@@ -1,0 +1,246 @@
+package com.indflix
+
+import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.utils.*
+import kotlinx.coroutines.*
+import org.jsoup.nodes.Element
+
+/**
+ * Indflix - a CloudStream provider that scrapes the Multimovies (multimovies.motorcycles) site.
+ *
+ * Source handling policy (per project requirements):
+ *  - Multiple streaming sources are pulled in PARALLEL.
+ *  - Each source has a hard TIMEOUT of ~30 seconds (SOURCE_TIMEOUT_MS).
+ *  - Sources are tried in PRIORITY order (reliable + fast first). The priority list
+ *    is defined in [SOURCE_PRIORITY] and is used both to order parallel launches and
+ *    to sort the returned links.
+ */
+class IndflixProvider : MainAPI() {
+
+    override var mainUrl = "https://multimovies.motorcycles"
+    override var name = "Indflix"
+    override val hasMainPage = true
+    override val hasQuickSearch = true
+    override val supportedTypes = setOf(
+        TvType.Movie,
+        TvType.TvSeries,
+        TvType.AnimeMovie,
+        TvType.Anime,
+        TvType.Cartoon,
+    )
+
+    override val mainPage = mainPageOf(
+        Pair("$mainUrl/movies/", "Movies"),
+        Pair("$mainUrl/tvshows/", "TV Shows"),
+        Pair("$mainUrl/seasons/", "Seasons"),
+        Pair("$mainUrl/genre/bollywood-movies/", "Bollywood"),
+        Pair("$mainUrl/genre/hollywood/", "Hollywood"),
+        Pair("$mainUrl/genre/south-indian/", "South Indian"),
+        Pair("$mainUrl/genre/anime-hindi/", "Hindi Dub Anime"),
+        Pair("$mainUrl/trending/", "Top Rated"),
+    )
+
+    // ------------------------------------------------------------------
+    // Source priority / timeout configuration
+    // ------------------------------------------------------------------
+
+    /** Per-source timeout in milliseconds. */
+    companion object {
+        const val SOURCE_TIMEOUT_MS = 30_000L
+
+        /**
+         * Server names as they appear on the Multimovies "Video Sources" list,
+         * ordered from most reliable/fast to least. Servers not listed here are
+         * still pulled, but with the lowest priority.
+         */
+        val SOURCE_PRIORITY: List<String> = listOf(
+            "GDMIRROR - Recommended",
+            "GDMIRROR",
+            "Cineverse",
+            "Nxsha",
+            "screenscape.me",
+            "Multimovies",
+            "Filelions",
+            "Vidhide",
+            "Streamwish",
+            "Doodstream",
+        )
+    }
+
+    private fun priorityOf(serverName: String): Int {
+        val idx = SOURCE_PRIORITY.indexOfFirst { serverName.contains(it, ignoreCase = true) }
+        return if (idx == -1) SOURCE_PRIORITY.size else idx
+    }
+
+    // ------------------------------------------------------------------
+    // Search
+    // ------------------------------------------------------------------
+
+    override suspend fun search(query: String): List<SearchResponse>? {
+        val doc = app.get("$mainUrl/?s=${query.encodeURL()}", timeout = 20).document
+        return doc.select("div#archive-content div.item, div.search-page div.result-item, article.item").mapNotNull {
+            it.toSearchResponse()
+        }.takeIf { it.isNotEmpty() }
+    }
+
+    override suspend fun quickSearch(query: String): List<SearchResponse>? = search(query)
+
+    private fun Element.toSearchResponse(): SearchResponse? {
+        val a = selectFirst("a, div.data a h2, div.poster a") ?: return null
+        val href = selectFirst("a[href]")?.attr("href") ?: return null
+        if (!href.contains(mainUrl)) return null
+        val title = selectFirst("img")?.attr("alt")
+            ?: selectFirst("h2, div.data h3 a, .title")?.text()
+            ?: return null
+        val poster = selectFirst("img")?.attr("src")
+            ?.let { if (it.startsWith("//")) "https:$it" else it }
+            ?: selectFirst("img")?.attr("data-src")
+        val isMovie = href.contains("/movies/")
+        val isSeries = href.contains("/tvshows/") || href.contains("/seasons/")
+        val tvType = when {
+            isSeries -> TvType.TvSeries
+            else -> TvType.Movie
+        }
+        return if (tvType == TvType.TvSeries) {
+            newTvSeriesSearchResponse(title, href, tvType) { this.posterUrl = poster }
+        } else {
+            newMovieSearchResponse(title, href, tvType) { this.posterUrl = poster }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Main page
+    // ------------------------------------------------------------------
+
+    override suspend fun getMainPage(
+        page: Int,
+        request: MainPageRequest
+    ): HomePageResponse {
+        val url = if (page > 1) "${request.data}page/$page/" else request.data
+        val doc = app.get(url, timeout = 20).document
+        val items = doc.select("article.item, div#archive-content div.item, div.items div.item").mapNotNull {
+            it.toSearchResponse()
+        }
+        return newHomePageResponse(request.name, items)
+    }
+
+    // ------------------------------------------------------------------
+    // Load (detail page)
+    // ------------------------------------------------------------------
+
+    override suspend fun load(url: String): LoadResponse {
+        val doc = app.get(url, timeout = 20).document
+
+        val title = doc.selectFirst("h1, div.sheader h1, meta[property=og:title]")?.let {
+            if (it.tagName() == "meta") it.attr("content") else it.text()
+        }?.trim() ?: throw ErrorLoadingException("No title")
+
+        val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")
+            ?: doc.selectFirst("div.poster img, img.wp-post-image")?.attr("src")
+
+        val year = doc.selectFirst("span.date, .year, .extra span")?.text()
+            ?.let { Regex("\\d{4}").find(it)?.value?.toIntOrNull() }
+
+        val plot = doc.selectFirst("div.wp-content, div.description, .wp-content p")?.text()
+            ?.replace("Overview:", "")?.trim()
+
+        val tags = doc.select("div.sgeneros a, .genre a, .sgeneros a").mapNotNull { it.text() }
+
+        val rating = doc.selectFirst("span.dt_rating_vgs, .imdb, .rating span")?.text()
+            ?.removePrefix("IMDb:")?.toRatingInt()
+
+        val isMovie = url.contains("/movies/")
+
+        return if (isMovie) {
+            newMovieLoadResponse(title, url, TvType.Movie, url) {
+                this.posterUrl = poster
+                this.year = year
+                this.plot = plot
+                this.rating = rating
+            }
+        } else {
+            // TV / Seasons: collect all episodes from season + episode archive pages.
+            val episodes = arrayListOf<Episode>()
+            val seasonLinks = doc.select("div.se-c div.se-q a[href], ul.episodios li a[href], .seasons a[href]")
+                .mapNotNull { it.attr("href").takeIf { h -> h.contains(mainUrl) } }
+                .distinct()
+
+            val pages = if (seasonLinks.isEmpty()) listOf(url) else seasonLinks
+            pages.apmap { seasonUrl ->
+                val sDoc = app.get(seasonUrl, timeout = 20).document
+                sDoc.select("ul.episodios li, div.eps div.ep, .episodios li").forEachIndexed { i, ep ->
+                    val epLink = ep.selectFirst("a[href]")?.attr("href")?.takeIf { it.contains(mainUrl) }
+                        ?: return@forEachIndexed
+                    val epNum = Regex("(?i)(\\d+)x(\\d+)").find(epLink)?.groupValues?.getOrNull(2)?.toIntOrNull()
+                        ?: Regex("(\\d+)").find(epLink)?.value?.toIntOrNull() ?: (i + 1)
+                    val seasonNum = Regex("(?i)(\\d+)x(\\d+)").find(epLink)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 1
+                    val epTitle = ep.selectFirst(".episodiotitle a, .title, a")?.text()?.trim()
+                    episodes.add(
+                        newEpisode(epLink) {
+                            this.name = epTitle
+                            this.episode = epNum
+                            this.season = seasonNum
+                        }
+                    )
+                }
+            }
+
+            newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
+                this.posterUrl = poster
+                this.year = year
+                this.plot = plot
+                this.rating = rating
+                this.tags = tags
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Load links - parallel pulling with per-source 30s timeout + priority
+    // ------------------------------------------------------------------
+
+    override suspend fun loadLinks(
+        data: String,
+        isCasting: Boolean,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        val doc = app.get(data, timeout = 20).document
+
+        // Each "Video Sources" server entry: name + a link to the embed/download host.
+        val servers = doc.select("div#videoSources ul li, ul#playeroptionsul li, div.source-list li, .servers li")
+            .mapNotNull { li ->
+                val name = li.selectFirst(".server-name, .source-name, span, a")?.text()?.trim()
+                    ?: return@mapNotNull null
+                val href = li.selectFirst("a[href]")?.attr("href")
+                    ?: li.attr("data-link")
+                    ?: return@mapNotNull null
+                name to href
+            }
+
+        if (servers.isEmpty()) {
+            // Fallback: any direct download / embed link on the page.
+            val fallback = doc.selectFirst("a[href*='download'], a[href*='hai8g'], a[href*='embeds']")?.attr("href")
+            if (fallback != null) {
+                loadExtractor(fallback, data, subtitleCallback, callback)
+                return true
+            }
+            return false
+        }
+
+        val sources = servers.map { (name, href) ->
+            MultiSourcePuller.Source(name = name, url = href, referer = data)
+        }
+
+        // Parallel pull, per-source 30s timeout, priority-ordered results.
+        val links = MultiSourcePuller.pull(
+            sources = sources,
+            timeoutMs = SOURCE_TIMEOUT_MS,
+            priorityOf = { priorityOf(it) },
+            onSubtitle = subtitleCallback,
+        )
+
+        links.forEach { callback(it) }
+        return links.isNotEmpty()
+    }
+}
