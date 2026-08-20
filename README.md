@@ -17,7 +17,12 @@ reliable-first, parallel, timeout-bounded strategy.
 ## Project layout
 
 ```
-build.gradle(.kotlin?)      CloudStream plugin gradle config
+.github/workflows/build.yml GitHub Actions: builds the provider APK on push
+build.gradle                 CloudStream plugin (com.lagradost.cloudstream) config
+settings.gradle              Root project name "Indflix"
+gradle.properties            pluginInterfaceVersion + JVM/gradle flags
+gradle/wrapper/              Gradle wrapper (jar generated locally or by CI)
+src/main/AndroidManifest.xml Provider manifest (package com.indflix)
 src/main/kotlin/com/indflix/
   ├─ IndflixProvider.kt     MainAPI: search/mainPage/load/loadLinks + SOURCE_PRIORITY
   ├─ MultiSourcePuller.kt   parallel + timeout + priority engine
@@ -40,15 +45,20 @@ Reorder `SOURCE_PRIORITY` to change which source wins; change
 
 ## Build & install
 
-1. Fork `recloudstream/TestPlugins`, drop this repo in, enable GitHub Actions.
-2. Push → Actions builds `app-release.apk` (provider bundle).
-3. Install in CloudStream → Add repository → enable **Indflix**.
+This repo builds itself via GitHub Actions (`.github/workflows/build.yml`):
 
-Local build (needs Android SDK + gradle 8.9):
+1. Enable Actions in repo **Settings → Actions → General** (`Allow all actions`
+   and `Read and write permissions`).
+2. Push to `main` → the workflow builds `app-release.apk` (uploaded as the
+   `app-release` artifact on the run).
+3. Install the APK in CloudStream → Add repository → enable **Indflix**.
+
+Local build (needs Android SDK + JDK 17 + gradle 8.9):
 
 ```bash
-gradle wrapper --gradle-version 8.9   # generates gradle-wrapper.jar
+gradle wrapper --gradle-version 8.9   # generates gradle-wrapper.jar if missing
 ./gradlew assembleRelease
+# output: app/build/outputs/apk/release/*.apk
 ```
 
 ## Disclaimer
