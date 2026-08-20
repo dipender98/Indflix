@@ -47,7 +47,7 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/src
           chmod +x gradlew
-          ./gradlew make makePluginsJson
+          ./gradlew make makePluginsJson --stacktrace --no-daemon 2>&1 | tee $GITHUB_WORKSPACE/builds/build.log
           cp **/build/*.cs3 $GITHUB_WORKSPACE/builds/ || echo "No .cs3 files found"
           cp build/plugins.json $GITHUB_WORKSPACE/builds/ || echo "No plugins.json found"
 
@@ -70,12 +70,6 @@ jobs:
           cd $GITHUB_WORKSPACE/builds
           git config --local user.email "actions@github.com"
           git config --local user.name "GitHub Actions"
-          {
-            echo "=== gradle build output (tail) ==="
-            find $GITHUB_WORKSPACE/src -path '*/build/*.log' -exec tail -n 100 {} \; 2>/dev/null || true
-            echo "=== daemon log ==="
-            cat "$HOME/.gradle/daemon/"*"/daemon-*.out.log" 2>/dev/null | tail -n 150 || true
-          } > error.log
-          git add error.log
+          git add build.log
           git commit --amend -m "Build $GITHUB_SHA" || git commit -m "Build $GITHUB_SHA"
           git push --force || true
