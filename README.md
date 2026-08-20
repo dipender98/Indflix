@@ -21,16 +21,19 @@ reference; the real extension lives in `src/main/kotlin/com/indflix/`.
 ## Project layout
 
 ```
-.github/workflows/build.yml GitHub Actions: builds the provider APK on push
-build.gradle / build.gradle.kts  CloudStream plugin (com.lagradost.cloudstream) config
-settings.gradle(.kts)           Root project name "Indflix"
-gradle.properties               pluginInterfaceVersion + JVM/gradle flags
-gradle/wrapper/                 Gradle wrapper (jar committed for CI/local builds)
-src/main/AndroidManifest.xml    Provider manifest (package com.indflix)
-src/main/kotlin/com/indflix/
-  ├─ IndflixProvider.kt     MainAPI: search/mainPage/load/loadLinks + SOURCE_PRIORITY
-  ├─ MultiSourcePuller.kt   parallel + timeout + priority engine
-  └─ IndflixPlugin.kt       @CloudstreamPlugin registration
+.github/workflows/build.yml   GitHub Actions: builds the provider APK on push
+build.gradle.kts              CloudStream gradle plugin config (root, applies to subprojects)
+settings.gradle.kts           Auto-includes every dir with a build.gradle.kts
+gradle.properties             JVM/gradle flags
+gradle/wrapper/               Gradle wrapper (jar committed for CI/local builds)
+Indflix/
+  ├─ build.gradle.kts        cloudstream { pluginName="indflix", pluginClassName="IndflixProvider" }
+  ├─ src/main/AndroidManifest.xml
+  └─ src/main/kotlin/com/indflix/
+       ├─ IndflixProvider.kt  MainAPI: search/mainPage/load/loadLinks + SOURCE_PRIORITY
+       ├─ MultiSourcePuller.kt parallel + timeout + priority engine
+       └─ IndflixPlugin.kt    @CloudstreamPlugin registration
+ExampleProvider/               Reference template module (can be deleted)
 ```
 
 ## Tuning the source strategy

@@ -1,5 +1,0 @@
-// The tests in this project are run against a standard CloudStream app build.
-// The gradle plugin used (pluginint) is a fork of the standard Android gradle plugin
-// which generates provider modules for CloudStream extensions.
-rootProject.buildFileName = "build.gradle"
-rootProject.name = "Indflix"

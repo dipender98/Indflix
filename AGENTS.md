@@ -8,17 +8,22 @@ This repo is a fork/test of the CloudStream plugin template used for
 
 ## Architecture
 
-- `src/main/kotlin/com/indflix/IndflixProvider.kt` — the `MainAPI` provider.
+- `Indflix/src/main/kotlin/com/indflix/IndflixProvider.kt` — the `MainAPI` provider.
   Implements `search`, `getMainPage`, `load`, `loadLinks` against the Dooplay
   theme used by Multimovies.
-- `src/main/kotlin/com/indflix/MultiSourcePuller.kt` — the **source engine**:
+- `Indflix/src/main/kotlin/com/indflix/MultiSourcePuller.kt` — the **source engine**:
   - **Source priority**: `IndflixProvider.SOURCE_PRIORITY` orders servers from
     most reliable/fast to least.
   - **Parallel pulling**: every server is launched concurrently via `apmap`.
   - **Per-source timeout**: each source is wrapped in `withTimeoutOrNull(30s)`
     (`SOURCE_TIMEOUT_MS`). A slow/dead source can never block the others.
   - Results are returned sorted by priority.
-- `src/main/kotlin/com/indflix/IndflixPlugin.kt` — registers the provider.
+- `Indflix/src/main/kotlin/com/indflix/IndflixPlugin.kt` — registers the provider.
+- Build uses the **Kotlin DSL** TestPlugins layout: root `build.gradle.kts` +
+  `settings.gradle.kts` auto-includes each provider dir that has a
+  `build.gradle.kts` (here: `Indflix/`). The CloudStream gradle plugin
+  (`com.github.recloudstream:gradle:-SNAPSHOT`) is declared in the root
+  `buildscript` block.
 
 ## Source policy (requirement)
 

@@ -7,7 +7,7 @@ buildscript {
     repositories {
         google()
         mavenCentral()
-        // Shitpack repo which contains our tools and dependencies
+        // Jitpack repo which contains our tools and dependencies
         maven("https://jitpack.io")
     }
 
