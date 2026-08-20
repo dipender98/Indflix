@@ -12,18 +12,18 @@ for **cloutstream**. The extension lives in `Indflix/src/main/kotlin/com/indflix
 Add this repository in CloudStream → **Extensions → Add repository** and paste:
 
 ```
-https://dipender98.github.io/Indflix/repo.json
+https://raw.githubusercontent.com/dipender98/Indflix/builds/repo.json
 ```
 
-Or open this link from the CloudStream app to auto-add it:
+Or use the repository manifest (same content):
 
 ```
-https://dipender98.github.io/Indflix/repo.json
+https://github.com/dipender98/Indflix/blob/builds/repo.json
 ```
 
-The `repo.json` is published to **GitHub Pages** automatically on every push
-(see `.github/workflows/build.yml`). It lists `plugins.json`, which in turn
-points at the compiled `indflix.cs3` plugin.
+The `repo.json` points at `builds/plugins.json`, which is generated and force-pushed
+to the **`builds` branch** by GitHub Actions on every push (see `.github/workflows/build.yml`).
+The compiled `indflix.cs3` plugin lives alongside it on that branch.
 
 ## Features
 
@@ -70,14 +70,14 @@ Reorder `SOURCE_PRIORITY` to change which source wins; change
 ## Build & publish
 
 This repo builds and publishes the extension via GitHub Actions
-(`.github/workflows/build.yml`):
+(`.github/workflows/build.yml`), following the standard CloudStream
+`builds`-branch model (same as recloudstream/TestPlugins):
 
 1. Ensure **Settings → Actions → General** has `Allow all actions` and
-   `Read and write permissions`.
-2. Enable **Settings → Pages → Build and deployment → Source: GitHub Actions**.
-3. Push to `main` → the workflow builds `indflix.cs3` + `plugins.json`, writes
-   `repo.json`, and deploys them to GitHub Pages.
-4. The extension is now installable at the link in [Install](#install-extension-link).
+   `Read and write permissions` (the workflow force-pushes to the `builds` branch).
+2. Push to `main` → the workflow builds `indflix.cs3` + `plugins.json` and
+   force-pushes them to the **`builds`** branch, alongside `repo.json`.
+3. The extension is now installable at the link in [Install](#install-extension-link).
 
 Local build (needs Android SDK + JDK 17):
 

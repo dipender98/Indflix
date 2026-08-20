@@ -1,91 +1,65 @@
-name: Build and Publish Extension
+name: Build
 
 concurrency:
-  group: "build"
+  group: build-${{ github.ref }}
   cancel-in-progress: true
 
 on:
+  workflow_dispatch:
   push:
     branches:
+      - master
       - main
     paths-ignore:
       - '*.md'
-  workflow_dispatch:
 
 permissions:
-  contents: read
-  pages: write
-  id-token: write
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout Source
         uses: actions/checkout@v4
+        with:
+          path: "src"
 
-      - name: Set up JDK 17
+      - name: Checkout Builds Branch
+        uses: actions/checkout@v4
+        with:
+          ref: "builds"
+          path: "builds"
+
+      - name: Clean old builds
+        run: rm $GITHUB_WORKSPACE/builds/*.cs3 || true
+
+      - name: Setup JDK 17
         uses: actions/setup-java@v4
         with:
-          distribution: temurin
+          distribution: "temurin"
           java-version: 17
 
-      - name: Set up Android SDK
+      - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Grant execute permission for gradlew
-        run: chmod +x gradlew
-
-      # Build the .cs3 plugin and generate plugins.json
-      - name: Build plugin
-        run: ./gradlew make makePluginsJson --stacktrace --no-daemon
-
-      - name: Dump gradle failure log
-        if: failure()
+      - name: Build Plugins
         run: |
-          echo "=== gradle build output (tail) ==="
-          find . -path '*/build/*.log' -exec tail -n 80 {} \; 2>/dev/null || true
-          echo "=== daemon log ==="
-          cat "$HOME/.gradle/daemon/*/daemon-*.out.log" 2>/dev/null | tail -n 120 || true
+          cd $GITHUB_WORKSPACE/src
+          chmod +x gradlew
+          ./gradlew make makePluginsJson
+          cp **/build/*.cs3 $GITHUB_WORKSPACE/builds/ || echo "No .cs3 files found"
+          cp build/plugins.json $GITHUB_WORKSPACE/builds/ || echo "No plugins.json found"
 
-      - name: Prepare GitHub Pages output
+      - name: Push builds
         run: |
-          mkdir -p public
-          # Copy the generated plugin list + the compiled .cs3 artifacts
-          cp build/plugins.json public/plugins.json
-          cp -r */build/*.cs3 public/ 2>/dev/null || true
-          find . -name '*.cs3' -exec cp {} public/ \;
-
-          # Rewrite the .cs3 urls inside plugins.json to point at GitHub Pages
-          BASE="https://${{ github.repository_owner }}.github.io/${GITHUB_REPOSITORY##*/}"
-          node -e '
-            const fs=require("fs");
-            const base=process.env.BASE;
-            const p=JSON.parse(fs.readFileSync("public/plugins.json","utf8"));
-            for(const k in p){
-              const e=p[k];
-              if(e.url) e.url=`${base}/${e.url.split("/").pop()}`;
-            }
-            fs.writeFileSync("public/plugins.json",JSON.stringify(p,null,2));
-            const repo={
-              "name":"Indflix",
-              "description":"CloudStream extension that scrapes Multimovies and pulls sources in parallel with a per-source timeout.",
-              "manifestVersion":1,
-              "pluginLists":[`${base}/plugins.json`]
-            };
-            fs.writeFileSync("public/repo.json",JSON.stringify(repo,null,2));
-          '
-        env:
-          BASE: "https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}"
-
-      - name: Setup Pages
-        uses: actions/configure-pages@v5
-
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: "public"
-
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
+          cd $GITHUB_WORKSPACE/builds
+          git config --local user.email "actions@github.com"
+          git config --local user.name "GitHub Actions"
+          git add .
+          if [[ -n $(git status -s) ]]; then
+            git commit --amend -m "Build $GITHUB_SHA" || git commit -m "Build $GITHUB_SHA"
+            git push --force
+          else
+            echo "No changes to push"
+          fi

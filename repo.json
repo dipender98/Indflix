@@ -1,8 +1,9 @@
 {
   "name": "Indflix",
   "description": "CloudStream extension that scrapes Multimovies and pulls sources in parallel with a per-source timeout.",
-  "manifestVersion": 1,
+  "iconUrl": "https://wsrv.nl/?url=https://avatars.githubusercontent.com/u/0&mask=circle",
+  "manifestVersion": 2,
   "pluginLists": [
-    "https://dipender98.github.io/Indflix/plugins.json"
+    "https://raw.githubusercontent.com/dipender98/Indflix/builds/plugins.json"
   ]
 }
