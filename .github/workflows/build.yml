@@ -49,8 +49,12 @@ jobs:
           chmod +x gradlew
           ./gradlew make makePluginsJson --stacktrace --no-daemon 2>&1 | tee $GITHUB_WORKSPACE/builds/build.log
           # Copy compiled .cs3 plugin(s) (find is robust across module layouts)
+          echo "=== locate *.cs3 ===" >> $GITHUB_WORKSPACE/builds/locate.log
+          find $GITHUB_WORKSPACE/src -name '*.cs3' >> $GITHUB_WORKSPACE/builds/locate.log 2>&1
           find $GITHUB_WORKSPACE/src -name '*.cs3' -exec cp {} $GITHUB_WORKSPACE/builds/ \;
           # Copy generated plugin list (root build/ or any module build/)
+          echo "=== locate plugins.json ===" >> $GITHUB_WORKSPACE/builds/locate.log
+          find $GITHUB_WORKSPACE/src -name 'plugins.json' >> $GITHUB_WORKSPACE/builds/locate.log 2>&1
           find $GITHUB_WORKSPACE/src -name 'plugins.json' -exec cp {} $GITHUB_WORKSPACE/builds/ \;
           # Ship repo.json (repository manifest) to the builds branch root
           cp $GITHUB_WORKSPACE/src/repo.json $GITHUB_WORKSPACE/builds/repo.json
@@ -62,7 +66,7 @@ jobs:
           cd $GITHUB_WORKSPACE/builds
           git config --local user.email "actions@github.com"
           git config --local user.name "GitHub Actions"
-          git add .
+          git add -A
           if [[ -n $(git status -s) ]]; then
             git commit --amend -m "Build $GITHUB_SHA" || git commit -m "Build $GITHUB_SHA"
             git push --force
