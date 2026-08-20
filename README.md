@@ -4,6 +4,10 @@ A CloudStream 3 provider/streamer that scrapes **Multimovies**
 (`https://multimovies.motorcycles`) and pulls its video **sources** with a
 reliable-first, parallel, timeout-bounded strategy.
 
+This repo is a fork/test of the CloudStream plugin template (TestPlugins) used
+for **cloutstream**. The template's `ExampleProvider` module is kept as a
+reference; the real extension lives in `src/main/kotlin/com/indflix/`.
+
 ## Features
 
 - Search, main page sections, detail + episode loading (Dooplay theme).
@@ -18,11 +22,11 @@ reliable-first, parallel, timeout-bounded strategy.
 
 ```
 .github/workflows/build.yml GitHub Actions: builds the provider APK on push
-build.gradle                 CloudStream plugin (com.lagradost.cloudstream) config
-settings.gradle              Root project name "Indflix"
-gradle.properties            pluginInterfaceVersion + JVM/gradle flags
-gradle/wrapper/              Gradle wrapper (jar generated locally or by CI)
-src/main/AndroidManifest.xml Provider manifest (package com.indflix)
+build.gradle / build.gradle.kts  CloudStream plugin (com.lagradost.cloudstream) config
+settings.gradle(.kts)           Root project name "Indflix"
+gradle.properties               pluginInterfaceVersion + JVM/gradle flags
+gradle/wrapper/                 Gradle wrapper (jar committed for CI/local builds)
+src/main/AndroidManifest.xml    Provider manifest (package com.indflix)
 src/main/kotlin/com/indflix/
   ├─ IndflixProvider.kt     MainAPI: search/mainPage/load/loadLinks + SOURCE_PRIORITY
   ├─ MultiSourcePuller.kt   parallel + timeout + priority engine
@@ -56,7 +60,6 @@ This repo builds itself via GitHub Actions (`.github/workflows/build.yml`):
 Local build (needs Android SDK + JDK 17 + gradle 8.9):
 
 ```bash
-gradle wrapper --gradle-version 8.9   # generates gradle-wrapper.jar if missing
 ./gradlew assembleRelease
 # output: app/build/outputs/apk/release/*.apk
 ```
