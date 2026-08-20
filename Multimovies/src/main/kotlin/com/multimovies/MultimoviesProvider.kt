@@ -1,4 +1,4 @@
-package com.indflix
+package com.multimovies
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
@@ -15,10 +15,10 @@ import org.jsoup.nodes.Element
  *    is defined in [SOURCE_PRIORITY] and is used both to order parallel launches and
  *    to sort the returned links.
  */
-class IndflixProvider : MainAPI() {
+class MultimoviesProvider : MainAPI() {
 
     override var mainUrl = "https://multimovies.motorcycles"
-    override var name = "Indflix"
+    override var name = "Multimovies"
     override val hasMainPage = true
     override val hasQuickSearch = true
     override val supportedTypes = setOf(
@@ -54,16 +54,17 @@ class IndflixProvider : MainAPI() {
          * still pulled, but with the lowest priority.
          */
         val SOURCE_PRIORITY: List<String> = listOf(
-            "GDMIRROR - Recommended",
             "GDMIRROR",
+            "GDMIRROR - Recommended",
             "Cineverse",
             "Nxsha",
             "screenscape.me",
+            "VidZee",
+            "VidZee v2",
+            "vixsrc.to",
+            "CinemaOS",
+            "vidlink.pro",
             "Multimovies",
-            "Filelions",
-            "Vidhide",
-            "Streamwish",
-            "Doodstream",
         )
     }
 
@@ -207,26 +208,48 @@ class IndflixProvider : MainAPI() {
     ): Boolean {
         val doc = app.get(data, timeout = 20).document
 
-        // Each "Video Sources" server entry: name + a link to the embed/download host.
-        val servers = doc.select("div#videoSources ul li, ul#playeroptionsul li, div.source-list li, .servers li")
+        // Each "Video Source" on a Multimovies episode page is a
+        // li.doopley_player_option carrying data-post (post id), data-nume
+        // (source index) and data-type. The real embed URL is fetched from the
+        // site's dooplayer admin-ajax endpoint (the static <li> has no href).
+        val options = doc.select("ul#playeroptionsul li.doopley_player_option, li.doopley_player_option")
             .mapNotNull { li ->
-                val name = li.selectFirst(".server-name, .source-name, span, a")?.text()?.trim()
-                    ?: return@mapNotNull null
-                val href = li.selectFirst("a[href]")?.attr("href")
-                    ?: li.attr("data-link")
-                    ?: return@mapNotNull null
-                name to href
+                val name = li.selectFirst(".title")?.text()?.trim() ?: return@mapNotNull null
+                val post = li.attr("data-post").takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                val nume = li.attr("data-nume").takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                val type = li.attr("data-type").takeIf { it.isNotBlank() } ?: "tv"
+                name to Triple(post, nume, type)
             }
 
-        if (servers.isEmpty()) {
-            // Fallback: any direct download / embed link on the page.
-            val fallback = doc.selectFirst("a[href*='download'], a[href*='hai8g'], a[href*='embeds']")?.attr("href")
-            if (fallback != null) {
-                loadExtractor(fallback, data, subtitleCallback, callback)
-                return true
-            }
-            return false
+        if (options.isEmpty()) return false
+
+        // Resolve every source's embed via the dooplayer admin-ajax endpoint,
+        // then hand each embed to CloudStream's extractor registry.
+        val servers = options.mapNotNull { (name, triple) ->
+            val (post, nume, type) = triple
+            val body = mapOf(
+                "action" to "doo_player_ajax",
+                "post" to post,
+                "nume" to nume,
+                "type" to type,
+            )
+            val resp = runCatching {
+                app.post(
+                    "$mainUrl/wp-admin/admin-ajax.php",
+                    headers = mapOf("X-Requested-With" to "XMLHttpRequest"),
+                    data = body,
+                    timeout = 20,
+                ).text
+            }.getOrNull() ?: return@mapNotNull null
+
+            // Response: {"embed_url":"...","type":"iframe"}
+            val embed = Regex("\"embed_url\"\\s*:\\s*\"(.*?)\"").find(resp)?.groupValues?.get(1)
+                ?.replace("\\/", "/")
+                ?: return@mapNotNull null
+            name to embed
         }
+
+        if (servers.isEmpty()) return false
 
         val sources = servers.map { (name, href) ->
             MultiSourcePuller.Source(name = name, url = href, referer = data)

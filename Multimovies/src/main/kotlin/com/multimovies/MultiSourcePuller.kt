@@ -1,4 +1,4 @@
-package com.indflix
+package com.multimovies
 
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.utils.ExtractorLink
@@ -27,7 +27,7 @@ object MultiSourcePuller {
         val referer: String? = null,
     )
 
-    private val INDICATOR = " (Indflix)"
+    private val INDICATOR = " (Multimovies)"
 
     /**
      * @param sources   raw server list (unsorted is fine, sorting happens here)
@@ -38,7 +38,7 @@ object MultiSourcePuller {
      */
     suspend fun pull(
         sources: List<Source>,
-        timeoutMs: Long = IndflixProvider.SOURCE_TIMEOUT_MS,
+        timeoutMs: Long = MultimoviesProvider.SOURCE_TIMEOUT_MS,
         priorityOf: (String) -> Int,
         onSubtitle: (SubtitleFile) -> Unit,
     ): List<ExtractorLink> = withContext(Dispatchers.IO) {

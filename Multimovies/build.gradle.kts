@@ -1,6 +1,7 @@
 version = 1
 
 cloudstream {
+    name = "Multimovies"
     language = "en"
     authors = listOf("Indflix")
     description = "CloudStream provider that scrapes Multimovies and pulls sources in parallel with a per-source timeout."
@@ -10,7 +11,7 @@ cloudstream {
 }
 
 android {
-    namespace = "com.indflix"
+    namespace = "com.multimovies"
     defaultConfig {
         minSdk = 21
         compileSdkVersion(35)
