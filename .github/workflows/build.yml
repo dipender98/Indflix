@@ -38,7 +38,7 @@ jobs:
 
       # Build the .cs3 plugin and generate plugins.json
       - name: Build plugin
-        run: ./gradlew make makePluginsJson
+        run: ./gradlew make makePluginsJson --stacktrace --no-daemon
 
       - name: Prepare GitHub Pages output
         run: |

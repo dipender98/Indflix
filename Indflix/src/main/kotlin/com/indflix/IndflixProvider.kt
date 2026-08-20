@@ -115,7 +115,7 @@ class IndflixProvider : MainAPI() {
     override suspend fun getMainPage(
         page: Int,
         request: MainPageRequest
-    ): HomePageResponse {
+    ): HomePageResponse? {
         val url = if (page > 1) "${request.data}page/$page/" else request.data
         val doc = app.get(url, timeout = 20).document
         val items = doc.select("article.item, div#archive-content div.item, div.items div.item").mapNotNull {
@@ -128,7 +128,7 @@ class IndflixProvider : MainAPI() {
     // Load (detail page)
     // ------------------------------------------------------------------
 
-    override suspend fun load(url: String): LoadResponse {
+    override suspend fun load(url: String): LoadResponse? {
         val doc = app.get(url, timeout = 20).document
 
         val title = doc.selectFirst("h1, div.sheader h1, meta[property=og:title]")?.let {
