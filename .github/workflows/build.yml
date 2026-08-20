@@ -63,3 +63,19 @@ jobs:
           else
             echo "No changes to push"
           fi
+
+      - name: Capture build error
+        if: failure()
+        run: |
+          cd $GITHUB_WORKSPACE/builds
+          git config --local user.email "actions@github.com"
+          git config --local user.name "GitHub Actions"
+          {
+            echo "=== gradle build output (tail) ==="
+            find $GITHUB_WORKSPACE/src -path '*/build/*.log' -exec tail -n 100 {} \; 2>/dev/null || true
+            echo "=== daemon log ==="
+            cat "$HOME/.gradle/daemon/"*"/daemon-*.out.log" 2>/dev/null | tail -n 150 || true
+          } > error.log
+          git add error.log
+          git commit --amend -m "Build $GITHUB_SHA" || git commit -m "Build $GITHUB_SHA"
+          git push --force || true
