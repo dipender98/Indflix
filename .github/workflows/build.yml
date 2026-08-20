@@ -40,6 +40,14 @@ jobs:
       - name: Build plugin
         run: ./gradlew make makePluginsJson --stacktrace --no-daemon
 
+      - name: Dump gradle failure log
+        if: failure()
+        run: |
+          echo "=== gradle build output (tail) ==="
+          find . -path '*/build/*.log' -exec tail -n 80 {} \; 2>/dev/null || true
+          echo "=== daemon log ==="
+          cat "$HOME/.gradle/daemon/*/daemon-*.out.log" 2>/dev/null | tail -n 120 || true
+
       - name: Prepare GitHub Pages output
         run: |
           mkdir -p public
