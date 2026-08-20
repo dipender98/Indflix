@@ -36,17 +36,32 @@ prefer reliable + fast sources first (priority order)
 Tune in one place: `SOURCE_TIMEOUT_MS` and `SOURCE_PRIORITY` in
 `IndflixProvider.kt` (consumed by `MultiSourcePuller`).
 
-## Build
+- `repo.json` — CloudStream repository manifest at repo root; `pluginLists`
+  points to `plugins.json` served from GitHub Pages. This is the **extension
+  link** users add in the app.
 
-This plugin builds against the CloudStream gradle plugin (`com.lagradost.cloudstream`).
-The recommended workflow is to push to GitHub and let the Actions workflow build
-the APK (fork of recloudstream/TestPlugins). Requires:
-- Android SDK
-- `gradle wrapper` (generate the `gradle-wrapper.jar` locally with
-  `gradle wrapper --gradle-version 8.9` if you build locally)
+## Publishing (extension link)
+
+The Actions workflow (`.github/workflows/build.yml`) builds the plugin with
+`./gradlew make makePluginsJson`, then deploys `plugins.json`, `repo.json` and
+`indflix.cs3` to **GitHub Pages**. The resulting install link is:
 
 ```
-gradlew assembleRelease   # builds the provider APK
+https://dipender98.github.io/Indflix/repo.json
+```
+
+To make it live, enable **Settings → Pages → Source: GitHub Actions** and ensure
+Actions have write permission. The `repo.json` at the repo root mirrors this
+URL for documentation.
+
+## Build
+
+This plugin builds against the CloudStream gradle plugin (`com.lagradost.cloudstream3.gradle`).
+Requires Android SDK + JDK 17.
+
+```
+./gradlew make            # builds Indflix/build/indflix.cs3
+./gradlew makePluginsJson # generates build/plugins.json
 ```
 
 ## Legal

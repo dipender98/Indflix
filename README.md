@@ -5,8 +5,25 @@ A CloudStream 3 provider/streamer that scrapes **Multimovies**
 reliable-first, parallel, timeout-bounded strategy.
 
 This repo is a fork/test of the CloudStream plugin template (TestPlugins) used
-for **cloutstream**. The template's `ExampleProvider` module is kept as a
-reference; the real extension lives in `src/main/kotlin/com/indflix/`.
+for **cloutstream**. The extension lives in `Indflix/src/main/kotlin/com/indflix/`.
+
+## Install (extension link)
+
+Add this repository in CloudStream → **Extensions → Add repository** and paste:
+
+```
+https://dipender98.github.io/Indflix/repo.json
+```
+
+Or open this link from the CloudStream app to auto-add it:
+
+```
+https://dipender98.github.io/Indflix/repo.json
+```
+
+The `repo.json` is published to **GitHub Pages** automatically on every push
+(see `.github/workflows/build.yml`). It lists `plugins.json`, which in turn
+points at the compiled `indflix.cs3` plugin.
 
 ## Features
 
@@ -33,7 +50,7 @@ Indflix/
        ├─ IndflixProvider.kt  MainAPI: search/mainPage/load/loadLinks + SOURCE_PRIORITY
        ├─ MultiSourcePuller.kt parallel + timeout + priority engine
        └─ IndflixPlugin.kt    @CloudstreamPlugin registration
-ExampleProvider/               Reference template module (can be deleted)
+repo.json                     CloudStream repository manifest (→ plugins.json on Pages)
 ```
 
 ## Tuning the source strategy
@@ -50,21 +67,24 @@ companion object {
 Reorder `SOURCE_PRIORITY` to change which source wins; change
 `SOURCE_TIMEOUT_MS` to tighten/loosen the per-source budget.
 
-## Build & install
+## Build & publish
 
-This repo builds itself via GitHub Actions (`.github/workflows/build.yml`):
+This repo builds and publishes the extension via GitHub Actions
+(`.github/workflows/build.yml`):
 
-1. Enable Actions in repo **Settings → Actions → General** (`Allow all actions`
-   and `Read and write permissions`).
-2. Push to `main` → the workflow builds `app-release.apk` (uploaded as the
-   `app-release` artifact on the run).
-3. Install the APK in CloudStream → Add repository → enable **Indflix**.
+1. Ensure **Settings → Actions → General** has `Allow all actions` and
+   `Read and write permissions`.
+2. Enable **Settings → Pages → Build and deployment → Source: GitHub Actions**.
+3. Push to `main` → the workflow builds `indflix.cs3` + `plugins.json`, writes
+   `repo.json`, and deploys them to GitHub Pages.
+4. The extension is now installable at the link in [Install](#install-extension-link).
 
-Local build (needs Android SDK + JDK 17 + gradle 8.9):
+Local build (needs Android SDK + JDK 17):
 
 ```bash
-./gradlew assembleRelease
-# output: app/build/outputs/apk/release/*.apk
+./gradlew make            # builds indflix.cs3
+./gradlew makePluginsJson # generates plugins.json
+# output: Indflix/build/indflix.cs3 and build/plugins.json
 ```
 
 ## Disclaimer

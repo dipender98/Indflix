@@ -1,4 +1,4 @@
-name: Build
+name: Build and Publish Extension
 
 concurrency:
   group: "build"
@@ -7,15 +7,15 @@ concurrency:
 on:
   push:
     branches:
-      - master
       - main
     paths-ignore:
       - '*.md'
-  pull_request:
-    branches:
-      - master
-      - main
   workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
 
 jobs:
   build:
@@ -36,11 +36,48 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
-      - name: Build Plugins
-        run: ./gradlew assembleRelease
+      # Build the .cs3 plugin and generate plugins.json
+      - name: Build plugin
+        run: ./gradlew make makePluginsJson
 
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
+      - name: Prepare GitHub Pages output
+        run: |
+          mkdir -p public
+          # Copy the generated plugin list + the compiled .cs3 artifacts
+          cp build/plugins.json public/plugins.json
+          cp -r */build/*.cs3 public/ 2>/dev/null || true
+          find . -name '*.cs3' -exec cp {} public/ \;
+
+          # Rewrite the .cs3 urls inside plugins.json to point at GitHub Pages
+          BASE="https://${{ github.repository_owner }}.github.io/${GITHUB_REPOSITORY##*/}"
+          node -e '
+            const fs=require("fs");
+            const base=process.env.BASE;
+            const p=JSON.parse(fs.readFileSync("public/plugins.json","utf8"));
+            for(const k in p){
+              const e=p[k];
+              if(e.url) e.url=`${base}/${e.url.split("/").pop()}`;
+            }
+            fs.writeFileSync("public/plugins.json",JSON.stringify(p,null,2));
+            const repo={
+              "name":"Indflix",
+              "description":"CloudStream extension that scrapes Multimovies and pulls sources in parallel with a per-source timeout.",
+              "manifestVersion":1,
+              "pluginLists":[`${base}/plugins.json`]
+            };
+            fs.writeFileSync("public/repo.json",JSON.stringify(repo,null,2));
+          '
+        env:
+          BASE: "https://${{ github.repository_owner }}.github.io/${{ github.repository }}"
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
         with:
-          name: app-release
-          path: "**/build/outputs/apk/release/*.apk"
+          path: "public"
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
