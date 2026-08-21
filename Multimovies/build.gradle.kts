@@ -1,4 +1,4 @@
-version = 480
+version = 1
 
 cloudstream {
     name = "Multimovies"
@@ -12,13 +12,5 @@ cloudstream {
 
 android {
     namespace = "com.multimovies"
-    defaultConfig {
-        minSdk = 21
-        compileSdk = 35
-        targetSdk = 35
-    }
 }
 
-dependencies {
-    implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.13.1")
-}

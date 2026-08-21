@@ -1,3 +1,8 @@
+import com.android.build.gradle.BaseExtension
+import com.lagradost.cloudstream3.gradle.CloudstreamExtension
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile
+
 buildscript {
     repositories {
         google()
@@ -6,9 +11,9 @@ buildscript {
     }
 
     dependencies {
-        classpath("com.android.tools.build:agp:9.1.4")
-        classpath("com.github.recloudstream:gradle:81b1d424d2")
-        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.3.2")
+        classpath("com.android.tools.build:gradle:8.7.3")
+        classpath("com.github.recloudstream:gradle:-SNAPSHOT")
+        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.1.0")
     }
 }
 
@@ -26,10 +31,11 @@ fun Project.android(configuration: BaseExtension.() -> Unit) = extensions.getByN
 
 subprojects {
     apply(plugin = "com.android.library")
+    apply(plugin = "kotlin-android")
     apply(plugin = "com.lagradost.cloudstream3.gradle")
 
     cloudstream {
-        setRepo(System.getenv("GITHUB_REPOSITORY") ?: "user/repo")
+        setRepo(System.getenv("GITHUB_REPOSITORY") ?: "dipender98/Indflix")
     }
 
     android {
@@ -37,7 +43,7 @@ subprojects {
 
         defaultConfig {
             minSdk = 21
-            compileSdk = 35
+            compileSdkVersion(35)
             targetSdk = 35
         }
 
