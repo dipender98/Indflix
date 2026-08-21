@@ -45,8 +45,8 @@ object MultiSourcePuller {
         if (sources.isEmpty()) return@withContext emptyList()
 
         val ordered = sources.sortedBy { priorityOf(it.name) }
-        val links = Collections.synchronizedList<ArrayList<ExtractorLink>>(ArrayList())
-        val subs = Collections.synchronizedList<ArrayList<SubtitleFile>>(ArrayList())
+        val links = Collections.synchronizedList(mutableListOf<ExtractorLink>())
+        val subs = Collections.synchronizedList(mutableListOf<SubtitleFile>())
 
         coroutineScope {
             ordered.map { src ->
