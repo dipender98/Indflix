@@ -3,6 +3,7 @@ package com.multimovies
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.loadExtractor
+import com.lagradost.cloudstream3.utils.newExtractorLink
 import kotlinx.coroutines.*
 import java.util.Collections
 
@@ -56,9 +57,20 @@ object MultiSourcePuller {
                             loadExtractor(
                                 url = src.url,
                                 referer = src.referer,
-                                subtitleCallback = { subs.add(it) },
+                                subtitleCallback = { subs.addAll(it) },
                                 callback = { l ->
-                                    links.add(l.copy(server = src.name + INDICATOR))
+                                    links.add(
+                                        newExtractorLink(
+                                            source = src.name + INDICATOR,
+                                            name = l.name,
+                                            url = l.url,
+                                            type = l.type,
+                                        ) {
+                                            this.referer = l.referer
+                                            this.quality = l.quality
+                                            this.headers = l.headers
+                                        }
+                                    )
                                 }
                             )
                         }
@@ -69,6 +81,6 @@ object MultiSourcePuller {
 
         subs.forEach { onSubtitle(it) }
         links
-            .sortedBy { priorityOf(it.server?.removeSuffix(INDICATOR).orEmpty()) }
+            .sortedBy { priorityOf(it.source?.removeSuffix(INDICATOR).orEmpty()) }
     }
 }

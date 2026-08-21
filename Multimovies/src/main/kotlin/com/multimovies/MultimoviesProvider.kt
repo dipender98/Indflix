@@ -160,7 +160,7 @@ class MultimoviesProvider : MainAPI() {
                 this.posterUrl = poster
                 this.year = year
                 this.plot = plot
-                addScore(score ?: "0", maxValue = 10)
+                this.score = score?.let { Score.from10(it) }
             }
         } else {
             // TV / Seasons: collect all episodes from season + episode archive pages.
@@ -197,7 +197,7 @@ class MultimoviesProvider : MainAPI() {
                 this.posterUrl = poster
                 this.year = year
                 this.plot = plot
-                addScore(score ?: "0", maxValue = 10)
+                this.score = score?.let { Score.from10(it) }
                 this.tags = tags
             }
         }
