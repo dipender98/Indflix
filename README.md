@@ -1,93 +1,89 @@
-# Indflix — CloudStream Extension
+# Indflix — CloudStream Repository
 
-A CloudStream 3 provider/streamer that scrapes **Multimovies**
-(`https://multimovies.motorcycles`) and pulls its video **sources** with a
-reliable-first, parallel, timeout-bounded strategy.
+CloudStream 3 repository providing the **Multimovies** provider.  
+Multimovies scrapes `https://multimovies.motorcycles` (Dooplay theme) and resolves
+video sources through a parallel, timeout-bounded puller that tries reliable
+servers first.
 
-This repo is a fork/test of the CloudStream plugin template (TestPlugins) used
-for **cloutstream**. The extension lives in `Indflix/src/main/kotlin/com/indflix/`.
+## Install
 
-## Install (extension link)
-
-Add this repository in CloudStream → **Extensions → Add repository** and paste:
+1. Open CloudStream → **Extensions → Add repository**
+2. Paste this link:
 
 ```
 https://raw.githubusercontent.com/dipender98/Indflix/builds/repo.json
 ```
 
-Or use the repository manifest (same content):
-
-```
-https://github.com/dipender98/Indflix/blob/builds/repo.json
-```
-
-The `repo.json` points at `builds/plugins.json`, which is generated and force-pushed
-to the **`builds` branch** by GitHub Actions on every push (see `.github/workflows/build.yml`).
-The compiled `indflix.cs3` plugin lives alongside it on that branch.
+3. After the repo refreshes, enable **Multimovies** in the provider list.
 
 ## Features
 
-- Search, main page sections, detail + episode loading (Dooplay theme).
-- `loadLinks` extracts every "Video Sources" server and resolves it through
-  CloudStream's extractor registry.
-- **Source priority** — servers tried reliable/fast-first (`SOURCE_PRIORITY`).
-- **Parallel pulling** — all sources launched concurrently (`apmap`).
-- **Per-source timeout ≈ 30s** — each source isolated with `withTimeoutOrNull`
-  so one dead host never blocks the rest.
+- Search, home sections, detail/load, and episode loading (Dooplay theme).
+- Real embed resolution via `admin-ajax.php` (`doo_player_ajax`) for every
+  listed server (GDMIRROR, Cineverse, Nxsha, etc.).
+- **Source priority** — reliable/fast servers are tried first.
+- **Parallel pulling** — all sources launched at once.
+- **Per-source timeout ≈ 30 s** — one dead host cannot block the others.
 
-## Project layout
+## Repository structure
 
 ```
-.github/workflows/build.yml   GitHub Actions: builds the provider APK on push
-build.gradle.kts              CloudStream gradle plugin config (root, applies to subprojects)
-settings.gradle.kts           Auto-includes every dir with a build.gradle.kts
-gradle.properties             JVM/gradle flags
-gradle/wrapper/               Gradle wrapper (jar committed for CI/local builds)
-Indflix/
-  ├─ build.gradle.kts        cloudstream { pluginName="indflix", pluginClassName="IndflixProvider" }
-  ├─ src/main/AndroidManifest.xml
-  └─ src/main/kotlin/com/indflix/
-       ├─ IndflixProvider.kt  MainAPI: search/mainPage/load/loadLinks + SOURCE_PRIORITY
-       ├─ MultiSourcePuller.kt parallel + timeout + priority engine
-       └─ IndflixPlugin.kt    @CloudstreamPlugin registration
-repo.json                     CloudStream repository manifest (→ plugins.json on Pages)
+build.gradle.kts                Root gradle config (AGP 9.1.x, Kotlin 2.3.x, pinned CS gradle plugin)
+settings.gradle.kts             Auto-includes subdirs with a build.gradle.kts
+repo.json                       CloudStream repository manifest → builds/plugins.json
+.github/workflows/build.yml     Builds .cs3 + plugins.json and force-pushes to the `builds` branch
+Multimovies/
+  build.gradle.kts              Module config: cloudstream { name = "Multimovies" }
+  src/main/AndroidManifest.xml
+  src/main/kotlin/com/multimovies/
+    ├─ MultimoviesProvider.kt   MainAPI: search / mainPage / load / loadLinks + SOURCE_PRIORITY
+    ├─ MultiSourcePuller.kt     Parallel + timeout + priority engine
+    └─ MultimoviesPlugin.kt     @CloudstreamPlugin registration
 ```
 
-## Tuning the source strategy
+## Tuning
 
-All knobs live in `IndflixProvider.kt`:
+All knobs live in `MultimoviesProvider.kt`:
 
 ```kotlin
 companion object {
     const val SOURCE_TIMEOUT_MS = 30_000L
-    val SOURCE_PRIORITY = listOf("GDMIRROR - Recommended", "Cineverse", "Nxsha", ...)
+    val SOURCE_PRIORITY = listOf(
+        "GDMIRROR - Recommended",
+        "Cineverse",
+        "Nxsha",
+        "screenscape.me",
+        "VidZee",
+        "vixsrc.to",
+        "CinemaOS",
+        "vidlink.pro"
+    )
 }
 ```
 
-Reorder `SOURCE_PRIORITY` to change which source wins; change
-`SOURCE_TIMEOUT_MS` to tighten/loosen the per-source budget.
+Reorder `SOURCE_PRIORITY` to change which source wins.  
+Change `SOURCE_TIMEOUT_MS` to tighten/loosen the per-source budget.
 
 ## Build & publish
 
-This repo builds and publishes the extension via GitHub Actions
-(`.github/workflows/build.yml`), following the standard CloudStream
-`builds`-branch model (same as recloudstream/TestPlugins):
+This repo uses the standard CloudStream **`builds`-branch** model.
 
-1. Ensure **Settings → Actions → General** has `Allow all actions` and
-   `Read and write permissions` (the workflow force-pushes to the `builds` branch).
-2. Push to `main` → the workflow builds `indflix.cs3` + `plugins.json` and
-   force-pushes them to the **`builds`** branch, alongside `repo.json`.
-3. The extension is now installable at the link in [Install](#install-extension-link).
+- Push to `main` → GitHub Actions builds `Multimovies.cs3` + `plugins.json`
+  and force-pushes them to the **`builds`** branch, alongside `repo.json`.
+- CloudStream reads `repo.json` → `builds/plugins.json` and lists the plugin.
 
 Local build (needs Android SDK + JDK 17):
 
 ```bash
-./gradlew make            # builds indflix.cs3
+./gradlew make            # builds Multimovies.cs3
 ./gradlew makePluginsJson # generates plugins.json
-# output: Indflix/build/indflix.cs3 and build/plugins.json
+# Output: Multimovies/build/Multimovies.cs3 and build/plugins.json
 ```
 
-## Disclaimer
+## Developer notes
 
-Technical demo of source aggregation only. Does not host content. Streaming
-copyrighted material may violate the source site's ToS and applicable law.
+- Module layout is set up for future providers (e.g. `OTT/`, `NetMirror/`).
+  Add a new subdir with a `build.gradle.kts` and `settings.gradle.kts` will
+  auto-include it.
+- Do **not** host or redistribute copyrighted content. This is a technical
+  demonstration of source aggregation only.

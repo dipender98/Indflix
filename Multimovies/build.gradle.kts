@@ -1,4 +1,4 @@
-version = 1
+version = 480
 
 cloudstream {
     name = "Multimovies"
@@ -14,7 +14,7 @@ android {
     namespace = "com.multimovies"
     defaultConfig {
         minSdk = 21
-        compileSdkVersion(35)
+        compileSdk = 35
         targetSdk = 35
     }
 }
