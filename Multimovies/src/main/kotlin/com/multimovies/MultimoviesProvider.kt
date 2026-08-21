@@ -21,6 +21,8 @@ class MultimoviesProvider : MainAPI() {
 
     override var mainUrl = "https://multimovies.motorcycles"
     override var name = "Multimovies"
+    private val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
+    private val commonHeaders = mapOf("User-Agent" to userAgent)
     override val hasMainPage = true
     override val hasQuickSearch = true
     override val supportedTypes = setOf(
@@ -82,7 +84,11 @@ class MultimoviesProvider : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse>? {
         val encodedQuery = URLEncoder.encode(query, StandardCharsets.UTF_8.toString())
         val searchUrl = "$mainUrl/?s=$encodedQuery"
-        val doc = app.get(searchUrl, timeout = 20).document
+        val doc = try {
+            app.get(searchUrl, timeout = 20, headers = commonHeaders).document
+        } catch (e: Exception) {
+            return null
+        }
 
         val items = doc.select(
             "div#archive-content div.item, " +
@@ -135,7 +141,11 @@ class MultimoviesProvider : MainAPI() {
         request: MainPageRequest
     ): HomePageResponse? {
         val url = if (page > 1) "${request.data}page/$page/" else request.data
-        val doc = app.get(url, timeout = 20).document
+        val doc = try {
+            app.get(url, timeout = 20, headers = commonHeaders).document
+        } catch (e: Exception) {
+            return null
+        }
         val items = doc.select("article.item, div#archive-content div.item, div.items div.item").mapNotNull {
             it.toSearchResponse()
         }
@@ -147,7 +157,11 @@ class MultimoviesProvider : MainAPI() {
     // ------------------------------------------------------------------
 
     override suspend fun load(url: String): LoadResponse? {
-        val doc = app.get(url, timeout = 20).document
+        val doc = try {
+            app.get(url, timeout = 20, headers = commonHeaders).document
+        } catch (e: Exception) {
+            return null
+        }
 
         val title = doc.selectFirst("h1, div.sheader h1, meta[property=og:title]")?.let {
             if (it.tagName() == "meta") it.attr("content") else it.text()
@@ -227,7 +241,11 @@ class MultimoviesProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val doc = app.get(data, timeout = 20).document
+        val doc = try {
+            app.get(data, timeout = 20, headers = commonHeaders).document
+        } catch (e: Exception) {
+            return false
+        }
 
         // Each "Video Source" on a Multimovies episode page is a
         // li.doopley_player_option carrying data-post (post id), data-nume
