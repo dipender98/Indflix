@@ -45,22 +45,26 @@ object MultiSourcePuller {
         if (sources.isEmpty()) return@withContext emptyList()
 
         val ordered = sources.sortedBy { priorityOf(it.name) }
-        val links = Collections.synchronizedList(ArrayList<ExtractorLink>())
-        val subs = Collections.synchronizedList(ArrayList<SubtitleFile>())
+        val links = Collections.synchronizedList<ArrayList<ExtractorLink>>(ArrayList())
+        val subs = Collections.synchronizedList<ArrayList<SubtitleFile>>(ArrayList())
 
-        ordered.apmap { src ->
-            withTimeoutOrNull(timeoutMs) {
-                runCatching {
-                    loadExtractor(
-                        url = src.url,
-                        referer = src.referer,
-                        subtitleCallback = { subs.add(it) },
-                        callback = { l ->
-                            links.add(l.copy(server = src.name + INDICATOR))
+        coroutineScope {
+            ordered.map { src ->
+                async {
+                    withTimeoutOrNull(timeoutMs) {
+                        runCatching {
+                            loadExtractor(
+                                url = src.url,
+                                referer = src.referer,
+                                subtitleCallback = { subs.add(it) },
+                                callback = { l ->
+                                    links.add(l.copy(server = src.name + INDICATOR))
+                                }
+                            )
                         }
-                    )
+                    }
                 }
-            }
+            }.awaitAll()
         }
 
         subs.forEach { onSubtitle(it) }

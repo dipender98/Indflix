@@ -4,9 +4,11 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.*
 import org.jsoup.nodes.Element
+import java.net.URLEncoder
+import java.nio.charset.StandardCharsets
 
 /**
- * Indflix - a CloudStream provider that scrapes the Multimovies (multimovies.motorcycles) site.
+ * Multimovies - a CloudStream provider that scrapes the Multimovies (multimovies.motorcycles) site.
  *
  * Source handling policy (per project requirements):
  *  - Multiple streaming sources are pulled in PARALLEL.
@@ -78,7 +80,8 @@ class MultimoviesProvider : MainAPI() {
     // ------------------------------------------------------------------
 
     override suspend fun search(query: String): List<SearchResponse>? {
-        val doc = app.get("$mainUrl/?s=${query.encodeURL()}", timeout = 20).document
+        val encodedQuery = URLEncoder.encode(query, StandardCharsets.UTF_8.toString())
+        val doc = app.get("$mainUrl/?s=$encodedQuery", timeout = 20).document
         return doc.select("div#archive-content div.item, div.search-page div.result-item, article.item").mapNotNull {
             it.toSearchResponse()
         }.takeIf { it.isNotEmpty() }
@@ -147,8 +150,8 @@ class MultimoviesProvider : MainAPI() {
 
         val tags = doc.select("div.sgeneros a, .genre a, .sgeneros a").mapNotNull { it.text() }
 
-        val rating = doc.selectFirst("span.dt_rating_vgs, .imdb, .rating span")?.text()
-            ?.removePrefix("IMDb:")?.toRatingInt()
+        val score = doc.selectFirst("span.dt_rating_vgs, .imdb, .rating span")?.text()
+            ?.removePrefix("IMDb:")?.toIntOrNull()
 
         val isMovie = url.contains("/movies/")
 
@@ -157,7 +160,7 @@ class MultimoviesProvider : MainAPI() {
                 this.posterUrl = poster
                 this.year = year
                 this.plot = plot
-                this.rating = rating
+                this.score = score
             }
         } else {
             // TV / Seasons: collect all episodes from season + episode archive pages.
@@ -167,30 +170,34 @@ class MultimoviesProvider : MainAPI() {
                 .distinct()
 
             val pages = if (seasonLinks.isEmpty()) listOf(url) else seasonLinks
-            pages.apmap { seasonUrl ->
-                val sDoc = app.get(seasonUrl, timeout = 20).document
-                sDoc.select("ul.episodios li, div.eps div.ep, .episodios li").forEachIndexed { i, ep ->
-                    val epLink = ep.selectFirst("a[href]")?.attr("href")?.takeIf { it.contains(mainUrl) }
-                        ?: return@forEachIndexed
-                    val epNum = Regex("(?i)(\\d+)x(\\d+)").find(epLink)?.groupValues?.getOrNull(2)?.toIntOrNull()
-                        ?: Regex("(\\d+)").find(epLink)?.value?.toIntOrNull() ?: (i + 1)
-                    val seasonNum = Regex("(?i)(\\d+)x(\\d+)").find(epLink)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 1
-                    val epTitle = ep.selectFirst(".episodiotitle a, .title, a")?.text()?.trim()
-                    episodes.add(
-                        newEpisode(epLink) {
-                            this.name = epTitle
-                            this.episode = epNum
-                            this.season = seasonNum
+            coroutineScope {
+                pages.map { seasonUrl ->
+                    async {
+                        val sDoc = app.get(seasonUrl, timeout = 20).document
+                        sDoc.select("ul.episodios li, div.eps div.ep, .episodios li").forEachIndexed { i, ep ->
+                            val epLink = ep.selectFirst("a[href]")?.attr("href")?.takeIf { it.contains(mainUrl) }
+                                ?: return@forEachIndexed
+                            val epNum = Regex("(?i)(\\d+)x(\\d+)").find(epLink)?.groupValues?.getOrNull(2)?.toIntOrNull()
+                                ?: Regex("(\\d+)").find(epLink)?.value?.toIntOrNull() ?: (i + 1)
+                            val seasonNum = Regex("(?i)(\\d+)x(\\d+)").find(epLink)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 1
+                            val epTitle = ep.selectFirst(".episodiotitle a, .title, a")?.text()?.trim()
+                            episodes.add(
+                                newEpisode(epLink) {
+                                    this.name = epTitle
+                                    this.episode = epNum
+                                    this.season = seasonNum
+                                }
+                            )
                         }
-                    )
-                }
+                    }
+                }.awaitAll()
             }
 
             newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
                 this.posterUrl = poster
                 this.year = year
                 this.plot = plot
-                this.rating = rating
+                this.score = score
                 this.tags = tags
             }
         }
