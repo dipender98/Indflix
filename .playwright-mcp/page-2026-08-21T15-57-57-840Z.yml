@@ -1,0 +1,182 @@
+- generic [ref=e2]:
+  - generic [ref=e3]:
+    - link "Skip to content" [ref=e4] [cursor=pointer]:
+      - /url: "#start-of-content"
+    - banner [ref=e9]:
+      - heading "Navigation Menu" [level=2] [ref=e10]
+      - generic [ref=e11]:
+        - link "Homepage" [ref=e13] [cursor=pointer]:
+          - /url: /
+        - generic [ref=e16]:
+          - navigation "Global" [ref=e17]:
+            - list [ref=e18]:
+              - listitem [ref=e19]:
+                - button "Platform" [ref=e21] [cursor=pointer]
+              - listitem [ref=e24]:
+                - button "Solutions" [ref=e26] [cursor=pointer]
+              - listitem [ref=e29]:
+                - button "Resources" [ref=e31] [cursor=pointer]
+              - listitem [ref=e34]:
+                - button "Open Source" [ref=e36] [cursor=pointer]
+              - listitem [ref=e39]:
+                - button "Enterprise" [ref=e41] [cursor=pointer]
+              - listitem [ref=e44]:
+                - link "Pricing" [ref=e45] [cursor=pointer]:
+                  - /url: https://github.com/pricing
+          - generic [ref=e46]:
+            - button "Search or jump to, type / to search" [ref=e48] [cursor=pointer]
+            - link "Sign in" [ref=e55] [cursor=pointer]:
+              - /url: /login?return_to=https%3A%2F%2Fgithub.com%2Fdipender98%2FIndflix%2Factions%2Fruns%2F32499990009
+            - link "Sign up" [ref=e58] [cursor=pointer]:
+              - /url: /signup?ref_cta=Sign+up&ref_loc=header+logged+out&ref_page=%2F%3Cuser-name%3E%2F%3Crepo-name%3E%2Factions%2Fworkflow_runs%2Fshow&source=header-repo&source_repo=dipender98%2FIndflix
+            - button "Appearance settings" [ref=e61] [cursor=pointer]
+  - main [ref=e68]:
+    - generic [ref=e69]:
+      - generic [ref=e70]:
+        - generic [ref=e71]:
+          - generic [ref=e72]:
+            - generic [ref=e73]:
+              - link "dipender98" [ref=e77] [cursor=pointer]:
+                - /url: /dipender98
+              - generic [ref=e78]: /
+              - strong [ref=e79]:
+                - link "Indflix" [ref=e80] [cursor=pointer]:
+                  - /url: /dipender98/Indflix
+              - generic [ref=e81]: Public
+            - generic [ref=e82]:
+              - text: forked from
+              - link "recloudstream/TestPlugins" [ref=e83] [cursor=pointer]:
+                - /url: /recloudstream/TestPlugins
+          - generic [ref=e84]:
+            - list:
+              - listitem [ref=e85]:
+                - link "You must be signed in to change notification settings" [ref=e86] [cursor=pointer]:
+                  - /url: /login?return_to=%2Fdipender98%2FIndflix
+                  - text: Notifications
+              - listitem [ref=e89]:
+                - link "Fork 0" [ref=e90] [cursor=pointer]:
+                  - /url: /login?return_to=%2Fdipender98%2FIndflix
+                  - text: Fork
+                  - generic "0" [ref=e93]
+              - listitem [ref=e94]:
+                - link "You must be signed in to star a repository" [ref=e96] [cursor=pointer]:
+                  - /url: /login?return_to=%2Fdipender98%2FIndflix
+                  - text: Star
+                  - generic "0 users starred this repository" [ref=e99]: "0"
+        - navigation "Repository" [ref=e100]:
+          - list [ref=e101]:
+            - listitem [ref=e102]:
+              - link "Code" [ref=e103] [cursor=pointer]:
+                - /url: /dipender98/Indflix
+            - listitem [ref=e107]:
+              - link "Pull requests" [ref=e108] [cursor=pointer]:
+                - /url: /dipender98/Indflix/pulls
+            - listitem [ref=e112]:
+              - link "Actions" [ref=e113] [cursor=pointer]:
+                - /url: /dipender98/Indflix/actions
+            - listitem [ref=e117]:
+              - link "Projects" [ref=e118] [cursor=pointer]:
+                - /url: /dipender98/Indflix/projects
+            - listitem [ref=e122]:
+              - link "Security and quality" [ref=e123] [cursor=pointer]:
+                - /url: /dipender98/Indflix/security
+            - listitem [ref=e127]:
+              - link "Insights" [ref=e128] [cursor=pointer]:
+                - /url: /dipender98/Indflix/pulse
+      - generic [ref=e136]:
+        - generic [ref=e139]:
+          - link "Build" [ref=e142] [cursor=pointer]:
+            - /url: /dipender98/Indflix/actions/workflows/build.yml
+          - generic [ref=e146]:
+            - generic [ref=e147]:
+              - img "failed:" [ref=e151]
+              - 'heading "Migrate to new CloudStream API: ExtractorLink, loadExtractor, Score #24" [level=1] [ref=e153]'
+            - link "Sign in to view logs" [ref=e157] [cursor=pointer]:
+              - /url: /login?return_to=https%3A%2F%2Fgithub.com%2Fdipender98%2FIndflix%2Factions%2Fruns%2F32499990009
+        - generic [ref=e161]:
+          - region "Workflow run summary" [ref=e162]:
+            - generic [ref=e163]:
+              - generic [ref=e164]:
+                - generic [ref=e165]: Triggered via push August 21, 2026 15:525 minutes ago
+                - generic [ref=e166]:
+                  - link [ref=e167] [cursor=pointer]:
+                    - /url: /dipender98
+                    - img "@dipender98" [ref=e168]
+                    - text: dipender98
+                  - generic [ref=e169]:
+                    - generic [ref=e170]: pushed
+                    - link "f807469" [ref=e171] [cursor=pointer]:
+                      - /url: /dipender98/Indflix/commit/f807469ca6fcf46b49a917b9a05bfdba6bc3d98a
+                  - link "main" [ref=e174] [cursor=pointer]:
+                    - /url: /dipender98/Indflix/tree/refs/heads/main
+              - generic [ref=e175]:
+                - generic [ref=e176]: Status
+                - text: Failure
+              - generic [ref=e177]:
+                - generic [ref=e178]: Total duration
+                - link "1m 46s" [ref=e179] [cursor=pointer]:
+                  - /url: /dipender98/Indflix/actions/runs/32499990009/usage
+              - generic [ref=e180]:
+                - generic [ref=e181]: Artifacts
+                - text: –
+          - region "Workflow run graph" [ref=e182]:
+            - generic [ref=e184]:
+              - generic [ref=e186]:
+                - heading [level=2] [ref=e187]:
+                  - link "build.yml" [ref=e188] [cursor=pointer]:
+                    - /url: /dipender98/Indflix/actions/runs/32499990009/workflow
+                - generic [ref=e189]: "on: push"
+              - generic [ref=e191]:
+                - 'link "failed: build 1m 43s" [ref=e196] [cursor=pointer]':
+                  - /url: /dipender98/Indflix/actions/runs/32499990009/job/96827200059
+                  - generic [ref=e198]:
+                    - img "failed:" [ref=e200]
+                    - generic [ref=e202]: build
+                    - generic [ref=e204]: 1m 43s
+                - generic [ref=e205]:
+                  - paragraph [ref=e206]: Oh hello! Nice to see you.
+                  - paragraph [ref=e207]:
+                    - text: Made with ❤️ by
+                    - link [ref=e208] [cursor=pointer]:
+                      - /url: https://actions.github.io/humans.txt
+                      - text: humans.txt
+              - generic [ref=e209]:
+                - button "Fit to window" [disabled] [ref=e210]
+                - generic [ref=e211]:
+                  - button "Zoom out" [disabled] [ref=e213]
+                  - button "Zoom in" [disabled] [ref=e215]
+          - region "Annotations" [ref=e216]:
+            - generic [ref=e217]:
+              - generic [ref=e219]:
+                - heading "Annotations" [level=2] [ref=e220]
+                - generic [ref=e221]: 1 error and 2 warnings
+              - table [ref=e222]:
+                - rowgroup [ref=e223]:
+                  - row [ref=e224]:
+                    - cell "build Process completed with exit code 1." [ref=e225]:
+                      - generic [ref=e230]:
+                        - link [ref=e231] [cursor=pointer]:
+                          - /url: /dipender98/Indflix/actions/runs/32499990009/job/96827200059#step:7:243
+                          - strong [ref=e232]: build
+                        - generic [ref=e233]: Process completed with exit code 1.
+                  - row [ref=e236]:
+                    - cell [ref=e237]:
+                      - generic [ref=e242]:
+                        - link [ref=e243] [cursor=pointer]:
+                          - /url: /dipender98/Indflix/actions/runs/32499990009/job/96827200059#step:17:3
+                          - strong [ref=e244]: build
+                        - generic [ref=e245]:
+                          - generic [ref=e247]:
+                            - text: "Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@v4, actions/setup-java@v4, android-actions/setup-android@v3. For more information see:"
+                            - link "https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/" [ref=e248] [cursor=pointer]:
+                              - /url: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+                          - button "Show more" [ref=e249] [cursor=pointer]
+                  - row [ref=e250]:
+                    - cell "build setup-java v4 is deprecated and will no longer receive updates. Please migrate to actions/setup-java@v5. Show more" [ref=e251]:
+                      - generic [ref=e256]:
+                        - link [ref=e257] [cursor=pointer]:
+                          - /url: /dipender98/Indflix/actions/runs/32499990009/job/96827200059#step:5:15
+                          - strong [ref=e258]: build
+                        - generic [ref=e259]:
+                          - generic [ref=e260]: setup-java v4 is deprecated and will no longer receive updates. Please migrate to actions/setup-java@v5.
+                          - button "Show more" [ref=e262] [cursor=pointer]
