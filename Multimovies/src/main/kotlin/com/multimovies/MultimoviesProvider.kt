@@ -81,20 +81,33 @@ class MultimoviesProvider : MainAPI() {
 
     override suspend fun search(query: String): List<SearchResponse>? {
         val encodedQuery = URLEncoder.encode(query, StandardCharsets.UTF_8.toString())
-        val doc = app.get("$mainUrl/?s=$encodedQuery", timeout = 20).document
-        return doc.select("div#archive-content div.item, div.search-page div.result-item, article.item").mapNotNull {
-            it.toSearchResponse()
-        }.takeIf { it.isNotEmpty() }
+        val searchUrl = "$mainUrl/?s=$encodedQuery"
+        val doc = app.get(searchUrl, timeout = 20).document
+
+        val items = doc.select(
+            "div#archive-content div.item, " +
+            "div.search-page div.result-item, " +
+            "article.item, " +
+            "div.ml-items div.item, " +
+            "div.results div.result, " +
+            "ul.ml-posts li, " +
+            "div#content div.post, " +
+            "div.items div.item"
+        )
+
+        val results = items.mapNotNull { it.toSearchResponse() }
+        return results.takeIf { it.isNotEmpty() }
     }
 
     override suspend fun quickSearch(query: String): List<SearchResponse>? = search(query)
 
     private fun Element.toSearchResponse(): SearchResponse? {
-        val a = selectFirst("a, div.data a h2, div.poster a") ?: return null
-        val href = selectFirst("a[href]")?.attr("href") ?: return null
-        if (!href.contains(mainUrl)) return null
+        val a = selectFirst("a[href], div.data a h2, div.poster a") ?: return null
+        val href = a.attr("href").takeIf { it.contains(mainUrl) } ?: return null
         val title = selectFirst("img")?.attr("alt")
-            ?: selectFirst("h2, div.data h3 a, .title")?.text()
+            ?: a.selectFirst("h2, div.data h3 a, .title")?.text()
+            ?: a.text()
+            ?.trim()
             ?: return null
         val poster = selectFirst("img")?.attr("src")
             ?.let { if (it.startsWith("//")) "https:$it" else it }
@@ -103,7 +116,8 @@ class MultimoviesProvider : MainAPI() {
         val isSeries = href.contains("/tvshows/") || href.contains("/seasons/")
         val tvType = when {
             isSeries -> TvType.TvSeries
-            else -> TvType.Movie
+            isMovie -> TvType.Movie
+            else -> TvType.TvSeries
         }
         return if (tvType == TvType.TvSeries) {
             newTvSeriesSearchResponse(title, href, tvType) { this.posterUrl = poster }
