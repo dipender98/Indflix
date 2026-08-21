@@ -201,7 +201,11 @@ class MultimoviesProvider : MainAPI() {
             coroutineScope {
                 pages.map { seasonUrl ->
                     async {
-                        val sDoc = app.get(seasonUrl, timeout = 20).document
+                        val sDoc = try {
+                            app.get(seasonUrl, timeout = 20, headers = commonHeaders).document
+                        } catch (e: Exception) {
+                            return@async
+                        }
                         sDoc.select("ul.episodios li, div.eps div.ep, .episodios li").forEachIndexed { i, ep ->
                             val epLink = ep.selectFirst("a[href]")?.attr("href")?.takeIf { it.contains(mainUrl) }
                                 ?: return@forEachIndexed
@@ -275,7 +279,7 @@ class MultimoviesProvider : MainAPI() {
             val resp = runCatching {
                 app.post(
                     "$mainUrl/wp-admin/admin-ajax.php",
-                    headers = mapOf("X-Requested-With" to "XMLHttpRequest"),
+                    headers = commonHeaders + mapOf("X-Requested-With" to "XMLHttpRequest"),
                     data = body,
                     timeout = 20,
                 ).text
