@@ -1,7 +1,6 @@
 version = 1
 
 cloudstream {
-    name = "Multimovies"
     language = "en"
     authors = listOf("Indflix")
     description = "CloudStream provider that scrapes Multimovies and pulls sources in parallel with a per-source timeout."
