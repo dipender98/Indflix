@@ -151,7 +151,7 @@ class MultimoviesProvider : MainAPI() {
         val tags = doc.select("div.sgeneros a, .genre a, .sgeneros a").mapNotNull { it.text() }
 
         val score = doc.selectFirst("span.dt_rating_vgs, .imdb, .rating span")?.text()
-            ?.removePrefix("IMDb:")?.toIntOrNull()
+            ?.removePrefix("IMDb:")?.trim()
 
         val isMovie = url.contains("/movies/")
 
@@ -160,7 +160,7 @@ class MultimoviesProvider : MainAPI() {
                 this.posterUrl = poster
                 this.year = year
                 this.plot = plot
-                this.score = score
+                addScore(score ?: "0", maxValue = 10)
             }
         } else {
             // TV / Seasons: collect all episodes from season + episode archive pages.
@@ -197,7 +197,7 @@ class MultimoviesProvider : MainAPI() {
                 this.posterUrl = poster
                 this.year = year
                 this.plot = plot
-                this.score = score
+                addScore(score ?: "0", maxValue = 10)
                 this.tags = tags
             }
         }
