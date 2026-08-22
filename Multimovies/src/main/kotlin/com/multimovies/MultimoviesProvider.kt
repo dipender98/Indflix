@@ -180,37 +180,19 @@ class MultimoviesProvider : MainAPI() {
     // Load (detail page)
     // ------------------------------------------------------------------
 
-    /**
-     * Fetches a page, recovering from an expired in-app Cloudflare solver.
-     * getCfKiller() caches a single CloudflareKiller instance whose challenge
-     * cookies expire; once they do, every app.get() on that instance fails, so
-     * load() fails and CloudStream retries it in a loop ("refreshing" details
-     * page). Drop the cached solver and retry once with a fresh one first.
-     */
-    private suspend fun loadDocument(url: String): org.jsoup.nodes.Document? {
-        var doc: org.jsoup.nodes.Document? = null
-        for (i in 0..1) {
-            try {
-                doc = app.get(url, timeout = 20, headers = commonHeaders, interceptor = getCfKiller()).document
-                break
-            } catch (e: Exception) {
-                cfKiller = null
-            }
-        }
-        return doc
-    }
-
     override suspend fun load(url: String): LoadResponse? {
-        val doc = loadDocument(url) ?: return null
+        val doc = try {
+            app.get(url, timeout = 20, headers = commonHeaders, interceptor = getCfKiller()).document
+        } catch (e: Exception) {
+            return null
+        }
 
         val title = doc.selectFirst("h1, div.sheader h1, meta[property=og:title]")?.let {
             if (it.tagName() == "meta") it.attr("content") else it.text()
         }?.trim() ?: throw ErrorLoadingException("No title")
 
-        val poster = upgradePosterUrl(
-            doc.selectFirst("meta[property=og:image]")?.attr("content")
-                ?: doc.selectFirst("div.poster img, img.wp-post-image")?.attr("src")
-        )
+        val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")
+            ?: doc.selectFirst("div.poster img, img.wp-post-image")?.attr("src")
 
         val year = doc.selectFirst("span.date, .year, .extra span")?.text()
             ?.let { Regex("\\d{4}").find(it)?.value?.toIntOrNull() }
@@ -231,7 +213,7 @@ class MultimoviesProvider : MainAPI() {
                 this.year = year
                 this.plot = plot
                 this.score = score?.let { Score.from10(it) }
-                this.tags = tags.takeIf { it.isNotEmpty() }
+                this.tags = tags
             }
         } else {
             // TV / Seasons: collect all episodes from season + episode archive pages.
@@ -244,7 +226,11 @@ class MultimoviesProvider : MainAPI() {
             coroutineScope {
                 pages.map { seasonUrl ->
                     async {
-                        val sDoc = loadDocument(seasonUrl) ?: return@async
+                        val sDoc = try {
+                            app.get(seasonUrl, timeout = 20, headers = commonHeaders, interceptor = getCfKiller()).document
+                        } catch (e: Exception) {
+                            return@async
+                        }
                         sDoc.select("ul.episodios li, div.eps div.ep, .episodios li").forEachIndexed { i, ep ->
                             val epLink = ep.selectFirst("a[href]")?.attr("href")?.takeIf { it.contains(mainUrl) }
                                 ?: return@forEachIndexed
@@ -269,7 +255,7 @@ class MultimoviesProvider : MainAPI() {
                 this.year = year
                 this.plot = plot
                 this.score = score?.let { Score.from10(it) }
-                this.tags = tags.takeIf { it.isNotEmpty() }
+                this.tags = tags
             }
         }
     }
@@ -285,7 +271,11 @@ class MultimoviesProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val doc = loadDocument(data) ?: return false
+        val doc = try {
+            app.get(data, timeout = 20, headers = commonHeaders, interceptor = getCfKiller()).document
+        } catch (e: Exception) {
+            return false
+        }
 
         // Each "Video Source" on a Multimovies episode page is a
         // li.dooplay_player_option carrying data-nume (source index) and data-type.
