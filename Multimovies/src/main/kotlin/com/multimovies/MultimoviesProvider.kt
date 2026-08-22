@@ -92,6 +92,51 @@ class MultimoviesProvider : MainAPI() {
         return if (idx == -1) SOURCE_PRIORITY.size else idx
     }
 
+    /**
+     * Fetch [url] and parse it to a Jsoup Document, solving the site's Cloudflare
+     * managed challenge via [CloudflareKiller].
+     *
+     * The challenge is solved in a WebView and can take a while, so we use a long
+     * timeout and retry once with a FRESH solver if the first attempt returns the
+     * "Just a moment..." interstitial (a 200 response that is not the real page).
+     *
+     * On hard failure we throw [ErrorLoadingException] so the detail page shows the
+     * error ONCE. Returning null instead makes CloudStream's LoadFragment retry
+     * load() forever (the "keep refreshing" loop).
+     */
+    private suspend fun solveDocument(url: String, timeoutSeconds: Int = 60): Document {
+        val solvers = listOf(
+            { getCfKiller() },
+            { cfKiller = CloudflareKiller().also { cfKiller = it } },
+        )
+        var lastErr: Exception? = null
+        for (makeSolver in solvers) {
+            try {
+                val doc = app.get(
+                    url,
+                    timeout = timeoutSeconds,
+                    headers = commonHeaders,
+                    interceptor = makeSolver(),
+                ).document
+                val bodyText = doc.body()?.text() ?: ""
+                val isChallenge = bodyText.contains("just a moment", ignoreCase = true)
+                    || bodyText.contains("cf-mitigated", ignoreCase = true)
+                    || bodyText.contains("verify you are human", ignoreCase = true)
+                    || bodyText.contains("checking your browser", ignoreCase = true)
+                if (isChallenge) {
+                    lastErr = ErrorLoadingException("Cloudflare challenge not solved")
+                    cfKiller = null
+                    continue
+                }
+                return doc
+            } catch (e: Exception) {
+                lastErr = e
+                cfKiller = null
+            }
+        }
+        throw ErrorLoadingException(lastErr?.localizedMessage ?: "Failed to load $url")
+    }
+
 
     private fun upgradePosterUrl(url: String?): String? {
         if (url.isNullOrBlank()) return null
@@ -181,15 +226,12 @@ class MultimoviesProvider : MainAPI() {
     // ------------------------------------------------------------------
 
     override suspend fun load(url: String): LoadResponse? {
-        val doc = try {
-            app.get(url, timeout = 20, headers = commonHeaders, interceptor = getCfKiller()).document
-        } catch (e: Exception) {
-            return null
-        }
+        // solveDocument() surfaces failures via ErrorLoadingException (no retry loop).
+        val doc = solveDocument(url)
 
         val title = doc.selectFirst("h1, div.sheader h1, meta[property=og:title]")?.let {
             if (it.tagName() == "meta") it.attr("content") else it.text()
-        }?.trim() ?: throw ErrorLoadingException("No title")
+        }?.trim() ?: throw ErrorLoadingException("No title found on $url")
 
         val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")
             ?: doc.selectFirst("div.poster img, img.wp-post-image")?.attr("src")
@@ -227,7 +269,7 @@ class MultimoviesProvider : MainAPI() {
                 pages.map { seasonUrl ->
                     async {
                         val sDoc = try {
-                            app.get(seasonUrl, timeout = 20, headers = commonHeaders, interceptor = getCfKiller()).document
+                            solveDocument(seasonUrl)
                         } catch (e: Exception) {
                             return@async
                         }
@@ -272,7 +314,7 @@ class MultimoviesProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val doc = try {
-            app.get(data, timeout = 20, headers = commonHeaders, interceptor = getCfKiller()).document
+            solveDocument(data)
         } catch (e: Exception) {
             return false
         }
