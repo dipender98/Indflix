@@ -1,6 +1,7 @@
 package com.multimovies
 
 import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.network.CloudflareKiller
 import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.*
 import org.jsoup.Jsoup
@@ -24,6 +25,9 @@ class MultimoviesProvider : MainAPI() {
     override var name = "Multimovies"
     private val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
     private val commonHeaders = mapOf("User-Agent" to userAgent)
+    // Solves the Cloudflare managed challenge on multimovies.motorcycles. Must be a
+    // single shared instance so solved cookies persist across search/load/loadLinks.
+    private val cfKiller = CloudflareKiller()
     override val hasMainPage = true
     override val hasQuickSearch = true
     override val supportedTypes = setOf(
@@ -86,7 +90,7 @@ class MultimoviesProvider : MainAPI() {
         val encodedQuery = URLEncoder.encode(query, StandardCharsets.UTF_8.toString())
         val searchUrl = "$mainUrl/?s=$encodedQuery"
         val doc = try {
-            app.get(searchUrl, timeout = 20, headers = commonHeaders).document
+            app.get(searchUrl, timeout = 20, headers = commonHeaders, interceptor = cfKiller).document
         } catch (e: Exception) {
             return null
         }
@@ -143,7 +147,7 @@ class MultimoviesProvider : MainAPI() {
     ): HomePageResponse? {
         val url = if (page > 1) "${request.data}page/$page/" else request.data
         val doc = try {
-            app.get(url, timeout = 20, headers = commonHeaders).document
+            app.get(url, timeout = 20, headers = commonHeaders, interceptor = cfKiller).document
         } catch (e: Exception) {
             return null
         }
@@ -159,7 +163,7 @@ class MultimoviesProvider : MainAPI() {
 
     override suspend fun load(url: String): LoadResponse? {
         val doc = try {
-            app.get(url, timeout = 20, headers = commonHeaders).document
+            app.get(url, timeout = 20, headers = commonHeaders, interceptor = cfKiller).document
         } catch (e: Exception) {
             return null
         }
@@ -247,7 +251,7 @@ class MultimoviesProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val doc = try {
-            app.get(data, timeout = 20, headers = commonHeaders).document
+            app.get(data, timeout = 20, headers = commonHeaders, interceptor = cfKiller).document
         } catch (e: Exception) {
             return false
         }
@@ -285,7 +289,9 @@ class MultimoviesProvider : MainAPI() {
                         "Referer" to data,
                     ),
                     data = body,
+                    referer = data,
                     timeout = 20,
+                    interceptor = cfKiller,
                 ).text
             }.getOrNull() ?: return@mapNotNull null
 
