@@ -211,7 +211,7 @@ class MultimoviesProvider : MainAPI() {
                 pages.map { seasonUrl ->
                     async {
                         val sDoc = try {
-                            app.get(seasonUrl, timeout = 20, headers = commonHeaders).document
+                            app.get(seasonUrl, timeout = 20, headers = commonHeaders, interceptor = getCfKiller()).document
                         } catch (e: Exception) {
                             return@async
                         }
@@ -261,15 +261,21 @@ class MultimoviesProvider : MainAPI() {
         }
 
         // Each "Video Source" on a Multimovies episode page is a
-        // li.doopley_player_option carrying data-post (post id), data-nume
-        // (source index) and data-type. The real embed URL is fetched from the
-        // site's dooplayer admin-ajax endpoint (the static <li> has no href).
+        // li.doopley_player_option carrying data-nume (source index) and data-type.
+        // The real embed URL comes from the site's dooplayer admin-ajax endpoint,
+        // keyed by the post id. The post id is Dooplay-standard in
+        // <meta id="dooplay-ajax-counter" data-postid="...">; the <li> data-post
+        // is a fallback when the meta tag is absent.
+        val postId = doc.selectFirst("meta#dooplay-ajax-counter")
+            ?.attr("data-postid")
+            ?.takeIf { it.isNotBlank() }
         val options = doc.select("ul#playeroptionsul li.doopley_player_option, li.doopley_player_option")
             .mapNotNull { li ->
                 val name = li.selectFirst(".title")?.text()?.trim() ?: return@mapNotNull null
-                val post = li.attr("data-post").takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                val post = postId ?: li.attr("data-post").takeIf { it.isNotBlank() } ?: return@mapNotNull null
                 val nume = li.attr("data-nume").takeIf { it.isNotBlank() } ?: return@mapNotNull null
-                val type = li.attr("data-type").takeIf { it.isNotBlank() } ?: "tv"
+                val type = li.attr("data-type").takeIf { it.isNotBlank() }
+                    ?: if (data.contains("/movies/")) "movie" else "tv"
                 name to Triple(post, nume, type)
             }
 
