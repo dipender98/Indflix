@@ -184,7 +184,7 @@ class MultimoviesProvider : MainAPI() {
         val doc = try {
             app.get(url, timeout = 20, headers = commonHeaders, interceptor = getCfKiller()).document
         } catch (e: Exception) {
-            throw ErrorLoadingException(e.toString())
+            return null
         }
 
         val title = doc.selectFirst("h1, div.sheader h1, meta[property=og:title]")?.let {
