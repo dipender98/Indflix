@@ -51,28 +51,37 @@ content, so no personal API key is required.
   built-in \TmdbProvider\ meta-provider can further enrich episodes (descriptions, ratings) and
   cast (with profile photos) when the user enables TMDB in the app.
 
-### Optional TMDB key (ratings only)
+### Optional TMDB key (ratings only) -- disabled in this build
 
-The provider exposes a setting **"TMDB API Key (optional — used only for ratings)"**.
-- If left empty: all metadata (including rating) comes from Cinemeta.
-- If the user enters a TMDB key: \TmdbRatingService\ (in \TmdbRatingService.kt\) is used
-  **only** to override the \score\ with TMDB's \vote_average\. Every other field still comes
-  from Cinemeta. On any TMDB failure it silently falls back to Cinemeta. No key is hardcoded
-  in the source.
+The CloudStream version this plugin builds against (pinned plugin `81b1d424d2` / library
+`cloudstream3:pre-release`) does **not** expose provider settings on `MainAPI` (no `preferences`
+or `context` members), so the provider cannot surface a "TMDB API Key" setting to users. As a result:
+
+- Ratings **always** come from the keyless Cinemeta `imdbRating` (via `Score.from10`).
+- `TmdbRatingService.kt` was removed; `tmdbApiKey` / `preferences` are no longer declared.
+
+When the user enables CloudStream's built-in **TMDB** meta-provider in the app, `addImdbId`
+(tags the IMDB id on every `LoadResponse`) lets that meta-provider pull richer ratings, episode
+descriptions, and cast (with photos) -- no provider setting required.
+
+To re-enable an explicit per-provider TMDB key later, upgrade the CloudStream gradle plugin/library
+to a version that exposes the `preferences` settings DSL, then restore `TmdbRatingService`.
 
 ### Poster quality
 
 \upgradePosterUrl()\ strips Dooplay "\-WxH" thumbnail size suffixes so search/detail posters
 load at full resolution instead of pixelated thumbnails.
 
-- \epo.json\ — CloudStream repository manifest at repo root; \pluginLists\
+- \
+epo.json\ — CloudStream repository manifest at repo root; \pluginLists\
   points to \plugins.json\ on the \uilds\ branch. This is the **extension
   link** users add in the app.
 
 ## Publishing (extension link)
 
 The Actions workflow (\.github/workflows/build.yml\) builds the plugin with
-\./gradlew make makePluginsJson\, then deploys \plugins.json\, \epo.json\ and
+\./gradlew make makePluginsJson\, then deploys \plugins.json\, \
+epo.json\ and
 \Multimovies.cs3\ to the **\uilds\ branch**. The resulting install link is:
 
 \\\
@@ -80,7 +89,8 @@ https://raw.githubusercontent.com/dipender98/Indflix/builds/repo.json
 \\\
 
 To make it live, enable **Settings ? Pages ? Source: GitHub Actions** and ensure
-Actions have write permission. The \epo.json\ at the repo root mirrors this
+Actions have write permission. The \
+epo.json\ at the repo root mirrors this
 URL for documentation.
 
 ## Build

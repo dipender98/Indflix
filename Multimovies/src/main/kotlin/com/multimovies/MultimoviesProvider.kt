@@ -1,5 +1,7 @@
 ﻿package com.multimovies
 
+import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
+import com.lagradost.cloudstream3.LoadResponse.Companion.addImdbId
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.network.CloudflareKiller
 import com.lagradost.cloudstream3.utils.*
@@ -10,7 +12,6 @@ import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 
 import com.multimovies.CinemetaService
-import com.multimovies.TmdbRatingService
 
 /**
  * Multimovies - a CloudStream provider that scrapes the Multimovies (multimovies.motorcycles) site.
@@ -27,20 +28,6 @@ class MultimoviesProvider : MainAPI() {
     override var mainUrl = "https://multimovies.motorcycles"
     override var name = "Multimovies"
 
-    override val preferences = """[
-        {
-            "key": "tmdbApiKey",
-            "title": "TMDB API Key (optional — used only for ratings)",
-            "summary": "Leave empty to use keyless Cinemeta metadata. If set, TMDB is used ONLY for ratings/score.",
-            "valueType": "text",
-            "default": ""
-        }
-    ]"""
-
-    private val tmdbApiKey: String
-        get() = context?.getSharedPreferences("provider_$name", 0)
-            ?.getString("tmdbApiKey", "")
-            ?.takeIf { it.isNotBlank() } ?: ""
     private val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
     private val commonHeaders = mapOf("User-Agent" to userAgent)
     // Solves the Cloudflare managed challenge on multimovies.motorcycles. Created
@@ -118,7 +105,7 @@ class MultimoviesProvider : MainAPI() {
         if (url.isNullOrBlank()) return null
         val fixed = if (url.startsWith("//")) "https:$url" else url
         // Strip Dooplay "-WxH" thumbnail size suffixes to get the full-resolution image.
-        return fixed.replace(Regex("-\d+x\d+(?=\.[a-zA-Z]+$)"), "")
+        return fixed.replace(Regex("""-\d+x\d+(?=\.[a-zA-Z]+$)"""), "")
     }
 
     // ------------------------------------------------------------------
@@ -231,22 +218,18 @@ class MultimoviesProvider : MainAPI() {
         val isMovie = url.contains("/movies/")
         val imdbId = extractImdbId(doc)
         val cMeta = imdbId?.let { CinemetaService.getMetadata(it, if (isMovie) "movie" else "series") }
-        val tmdbRating = if (tmdbApiKey.isNotBlank() && imdbId != null) {
-            TmdbRatingService.getRating(imdbId, if (isMovie) "movie" else "series", tmdbApiKey)
-        } else null
 
         return if (isMovie) {
             newMovieLoadResponse(title, url, TvType.Movie, url) {
                 this.posterUrl = poster ?: cMeta?.poster
                 this.year = year ?: cMeta?.year?.toIntOrNull()
                 this.plot = plot ?: cMeta?.description
-                this.score = tmdbRating
-                    ?: score?.let { Score.from10(it) }
+                this.score = score?.let { Score.from10(it) }
                     ?: cMeta?.imdbRating?.let { Score.from10(it) }
                 this.tags = tags.takeIf { it.isNotEmpty() } ?: (cMeta?.genre ?: cMeta?.genres)
                 this.backgroundPosterUrl = cMeta?.background
-                imdbId?.let { addImdbId(it) }
-                cMeta?.cast?.let { if (it.isNotEmpty()) addActors(it) }
+                addImdbId(imdbId)
+                addActors(cMeta?.cast)
             }
         } else {
             // TV / Seasons: collect all episodes from season + episode archive pages.
@@ -287,13 +270,12 @@ class MultimoviesProvider : MainAPI() {
                 this.posterUrl = poster ?: cMeta?.poster
                 this.year = year ?: cMeta?.year?.toIntOrNull()
                 this.plot = plot ?: cMeta?.description
-                this.score = tmdbRating
-                    ?: score?.let { Score.from10(it) }
+                this.score = score?.let { Score.from10(it) }
                     ?: cMeta?.imdbRating?.let { Score.from10(it) }
                 this.tags = tags.takeIf { it.isNotEmpty() } ?: (cMeta?.genre ?: cMeta?.genres)
                 this.backgroundPosterUrl = cMeta?.background
-                imdbId?.let { addImdbId(it) }
-                cMeta?.cast?.let { if (it.isNotEmpty()) addActors(it) }
+                addImdbId(imdbId)
+                addActors(cMeta?.cast)
             }
         }
     }

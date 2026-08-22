@@ -1,9 +1,9 @@
 ﻿package com.multimovies
 
 import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
-import com.lagradost.cloudstream3.utils.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.Serializable
 import org.jsoup.Jsoup
 
 /**
@@ -32,13 +32,14 @@ object CinemetaService {
                     .text()
                 tryParseJson<CinemetaResponse>(json)?.meta
             } catch (e: Exception) {
-                Log.e("CinemetaService", "Failed to fetch metadata for $imdbId: ${e.message}")
                 null
             }
         }
 
+    @Serializable
     data class CinemetaResponse(val meta: CinemetaMeta)
 
+    @Serializable
     data class CinemetaMeta(
         val name: String? = null,
         val description: String? = null,
