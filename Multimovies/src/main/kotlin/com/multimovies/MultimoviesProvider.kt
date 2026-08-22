@@ -1,4 +1,4 @@
-package com.multimovies
+﻿package com.multimovies
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.network.CloudflareKiller
@@ -8,6 +8,9 @@ import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
+
+import com.multimovies.CinemetaService
+import com.multimovies.TmdbRatingService
 
 /**
  * Multimovies - a CloudStream provider that scrapes the Multimovies (multimovies.motorcycles) site.
@@ -23,6 +26,21 @@ class MultimoviesProvider : MainAPI() {
 
     override var mainUrl = "https://multimovies.motorcycles"
     override var name = "Multimovies"
+
+    override val preferences = """[
+        {
+            "key": "tmdbApiKey",
+            "title": "TMDB API Key (optional — used only for ratings)",
+            "summary": "Leave empty to use keyless Cinemeta metadata. If set, TMDB is used ONLY for ratings/score.",
+            "valueType": "text",
+            "default": ""
+        }
+    ]"""
+
+    private val tmdbApiKey: String
+        get() = context?.getSharedPreferences("provider_$name", 0)
+            ?.getString("tmdbApiKey", "")
+            ?.takeIf { it.isNotBlank() } ?: ""
     private val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
     private val commonHeaders = mapOf("User-Agent" to userAgent)
     // Solves the Cloudflare managed challenge on multimovies.motorcycles. Created
@@ -67,10 +85,14 @@ class MultimoviesProvider : MainAPI() {
          * still pulled, but with the lowest priority.
          */
         val SOURCE_PRIORITY: List<String> = listOf(
-            "GDMIRROR",
             "GDMIRROR - Recommended",
+            "GDMIRROR",
             "Cineverse",
             "Nxsha",
+            "GDFlix",
+            "HubCloud",
+            "FastDL",
+            "StreamWish",
             "screenscape.me",
             "VidZee",
             "VidZee v2",
@@ -84,6 +106,19 @@ class MultimoviesProvider : MainAPI() {
     private fun priorityOf(serverName: String): Int {
         val idx = SOURCE_PRIORITY.indexOfFirst { serverName.contains(it, ignoreCase = true) }
         return if (idx == -1) SOURCE_PRIORITY.size else idx
+    }
+
+    private fun extractImdbId(doc: org.jsoup.nodes.Document): String? {
+        val link = doc.select("a[href*=\"imdb\"]").firstOrNull()?.attr("href")
+            ?: doc.select("a[href*=\"IMDB\"]").firstOrNull()?.attr("href")
+        return link?.let { Regex("tt\\d{6,}").find(it)?.value }
+    }
+
+    private fun upgradePosterUrl(url: String?): String? {
+        if (url.isNullOrBlank()) return null
+        val fixed = if (url.startsWith("//")) "https:$url" else url
+        // Strip Dooplay "-WxH" thumbnail size suffixes to get the full-resolution image.
+        return fixed.replace(Regex("-\d+x\d+(?=\.[a-zA-Z]+$)"), "")
     }
 
     // ------------------------------------------------------------------
@@ -124,9 +159,10 @@ class MultimoviesProvider : MainAPI() {
             ?: a.text()
             ?.trim()
             ?: return null
-        val poster = selectFirst("img")?.attr("src")
-            ?.let { if (it.startsWith("//")) "https:$it" else it }
-            ?: selectFirst("img")?.attr("data-src")
+        val poster = upgradePosterUrl(
+            selectFirst("img")?.attr("src")
+                ?: selectFirst("img")?.attr("data-src")
+        )
         val isMovie = href.contains("/movies/")
         val isSeries = href.contains("/tvshows/") || href.contains("/seasons/")
         val tvType = when {
@@ -176,8 +212,10 @@ class MultimoviesProvider : MainAPI() {
             if (it.tagName() == "meta") it.attr("content") else it.text()
         }?.trim() ?: throw ErrorLoadingException("No title")
 
-        val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")
-            ?: doc.selectFirst("div.poster img, img.wp-post-image")?.attr("src")
+        val poster = upgradePosterUrl(
+            doc.selectFirst("meta[property=og:image]")?.attr("content")
+                ?: doc.selectFirst("div.poster img, img.wp-post-image")?.attr("src")
+        )
 
         val year = doc.selectFirst("span.date, .year, .extra span")?.text()
             ?.let { Regex("\\d{4}").find(it)?.value?.toIntOrNull() }
@@ -191,13 +229,24 @@ class MultimoviesProvider : MainAPI() {
             ?.removePrefix("IMDb:")?.trim()
 
         val isMovie = url.contains("/movies/")
+        val imdbId = extractImdbId(doc)
+        val cMeta = imdbId?.let { CinemetaService.getMetadata(it, if (isMovie) "movie" else "series") }
+        val tmdbRating = if (tmdbApiKey.isNotBlank() && imdbId != null) {
+            TmdbRatingService.getRating(imdbId, if (isMovie) "movie" else "series", tmdbApiKey)
+        } else null
 
         return if (isMovie) {
             newMovieLoadResponse(title, url, TvType.Movie, url) {
-                this.posterUrl = poster
-                this.year = year
-                this.plot = plot
-                this.score = score?.let { Score.from10(it) }
+                this.posterUrl = poster ?: cMeta?.poster
+                this.year = year ?: cMeta?.year?.toIntOrNull()
+                this.plot = plot ?: cMeta?.description
+                this.score = tmdbRating
+                    ?: score?.let { Score.from10(it) }
+                    ?: cMeta?.imdbRating?.let { Score.from10(it) }
+                this.tags = tags.takeIf { it.isNotEmpty() } ?: (cMeta?.genre ?: cMeta?.genres)
+                this.backgroundPosterUrl = cMeta?.background
+                imdbId?.let { addImdbId(it) }
+                cMeta?.cast?.let { if (it.isNotEmpty()) addActors(it) }
             }
         } else {
             // TV / Seasons: collect all episodes from season + episode archive pages.
@@ -235,14 +284,20 @@ class MultimoviesProvider : MainAPI() {
             }
 
             newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
-                this.posterUrl = poster
-                this.year = year
-                this.plot = plot
-                this.score = score?.let { Score.from10(it) }
-                this.tags = tags
+                this.posterUrl = poster ?: cMeta?.poster
+                this.year = year ?: cMeta?.year?.toIntOrNull()
+                this.plot = plot ?: cMeta?.description
+                this.score = tmdbRating
+                    ?: score?.let { Score.from10(it) }
+                    ?: cMeta?.imdbRating?.let { Score.from10(it) }
+                this.tags = tags.takeIf { it.isNotEmpty() } ?: (cMeta?.genre ?: cMeta?.genres)
+                this.backgroundPosterUrl = cMeta?.background
+                imdbId?.let { addImdbId(it) }
+                cMeta?.cast?.let { if (it.isNotEmpty()) addActors(it) }
             }
         }
     }
+
 
     // ------------------------------------------------------------------
     // Load links - parallel pulling with per-source 30s timeout + priority
