@@ -1,6 +1,5 @@
 ﻿package com.multimovies
 
-import com.lagradost.cloudstream3.LoadResponse.Companion.addImdbId
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.network.CloudflareKiller
 import com.lagradost.cloudstream3.utils.*
@@ -93,11 +92,6 @@ class MultimoviesProvider : MainAPI() {
         return if (idx == -1) SOURCE_PRIORITY.size else idx
     }
 
-    private fun extractImdbId(doc: org.jsoup.nodes.Document): String? {
-        val link = doc.select("a[href*=\"imdb\"]").firstOrNull()?.attr("href")
-            ?: doc.select("a[href*=\"IMDB\"]").firstOrNull()?.attr("href")
-        return link?.let { Regex("tt\\d{6,}").find(it)?.value }
-    }
 
     private fun upgradePosterUrl(url: String?): String? {
         if (url.isNullOrBlank()) return null
@@ -214,7 +208,6 @@ class MultimoviesProvider : MainAPI() {
             ?.removePrefix("IMDb:")?.trim()
 
         val isMovie = url.contains("/movies/")
-        val imdbId = extractImdbId(doc)
 
         return if (isMovie) {
             newMovieLoadResponse(title, url, TvType.Movie, url) {
@@ -223,7 +216,6 @@ class MultimoviesProvider : MainAPI() {
                 this.plot = plot
                 this.score = score?.let { Score.from10(it) }
                 this.tags = tags.takeIf { it.isNotEmpty() }
-                addImdbId(imdbId)
             }
         } else {
             // TV / Seasons: collect all episodes from season + episode archive pages.
@@ -266,7 +258,6 @@ class MultimoviesProvider : MainAPI() {
                 this.plot = plot
                 this.score = score?.let { Score.from10(it) }
                 this.tags = tags.takeIf { it.isNotEmpty() }
-                addImdbId(imdbId)
             }
         }
     }
