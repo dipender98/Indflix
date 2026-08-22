@@ -11,7 +11,7 @@ buildscript {
     }
     dependencies {
         classpath("com.android.tools.build:gradle:9.1.0")
-        classpath("com.github.recloudstream:gradle:81b1d424d2")
+        classpath("com.github.recloudstream:gradle:32895aedb6")
         classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.3.20")
     }
 }
@@ -67,7 +67,7 @@ subprojects {
     dependencies {
         val implementation by configurations
         val cloudstream by configurations
-        cloudstream("com.lagradost:cloudstream3:v4.8.0")
+        cloudstream("com.lagradost:cloudstream3:pre-release")
         implementation(kotlin("stdlib"))
         implementation("com.github.Blatzar:NiceHttp:0.4.18")
         implementation("org.jsoup:jsoup:1.22.2")
