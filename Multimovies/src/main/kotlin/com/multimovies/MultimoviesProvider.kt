@@ -3,9 +3,16 @@ package com.multimovies
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.*
+import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
+
+/** dooplayer admin-ajax response shape. */
+private data class DooPlayerResponse(
+    val embed_url: String? = null,
+    val type: String? = null,
+)
 
 /**
  * Multimovies - a CloudStream provider that scrapes the Multimovies (multimovies.motorcycles) site.
@@ -281,14 +288,27 @@ class MultimoviesProvider : MainAPI() {
                     "$mainUrl/wp-admin/admin-ajax.php",
                     headers = commonHeaders + mapOf("X-Requested-With" to "XMLHttpRequest"),
                     data = body,
+                    referer = data,
                     timeout = 20,
                 ).text
             }.getOrNull() ?: return@mapNotNull null
 
-            // Response: {"embed_url":"...","type":"iframe"}
-            val embed = Regex("\"embed_url\"\\s*:\\s*\"(.*?)\"").find(resp)?.groupValues?.get(1)
-                ?.replace("\\/", "/")
+            // The ajax response is JSON like {"embed_url":"...","type":"iframe"}.
+            // embed_url is EITHER a direct host URL OR an HTML snippet containing
+            // an <iframe>. Parse JSON properly (regex breaks on HTML values) and
+            // pull the iframe src when present.
+            val rawEmbed = tryParseJson<DooPlayerResponse>(resp)?.embed_url
+                ?: Regex("\"embed_url\"\\s*:\\s*\"(.*?)\",", RegexOption.DOT_MATCHES_ALL)
+                    .find(resp)?.groupValues?.get(1)
+                    ?.replace("\\/", "/")
                 ?: return@mapNotNull null
+
+            val embed = if (rawEmbed.contains("<iframe", ignoreCase = true)) {
+                Jsoup.parse(rawEmbed).selectFirst("iframe")?.attr("src")
+                    ?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            } else {
+                rawEmbed.replace("\\/", "/").trim()
+            }
             name to embed
         }
 
@@ -299,14 +319,16 @@ class MultimoviesProvider : MainAPI() {
         }
 
         // Parallel pull, per-source 30s timeout, priority-ordered results.
-        val links = MultiSourcePuller.pull(
-            sources = sources,
-            timeoutMs = SOURCE_TIMEOUT_MS,
-            priorityOf = { priorityOf(it) },
-            onSubtitle = subtitleCallback,
-        )
+        val links = runCatching {
+            MultiSourcePuller.pull(
+                sources = sources,
+                timeoutMs = SOURCE_TIMEOUT_MS,
+                priorityOf = { priorityOf(it) },
+                onSubtitle = subtitleCallback,
+            )
+        }.getOrElse { emptyList() }
 
-        links.forEach { callback(it) }
+        links.forEach { runCatching { callback(it) } }
         return links.isNotEmpty()
     }
 }
