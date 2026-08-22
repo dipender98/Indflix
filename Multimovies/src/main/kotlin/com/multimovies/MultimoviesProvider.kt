@@ -261,7 +261,7 @@ class MultimoviesProvider : MainAPI() {
         }
 
         // Each "Video Source" on a Multimovies episode page is a
-        // li.doopley_player_option carrying data-nume (source index) and data-type.
+        // li.dooplay_player_option carrying data-nume (source index) and data-type.
         // The real embed URL comes from the site's dooplayer admin-ajax endpoint,
         // keyed by the post id. The post id is Dooplay-standard in
         // <meta id="dooplay-ajax-counter" data-postid="...">; the <li> data-post
@@ -269,7 +269,7 @@ class MultimoviesProvider : MainAPI() {
         val postId = doc.selectFirst("meta#dooplay-ajax-counter")
             ?.attr("data-postid")
             ?.takeIf { it.isNotBlank() }
-        val options = doc.select("ul#playeroptionsul li.doopley_player_option, li.doopley_player_option")
+        val options = doc.select("ul#playeroptionsul li.dooplay_player_option, li.dooplay_player_option")
             .mapNotNull { li ->
                 val name = li.selectFirst(".title")?.text()?.trim() ?: return@mapNotNull null
                 val post = postId ?: li.attr("data-post").takeIf { it.isNotBlank() } ?: return@mapNotNull null
