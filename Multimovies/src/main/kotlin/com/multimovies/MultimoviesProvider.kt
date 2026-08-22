@@ -8,12 +8,6 @@ import org.jsoup.nodes.Element
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 
-/** dooplayer admin-ajax response shape. */
-private data class DooPlayerResponse(
-    val embed_url: String? = null,
-    val type: String? = null,
-)
-
 /**
  * Multimovies - a CloudStream provider that scrapes the Multimovies (multimovies.motorcycles) site.
  *
@@ -286,21 +280,23 @@ class MultimoviesProvider : MainAPI() {
             val resp = runCatching {
                 app.post(
                     "$mainUrl/wp-admin/admin-ajax.php",
-                    headers = commonHeaders + mapOf("X-Requested-With" to "XMLHttpRequest"),
+                    headers = commonHeaders + mapOf(
+                        "X-Requested-With" to "XMLHttpRequest",
+                        "Referer" to data,
+                    ),
                     data = body,
-                    referer = data,
                     timeout = 20,
                 ).text
             }.getOrNull() ?: return@mapNotNull null
 
             // The ajax response is JSON like {"embed_url":"...","type":"iframe"}.
             // embed_url is EITHER a direct host URL OR an HTML snippet containing
-            // an <iframe>. Parse JSON properly (regex breaks on HTML values) and
-            // pull the iframe src when present.
-            val rawEmbed = tryParseJson<DooPlayerResponse>(resp)?.embed_url
-                ?: Regex("\"embed_url\"\\s*:\\s*\"(.*?)\",", RegexOption.DOT_MATCHES_ALL)
-                    .find(resp)?.groupValues?.get(1)
-                    ?.replace("\\/", "/")
+            // an <iframe>. Extract the JSON string value robustly (handling
+            // escaped quotes) and pull the iframe src when present.
+            val rawEmbed = Regex("\"embed_url\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\"")
+                .find(resp)?.groupValues?.get(1)
+                ?.replace("\\/", "/")
+                ?.replace("\\\"", "\"")
                 ?: return@mapNotNull null
 
             val embed = if (rawEmbed.contains("<iframe", ignoreCase = true)) {
