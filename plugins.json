@@ -9,7 +9,7 @@
             "Indflix"
         ],
         "description": "CloudStream provider that scrapes Multimovies and pulls sources in parallel with a per-source timeout.",
-        "fileSize": 27822,
+        "fileSize": 33887,
         "repositoryUrl": "https://github.com/dipender98/Indflix",
         "language": "en",
         "tvTypes": [
@@ -20,6 +20,6 @@
             "Cartoon"
         ],
         "apiVersion": 1,
-        "fileHash": "sha256-1661565b76b88593fe511547235e941fc6f49e161b287d77668f1ba0039e2353"
+        "fileHash": "sha256-0cc8a0d08e2b6218665d866ffac7716bbed6d780b512ce67a8aaddfc452b073f"
     }
 ]
