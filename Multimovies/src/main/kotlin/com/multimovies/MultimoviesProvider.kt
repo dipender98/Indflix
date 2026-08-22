@@ -1,6 +1,5 @@
 ﻿package com.multimovies
 
-import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
 import com.lagradost.cloudstream3.LoadResponse.Companion.addImdbId
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.network.CloudflareKiller
@@ -11,7 +10,6 @@ import org.jsoup.nodes.Element
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 
-import com.multimovies.CinemetaService
 
 /**
  * Multimovies - a CloudStream provider that scrapes the Multimovies (multimovies.motorcycles) site.
@@ -217,19 +215,15 @@ class MultimoviesProvider : MainAPI() {
 
         val isMovie = url.contains("/movies/")
         val imdbId = extractImdbId(doc)
-        val cMeta = imdbId?.let { CinemetaService.getMetadata(it, if (isMovie) "movie" else "series") }
 
         return if (isMovie) {
             newMovieLoadResponse(title, url, TvType.Movie, url) {
-                this.posterUrl = poster ?: cMeta?.poster
-                this.year = year ?: cMeta?.year?.toIntOrNull()
-                this.plot = plot ?: cMeta?.description
+                this.posterUrl = poster
+                this.year = year
+                this.plot = plot
                 this.score = score?.let { Score.from10(it) }
-                    ?: cMeta?.imdbRating?.let { Score.from10(it) }
-                this.tags = tags.takeIf { it.isNotEmpty() } ?: (cMeta?.genre ?: cMeta?.genres)
-                this.backgroundPosterUrl = cMeta?.background
+                this.tags = tags.takeIf { it.isNotEmpty() }
                 addImdbId(imdbId)
-                addActors(cMeta?.cast)
             }
         } else {
             // TV / Seasons: collect all episodes from season + episode archive pages.
@@ -267,15 +261,12 @@ class MultimoviesProvider : MainAPI() {
             }
 
             newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
-                this.posterUrl = poster ?: cMeta?.poster
-                this.year = year ?: cMeta?.year?.toIntOrNull()
-                this.plot = plot ?: cMeta?.description
+                this.posterUrl = poster
+                this.year = year
+                this.plot = plot
                 this.score = score?.let { Score.from10(it) }
-                    ?: cMeta?.imdbRating?.let { Score.from10(it) }
-                this.tags = tags.takeIf { it.isNotEmpty() } ?: (cMeta?.genre ?: cMeta?.genres)
-                this.backgroundPosterUrl = cMeta?.background
+                this.tags = tags.takeIf { it.isNotEmpty() }
                 addImdbId(imdbId)
-                addActors(cMeta?.cast)
             }
         }
     }
