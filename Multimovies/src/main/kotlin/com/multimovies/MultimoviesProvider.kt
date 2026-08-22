@@ -25,11 +25,13 @@ class MultimoviesProvider : MainAPI() {
     override var name = "Multimovies"
     private val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
     private val commonHeaders = mapOf("User-Agent" to userAgent)
-    // Solves the Cloudflare managed challenge on multimovies.motorcycles. Lazily
-    // created so construction (which touches CookieManager/WebView) happens on the
-    // first network call, not at plugin install time. Must stay a single shared
-    // instance so solved cookies persist across search/load/loadLinks.
-    private val cfKiller by lazy { CloudflareKiller() }
+    // Solves the Cloudflare managed challenge on multimovies.motorcycles. Created
+    // on first use (not at plugin install) so CookieManager/WebView setup happens
+    // during a network call. Cached so solved cookies persist across calls.
+    private var cfKiller: CloudflareKiller? = null
+    private fun getCfKiller(): CloudflareKiller {
+        return cfKiller ?: CloudflareKiller().also { cfKiller = it }
+    }
     override val hasMainPage = true
     override val hasQuickSearch = true
     override val supportedTypes = setOf(
@@ -92,7 +94,7 @@ class MultimoviesProvider : MainAPI() {
         val encodedQuery = URLEncoder.encode(query, StandardCharsets.UTF_8.toString())
         val searchUrl = "$mainUrl/?s=$encodedQuery"
         val doc = try {
-            app.get(searchUrl, timeout = 20, headers = commonHeaders, interceptor = cfKiller.value).document
+            app.get(searchUrl, timeout = 20, headers = commonHeaders, interceptor = getCfKiller()).document
         } catch (e: Exception) {
             return null
         }
@@ -149,7 +151,7 @@ class MultimoviesProvider : MainAPI() {
     ): HomePageResponse? {
         val url = if (page > 1) "${request.data}page/$page/" else request.data
         val doc = try {
-            app.get(url, timeout = 20, headers = commonHeaders, interceptor = cfKiller.value).document
+            app.get(url, timeout = 20, headers = commonHeaders, interceptor = getCfKiller()).document
         } catch (e: Exception) {
             return null
         }
@@ -165,7 +167,7 @@ class MultimoviesProvider : MainAPI() {
 
     override suspend fun load(url: String): LoadResponse? {
         val doc = try {
-            app.get(url, timeout = 20, headers = commonHeaders, interceptor = cfKiller.value).document
+            app.get(url, timeout = 20, headers = commonHeaders, interceptor = getCfKiller()).document
         } catch (e: Exception) {
             return null
         }
@@ -253,7 +255,7 @@ class MultimoviesProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val doc = try {
-            app.get(data, timeout = 20, headers = commonHeaders, interceptor = cfKiller.value).document
+            app.get(data, timeout = 20, headers = commonHeaders, interceptor = getCfKiller()).document
         } catch (e: Exception) {
             return false
         }
@@ -293,7 +295,7 @@ class MultimoviesProvider : MainAPI() {
                     data = body,
                     referer = data,
                     timeout = 20,
-                    interceptor = cfKiller.value,
+                    interceptor = getCfKiller(),
                 ).text
             }.getOrNull() ?: return@mapNotNull null
 
