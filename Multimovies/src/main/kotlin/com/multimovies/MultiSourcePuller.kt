@@ -7,6 +7,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.getQualityFromName
 import com.lagradost.cloudstream3.utils.loadExtractor
 import kotlinx.coroutines.*
+import org.jsoup.Jsoup
 import java.util.Collections
 
 /**
@@ -17,20 +18,37 @@ import java.util.Collections
  *   2. Launches ALL of them concurrently (parallel pulling).
  *   3. Wraps each individual source in a [timeoutMs] timeout (default 30s).
  *      A single slow/dead source can never block the others.
- *   4. Returns the successfully extracted links, sorted by priority.
+ *   4. Returns the successfully extracted links, sorted by priority/latency.
+ *
+ * Per source it runs a unified extraction pipeline:
+ *     a. CloudStream's extractor registry (loadExtractor)
+ *     b. inline host extractors (vixsrc masterPlaylist, vidlink enc+b/ flow)
+ *     c. a generic m3u8/mp4 sniff of the player page
  *
  * This is intentionally decoupled from the provider so the strategy can be
  * tuned (timeouts, priority weights, concurrency limits) in one place.
  */
 object MultiSourcePuller {
 
+    /** Which extraction path a source takes. */
+    enum class ExtractionType { GENERIC, MASTER_PLAYLIST, VIDLINK }
+
     data class Source(
         val name: String,
         val url: String,
         val referer: String? = null,
+        val headers: Map<String, String> = emptyMap(),
+        val extraction: ExtractionType = ExtractionType.GENERIC,
+        val tmdbId: String? = null,
+        val season: Int? = null,
+        val episode: Int? = null,
+        val latencyMs: Long = Long.MAX_VALUE,
     )
 
     const val INDICATOR = " (Multimovies)"
+
+    /** Max iframe levels to unwrap before treating a page as the player. */
+    private const val MAX_UNWRAP_LEVELS = 4
 
     /** Regexes for the generic embed sniffer: stream URLs to harvest directly. */
     internal val STREAM_URL_REGEXES = listOf(
@@ -63,53 +81,102 @@ object MultiSourcePuller {
         "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
     )
 
+    private fun hostOf(url: String): String =
+        url.substringAfter("://").substringBefore("/").lowercase()
+
+    /**
+     * Recursively follow iframes until the deepest player URL is found. A wrapper
+     * page (e.g. an aggregator/redirector) is fetched and its first iframe src
+     * followed, up to [MAX_UNWRAP_LEVELS]. Direct stream URLs (.m3u8/.mp4) short-circuit.
+     */
+    suspend fun unwrapEmbed(
+        url: String,
+        referer: String? = null,
+        headers: Map<String, String> = sharedHeaders,
+    ): String {
+        var current = url
+        repeat(MAX_UNWRAP_LEVELS) {
+            val host = hostOf(current)
+            if (host.endsWith(".m3u8") || host.contains(".m3u8", ignoreCase = true) ||
+                host.contains(".mp4", ignoreCase = true)
+            ) return current
+            val text = runCatching {
+                app.get(current, timeout = 5, headers = buildMap {
+                    putAll(headers)
+                    if (referer != null) put("Referer", referer)
+                }).text
+            }.getOrNull() ?: return current
+            val next = Jsoup.parse(text).selectFirst("iframe")?.attr("src")?.takeIf { it.isNotBlank() }
+                ?: return current
+            val resolved = when {
+                next.startsWith("//") -> "https:$next"
+                next.startsWith("http", ignoreCase = true) -> next
+                next.startsWith("/") -> {
+                    val base = current.substringBefore("/", missingDelimiterValue = current)
+                    base + next
+                }
+                else -> next
+            }
+            if (resolved == current) return current
+            current = resolved
+        }
+        return current
+    }
+
+    /** True when a link name/label indicates a Hindi audio track. */
+    internal fun isHindi(link: ExtractorLink): Boolean {
+        val hay = buildString {
+            link.name?.let { append(it) }
+            append(' ')
+            link.source?.let { append(it) }
+        }.lowercase()
+        return hay.contains("hindi") || hay.contains("हिन्दी") || hay.contains("हिंदी")
+    }
+
     /**
      * @param sources   raw server list (unsorted is fine, sorting happens here)
-     * @param timeoutMs per-source hard timeout in ms (project default: 30_000)
+     * @param timeoutMs per-source hard timeout in ms (project default: 15_000)
      * @param priorityOf maps a server name to a sort index (lower = better)
+     * @param preferHindi when true, Hindi-audio links win latency/priority ties
      * @param onSubtitle called for each subtitle found
      * @param onLink optional: called immediately for every extracted link (streaming —
      *        lets the player start the fastest source instead of waiting for all sources)
-     * @return list of extractor links, ordered by source priority
+     * @return list of extractor links, ordered by priority then latency then Hindi
      */
     suspend fun pull(
         sources: List<Source>,
         timeoutMs: Long = MultimoviesProvider.SOURCE_TIMEOUT_MS,
         priorityOf: (String) -> Int,
+        preferHindi: Boolean = true,
         onSubtitle: (SubtitleFile) -> Unit,
         onLink: (ExtractorLink) -> Unit = {},
     ): List<ExtractorLink> = withContext(Dispatchers.IO) {
         if (sources.isEmpty()) return@withContext emptyList()
 
-        val ordered = sources.sortedBy { priorityOf(it.name) }
         val links = Collections.synchronizedList(mutableListOf<ExtractorLink>())
         val subs = Collections.synchronizedList(mutableListOf<SubtitleFile>())
 
         coroutineScope {
-            ordered.map { src ->
+            sources.map { src ->
                 async {
                     withTimeoutOrNull(timeoutMs) {
                         runCatching {
-                            loadExtractor(
-                                url = src.url,
-                                referer = src.referer,
-                                subtitleCallback = { subs.add(it) },
-                                callback = { l ->
-                                    val link = ExtractorLink(
-                                        source = src.name + INDICATOR,
-                                        name = l.name,
-                                        url = l.url,
-                                        referer = l.referer,
-                                        quality = l.quality,
-                                        headers = l.headers,
-                                        extractorData = null,
-                                        type = l.type,
-                                        audioTracks = emptyList()
-                                    )
-                                    links.add(link)
-                                    onLink(link)
-                                }
-                            )
+                            val found = extractSource(src, onSubtitle = { subs.add(it) })
+                            found.forEach { l ->
+                                val link = ExtractorLink(
+                                    source = src.name + INDICATOR,
+                                    name = l.name,
+                                    url = l.url,
+                                    referer = l.referer ?: src.url,
+                                    quality = l.quality,
+                                    headers = l.headers ?: src.headers,
+                                    extractorData = null,
+                                    type = l.type,
+                                    audioTracks = l.audioTracks ?: emptyList(),
+                                )
+                                links.add(link)
+                                onLink(link)
+                            }
                         }
                     }
                 }
@@ -117,59 +184,200 @@ object MultiSourcePuller {
         }
 
         subs.forEach { onSubtitle(it) }
-        links
-            .sortedBy { priorityOf(it.source?.removeSuffix(INDICATOR).orEmpty()) }
+
+        val latencyByName = sources.associate { it.name to it.latencyMs }
+        val comparator = compareBy<ExtractorLink>({ priorityOf(it.source?.removeSuffix(INDICATOR).orEmpty()) })
+            .thenBy({ latencyByName[it.source?.removeSuffix(INDICATOR)] ?: Long.MAX_VALUE })
+            .thenByDescending { if (preferHindi) isHindi(it) else false }
+        links.sortedWith(comparator)
+    }
+
+    /** Unified per-source extraction: inline extractor first, then registry, then sniff. */
+    private suspend fun extractSource(
+        src: Source,
+        onSubtitle: (SubtitleFile) -> Unit,
+    ): List<ExtractorLink> = when (src.extraction) {
+        ExtractionType.MASTER_PLAYLIST -> extractVixsrc(src)
+        ExtractionType.VIDLINK -> extractVidlink(src)
+        ExtractionType.GENERIC -> extractGeneric(src, onSubtitle)
+    }
+
+    private suspend fun extractGeneric(
+        src: Source,
+        onSubtitle: (SubtitleFile) -> Unit,
+    ): List<ExtractorLink> {
+        // Stage a: CloudStream extractor registry (installed/built-in extractors).
+        val found = mutableListOf<ExtractorLink>()
+        val registryOk = runCatching {
+            loadExtractor(
+                url = src.url,
+                referer = src.referer,
+                subtitleCallback = onSubtitle,
+                callback = { found.add(it) },
+            )
+        }.getOrDefault(false)
+        if (registryOk && found.isNotEmpty()) return found
+
+        // Stage b: inline host extractor based on the resolved host.
+        val host = hostOf(src.url)
+        val inline = when {
+            host.contains("vixsrc") -> extractVixsrc(src)
+            host.contains("vidlink") -> extractVidlink(src)
+            else -> null
+        }
+        if (!inline.isNullOrEmpty()) return inline
+
+        // Stage c: generic m3u8/mp4 sniff.
+        return sniff(src)
+    }
+
+    /** VixSrc: parse window.masterPlaylist from the static HTML and build the
+     *  signed master playlist URL (no JS execution needed). */
+    private suspend fun extractVixsrc(src: Source): List<ExtractorLink> {
+        val headers = buildMap {
+            putAll(sharedHeaders)
+            putAll(src.headers)
+            if (src.referer != null) put("Referer", src.referer)
+        }
+        val text = runCatching {
+            app.get(src.url, timeout = 8, headers = headers).text
+        }.getOrNull() ?: return emptyList()
+        val signed = buildSignedVixsrcUrl(text) ?: return emptyList()
+        return listOf(
+            ExtractorLink(
+                source = src.name,
+                name = src.name,
+                url = signed,
+                referer = src.url,
+                quality = -1,
+                headers = headers,
+                extractorData = null,
+                type = ExtractorLinkType.M3U8,
+                audioTracks = emptyList(),
+            )
+        )
     }
 
     /**
-     * Generic fallback for embed hosts that CloudStream's extractor registry
-     * can't handle (e.g. custom Cineverse/Nexa players). Fetches each embed
-     * page and harvests the first m3u8/mp4/webm/mkv URL found in the response,
-     * emitting a direct link. Per-source bounded by [timeoutS]; best-effort
-     * (returns empty list / partial results, never throws).
+     * Pure helper: extract the signed vixsrc master playlist URL from the player page.
+     * Tries window.masterPlaylist {url, token, expires} first, then a bare m3u8.
      */
-    suspend fun sniffEmbeds(
-        sources: List<Pair<String, String>>,
-        timeoutS: Long,
-        referer: String?,
-    ): List<ExtractorLink> = withContext(Dispatchers.IO) {
-        if (sources.isEmpty()) return@withContext emptyList()
-        val links = Collections.synchronizedList(mutableListOf<ExtractorLink>())
-        coroutineScope {
-            sources.map { (name, url) ->
-                async {
-                    withTimeoutOrNull(timeoutS * 1000L) {
-                        runCatching {
-                            val headers = buildMap {
-                                putAll(sharedHeaders)
-                                if (referer != null) put("Referer", referer)
-                            }
-                            val text = app.get(
-                                url, timeout = timeoutS, headers = headers,
-                            ).text ?: return@runCatching
-                            val stream = extractStreamUrl(text) ?: return@runCatching
-                            val source = name + INDICATOR
-                            val linkType =
-                                if (stream.contains(".m3u8", ignoreCase = true)) ExtractorLinkType.M3U8
-                                else ExtractorLinkType.VIDEO
-                            links.add(
-                                ExtractorLink(
-                                    source = source,
-                                    name = source,
-                                    url = stream,
-                                    referer = url,
-                                    quality = getQualityFromName(stream),
-                                    headers = headers,
-                                    extractorData = null,
-                                    type = linkType,
-                                    audioTracks = emptyList(),
-                                )
-                            )
-                        }
-                    }
-                }
-            }.awaitAll()
+    internal fun buildSignedVixsrcUrl(text: String): String? {
+        val obj = Regex("""window\.masterPlaylist\s*=\s*\{([\s\S]*?)\};?""").find(text)
+        if (obj != null) {
+            val body = obj.groupValues[1]
+            val url = Regex("""["']?url["']?\s*[:=]\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE)
+                .find(body)?.groupValues?.get(1) ?: return null
+            val token = Regex("""["']?token["']?\s*[:=]\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE)
+                .find(body)?.groupValues?.get(1) ?: return null
+            val expires = Regex("""["']?expires["']?\s*[:=]\s*["']?([^"',}\s]+)["']?""", RegexOption.IGNORE_CASE)
+                .find(body)?.groupValues?.get(1) ?: return null
+            val normalized = when {
+                url.startsWith("//") -> "https:$url"
+                url.startsWith("http", ignoreCase = true) -> url
+                else -> return null
+            }
+            val sep = if (normalized.contains("?")) "&" else "?"
+            return "$normalized${sep}token=$token&expires=$expires&h=1&lang=en"
         }
-        links
+        return extractStreamUrl(text)
+    }
+
+    /** VidLink: encrypt the TMDB id, then fetch the stream via the b/ API. */
+    private suspend fun extractVidlink(src: Source): List<ExtractorLink> {
+        val tmdbId = src.tmdbId ?: return emptyList()
+        val headers = buildMap {
+            putAll(sharedHeaders)
+            putAll(src.headers)
+            put("Referer", "https://vidlink.pro/")
+            put("Origin", "https://vidlink.pro/")
+        }
+        val encText = runCatching {
+            app.get("https://vidlink.pro/api/enc-vidlink?text=$tmdbId", timeout = 6, headers = headers).text
+        }.getOrNull() ?: return emptyList()
+        val encrypted = parseEncVidlink(encText) ?: return emptyList()
+        val isTv = src.season != null && src.episode != null
+        val path = if (isTv) "tv/$encrypted/${src.season}/${src.episode}" else "movie/$encrypted"
+        val data = runCatching {
+            app.get("https://vidlink.pro/api/b/$path", timeout = 6, headers = headers).text
+        }.getOrNull() ?: return emptyList()
+        val stream = extractM3u8FromVidlink(data) ?: return emptyList()
+        return listOf(
+            ExtractorLink(
+                source = src.name,
+                name = src.name,
+                url = stream,
+                referer = src.url,
+                quality = -1,
+                headers = headers,
+                extractorData = null,
+                type = ExtractorLinkType.M3U8,
+                audioTracks = emptyList(),
+            )
+        )
+    }
+
+    /** Accepts common enc-vidlink response shapes (JSON {text|encrypted|enc|data} or a raw string). */
+    internal fun parseEncVidlink(text: String): String? {
+        val t = text.trim()
+        if (t.startsWith("\"") || t.startsWith("'")) return t.trim('"', '\'')
+        if (t.startsWith("{")) {
+            return try {
+                val obj = org.json.JSONObject(t)
+                listOf("text", "encrypted", "enc", "data").forEach { k ->
+                    obj.optString(k).takeIf { it.isNotBlank() }?.let { return it }
+                }
+                val keys = obj.keys()
+                while (keys.hasNext()) {
+                    val v = obj.optString(keys.next()).takeIf { it.isNotBlank() }
+                    if (v != null) return v
+                }
+                null
+            } catch (e: Exception) {
+                null
+            }
+        }
+        return null
+    }
+
+    internal fun extractM3u8FromVidlink(text: String): String? {
+        extractStreamUrl(text)?.let { return it }
+        return try {
+            val obj = org.json.JSONObject(text)
+            obj.optString("url").takeIf { it.isNotBlank() }
+                ?: obj.optJSONObject("data")?.optString("url")?.takeIf { it.isNotBlank() }
+                ?: obj.optString("stream").takeIf { it.isNotBlank() }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /** Generic fallback: fetch the player page and harvest the first stream URL. */
+    private suspend fun sniff(src: Source): List<ExtractorLink> {
+        val headers = buildMap {
+            putAll(sharedHeaders)
+            putAll(src.headers)
+            if (src.referer != null) put("Referer", src.referer)
+        }
+        val text = runCatching {
+            app.get(src.url, timeout = 5, headers = headers).text
+        }.getOrNull() ?: return emptyList()
+        val stream = extractStreamUrl(text) ?: return emptyList()
+        val source = src.name + INDICATOR
+        val linkType = if (stream.contains(".m3u8", ignoreCase = true)) ExtractorLinkType.M3U8
+        else ExtractorLinkType.VIDEO
+        return listOf(
+            ExtractorLink(
+                source = source,
+                name = source,
+                url = stream,
+                referer = src.url,
+                quality = getQualityFromName(stream),
+                headers = headers,
+                extractorData = null,
+                type = linkType,
+                audioTracks = emptyList(),
+            )
+        )
     }
 }

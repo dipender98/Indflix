@@ -122,11 +122,12 @@ private fun str(obj: JSONObject, key: String): String? {
             ?.takeIf { it.isNotEmpty() }
             ?.let { return it }
 
-        // 4. Data attributes (some themes use data-imdb)
-        doc.select("[data-imdb], [data-imdb-id], [data-imdbid]").firstOrNull()
-            ?.attr("data-imdb")
-            ?.takeIf { it.isNotBlank() }
-            ?.let { return normalize(it) }
+        // 4. Data attributes (some themes use data-imdb / data-imdb-id / data-imdbid)
+        doc.select("[data-imdb], [data-imdb-id], [data-imdbid], [data-imdb_id]").firstOrNull()?.let { el ->
+            listOf("data-imdb", "data-imdb-id", "data-imdbid", "data-imdb_id").forEach { attr ->
+                el.attr(attr).takeIf { it.isNotBlank() }?.let { return normalize(it) }
+            }
+        }
 
         // 5. Script tags with JSON-LD or embedded data
         doc.select("script[type=\"application/ld+json\"]").forEach { script ->
@@ -150,6 +151,28 @@ private fun str(obj: JSONObject, key: String): String? {
     private fun normalize(value: String): String {
         val m = Regex("""tt\d{7,8}""").find(value)
         return m?.value ?: value
+    }
+
+    /** Extract a TMDB numeric id from the page (used for TMDB-id-based stream hosts
+     *  like vidlink.pro / multiembed.mov). Checks data-* attributes, JSON-LD
+     *  sameAs/@id links and inline JS vars. Returns null when absent. */
+    fun extractTmdbId(doc: Document): String? {
+        // 1. Data attributes
+        doc.select("[data-tmdb], [data-tmdb-id], [data-tmdbid], [data-tmdb_id]").firstOrNull()?.let { el ->
+            listOf("data-tmdb", "data-tmdb-id", "data-tmdbid", "data-tmdb_id").forEach { attr ->
+                el.attr(attr).takeIf { it.isNotBlank() }?.let { return it.trim() }
+            }
+        }
+
+        // 2. JSON-LD / scripts referencing themoviedb.org or inline tmdb vars
+        doc.select("script").forEach { script ->
+            val text = script.html()
+            Regex("""https?://(?:www\.)?themoviedb\.org/(?:movie|tv)/(\d+)""")
+                .find(text)?.groupValues?.get(1)?.let { return it }
+            Regex("""["']?(?:tmdb|tmdbId|tmdb_id|tmdbid)["']?\s*[=:]\s*["']?(\d+)["']?""", RegexOption.IGNORE_CASE)
+                .find(text)?.groupValues?.get(1)?.let { return it }
+        }
+        return null
     }
 
     /**

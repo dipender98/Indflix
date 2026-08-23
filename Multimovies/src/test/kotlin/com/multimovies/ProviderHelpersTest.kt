@@ -4,6 +4,7 @@ import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -30,6 +31,24 @@ class ProviderHelpersTest {
     fun `upgradePosterUrl strips separate w and h query params`() {
         assertEquals("https://img.example/poster.jpg",
             upgradePosterUrl("https://img.example/poster.jpg?w=185&h=278"))
+    }
+
+    @Test
+    fun `upgradePosterUrl strips CDN im and q tokens`() {
+        assertEquals("https://img.example/poster.jpg",
+            upgradePosterUrl("https://img.example/poster.jpg?im=185x278&q=50"))
+    }
+
+    @Test
+    fun `upgradePosterUrl strips quality param`() {
+        assertEquals("https://img.example/poster.jpg",
+            upgradePosterUrl("https://img.example/poster.jpg?quality=40"))
+    }
+
+    @Test
+    fun `upgradePosterUrl keeps non-resize query params`() {
+        assertEquals("https://img.example/poster.jpg?v=2",
+            upgradePosterUrl("https://img.example/poster.jpg?v=2&resize=185,278"))
     }
 
     @Test
@@ -109,17 +128,67 @@ class ProviderHelpersTest {
         assertNull(MultiSourcePuller.extractStreamUrl("""no urls here"""))
     }
 
+    // ---- isThumbnailish ----
+
+    @Test
+    fun `isThumbnailish detects size suffix and resize params`() {
+        assertTrue(isThumbnailish("https://img.example/poster-768x1152.jpg"))
+        assertTrue(isThumbnailish("https://img.example/poster.jpg?w=185"))
+        assertTrue(isThumbnailish("https://img.example/poster.jpg?resize=185%2C278"))
+        assertTrue(isThumbnailish("https://img.example/poster.jpg?im=185x278"))
+    }
+
+    @Test
+    fun `isThumbnailish false for full-res urls`() {
+        assertFalse(isThumbnailish("https://img.example/poster.jpg"))
+        assertFalse(isThumbnailish("https://img.example/poster-scaled.jpg"))
+        assertFalse(isThumbnailish(null))
+        assertFalse(isThumbnailish(""))
+    }
+
+    // ---- buildSignedVixsrcUrl ----
+
+    @Test
+    fun `buildSignedVixsrcUrl parses masterPlaylist object`() {
+        val html = """window.masterPlaylist = { "url": "https://cdn.example/master.m3u8", "token": "abc123", "expires": "1700000000" };"""
+        assertEquals(
+            "https://cdn.example/master.m3u8?token=abc123&expires=1700000000&h=1&lang=en",
+            MultiSourcePuller.buildSignedVixsrcUrl(html)
+        )
+    }
+
+    @Test
+    fun `buildSignedVixsrcUrl handles protocol-relative and numeric expires`() {
+        val html = """window.masterPlaylist = { url: "//cdn.example/master.m3u8", token: "tok", expires: 999 };"""
+        assertEquals(
+            "https://cdn.example/master.m3u8?token=tok&expires=999&h=1&lang=en",
+            MultiSourcePuller.buildSignedVixsrcUrl(html)
+        )
+    }
+
+    @Test
+    fun `buildSignedVixsrcUrl falls back to bare m3u8 url`() {
+        assertEquals("https://cdn.example/stream.m3u8",
+            MultiSourcePuller.buildSignedVixsrcUrl("""<video src="https://cdn.example/stream.m3u8">"""))
+    }
+
+    @Test
+    fun `buildSignedVixsrcUrl returns null when no playlist or stream`() {
+        assertNull(MultiSourcePuller.buildSignedVixsrcUrl("nothing here"))
+    }
+
     // ---- SOURCE_PRIORITY ordering ----
 
     @Test
-    fun `SOURCE_PRIORITY ranks GDMIRROR and screenscape_me at the top`() {
+    fun `SOURCE_PRIORITY ranks fastest reliable sources at the top`() {
         assertEquals("GDMIRROR", SOURCE_PRIORITY.first())
-        assertEquals("screenscape.me", SOURCE_PRIORITY[1])
+        assertEquals("vixsrc.to", SOURCE_PRIORITY[1])
         assertEquals("Nxsha", SOURCE_PRIORITY.last())
-        // exactly the 9 live source names, no stale entries
+        // exactly the expected order: dooplayer labels + direct global sources
         assertEquals(
-            listOf("GDMIRROR", "screenscape.me", "VidZee", "VidZee v2", "vixsrc.to",
-                "CinemaOS", "vidlink.pro", "Cineverse", "Nxsha"),
+            listOf("GDMIRROR", "vixsrc.to", "autoembed", "2embed", "vidlink.pro",
+                "multiembed", "screenscape.me", "VidZee", "VidZee v2",
+                "CinemaOS", "Cineverse", "Nxsha"),
             SOURCE_PRIORITY
         )
     }

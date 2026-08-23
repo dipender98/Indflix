@@ -127,6 +127,56 @@ class CinemetaServiceTest {
     }
 
     @Test
+    fun `extractImdbId finds id from data attribute variations`() {
+        val doc = Jsoup.parse(
+            """<html><body>
+                <div data-imdb-id="tt6666666"></div>
+            </body></html>"""
+        )
+        assertEquals("tt6666666", CinemetaService.extractImdbId(doc))
+    }
+
+    @Test
+    fun `extractImdbId finds id from json-ld sameAs`() {
+        val doc = Jsoup.parse(
+            """<html><head>
+                <script type="application/ld+json">
+                {"@context":"https://schema.org","sameAs":["https://www.imdb.com/title/tt7777777/"]}
+                </script>
+            </head><body></body></html>"""
+        )
+        assertEquals("tt7777777", CinemetaService.extractImdbId(doc))
+    }
+
+    @Test
+    fun `extractTmdbId finds data-tmdb attribute`() {
+        val doc = Jsoup.parse("""<html><body><div data-tmdb="12345"></div></body></html>""")
+        assertEquals("12345", CinemetaService.extractTmdbId(doc))
+    }
+
+    @Test
+    fun `extractTmdbId finds json-ld tmdb sameAs`() {
+        val doc = Jsoup.parse(
+            """<html><head>
+                <script type="application/ld+json">{"@id":"https://www.themoviedb.org/tv/1396"}</script>
+            </head><body></body></html>"""
+        )
+        assertEquals("1396", CinemetaService.extractTmdbId(doc))
+    }
+
+    @Test
+    fun `extractTmdbId finds inline tmdb variable`() {
+        val doc = Jsoup.parse("""<html><body><script>var tmdb_id = "1396";</script></body></html>""")
+        assertEquals("1396", CinemetaService.extractTmdbId(doc))
+    }
+
+    @Test
+    fun `extractTmdbId returns null when absent`() {
+        val doc = Jsoup.parse("<html><body><h1>nothing here</h1></body></html>")
+        assertNull(CinemetaService.extractTmdbId(doc))
+    }
+
+    @Test
     fun `parseMeta extracts episode descriptions and dates`() {
         val json = """
             {

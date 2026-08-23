@@ -12,6 +12,7 @@ import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
+import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
 
 /** Tiny in-memory cache for search results so repeated searches (and quick-search
@@ -115,11 +116,24 @@ internal fun upgradePosterUrl(url: String?): String? {
                 || k.equals("h", ignoreCase = true)
                 || k.equals("height", ignoreCase = true)
                 || k.equals("fit", ignoreCase = true)
+                || k.equals("im", ignoreCase = true)
+                || k.equals("q", ignoreCase = true)
+                || k.equals("quality", ignoreCase = true)
             ) null else p
         }.joinToString("&")
-        fixed = if (kept.isBlank()) base else "$base&$kept".replace("?&", "?")
+        fixed = if (kept.isBlank()) base else "$base?$kept"
     }
     return fixed
+}
+
+/** True when [url] still carries a resize/thumbnail marker that [upgradePosterUrl]
+ * could not remove (e.g. a large -WxH variant that is still smaller than the
+ * original, or a CDN resize query token). Used to decide when a search result
+ * should be overridden with a known-good full-resolution poster from Cinemeta. */
+internal fun isThumbnailish(url: String?): Boolean {
+    if (url.isNullOrBlank()) return false
+    return Regex("""-\d{2,4}x\d{2,4}""", RegexOption.IGNORE_CASE).containsMatchIn(url)
+        || Regex("""[?&](resize|w|h|width|height|fit|im|q|quality)=""", RegexOption.IGNORE_CASE).containsMatchIn(url)
 }
 
 /** Strips a "-WxH" size marker (e.g. -300x450) only when it represents a
@@ -157,19 +171,22 @@ internal fun parseRating(item: Element): Double? {
         .takeIf { it.isNotBlank() }?.toDoubleOrNull()
 }
 
-/** Server names as they appear on the Multimovies "Video Sources" list, ordered
- *  by speed/reliability (fastest/most reliable first). Mirrors the site's own
- *  ranking (GDMIRROR is the recommended/top source), so the quickest-responding
- *  hosts surface first. Servers not listed here are still pulled (generic
- *  sniffer fallback) but with the lowest priority. */
+/** Server names as they appear on the Multimovies "Video Sources" list, plus the
+ *  direct global sources, ordered by speed/reliability (fastest/most reliable
+ *  first). GDMIRROR is the recommended/top dooplayer source; vixsrc.to (direct,
+ *  no-JS HLS) is the fastest global source. Servers not listed here are still
+ *  pulled (generic sniffer fallback) but with the lowest priority. */
 internal val SOURCE_PRIORITY: List<String> = listOf(
     "GDMIRROR",
+    "vixsrc.to",
+    "autoembed",
+    "2embed",
+    "vidlink.pro",
+    "multiembed",
     "screenscape.me",
     "VidZee",
     "VidZee v2",
-    "vixsrc.to",
     "CinemaOS",
-    "vidlink.pro",
     "Cineverse",
     "Nxsha",
 )
@@ -227,9 +244,6 @@ class MultimoviesProvider : MainAPI() {
     /** Per-source timeout in milliseconds. */
     companion object {
         const val SOURCE_TIMEOUT_MS = 15_000L
-
-        /** Per-source timeout for the generic embed sniffer (seconds). */
-        const val SNIFF_TIMEOUT_S = 5L
 
         /** In-memory search result cache TTL (ms). */
         const val SEARCH_CACHE_TTL_MS = 5 * 60 * 1000L
@@ -336,12 +350,14 @@ class MultimoviesProvider : MainAPI() {
         return results.takeIf { it.isNotEmpty() }?.also { SearchCache.put(query, it) }
     }
 
-    /** Concurrently resolve Cinemeta posters for search results that are missing one.
-     *  Bounded to 3 concurrent lookups with a 3s per-item timeout so search stays fast. */
+    /** Concurrently resolve Cinemeta posters for search results that are missing one
+     *  or still carry a thumbnail size marker. Bounded to 3 concurrent lookups with
+     *  a 3s per-item timeout so search stays fast. */
     private suspend fun backfillPosters(results: List<SearchResponse>) {
         val toFetch = results.mapNotNull { r ->
             val poster = r.posterUrl
-            if (poster.isNullOrBlank()) SearchItem(r, r.name ?: "", r.type ?: TvType.Movie) else null
+            if (poster.isNullOrBlank() || isThumbnailish(poster))
+                SearchItem(r, r.name ?: "", r.type ?: TvType.Movie) else null
         }
         if (toFetch.isEmpty()) return
         val semaphore = Semaphore(3)
@@ -449,47 +465,38 @@ class MultimoviesProvider : MainAPI() {
             ?.removePrefix("IMDb:")?.trim()
 
         val isMovie = url.contains("/movies/")
-
-        // IMDB id: used to tag the response for CloudStream's built-in meta-provider
-        // enrichment (cast with photos, richer ratings) and for metadata fetches.
-        // Falls back to a title-based Cinemeta search when the page doesn't expose an
-        // IMDB id directly (some Dooplay builds omit the IMDB link). The fallback runs
-        // INSIDE the coroutineScope below so it overlaps season-page fetching.
-        val imdbIdFromPage = CinemetaService.extractImdbId(doc)
-
         val aioType = if (isMovie) "movie" else "series"
-        // Fetch keyless cast + artwork (from AIOStreams/TVDB addon) and Cinemeta
-        // episode metadata concurrently. Both are independent API calls, each with its
-        // own internal error handling (return null on failure), so neither can block or
-        // crash load(). This parallel fetch keeps load() fast even on slow networks.
+
+        val imdbIdFromPage = CinemetaService.extractImdbId(doc)
+        val tmdbIdFromPage = CinemetaService.extractTmdbId(doc)
+
+        // The IMDB id is the linchpin for meta-provider enrichment (cast photos,
+        // episode ratings/thumbnails) AND for building direct stream hosts. Resolve
+        // it concurrently with season-page fetching. No external metadata API is
+        // awaited inside load() so the response renders fast (progressive loading):
+        // episodes appear immediately, then the app's meta-providers fill cast,
+        // artwork, episode ratings and thumbnails via addImdbId.
         return coroutineScope {
-            // Resolve the IMDB id (page extraction + fallback title search). The
-            // fallback search is deferred so season-page fetching can run in parallel
-            // with it instead of serializing before the season loop.
-            val imdbIdDeferred = if (imdbIdFromPage == null && !title.isNullOrBlank()) {
-                async {
-                    withTimeoutOrNull(4000L) {
-                        CinemetaService.searchImdbId(title, year, if (isMovie) "movie" else "series")
-                    }
-                }
-            } else null
+            val imdbIdJob = async {
+                imdbIdFromPage ?: if (title.isNotBlank()) {
+                    runCatching {
+                        withTimeoutOrNull(4000L) {
+                            CinemetaService.searchImdbId(title, year, aioType)
+                        }
+                    }.getOrNull()
+                } else null
+            }
 
             if (isMovie) {
-                // Movies: the only concurrency win is IMDB-id search overlapping nothing
-                // else (no seasons), but resolve it before launching aioMeta which needs it.
-                val resolvedImdbId = imdbIdFromPage ?: imdbIdDeferred?.await()
-                val aioMetaDeferred = if (resolvedImdbId != null) {
-                    async { TvdbDataService.fetchMeta(resolvedImdbId, aioType) }
-                } else null
-                val aioMeta = aioMetaDeferred?.await()
+                val resolvedImdbId = imdbIdJob.await()
+                if (resolvedImdbId != null) {
+                    SourceMetaCache.put(url, SourceMeta(resolvedImdbId, tmdbIdFromPage, null, null))
+                }
                 newMovieLoadResponse(title, url, TvType.Movie, url) {
-                    this.posterUrl = aioMeta?.poster ?: poster
-                    this.backgroundPosterUrl = aioMeta?.background
-                    this.logoUrl = aioMeta?.logo
+                    this.posterUrl = poster
                     this.year = year
                     this.plot = plot
                     this.tags = tags
-                    this.actors = aioMeta?.cast
                     if (resolvedImdbId != null) {
                         addImdbId(resolvedImdbId)
                         score?.let { s -> s.toDoubleOrNull()?.let { addScore(s, 10) } }
@@ -503,14 +510,13 @@ class MultimoviesProvider : MainAPI() {
                 val seasonLinks = doc.select("div.se-c div.se-q a[href], ul.episodios li a[href], .seasons a[href]")
                     .mapNotNull { it.attr("href").takeIf { h -> h.contains(mainUrl) } }
                     .distinct()
-
                 val pages = if (seasonLinks.isEmpty()) listOf(url) else seasonLinks
 
                 // Fetch all season/episode pages in PARALLEL (fast-path fetchDoc reuses
                 // the already-solved cookies and never triggers a fresh CF solve). Each
                 // page is bounded by a 10s timeout and wrapped so a failure just skips
                 // that season. Concurrency capped to avoid hammering the site.
-                val seasonDocsDeferred = async {
+                val seasonDocsJob = async {
                     val sem = Semaphore(4)
                     pages.map { seasonUrl ->
                         async {
@@ -524,21 +530,8 @@ class MultimoviesProvider : MainAPI() {
                     }.awaitAll()
                 }
 
-                // Resolve the IMDB id (overlaps season page fetching above).
-                val resolvedImdbId = imdbIdFromPage ?: imdbIdDeferred?.await()
-
-                // Now that the id is known, kick off the two metadata API calls in parallel.
-                val aioMetaDeferred = if (resolvedImdbId != null) {
-                    async { TvdbDataService.fetchMeta(resolvedImdbId, aioType) }
-                } else null
-                val videoMetaDeferred = if (resolvedImdbId != null) {
-                    async { CinemetaService.fetchMeta(resolvedImdbId, "series") }
-                } else null
-
-                // Await season docs + metadata concurrently (fastest-available wins).
-                val seasonDocs = seasonDocsDeferred.await()
-                val aioMeta = aioMetaDeferred?.await()
-                val videoMeta = videoMetaDeferred?.await()
+                val resolvedImdbId = imdbIdJob.await()
+                val seasonDocs = seasonDocsJob.await()
 
                 seasonDocs.forEach { sDoc ->
                     if (sDoc == null) return@forEach
@@ -554,27 +547,19 @@ class MultimoviesProvider : MainAPI() {
                             this.episode = epNum
                             this.season = seasonNum
                         }
-                        // Enrich with Cinemeta episode metadata: description, release date, thumbnail.
-                        videoMeta?.videos?.find {
-                            it.season == seasonNum && it.episode == epNum
-                        }?.let { vid ->
-                            ep.description = vid.overview
-                            vid.released?.let { ep.addDate(it) }
-                            vid.thumbnail?.let { ep.posterUrl = it }
-                            vid.rating?.toDoubleOrNull()?.let { ep.score = Score.from10(it) }
-                        }
                         episodes.add(ep)
+                        // Stash ids + season/episode keyed by the exact url loadLinks() will receive.
+                        if (resolvedImdbId != null) {
+                            SourceMetaCache.put(epLink, SourceMeta(resolvedImdbId, tmdbIdFromPage, seasonNum, epNum))
+                        }
                     }
                 }
 
                 newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
-                    this.posterUrl = aioMeta?.poster ?: poster
-                    this.backgroundPosterUrl = aioMeta?.background
-                    this.logoUrl = aioMeta?.logo
+                    this.posterUrl = poster
                     this.year = year
                     this.plot = plot
                     this.tags = tags
-                    this.actors = aioMeta?.cast
                     if (resolvedImdbId != null) {
                         addImdbId(resolvedImdbId)
                         score?.let { s -> s.toDoubleOrNull()?.let { addScore(s, 10) } }
@@ -597,14 +582,26 @@ class MultimoviesProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
+        val meta = SourceMetaCache.get(data)
+
+        // Fast path: cached links for this title/episode (no probing, no CF solve).
+        if (meta != null) {
+            LinkCache.get(meta.imdbId, meta.season, meta.episode)?.let { cached ->
+                if (cached.isNotEmpty()) {
+                    cached.forEach { runCatching { callback(it) } }
+                    return true
+                }
+            }
+        }
+
         val doc = try {
             solveDocument(data)
         } catch (e: Exception) {
-            return false
-        }
+            null
+        } ?: return false
 
         // Each "Video Source" on a Multimovies episode page is a
-        // li.dooplay_player_option carrying data-nume (source index) and data-type.
+        // li.dooplayer_player_option carrying data-nume (source index) and data-type.
         // The real embed URL comes from the site's dooplayer admin-ajax endpoint,
         // keyed by the post id. The post id is Dooplay-standard in
         // <meta id="dooplay-ajax-counter" data-postid="...">; the <li> data-post
@@ -622,12 +619,65 @@ class MultimoviesProvider : MainAPI() {
                 name to Triple(post, nume, type)
             }
 
-        if (options.isEmpty()) return false
+        // Path A: dooplayer-independent direct sources built from the resolved ids.
+        val globalSources = buildGlobalSources(meta)
+        // Path B: dooplayer-resolved embeds (admin-ajax + recursive iframe unwrap).
+        val dooplayerSources = if (options.isNotEmpty()) resolveDooplayerSources(data, options) else emptyList()
 
-        // Resolve every source's embed URL via the dooplayer admin-ajax endpoint.
-        // These are independent POSTs → run in parallel so the fastest source isn't
-        // blocked by the slowest. As a side effect we measure response time (latencyMs)
-        // so results can be sorted by speed.
+        val sources = globalSources + dooplayerSources
+        if (sources.isEmpty()) return false
+
+        // Dedupe at emit time so a host reached through multiple paths surfaces once.
+        val emitted = Collections.synchronizedSet(HashSet<String>())
+
+        val links = runCatching {
+            MultiSourcePuller.pull(
+                sources = sources,
+                timeoutMs = SOURCE_TIMEOUT_MS,
+                priorityOf = { priorityOf(it) },
+                onSubtitle = subtitleCallback,
+                onLink = { l ->
+                    val key = "${hostOf(l.url ?: "")}|${l.quality}"
+                    if (emitted.add(key)) runCatching { callback(l) }
+                },
+            )
+        }.getOrElse { emptyList() }
+
+        val deduped = dedupeByHostQuality(links)
+        if (meta != null) LinkCache.put(meta.imdbId, meta.season, meta.episode, deduped)
+
+        return deduped.isNotEmpty()
+    }
+
+    /** Build dooplayer-independent direct sources from the ids cached during load(). */
+    private fun buildGlobalSources(meta: SourceMeta?): List<MultiSourcePuller.Source> {
+        if (meta == null) return emptyList()
+        return GlobalSources.list.mapNotNull { g ->
+            val id = when (g.idType) {
+                SourceId.IMDB -> meta.imdbId
+                SourceId.TMDB -> meta.tmdbId
+            } ?: return@mapNotNull null
+            val url = g.buildUrl(id, meta.season, meta.episode) ?: return@mapNotNull null
+            MultiSourcePuller.Source(
+                name = g.name,
+                url = url,
+                referer = url,
+                headers = commonHeaders + g.headers,
+                extraction = g.extraction,
+                tmdbId = meta.tmdbId,
+                season = meta.season,
+                episode = meta.episode,
+                latencyMs = g.priority.toLong(),
+            )
+        }
+    }
+
+    /** Resolve every dooplayer server's embed URL (parallel admin-ajax POSTs) and
+     *  recursively unwrap wrapper pages to the deepest player URL. */
+    private suspend fun resolveDooplayerSources(
+        data: String,
+        options: List<Pair<String, Triple<String, String, String>>>,
+    ): List<MultiSourcePuller.Source> {
         data class Embed(val name: String, val url: String, val latencyMs: Long)
         val servers: List<Embed> = coroutineScope {
             options.map { (name, triple) ->
@@ -671,48 +721,29 @@ class MultimoviesProvider : MainAPI() {
             }.awaitAll().filterNotNull()
         }
 
-        if (servers.isEmpty()) return false
-
-        // Sort resolved embeds by measured latency first (fastest respond first),
-        // then by the static priority list. This means the quickest-responding
-        // sources are extracted and streamed to the player first.
-        val orderedServers = servers.sortedWith(
-            compareBy<Embed>({ it.latencyMs }).thenBy { priorityOf(it.name) }
-        )
-        val sources = orderedServers.map { e ->
-            MultiSourcePuller.Source(name = e.name, url = e.url, referer = data)
-        }
-
-        // Parallel pull, per-source timeout, streaming: every extracted link is
-        // pushed to the player immediately (onLink) instead of waiting for all
-        // sources to finish — video starts as soon as the fastest source yields a
-        // link. The returned list is still used for the unlinked-source fallback.
-        val links = runCatching {
-            MultiSourcePuller.pull(
-                sources = sources,
-                timeoutMs = SOURCE_TIMEOUT_MS,
-                priorityOf = { priorityOf(it) },
-                onSubtitle = subtitleCallback,
-                onLink = { runCatching { callback(it) } },
+        return servers.map { e ->
+            val finalUrl = MultiSourcePuller.unwrapEmbed(
+                e.url,
+                referer = data,
+                headers = commonHeaders,
             )
-        }.getOrElse { emptyList() }
-
-        // Fallback: for sources that yielded no links via CloudStream's extractor
-        // registry, try a generic HLS/direct-file sniffer. Some Dooplay embed hosts
-        // are not registered extractors, so we scrape the embed page for m3u8/mp4
-        // URLs. Per-source bounded by SNIFF_TIMEOUT_S.
-        val linkedSources = links.mapNotNull { it.source?.removeSuffix(MultiSourcePuller.INDICATOR) }
-        val unlinkedNames = sources.map { it.name }.toSet() - linkedSources.toSet()
-        val unlinkedUrls = orderedServers.filter { it.name in unlinkedNames }.map { it.name to it.url }
-        val sniffs = if (unlinkedUrls.isNotEmpty()) {
-            runCatching {
-                MultiSourcePuller.sniffEmbeds(unlinkedUrls, SNIFF_TIMEOUT_S, data)
-            }.getOrElse { emptyList() }
-        } else {
-            emptyList()
+            MultiSourcePuller.Source(
+                name = e.name,
+                url = finalUrl,
+                referer = data,
+                headers = commonHeaders,
+                latencyMs = e.latencyMs,
+            )
         }
-        sniffs.forEach { runCatching { callback(it) } }
+    }
 
-        return links.isNotEmpty() || sniffs.isNotEmpty()
+    private fun hostOf(url: String): String =
+        url.substringAfter("://").substringBefore("/").lowercase()
+
+    /** Keep only the highest-ranked link per (host, quality) — avoids duplicate
+     *  entries when the same final host is reached through multiple paths. */
+    private fun dedupeByHostQuality(links: List<ExtractorLink>): List<ExtractorLink> {
+        val seen = HashSet<String>()
+        return links.filter { l -> seen.add("${hostOf(l.url ?: "")}|${l.quality}") }
     }
 }
