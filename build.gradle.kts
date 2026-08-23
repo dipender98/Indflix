@@ -11,7 +11,7 @@ buildscript {
     }
     dependencies {
         classpath("com.android.tools.build:gradle:9.1.0")
-        classpath("com.github.recloudstream:gradle:81b1d424d2")
+        classpath("com.github.recloudstream.gradle:gradle:81b1d424d2")
         classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.3.20")
     }
 }
@@ -49,6 +49,9 @@ subprojects {
             sourceCompatibility = JavaVersion.VERSION_1_8
             targetCompatibility = JavaVersion.VERSION_1_8
         }
+        testOptions {
+            unitTests.all { it.useJUnitPlatform() }
+        }
     }
 
     tasks.withType<KotlinJvmCompile>().configureEach {
@@ -67,7 +70,12 @@ subprojects {
     dependencies {
         val implementation by configurations
         val cloudstream by configurations
+        val testImplementation by configurations
         cloudstream("com.lagradost:cloudstream3:pre-release")
+        testImplementation(kotlin("test"))
+        testImplementation(kotlin("test-junit5"))
+        testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")
+        testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")
         implementation(kotlin("stdlib"))
         implementation("com.github.Blatzar:NiceHttp:0.4.18")
         implementation("org.jsoup:jsoup:1.22.2")
@@ -81,6 +89,17 @@ subprojects {
     }
 }
 
-tasks.register<Delete>("clean") {
-    delete(rootProject.layout.buildDirectory)
+    tasks.withType<Test>().configureEach {
+        useJUnitPlatform()
+    }
+
+afterEvaluate {
+    tasks.withType<Test>().configureEach {
+        useJUnitPlatform()
+    }
 }
+
+
+    tasks.register<Delete>("clean") {
+        delete(rootProject.layout.buildDirectory)
+    }

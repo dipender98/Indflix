@@ -21,7 +21,7 @@ This repo is a fork/test of the CloudStream plugin template. It is a technical d
 - Build uses the **Kotlin DSL** multi-provider layout: root \uild.gradle.kts\ +
   \settings.gradle.kts\ auto-includes each provider dir that has a
   \uild.gradle.kts\ (here: \Multimovies/\). The CloudStream gradle plugin
-  (\com.github.recloudstream:gradle:81b1d424d2\) is declared in the root
+  (\com.github.recloudstream.gradle:gradle:81b1d424d2\) is declared in the root
   \uildscript\ block with pinned commit.
 
 ## Source policy (requirement)

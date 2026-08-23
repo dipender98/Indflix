@@ -5,9 +5,45 @@ import com.lagradost.cloudstream3.network.CloudflareKiller
 import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.*
 import org.jsoup.Jsoup
+import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
+
+/**
+ * Retry [fetch] up to [attempts] times. If a result is "blocked" (e.g. a Cloudflare
+ * challenge page rather than the real document), [onBlocked] is invoked and the next
+ * attempt is tried. If every attempt fails or is blocked, throws an exception built by
+ * [failureMessage].
+ *
+ * This is the core of the detail-page fix: it tries a fixed, finite number of solvers
+ * and then surfaces a single error instead of CloudStream's LoadFragment retrying
+ * load() forever (the "keep refreshing" loop). Kept CloudStream-free so it is
+ * unit-testable on the JVM without an Android/WebView runtime.
+ */
+internal suspend fun <T> retryUntilSolved(
+    attempts: Int,
+    fetch: suspend (attempt: Int) -> T,
+    isBlocked: (T) -> Boolean,
+    onBlocked: () -> Unit = {},
+    failureMessage: (Throwable?) -> String,
+): T {
+    var lastErr: Throwable? = null
+    repeat(attempts) { i ->
+        try {
+            val result = fetch(i)
+            if (isBlocked(result)) {
+                lastErr = IllegalStateException(failureMessage(null))
+                onBlocked()
+                return@repeat
+            }
+            return result
+        } catch (e: Throwable) {
+            lastErr = e
+        }
+    }
+    throw IllegalStateException(failureMessage(lastErr))
+}
 
 
 /**
@@ -104,37 +140,41 @@ class MultimoviesProvider : MainAPI() {
      * error ONCE. Returning null instead makes CloudStream's LoadFragment retry
      * load() forever (the "keep refreshing" loop).
      */
-    private suspend fun solveDocument(url: String, timeoutSeconds: Int = 60): Document {
-        val solvers = listOf(
+    internal suspend fun solveDocument(
+        url: String,
+        timeoutSeconds: Long = 60,
+        fetch: suspend (solverFactory: () -> CloudflareKiller) -> Document = { factory ->
+            app.get(
+                url,
+                timeout = timeoutSeconds,
+                headers = commonHeaders,
+                interceptor = factory(),
+            ).document
+        },
+        isChallenge: (Document) -> Boolean = { doc ->
+            val bodyText = doc.body()?.text() ?: ""
+            bodyText.contains("just a moment", ignoreCase = true)
+                || bodyText.contains("cf-mitigated", ignoreCase = true)
+                || bodyText.contains("verify you are human", ignoreCase = true)
+                || bodyText.contains("checking your browser", ignoreCase = true)
+        },
+    ): Document {
+        val factories = listOf<() -> CloudflareKiller>(
             { getCfKiller() },
-            { cfKiller = CloudflareKiller().also { cfKiller = it } },
+            { CloudflareKiller().also { cfKiller = it } },
         )
-        var lastErr: Exception? = null
-        for (makeSolver in solvers) {
-            try {
-                val doc = app.get(
-                    url,
-                    timeout = timeoutSeconds,
-                    headers = commonHeaders,
-                    interceptor = makeSolver(),
-                ).document
-                val bodyText = doc.body()?.text() ?: ""
-                val isChallenge = bodyText.contains("just a moment", ignoreCase = true)
-                    || bodyText.contains("cf-mitigated", ignoreCase = true)
-                    || bodyText.contains("verify you are human", ignoreCase = true)
-                    || bodyText.contains("checking your browser", ignoreCase = true)
-                if (isChallenge) {
-                    lastErr = ErrorLoadingException("Cloudflare challenge not solved")
-                    cfKiller = null
-                    continue
-                }
-                return doc
-            } catch (e: Exception) {
-                lastErr = e
-                cfKiller = null
-            }
+        return try {
+            retryUntilSolved(
+                attempts = factories.size,
+                fetch = { i -> fetch(factories[i]) },
+                isBlocked = isChallenge,
+                onBlocked = { cfKiller = null },
+                failureMessage = { lastErr -> lastErr?.localizedMessage ?: "Failed to load $url" },
+            )
+        } catch (e: IllegalStateException) {
+            // Surface as a CloudStream error ONCE (no retry loop).
+            throw ErrorLoadingException(e.message)
         }
-        throw ErrorLoadingException(lastErr?.localizedMessage ?: "Failed to load $url")
     }
 
 
