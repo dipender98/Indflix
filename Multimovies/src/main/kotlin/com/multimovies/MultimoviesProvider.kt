@@ -11,6 +11,40 @@ import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
+import java.util.concurrent.ConcurrentHashMap
+
+/** Tiny in-memory cache for search results so repeated searches (and quick-search
+ *  typing) are instant instead of re-fetching the site. Bounded in size, TTL per
+ *  entry — search results don't change minute-to-minute. */
+internal object SearchCache {
+    private const val TTL_MS = MultimoviesProvider.SEARCH_CACHE_TTL_MS
+    private const val MAX_SIZE = 128
+
+    private data class Entry(val results: List<SearchResponse>, val expiresAt: Long)
+    private val cache = ConcurrentHashMap<String, Entry>()
+
+    fun get(query: String): List<SearchResponse>? {
+        val key = key(query)
+        val e = cache[key] ?: return null
+        if (System.currentTimeMillis() > e.expiresAt) {
+            cache.remove(key)
+            return null
+        }
+        return e.results
+    }
+
+    fun put(query: String, results: List<SearchResponse>) {
+        val key = key(query)
+        if (cache.size >= MAX_SIZE) {
+            cache.entries.minByOrNull { it.value.expiresAt }?.key?.let { cache.remove(it) }
+        }
+        cache[key] = Entry(results, System.currentTimeMillis() + TTL_MS)
+    }
+
+    fun clear() = cache.clear()
+
+    private fun key(query: String) = query.trim().lowercase()
+}
 
 /**
  * Retry [fetch] up to [attempts] times. If a result is "blocked" (e.g. a Cloudflare
@@ -46,6 +80,85 @@ internal suspend fun <T> retryUntilSolved(
     }
     throw IllegalStateException(failureMessage(lastErr))
 }
+
+
+/** True when [doc] is the site's Cloudflare interstitial rather than real content. */
+internal fun isChallenge(doc: Document): Boolean =
+    doc.body()?.text().orEmpty().let { bodyText ->
+        val titleText = doc.selectFirst("title")?.text()?.lowercase() ?: ""
+        bodyText.contains("just a moment", ignoreCase = true)
+            || bodyText.contains("cf-mitigated", ignoreCase = true)
+            || bodyText.contains("verify you are human", ignoreCase = true)
+            || bodyText.contains("checking your browser", ignoreCase = true)
+            || bodyText.contains("attention required", ignoreCase = true)
+            || titleText.contains("just a moment", ignoreCase = true)
+    }
+
+/** Upgrades a thumbnail URL to the full-resolution image by stripping resize
+ * markers and query-size params. Pure function, used for both search and detail
+ * posters so search-grid posters are sharp instead of pixelated. */
+internal fun upgradePosterUrl(url: String?): String? {
+    if (url.isNullOrBlank()) return null
+    var fixed = if (url.startsWith("//")) "https:$url" else url
+    fixed = fixed.replace(Regex("""-\d+x\d+""", RegexOption.IGNORE_CASE), "")
+    fixed = fixed.replace(Regex("""-scaled(?=\.[a-zA-Z]+$)""", RegexOption.IGNORE_CASE), "")
+    val qIdx = fixed.indexOf("?")
+    if (qIdx >= 0) {
+        val base = fixed.substring(0, qIdx)
+        val kept = fixed.substring(qIdx + 1).split(";").mapNotNull { p ->
+            val k = p.substringBefore("=").trim()
+            if (k.equals("resize", ignoreCase = true) || k.equals("w", ignoreCase = true)
+                || k.equals("width", ignoreCase = true)
+                || k.equals("h", ignoreCase = true)
+                || k.equals("height", ignoreCase = true)
+                || k.equals("fit", ignoreCase = true)
+            ) null else p
+        }.joinToString(";")
+        fixed = if (kept.isBlank()) base else "$base?$kept"
+    }
+    return fixed
+}
+
+internal fun upgradeUrl(url: String?): String? = upgradePosterUrl(url)
+
+/** Cheap, no-network parse of the per-item rating badge (as a number) from
+ *  list/search markup. Returns null when absent so search never makes extra
+ *  network calls. Pure function, testable on the JVM without Score. */
+internal fun parseRating(item: Element): Double? {
+    val raw = item.selectFirst(
+        "span.dt_rating_vgs, span.imdb, div.imdb-rating, " +
+        ".rating span, span.rating, [class*='imdb'] span"
+    )?.text()?.trim()
+        ?: return null
+    return raw.replace(Regex("[^\\d.]"), "")
+        .takeIf { it.isNotBlank() }?.toDoubleOrNull()
+}
+
+/** Server names as they appear on the Multimovies "Video Sources" list, ordered
+ *  most-reliable/fast to least. Defined at top level so tests can read the
+ *  ordering without class-loading the (Android-dependent) provider. Servers not
+ *  listed here are still pulled (with the generic sniffer as a fallback), but
+ *  with the lowest priority. Confirmed-working sources come first. */
+internal val SOURCE_PRIORITY: List<String> = listOf(
+    "CineMM",
+    "VidHide",
+    "Cineverse",
+    "Nexa",
+    "GDMIRROR - Recommended",
+    "GDMIRROR",
+    "Nxsha",
+    "GDFlix",
+    "HubCloud",
+    "FastDL",
+    "StreamWish",
+    "screenscape.me",
+    "VidZee",
+    "VidZee v2",
+    "vixsrc.to",
+    "CinemaOS",
+    "vidlink.pro",
+    "Multimovies",
+)
 
 
 /**
@@ -101,28 +214,11 @@ class MultimoviesProvider : MainAPI() {
     companion object {
         const val SOURCE_TIMEOUT_MS = 30_000L
 
-        /**
-         * Server names as they appear on the Multimovies "Video Sources" list,
-         * ordered from most reliable/fast to least. Servers not listed here are
-         * still pulled, but with the lowest priority.
-         */
-        val SOURCE_PRIORITY: List<String> = listOf(
-            "GDMIRROR - Recommended",
-            "GDMIRROR",
-            "Cineverse",
-            "Nxsha",
-            "GDFlix",
-            "HubCloud",
-            "FastDL",
-            "StreamWish",
-            "screenscape.me",
-            "VidZee",
-            "VidZee v2",
-            "vixsrc.to",
-            "CinemaOS",
-            "vidlink.pro",
-            "Multimovies",
-        )
+        /** Per-source timeout for the generic embed sniffer (seconds). */
+        const val SNIFF_TIMEOUT_S = 8L
+
+        /** In-memory search result cache TTL (ms). */
+        const val SEARCH_CACHE_TTL_MS = 5 * 60 * 1000L
     }
 
     private fun priorityOf(serverName: String): Int {
@@ -131,79 +227,81 @@ class MultimoviesProvider : MainAPI() {
     }
 
     /**
-     * Fetch [url] and parse it to a Jsoup Document, solving the site's Cloudflare
-     * managed challenge via [CloudflareKiller].
+     * Fetch [url] without the Cloudflare solver first: when solved cookies are
+     * already valid (CloudStream persists the cookie jar across calls), this is
+     * a fast ~1–3s path. Only if the response is a challenge (or the fast path
+     * errors) do we re-request with a fresh [CloudflareKiller] solve.
      *
-     * The challenge is solved in a WebView and can take a while, so we use a long
-     * timeout and retry once with a FRESH solver if the first attempt returns the
-     * "Just a moment..." interstitial (a 200 response that is not the real page).
-     *
-     * On hard failure we throw [ErrorLoadingException] so the detail page shows the
-     * error ONCE. Returning null instead makes CloudStream's LoadFragment retry
-     * load() forever (the "keep refreshing" loop).
+     * [required]=true (used by [solveDocument] for detail/link pages) surfaces an
+     * [ErrorLoadingException] instead of null so CloudStream doesn't retry
+     * forever. [required]=false returns null to let callers degrade gracefully.
      */
-    internal suspend fun solveDocument(
+    internal suspend fun fetchDoc(
         url: String,
-        timeoutSeconds: Long = 15,
-        fetch: suspend (solverFactory: () -> CloudflareKiller) -> Document = { factory ->
-            app.get(
-                url,
-                timeout = timeoutSeconds,
-                headers = commonHeaders,
-                interceptor = factory(),
-            ).document
-        },
-        isChallenge: (Document) -> Boolean = { doc ->
-            val bodyText = doc.body()?.text() ?: ""
-            val titleText = doc.selectFirst("title")?.text()?.lowercase() ?: ""
-            // Use precise Cloudflare challenge indicators only. Avoid broad terms like
-            // "cloudflare", "please wait", or "ray id" which can appear on legitimate
-            // pages (footers, cookie notices, loading messages) and cause false-positive
-            // rejections that prevent content AND metadata from loading.
-            bodyText.contains("just a moment", ignoreCase = true)
-                || bodyText.contains("cf-mitigated", ignoreCase = true)
-                || bodyText.contains("verify you are human", ignoreCase = true)
-                || bodyText.contains("checking your browser", ignoreCase = true)
-                || bodyText.contains("attention required", ignoreCase = true)
-                || titleText.contains("just a moment", ignoreCase = true)
-        },
-    ): Document {
-        val factories = listOf<() -> CloudflareKiller>(
-            { getCfKiller() },
-            { CloudflareKiller().also { cfKiller = it } },
-        )
-        val result = withTimeoutOrNull(SOURCE_TIMEOUT_MS) {
+        timeoutSeconds: Long = 12,
+        required: Boolean = false,
+        headers: Map<String, String> = commonHeaders,
+    ): Document? {
+        val challengeTimeoutS = 15L
+        // Fast path: rely on the persisted cookie jar; no WebView solve.
+        try {
+            val doc = app.get(url, timeout = timeoutSeconds, headers = headers).document
+            if (!isChallenge(doc)) return doc
+        } catch (e: Exception) {
+            // fall through to the challenge-solve path
+        }
+
+        // Challenge path: solve with CloudflareKiller (cached or fresh).
+        val solved = withTimeoutOrNull(SOURCE_TIMEOUT_MS) {
             retryUntilSolved(
-                attempts = factories.size,
-                fetch = { i -> fetch(factories[i]) },
-                isBlocked = isChallenge,
+                attempts = solverFactories().size,
+                fetch = { i ->
+                    val factory = solverFactories()[i.coerceAtMost(solverFactories().size - 1)]
+                    app.get(url, timeout = challengeTimeoutS, headers = headers,
+                        interceptor = factory()).document
+                },
+                isBlocked = ::isChallenge,
                 onBlocked = { cfKiller = null },
                 failureMessage = { lastErr -> lastErr?.localizedMessage ?: "Failed to load $url" },
             )
         }
-        return result ?: throw ErrorLoadingException("Timed out solving Cloudflare challenge for $url")
+        return when {
+            solved == null -> {
+                if (required) throw ErrorLoadingException("Timed out fetching $url") else null
+            }
+            isChallenge(solved) -> {
+                if (required) throw ErrorLoadingException("Cloudflare challenge unsolved for $url") else null
+            }
+            else -> solved
+        }
     }
 
+    /** CloudflareKiller factories retried in order: cached solver, then a fresh one. */
+    private fun solverFactories(): List<() -> CloudflareKiller> = listOf(
+        { getCfKiller() },
+        { CloudflareKiller().also { cfKiller = it } },
+    )
 
-    private fun upgradePosterUrl(url: String?): String? {
-        if (url.isNullOrBlank()) return null
-        val fixed = if (url.startsWith("//")) "https:$url" else url
-        // Strip Dooplay "-WxH" thumbnail size suffixes to get the full-resolution image.
-        return fixed.replace(Regex("""-\d+x\d+(?=\.[a-zA-Z]+$)"""), "")
-    }
+    /** Backward-compatible wrapper used by [load] and [loadLinks]. */
+    internal suspend fun solveDocument(
+        url: String,
+        timeoutSeconds: Long = 15,
+    ): Document = fetchDoc(url, timeoutSeconds = timeoutSeconds, required = true)
+        ?: throw ErrorLoadingException("Failed to fetch $url")
+
 
     // ------------------------------------------------------------------
     // Search
     // ------------------------------------------------------------------
 
     override suspend fun search(query: String): List<SearchResponse>? {
+        SearchCache.get(query)?.let { return it }
+
         val encodedQuery = URLEncoder.encode(query, StandardCharsets.UTF_8.toString())
         val searchUrl = "$mainUrl/?s=$encodedQuery"
-        val doc = try {
-            app.get(searchUrl, timeout = 20, headers = commonHeaders, interceptor = getCfKiller()).document
-        } catch (e: Exception) {
-            return null
-        }
+        // Fast path: reuse persisted cookies (skip the slow Cloudflare WebView solve)
+        // via fetchDoc; only fall back to solving when a challenge is detected.
+        val doc = fetchDoc(searchUrl, timeoutSeconds = 12, required = false) ?: return null
 
         val items = doc.select(
             "div#archive-content div.item, " +
@@ -217,7 +315,7 @@ class MultimoviesProvider : MainAPI() {
         )
 
         val results = items.mapNotNull { it.toSearchResponse() }
-        return results.takeIf { it.isNotEmpty() }
+        return results.takeIf { it.isNotEmpty() }?.also { SearchCache.put(query, it) }
     }
 
     override suspend fun quickSearch(query: String): List<SearchResponse>? = search(query)
@@ -242,9 +340,15 @@ class MultimoviesProvider : MainAPI() {
             else -> TvType.TvSeries
         }
         return if (tvType == TvType.TvSeries) {
-            newTvSeriesSearchResponse(title, href, tvType) { this.posterUrl = poster }
+            newTvSeriesSearchResponse(title, href, tvType) {
+                this.posterUrl = poster
+                parseRating(this@toSearchResponse)?.let { Score.from10(it.toString()) }?.let { this.score = it }
+            }
         } else {
-            newMovieSearchResponse(title, href, tvType) { this.posterUrl = poster }
+            newMovieSearchResponse(title, href, tvType) {
+                this.posterUrl = poster
+                parseRating(this@toSearchResponse)?.let { Score.from10(it.toString()) }?.let { this.score = it }
+            }
         }
     }
 
@@ -257,11 +361,7 @@ class MultimoviesProvider : MainAPI() {
         request: MainPageRequest
     ): HomePageResponse? {
         val url = if (page > 1) "${request.data}page/$page/" else request.data
-        val doc = try {
-            app.get(url, timeout = 20, headers = commonHeaders, interceptor = getCfKiller()).document
-        } catch (e: Exception) {
-            return null
-        }
+        val doc = fetchDoc(url, timeoutSeconds = 12, required = false) ?: return null
         val items = doc.select("article.item, div#archive-content div.item, div.items div.item").mapNotNull {
             it.toSearchResponse()
         }
@@ -280,8 +380,10 @@ class MultimoviesProvider : MainAPI() {
             if (it.tagName() == "meta") it.attr("content") else it.text()
         }?.trim() ?: throw ErrorLoadingException("No title found on $url")
 
-        val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")
-            ?: doc.selectFirst("div.poster img, img.wp-post-image")?.attr("src")
+        val poster = upgradeUrl(
+            doc.selectFirst("meta[property=og:image]")?.attr("content")
+                ?: doc.selectFirst("div.poster img, img.wp-post-image")?.attr("src")
+        )
 
         val year = doc.selectFirst("span.date, .year, .extra span")?.text()
             ?.let { Regex("\\d{4}").find(it)?.value?.toIntOrNull() }
@@ -452,7 +554,7 @@ class MultimoviesProvider : MainAPI() {
                     ),
                     data = body,
                     referer = data,
-                    timeout = 20,
+                    timeout = 12,
                     interceptor = getCfKiller(),
                 ).text
             }.getOrNull() ?: return@mapNotNull null
@@ -482,8 +584,8 @@ class MultimoviesProvider : MainAPI() {
             MultiSourcePuller.Source(name = name, url = href, referer = data)
         }
 
-        // Parallel pull, per-source 30s timeout, priority-ordered results.
-        val links = runCatching {
+        // Parallel pull, per-source timeout, priority-ordered results.
+        var links = runCatching {
             MultiSourcePuller.pull(
                 sources = sources,
                 timeoutMs = SOURCE_TIMEOUT_MS,
@@ -491,6 +593,20 @@ class MultimoviesProvider : MainAPI() {
                 onSubtitle = subtitleCallback,
             )
         }.getOrElse { emptyList() }
+
+        // Fallback: for sources that yielded no links via CloudStream's extractor
+        // registry, try a generic HLS/direct-file sniffer. Some Dooplay embed hosts
+        // (e.g. Cineverse, Nexa) are not registered extractors, so we scrape the
+        // embed page for m3u8/mp4 URLs. Per-source bounded by SNIFF_TIMEOUT_S.
+        val linkedSources = links.mapNotNull { it.source?.removeSuffix(MultiSourcePuller.INDICATOR) }
+        val unlinkedNames = sources.map { it.name }.toSet() - linkedSources.toSet()
+        val unlinkedUrls = servers.filter { it.first in unlinkedNames }
+        if (unlinkedUrls.isNotEmpty()) {
+            val sniffs = runCatching {
+                MultiSourcePuller.sniffEmbeds(unlinkedUrls, SNIFF_TIMEOUT_S, data)
+            }.getOrElse { emptyList() }
+            links += sniffs
+        }
 
         links.forEach { runCatching { callback(it) } }
         return links.isNotEmpty()
