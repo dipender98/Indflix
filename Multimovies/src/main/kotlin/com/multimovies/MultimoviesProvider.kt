@@ -142,7 +142,7 @@ class MultimoviesProvider : MainAPI() {
      */
     internal suspend fun solveDocument(
         url: String,
-        timeoutSeconds: Long = 60,
+        timeoutSeconds: Long = 15,
         fetch: suspend (solverFactory: () -> CloudflareKiller) -> Document = { factory ->
             app.get(
                 url,
@@ -157,6 +157,9 @@ class MultimoviesProvider : MainAPI() {
                 || bodyText.contains("cf-mitigated", ignoreCase = true)
                 || bodyText.contains("verify you are human", ignoreCase = true)
                 || bodyText.contains("checking your browser", ignoreCase = true)
+                || bodyText.contains("please wait", ignoreCase = true)
+                || bodyText.contains("ray id", ignoreCase = true)
+                || bodyText.contains("cloudflare", ignoreCase = true)
         },
     ): Document {
         val factories = listOf<() -> CloudflareKiller>(
