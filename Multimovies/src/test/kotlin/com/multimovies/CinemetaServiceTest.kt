@@ -38,6 +38,38 @@ class CinemetaServiceTest {
     }
 
     @Test
+    fun `extractImdbId finds id from imdb link class variations`() {
+        val doc = Jsoup.parse(
+            """<html><body>
+                <span class="imdbRating"><a href="https://imdb.com/title/tt7654321/">9.0</a></span>
+            </body></html>"""
+        )
+        assertEquals("tt7654321", CinemetaService.extractImdbId(doc))
+    }
+
+    @Test
+    fun `extractImdbId finds id from data attribute`() {
+        val doc = Jsoup.parse(
+            """<html><body>
+                <div data-imdb="tt1111111"></div>
+            </body></html>"""
+        )
+        assertEquals("tt1111111", CinemetaService.extractImdbId(doc))
+    }
+
+    @Test
+    fun `extractImdbId finds id from json-ld script`() {
+        val doc = Jsoup.parse(
+            """<html><head>
+                <script type="application/ld+json">
+                {"@context":"https://schema.org","@type":"TVSeries","@id":"https://imdb.com/title/tt2222222/"}
+                </script>
+            </head><body></body></html>"""
+        )
+        assertEquals("tt2222222", CinemetaService.extractImdbId(doc))
+    }
+
+    @Test
     fun `extractImdbId returns null when no imdb id present`() {
         val doc = Jsoup.parse("<html><body><h1>No links here</h1></body></html>")
         assertNull(CinemetaService.extractImdbId(doc))

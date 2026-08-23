@@ -56,11 +56,29 @@ object CinemetaService {
             ?.takeIf { it.isNotEmpty() }
             ?.let { return it }
 
-        // 3. Dooplay-specific containers
-        return doc.select("div.imdb a, span.imdb a, li.imdb a").firstOrNull()
+        // 3. Dooplay-specific containers (common patterns)
+        doc.select("div.imdb a, span.imdb a, li.imdb a, .imdb-link a, .imdbRating a, [class*='imdb'] a")
+            .firstOrNull()
             ?.attr("href")
             ?.let { normalize(it) }
             ?.takeIf { it.isNotEmpty() }
+            ?.let { return it }
+
+        // 4. Data attributes (some themes use data-imdb)
+        doc.select("[data-imdb], [data-imdb-id], [data-imdbid]").firstOrNull()
+            ?.attr("data-imdb")
+            ?.takeIf { it.isNotBlank() }
+            ?.let { return normalize(it) }
+
+        // 5. Script tags with JSON-LD or embedded data
+        doc.select("script[type=\"application/ld+json\"]").forEach { script ->
+            val text = script.html()
+            val m = Regex("""\"@id\"\s*:\s*\"https?://(?:www\.)?imdb\.com/title/(tt\d+)\"""").find(text)
+                ?: Regex("""tt\d{7,8}""").find(text)
+            m?.value?.let { return normalize(it) }
+        }
+
+        return null
     }
 
     private fun normalize(value: String): String {
