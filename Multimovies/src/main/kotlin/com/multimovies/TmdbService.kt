@@ -6,6 +6,7 @@ import com.lagradost.cloudstream3.app
 import org.json.JSONArray
 import org.json.JSONObject
 import org.jsoup.nodes.Document
+import java.util.concurrent.ConcurrentHashMap
 
 /** Read a JSON string field, returning null when blank (avoids platform-type quirks). */
 private fun str(obj: JSONObject, key: String): String? {
@@ -26,37 +27,49 @@ private fun str(obj: JSONObject, key: String): String? {
  * additionally pull richer ratings, episode descriptions, and cast with profile
  * photos -- no provider setting required.
  */
-object CinemetaService {
+    object CinemetaService {
 
-    private const val META_URL = "https://v3-cinemeta.strem.io/meta"
-    private const val CATALOG_URL = "https://v3-cinemeta.strem.io/catalog"
+        private const val META_URL = "https://v3-cinemeta.strem.io/meta"
+        private const val CATALOG_URL = "https://v3-cinemeta.strem.io/catalog"
 
-    /** Fetch Cinemeta metadata for [imdbId] of [type] ("movie" or "series"). */
-    suspend fun fetchMeta(imdbId: String, type: String): CinemetaMeta? {
-        if (imdbId.isBlank()) return null
-        return try {
-            val text = app.get("$META_URL/$type/$imdbId.json", timeout = 15).text
-            parseMeta(text)
-        } catch (e: Exception) {
-            null
+        /** In-memory cache for title-based IMDB id lookups, shared by the search
+         *  poster backfill and the detail page, so a given title resolves its
+         *  IMDB id at most once per session. */
+        private val imdbCache = ConcurrentHashMap<String, String?>()
+
+        /** Fetch Cinemeta metadata for [imdbId] of [type] ("movie" or "series"). */
+        suspend fun fetchMeta(imdbId: String, type: String): CinemetaMeta? {
+            if (imdbId.isBlank()) return null
+            return try {
+                val text = app.get("$META_URL/$type/$imdbId.json", timeout = 15).text
+                parseMeta(text)
+            } catch (e: Exception) {
+                null
+            }
         }
-    }
 
-    /**
-     * Search for an IMDB id by [title] and optional [year] using Cinemeta's
-     * public catalog search. This is a fallback when the page doesn't expose
-     * an IMDB id directly.
-     */
-    suspend fun searchImdbId(title: String, year: Int?, type: String): String? {
-        val query = java.net.URLEncoder.encode(title.trim(), "UTF-8")
-        val json = try {
-            app.get("$CATALOG_URL/$type/top/search=$query.json", timeout = 10).text
-        } catch (e: Exception) {
-            return null
+        /**
+         * Search for an IMDB id by [title] and optional [year] using Cinemeta's
+         * public catalog search. This is a fallback when the page doesn't expose
+         * an IMDB id directly. Cached by (title, year, type) so repeated lookups
+         * are instant.
+         */
+        suspend fun searchImdbId(title: String, year: Int?, type: String): String? {
+            val cached = imdbCache[cacheKey(title, year, type)]
+            if (cached != null) return cached
+            val query = java.net.URLEncoder.encode(title.trim(), "UTF-8")
+            val json = try {
+                app.get("$CATALOG_URL/$type/top/search=$query.json", timeout = 4).text
+            } catch (e: Exception) {
+                null
+            }
+            val result = if (json.isNullOrBlank()) null else pickBestImdbId(json, title, year)
+            imdbCache[cacheKey(title, year, type)] = result
+            return result
         }
-        if (json.isBlank()) return null
-        return pickBestImdbId(json, title, year)
-    }
+
+        private fun cacheKey(title: String, year: Int?, type: String) =
+            "$type:${title.trim().lowercase()}|$year"
 
     /** Parse a Cinemeta catalog search response and pick the best IMDB id match. */
     fun pickBestImdbId(raw: String?, title: String, year: Int?): String? {
@@ -241,7 +254,7 @@ object TvdbDataService {
         var json = ""
         for (url in candidates) {
             json = try {
-                app.get(url, timeout = 6).text
+                app.get(url, timeout = 4).text
             } catch (e: Exception) {
                 ""
             }

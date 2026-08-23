@@ -15,16 +15,9 @@ class ProviderHelpersTest {
     // ---- upgradePosterUrl ----
 
     @Test
-    fun `upgradePosterUrl strips Dash W x H suffix before extension`() {
+    fun `upgradePosterUrl strips small size suffix before extension`() {
         assertEquals("https://img.example/cdn/poster.jpg",
             upgradePosterUrl("https://img.example/cdn/poster-185x278.jpg"))
-    }
-
-    @Test
-    fun `upgradePosterUrl strips suffix anywhere in path`() {
-        // -185x278 is the size suffix (stripped); -2 is the real full-res filename variant.
-        assertEquals("https://img.example/poster-2.jpg",
-            upgradePosterUrl("https://img.example/poster-185x278-2.jpg"))
     }
 
     @Test
@@ -40,15 +33,31 @@ class ProviderHelpersTest {
     }
 
     @Test
-    fun `upgradePosterUrl handles protocol-relative and -scaled`() {
-        assertEquals("https://img.example/poster.jpg",
+    fun `upgradePosterUrl preserves -scaled marker`() {
+        // -scaled is a real WP file variant (the only full-res copy); do not strip it.
+        assertEquals("https://img.example/poster-scaled.jpg",
             upgradePosterUrl("//img.example/poster-300x450-scaled.jpg"))
+    }
+
+    @Test
+    fun `upgradePosterUrl preserves large size dim suffix`() {
+        // 1920x1080 is full-res, not a thumbnail — leave it alone.
+        assertEquals("https://img.example/poster-1920x1080.jpg",
+            upgradePosterUrl("https://img.example/poster-1920x1080.jpg"))
     }
 
     @Test
     fun `upgradePosterUrl leaves full-res url untouched`() {
         assertEquals("https://img.example/poster.jpg",
             upgradePosterUrl("https://img.example/poster.jpg"))
+    }
+
+    @Test
+    fun `upgradePosterUrl returns original when suffix not before extension`() {
+        // -185x278-2.jpg has extra path segment after the size; candidate would be
+        // poster-2.jpg whose ext matches, so the suffix IS stripped (small dims).
+        assertEquals("https://img.example/poster-2.jpg",
+            upgradePosterUrl("https://img.example/poster-185x278-2.jpg"))
     }
 
     @Test
@@ -104,10 +113,14 @@ class ProviderHelpersTest {
 
     @Test
     fun `SOURCE_PRIORITY ranks GDMIRROR and screenscape_me at the top`() {
-        val idxGdm = SOURCE_PRIORITY.indexOf("GDMIRROR")
-        val idxScrn = SOURCE_PRIORITY.indexOf("screenscape.me")
-        val idxVidZee = SOURCE_PRIORITY.indexOf("VidZee")
-        assertTrue(idxGdm == 0 || idxGdm == 1, "GDMIRROR should be in first two positions, was $idxGdm")
-        assertTrue(idxVidZee > idxScrn, "VidZee should be after screenscape.me")
+        assertEquals("GDMIRROR", SOURCE_PRIORITY.first())
+        assertEquals("screenscape.me", SOURCE_PRIORITY[1])
+        assertEquals("Nxsha", SOURCE_PRIORITY.last())
+        // exactly the 9 live source names, no stale entries
+        assertEquals(
+            listOf("GDMIRROR", "screenscape.me", "VidZee", "VidZee v2", "vixsrc.to",
+                "CinemaOS", "vidlink.pro", "Cineverse", "Nxsha"),
+            SOURCE_PRIORITY
+        )
     }
 }

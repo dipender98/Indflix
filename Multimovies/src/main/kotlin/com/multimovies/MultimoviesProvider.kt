@@ -6,6 +6,7 @@ import com.lagradost.cloudstream3.LoadResponse.Companion.addScore
 import com.lagradost.cloudstream3.network.CloudflareKiller
 import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.*
+import kotlinx.coroutines.sync.Semaphore
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
@@ -94,18 +95,20 @@ internal fun isChallenge(doc: Document): Boolean =
             || titleText.contains("just a moment", ignoreCase = true)
     }
 
-/** Upgrades a thumbnail URL to the full-resolution image by stripping resize
- * markers and query-size params. Pure function, used for both search and detail
- * posters so search-grid posters are sharp instead of pixelated. */
+/** Upgrades a thumbnail URL to the full-resolution image by stripping only
+ * genuine thumbnail resize markers (-WxH where W,H are small) and query-size
+ * params. Conservative: never strips -scaled (a real WordPress file variant)
+ * and only drops -WxH when both dims <= 500 and the result still ends in an
+ * image extension; otherwise returns the original so a poster is always shown.
+ * Pure function, used for both search and detail posters. */
 internal fun upgradePosterUrl(url: String?): String? {
     if (url.isNullOrBlank()) return null
     var fixed = if (url.startsWith("//")) "https:$url" else url
-    fixed = fixed.replace(Regex("""-\d+x\d+""", RegexOption.IGNORE_CASE), "")
-    fixed = fixed.replace(Regex("""-scaled(?=\.[a-zA-Z]+$)""", RegexOption.IGNORE_CASE), "")
+    fixed = stripSmallSizeSuffix(fixed)
     val qIdx = fixed.indexOf("?")
     if (qIdx >= 0) {
         val base = fixed.substring(0, qIdx)
-        val kept = fixed.substring(qIdx + 1).split(";").mapNotNull { p ->
+        val kept = fixed.substring(qIdx + 1).split("&").mapNotNull { p ->
             val k = p.substringBefore("=").trim()
             if (k.equals("resize", ignoreCase = true) || k.equals("w", ignoreCase = true)
                 || k.equals("width", ignoreCase = true)
@@ -113,13 +116,33 @@ internal fun upgradePosterUrl(url: String?): String? {
                 || k.equals("height", ignoreCase = true)
                 || k.equals("fit", ignoreCase = true)
             ) null else p
-        }.joinToString(";")
-        fixed = if (kept.isBlank()) base else "$base?$kept"
+        }.joinToString("&")
+        fixed = if (kept.isBlank()) base else "$base&$kept".replace("?&", "?")
     }
     return fixed
 }
 
+/** Strips a "-WxH" size marker (e.g. -300x450) only when it represents a
+ * small thumbnail: both dims <= 500. Left intact: -scaled (a real WP file
+ * variant), large dims (the image is already full-res). Returns [url] unchanged
+ * when the marker dims exceed the thumbnail threshold or there is none. */
+private fun stripSmallSizeSuffix(url: String): String {
+    val m = Regex("""-(\d{2,4})x(\d{2,4})""", RegexOption.IGNORE_CASE).find(url) ?: return url
+    val w = m.groupValues[1].toInt()
+    val h = m.groupValues[2].toInt()
+    if (w > 500 || h > 500) return url
+    return url.removeRange(m.range)
+}
+
 internal fun upgradeUrl(url: String?): String? = upgradePosterUrl(url)
+
+/** Tries common lazy-load attributes in order so a poster URL is found even when
+ * the theme stores the real image in a data-* attribute instead of src. */
+private fun Element.posterUrl(): String? =
+    selectFirst("img")?.let { img ->
+        listOf(img.attr("src"), img.attr("data-src"), img.attr("data-lazy-src"),
+            img.attr("data-original"), img.attr("data-lazyload")).firstOrNull { it.isNotBlank() }
+    }?.takeIf { it.isNotBlank() }
 
 /** Cheap, no-network parse of the per-item rating badge (as a number) from
  *  list/search markup. Returns null when absent so search never makes extra
@@ -135,13 +158,11 @@ internal fun parseRating(item: Element): Double? {
 }
 
 /** Server names as they appear on the Multimovies "Video Sources" list, ordered
- *  most-reliable/fast to least. Defined at top level so tests can read the
- *  ordering without class-loading the (Android-dependent) provider. Servers not
- *  listed here are still pulled (with the generic sniffer as a fallback), but
- *  with the lowest priority. Order mirrors the site's own ranking (GDMIRROR is
- *  the recommended/top source), so the fastest/most reliable hosts surface first. */
+ *  by speed/reliability (fastest/most reliable first). Mirrors the site's own
+ *  ranking (GDMIRROR is the recommended/top source), so the quickest-responding
+ *  hosts surface first. Servers not listed here are still pulled (generic
+ *  sniffer fallback) but with the lowest priority. */
 internal val SOURCE_PRIORITY: List<String> = listOf(
-    "GDMIRROR - Recommended",
     "GDMIRROR",
     "screenscape.me",
     "VidZee",
@@ -151,13 +172,6 @@ internal val SOURCE_PRIORITY: List<String> = listOf(
     "vidlink.pro",
     "Cineverse",
     "Nxsha",
-    "CineMM",
-    "VidHide",
-    "GDFlix",
-    "HubCloud",
-    "FastDL",
-    "StreamWish",
-    "Multimovies",
 )
 
 
@@ -315,8 +329,49 @@ class MultimoviesProvider : MainAPI() {
         )
 
         val results = items.mapNotNull { it.toSearchResponse() }
+        // Backfill posters only for items whose own markup yielded none. Bounded
+        // (max 3 concurrent, ~3s each) so search latency stays ~1-2s; if an item
+        // doesn't resolve in time it simply keeps no poster.
+        backfillPosters(results)
         return results.takeIf { it.isNotEmpty() }?.also { SearchCache.put(query, it) }
     }
+
+    /** Concurrently resolve Cinemeta posters for search results that are missing one.
+     *  Bounded to 3 concurrent lookups with a 3s per-item timeout so search stays fast. */
+    private suspend fun backfillPosters(results: List<SearchResponse>) {
+        val toFetch = results.mapNotNull { r ->
+            val poster = r.posterUrl
+            if (poster.isNullOrBlank()) SearchItem(r, r.name ?: "", r.type ?: TvType.Movie) else null
+        }
+        if (toFetch.isEmpty()) return
+        val semaphore = Semaphore(3)
+        coroutineScope {
+            toFetch.map { item ->
+                async {
+                    semaphore.acquire()
+                    try {
+                        withTimeoutOrNull(3000L) {
+                            val imdbId = CinemetaService.searchImdbId(
+                                item.title, null, if (item.tvType == TvType.Movie) "movie" else "series"
+                            ) ?: return@withTimeoutOrNull null
+                            val metaType = if (item.tvType == TvType.Movie) "movie" else "series"
+                            CinemetaService.fetchMeta(imdbId, metaType)?.poster
+                        }?.takeIf { it.isNotBlank() }
+                    } finally {
+                        semaphore.release()
+                    }
+                }
+            }.awaitAll().forEachIndexed { idx, url ->
+                if (url != null) toFetch[idx].response.posterUrl = url
+            }
+        }
+    }
+
+    private data class SearchItem(
+        val response: SearchResponse,
+        val title: String,
+        val tvType: TvType,
+    )
 
     override suspend fun quickSearch(query: String): List<SearchResponse>? = search(query)
 
@@ -328,10 +383,7 @@ class MultimoviesProvider : MainAPI() {
             ?: a.text()
             ?.trim()
             ?: return null
-        val poster = upgradePosterUrl(
-            selectFirst("img")?.attr("src")
-                ?: selectFirst("img")?.attr("data-src")
-        )
+        val poster = upgradePosterUrl(posterUrl())
         val isMovie = href.contains("/movies/")
         val isSeries = href.contains("/tvshows/") || href.contains("/seasons/")
         val tvType = when {
@@ -400,28 +452,36 @@ class MultimoviesProvider : MainAPI() {
 
         // IMDB id: used to tag the response for CloudStream's built-in meta-provider
         // enrichment (cast with photos, richer ratings) and for metadata fetches.
-        // Falls back to a title-based Cinemeta search when the page doesn't expose
-        // an IMDB id directly (some Dooplay builds omit the IMDB link).
-        var imdbId = CinemetaService.extractImdbId(doc)
-        if (imdbId == null && !title.isNullOrBlank()) {
-            imdbId = CinemetaService.searchImdbId(title, year, if (isMovie) "movie" else "series")
-        }
+        // Falls back to a title-based Cinemeta search when the page doesn't expose an
+        // IMDB id directly (some Dooplay builds omit the IMDB link). The fallback runs
+        // INSIDE the coroutineScope below so it overlaps season-page fetching.
+        val imdbIdFromPage = CinemetaService.extractImdbId(doc)
 
+        val aioType = if (isMovie) "movie" else "series"
         // Fetch keyless cast + artwork (from AIOStreams/TVDB addon) and Cinemeta
         // episode metadata concurrently. Both are independent API calls, each with its
         // own internal error handling (return null on failure), so neither can block or
         // crash load(). This parallel fetch keeps load() fast even on slow networks.
-        val aioType = if (isMovie) "movie" else "series"
         return coroutineScope {
-            val aioMetaDeferred = if (imdbId != null) {
-                async { TvdbDataService.fetchMeta(imdbId, aioType) }
+            // Resolve the IMDB id (page extraction + fallback title search). The
+            // fallback search is deferred so season-page fetching can run in parallel
+            // with it instead of serializing before the season loop.
+            val imdbIdDeferred = if (imdbIdFromPage == null && !title.isNullOrBlank()) {
+                async {
+                    withTimeoutOrNull(4000L) {
+                        CinemetaService.searchImdbId(title, year, if (isMovie) "movie" else "series")
+                    }
+                }
             } else null
-            val videoMetaDeferred = if (imdbId != null && !isMovie) {
-                async { CinemetaService.fetchMeta(imdbId, "series") }
-            } else null
-            val aioMeta = aioMetaDeferred?.await()
 
             if (isMovie) {
+                // Movies: the only concurrency win is IMDB-id search overlapping nothing
+                // else (no seasons), but resolve it before launching aioMeta which needs it.
+                val resolvedImdbId = imdbIdFromPage ?: imdbIdDeferred?.await()
+                val aioMetaDeferred = if (resolvedImdbId != null) {
+                    async { TvdbDataService.fetchMeta(resolvedImdbId, aioType) }
+                } else null
+                val aioMeta = aioMetaDeferred?.await()
                 newMovieLoadResponse(title, url, TvType.Movie, url) {
                     this.posterUrl = aioMeta?.poster ?: poster
                     this.backgroundPosterUrl = aioMeta?.background
@@ -430,8 +490,8 @@ class MultimoviesProvider : MainAPI() {
                     this.plot = plot
                     this.tags = tags
                     this.actors = aioMeta?.cast
-                    if (imdbId != null) {
-                        addImdbId(imdbId)
+                    if (resolvedImdbId != null) {
+                        addImdbId(resolvedImdbId)
                         score?.let { s -> s.toDoubleOrNull()?.let { addScore(s, 10) } }
                     } else {
                         this.score = score?.let { Score.from10(it) }
@@ -445,14 +505,43 @@ class MultimoviesProvider : MainAPI() {
                     .distinct()
 
                 val pages = if (seasonLinks.isEmpty()) listOf(url) else seasonLinks
+
+                // Fetch all season/episode pages in PARALLEL (fast-path fetchDoc reuses
+                // the already-solved cookies and never triggers a fresh CF solve). Each
+                // page is bounded by a 10s timeout and wrapped so a failure just skips
+                // that season. Concurrency capped to avoid hammering the site.
+                val seasonDocsDeferred = async {
+                    val sem = Semaphore(4)
+                    pages.map { seasonUrl ->
+                        async {
+                            sem.acquire()
+                            try {
+                                fetchDoc(seasonUrl, timeoutSeconds = 10, required = false)
+                            } finally {
+                                sem.release()
+                            }
+                        }
+                    }.awaitAll()
+                }
+
+                // Resolve the IMDB id (overlaps season page fetching above).
+                val resolvedImdbId = imdbIdFromPage ?: imdbIdDeferred?.await()
+
+                // Now that the id is known, kick off the two metadata API calls in parallel.
+                val aioMetaDeferred = if (resolvedImdbId != null) {
+                    async { TvdbDataService.fetchMeta(resolvedImdbId, aioType) }
+                } else null
+                val videoMetaDeferred = if (resolvedImdbId != null) {
+                    async { CinemetaService.fetchMeta(resolvedImdbId, "series") }
+                } else null
+
+                // Await season docs + metadata concurrently (fastest-available wins).
+                val seasonDocs = seasonDocsDeferred.await()
+                val aioMeta = aioMetaDeferred?.await()
                 val videoMeta = videoMetaDeferred?.await()
 
-                for (seasonUrl in pages) {
-                    val sDoc = try {
-                        solveDocument(seasonUrl)
-                    } catch (e: Exception) {
-                        continue
-                    }
+                seasonDocs.forEach { sDoc ->
+                    if (sDoc == null) return@forEach
                     sDoc.select("ul.episodios li, div.eps div.ep, .episodios li").forEachIndexed { i, ep ->
                         val epLink = ep.selectFirst("a[href]")?.attr("href")?.takeIf { it.contains(mainUrl) }
                             ?: return@forEachIndexed
@@ -486,8 +575,8 @@ class MultimoviesProvider : MainAPI() {
                     this.plot = plot
                     this.tags = tags
                     this.actors = aioMeta?.cast
-                    if (imdbId != null) {
-                        addImdbId(imdbId)
+                    if (resolvedImdbId != null) {
+                        addImdbId(resolvedImdbId)
                         score?.let { s -> s.toDoubleOrNull()?.let { addScore(s, 10) } }
                     } else {
                         this.score = score?.let { Score.from10(it) }
