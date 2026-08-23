@@ -89,17 +89,6 @@ subprojects {
     }
 }
 
-    tasks.withType<Test>().configureEach {
-        useJUnitPlatform()
-    }
-
-afterEvaluate {
-    tasks.withType<Test>().configureEach {
-        useJUnitPlatform()
-    }
-}
-
-
     tasks.register<Delete>("clean") {
         delete(rootProject.layout.buildDirectory)
     }
