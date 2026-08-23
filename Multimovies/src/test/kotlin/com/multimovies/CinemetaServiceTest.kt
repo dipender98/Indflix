@@ -1,0 +1,86 @@
+package com.multimovies
+
+import org.jsoup.Jsoup
+import org.junit.jupiter.api.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertNull
+
+class CinemetaServiceTest {
+
+    @Test
+    fun `extractImdbId finds id from og meta tag`() {
+        val doc = Jsoup.parse(
+            """<html><head>
+                <meta property="og:imdb_id" content="tt0944947">
+            </head><body></body></html>"""
+        )
+        assertEquals("tt0944947", CinemetaService.extractImdbId(doc))
+    }
+
+    @Test
+    fun `extractImdbId finds id from imdb link href`() {
+        val doc = Jsoup.parse(
+            """<html><body>
+                <a href="https://www.imdb.com/title/tt0111417/">IMDb</a>
+            </body></html>"""
+        )
+        assertEquals("tt0111417", CinemetaService.extractImdbId(doc))
+    }
+
+    @Test
+    fun `extractImdbId finds id from dooplay imdb container`() {
+        val doc = Jsoup.parse(
+            """<html><body>
+                <div class="imdb"><a href="/title/tt1234567/">8.5</a></div>
+            </body></html>"""
+        )
+        assertEquals("tt1234567", CinemetaService.extractImdbId(doc))
+    }
+
+    @Test
+    fun `extractImdbId returns null when no imdb id present`() {
+        val doc = Jsoup.parse("<html><body><h1>No links here</h1></body></html>")
+        assertNull(CinemetaService.extractImdbId(doc))
+    }
+
+    @Test
+    fun `parseMeta extracts episode descriptions and dates`() {
+        val json = """
+            {
+              "meta": {
+                "id": "tt0944947",
+                "name": "Game of Thrones",
+                "year": "2011",
+                "description": "A story of conflict.",
+                "imdbRating": "9.2",
+                "genre": ["Drama", "Fantasy"],
+                "cast": ["Peter Dinklage", "Emilia Clarke"],
+                "videos": [
+                  {"id": "tt0944947:1:1", "name": "Winter Is Coming", "overview": "An epic start.", "season": 1, "episode": 1, "released": "2011-04-17T00:00:00.000Z", "thumbnail": "https://episodes.metahub.space/tt0944947/1/1/poster.jpg"},
+                  {"id": "tt0944947:1:2", "name": "The Kingsroad", "overview": "Second episode.", "season": 1, "episode": 2, "released": "2011-04-24T00:00:00.000Z"}
+                ]
+              }
+            }
+        """.trimIndent()
+
+        val meta = CinemetaService.parseMeta(json)
+        assertEquals("tt0944947", meta?.id)
+        assertEquals("Game of Thrones", meta?.name)
+        assertEquals("9.2", meta?.imdbRating)
+        assertEquals(listOf("Drama", "Fantasy"), meta?.genre)
+        assertEquals(listOf("Peter Dinklage", "Emilia Clarke"), meta?.cast)
+        assertEquals(2, meta?.videos?.size)
+        val ep1 = meta?.videos?.first()
+        assertEquals("Winter Is Coming", ep1?.name)
+        assertEquals("An epic start.", ep1?.overview)
+        assertEquals("2011-04-17T00:00:00.000Z", ep1?.released)
+        assertEquals("https://episodes.metahub.space/tt0944947/1/1/poster.jpg", ep1?.thumbnail)
+    }
+
+    @Test
+    fun `parseMeta returns null for invalid json`() {
+        assertNull(CinemetaService.parseMeta("not valid json"))
+        assertNull(CinemetaService.parseMeta(""))
+        assertNull(CinemetaService.parseMeta(null))
+    }
+}

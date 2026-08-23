@@ -1,6 +1,8 @@
 package com.multimovies
 
 import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.LoadResponse.Companion.addImdbId
+import com.lagradost.cloudstream3.LoadResponse.Companion.addScore
 import com.lagradost.cloudstream3.network.CloudflareKiller
 import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.*
@@ -290,13 +292,32 @@ class MultimoviesProvider : MainAPI() {
 
         val isMovie = url.contains("/movies/")
 
+        // IMDB id: used to tag the response for CloudStream's built-in meta-provider
+        // enrichment (cast with photos, richer ratings) and for metadata fetches.
+        val imdbId = CinemetaService.extractImdbId(doc)
+
+        // Keyless cast + artwork (poster/background/logo) from the AIOStreams / TMDB
+        // Stremio addon. Shows cast photos WITHOUT requiring the user to enable TMDB
+        // in CloudStream (unlike addImdbId, which only triggers the meta-provider).
+        val aioMeta = if (imdbId != null) {
+            TvdbDataService.fetchMeta(imdbId, if (isMovie) "movie" else "series")
+        } else null
+
         return if (isMovie) {
             newMovieLoadResponse(title, url, TvType.Movie, url) {
-                this.posterUrl = poster
+                this.posterUrl = aioMeta?.poster ?: poster
+                this.backgroundPosterUrl = aioMeta?.background
+                this.logoUrl = aioMeta?.logo
                 this.year = year
                 this.plot = plot
-                this.score = score?.let { Score.from10(it) }
                 this.tags = tags
+                this.actors = aioMeta?.cast
+                if (imdbId != null) {
+                    addImdbId(imdbId)
+                    score?.let { s -> s.toDoubleOrNull()?.let { addScore(s, 10) } }
+                } else {
+                    this.score = score?.let { Score.from10(it) }
+                }
             }
         } else {
             // TV / Seasons: collect all episodes from season + episode archive pages.
@@ -306,6 +327,10 @@ class MultimoviesProvider : MainAPI() {
                 .distinct()
 
             val pages = if (seasonLinks.isEmpty()) listOf(url) else seasonLinks
+            val videoMeta = if (imdbId != null) {
+                CinemetaService.fetchMeta(imdbId, "series")
+            } else null
+
             for (seasonUrl in pages) {
                 val sDoc = try {
                     solveDocument(seasonUrl)
@@ -319,22 +344,38 @@ class MultimoviesProvider : MainAPI() {
                         ?: Regex("(\\d+)").find(epLink)?.value?.toIntOrNull() ?: (i + 1)
                     val seasonNum = Regex("(?i)(\\d+)x(\\d+)").find(epLink)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 1
                     val epTitle = ep.selectFirst(".episodiotitle a, .title, a")?.text()?.trim()
-                    episodes.add(
-                        newEpisode(epLink) {
-                            this.name = epTitle
-                            this.episode = epNum
-                            this.season = seasonNum
-                        }
-                    )
+                    val ep = newEpisode(epLink) {
+                        this.name = epTitle
+                        this.episode = epNum
+                        this.season = seasonNum
+                    }
+                    // Enrich with Cinemeta episode metadata: description, release date, thumbnail.
+                    videoMeta?.videos?.find {
+                        it.season == seasonNum && it.episode == epNum
+                    }?.let { vid ->
+                        ep.description = vid.overview
+                        vid.released?.let { ep.addDate(it) }
+                        vid.thumbnail?.let { ep.posterUrl = it }
+                        vid.rating?.toDoubleOrNull()?.let { ep.score = Score.from10(it) }
+                    }
+                    episodes.add(ep)
                 }
             }
 
             newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
-                this.posterUrl = poster
+                this.posterUrl = aioMeta?.poster ?: poster
+                this.backgroundPosterUrl = aioMeta?.background
+                this.logoUrl = aioMeta?.logo
                 this.year = year
                 this.plot = plot
-                this.score = score?.let { Score.from10(it) }
                 this.tags = tags
+                this.actors = aioMeta?.cast
+                if (imdbId != null) {
+                    addImdbId(imdbId)
+                    score?.let { s -> s.toDoubleOrNull()?.let { addScore(s, 10) } }
+                } else {
+                    this.score = score?.let { Score.from10(it) }
+                }
             }
         }
     }
