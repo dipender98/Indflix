@@ -70,6 +70,57 @@ class CinemetaServiceTest {
     }
 
     @Test
+    fun `extractImdbId finds id from inline js variable`() {
+        val doc = Jsoup.parse(
+            """<html><body>
+                <script>var imdb_id = "tt3333333";</script>
+            </body></html>"""
+        )
+        assertEquals("tt3333333", CinemetaService.extractImdbId(doc))
+    }
+
+    @Test
+    fun `extractImdbId finds id from single-quote json`() {
+        val doc = Jsoup.parse(
+            """<html><body>
+                <script>{'imdb_id': 'tt4444444'}</script>
+            </body></html>"""
+        )
+        assertEquals("tt4444444", CinemetaService.extractImdbId(doc))
+    }
+
+    @Test
+    fun `pickBestImdbId matches exact title and year`() {
+        val json = """
+            {
+              "metas": [
+                {"id": "tt0944947", "name": "Game of Thrones", "year": "2011"},
+                {"id": "tt1111111", "name": "Something Else", "year": "2015"}
+              ]
+            }
+        """.trimIndent()
+        assertEquals("tt0944947", CinemetaService.pickBestImdbId(json, "Game of Thrones", 2011))
+    }
+
+    @Test
+    fun `pickBestImdbId falls back to first result`() {
+        val json = """
+            {
+              "metas": [
+                {"id": "tt5555555", "name": "Some Movie", "year": "2020"}
+              ]
+            }
+        """.trimIndent()
+        assertEquals("tt5555555", CinemetaService.pickBestImdbId(json, "Unrelated Query", null))
+    }
+
+    @Test
+    fun `pickBestImdbId returns null for invalid json`() {
+        assertNull(CinemetaService.pickBestImdbId("not json", "Game of Thrones", null))
+        assertNull(CinemetaService.pickBestImdbId("", "Game of Thrones", null))
+    }
+
+    @Test
     fun `extractImdbId returns null when no imdb id present`() {
         val doc = Jsoup.parse("<html><body><h1>No links here</h1></body></html>")
         assertNull(CinemetaService.extractImdbId(doc))

@@ -298,7 +298,12 @@ class MultimoviesProvider : MainAPI() {
 
         // IMDB id: used to tag the response for CloudStream's built-in meta-provider
         // enrichment (cast with photos, richer ratings) and for metadata fetches.
-        val imdbId = CinemetaService.extractImdbId(doc)
+        // Falls back to a title-based Cinemeta search when the page doesn't expose
+        // an IMDB id directly (some Dooplay builds omit the IMDB link).
+        var imdbId = CinemetaService.extractImdbId(doc)
+        if (imdbId == null && !title.isNullOrBlank()) {
+            imdbId = CinemetaService.searchImdbId(title, year, if (isMovie) "movie" else "series")
+        }
 
         // Fetch keyless cast + artwork (from AIOStreams/TVDB addon) and Cinemeta
         // episode metadata concurrently. Both are independent API calls, each with its

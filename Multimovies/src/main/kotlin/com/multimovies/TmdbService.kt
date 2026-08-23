@@ -28,14 +28,59 @@ private fun str(obj: JSONObject, key: String): String? {
  */
 object CinemetaService {
 
-    private const val BASE_URL = "https://v3-cinemeta.strem.io/meta"
+    private const val META_URL = "https://v3-cinemeta.strem.io/meta"
+    private const val CATALOG_URL = "https://v3-cinemeta.strem.io/catalog"
 
     /** Fetch Cinemeta metadata for [imdbId] of [type] ("movie" or "series"). */
     suspend fun fetchMeta(imdbId: String, type: String): CinemetaMeta? {
         if (imdbId.isBlank()) return null
         return try {
-            val text = app.get("$BASE_URL/$type/$imdbId.json", timeout = 15).text
+            val text = app.get("$META_URL/$type/$imdbId.json", timeout = 15).text
             parseMeta(text)
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /**
+     * Search for an IMDB id by [title] and optional [year] using Cinemeta's
+     * public catalog search. This is a fallback when the page doesn't expose
+     * an IMDB id directly.
+     */
+    suspend fun searchImdbId(title: String, year: Int?, type: String): String? {
+        val query = java.net.URLEncoder.encode(title.trim(), "UTF-8")
+        val json = try {
+            app.get("$CATALOG_URL/$type/top/search=$query.json", timeout = 10).text
+        } catch (e: Exception) {
+            return null
+        }
+        if (json.isBlank()) return null
+        return pickBestImdbId(json, title, year)
+    }
+
+    /** Parse a Cinemeta catalog search response and pick the best IMDB id match. */
+    fun pickBestImdbId(raw: String?, title: String, year: Int?): String? {
+        if (raw.isNullOrBlank()) return null
+        return try {
+            val root = JSONObject(raw)
+            val metas = root.optJSONArray("metas") ?: return null
+            val titleLower = title.lowercase().trim()
+            // try exact title match (year optional, prefer it when provided)
+            for (i in 0 until metas.length()) {
+                val m = metas.optJSONObject(i) ?: continue
+                val name = str(m, "name")?.lowercase()?.trim() ?: continue
+                val mYear = str(m, "year")?.takeIf { it.length == 4 }?.toIntOrNull()
+                    ?: str(m, "releaseInfo")?.take(4)?.toIntOrNull()
+                if (name == titleLower && (year == null || mYear == null || mYear == year)) {
+                    str(m, "id")?.takeIf { it.startsWith("tt") }?.let { return it }
+                }
+            }
+            // fallback: first result with an imdb id
+            for (i in 0 until metas.length()) {
+                val m = metas.optJSONObject(i) ?: continue
+                str(m, "id")?.takeIf { it.startsWith("tt") }?.let { return it }
+            }
+            null
         } catch (e: Exception) {
             null
         }
@@ -76,6 +121,14 @@ object CinemetaService {
             val m = Regex("""\"@id\"\s*:\s*\"https?://(?:www\.)?imdb\.com/title/(tt\d+)\"""").find(text)
                 ?: Regex("""tt\d{7,8}""").find(text)
             m?.value?.let { return normalize(it) }
+        }
+
+        // 6. Inline JavaScript variables: imdb_id = "tt...", "imdb": "tt...", etc.
+        doc.select("script").forEach { script ->
+            val text = script.html()
+            val m = Regex("""imdb[_\s]*id\s*[=:]\s*['"](tt\d+)['"]""", RegexOption.IGNORE_CASE).find(text)
+                ?: Regex("""['"](?:imdb|imdb_id|imdbId|imdbid)['"]\s*:\s*['"](tt\d+)['"]""", RegexOption.IGNORE_CASE).find(text)
+            m?.groupValues?.getOrNull(1)?.let { return it }
         }
 
         return null
@@ -181,17 +234,18 @@ object TvdbDataService {
      */
     suspend fun fetchMeta(imdbId: String?, type: String): ExtractedMediaData? {
         if (imdbId.isNullOrBlank()) return null
-        var json = try {
-            app.get("$PRIMARY/$type/$imdbId.json", timeout = 10).text
-        } catch (e: Exception) {
-            ""
-        }
-        if (json.isBlank()) {
+        val candidates = listOf(
+            "$PRIMARY/$type/$imdbId.json",
+            "$FALLBACK/$type/$imdbId.json",
+        )
+        var json = ""
+        for (url in candidates) {
             json = try {
-                app.get("$FALLBACK/$type/$imdbId.json", timeout = 10).text
+                app.get(url, timeout = 6).text
             } catch (e: Exception) {
                 ""
             }
+            if (json.isNotBlank()) break
         }
         if (json.isBlank()) return null
 
