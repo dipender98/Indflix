@@ -155,13 +155,17 @@ class MultimoviesProvider : MainAPI() {
         },
         isChallenge: (Document) -> Boolean = { doc ->
             val bodyText = doc.body()?.text() ?: ""
+            val titleText = doc.selectFirst("title")?.text()?.lowercase() ?: ""
+            // Use precise Cloudflare challenge indicators only. Avoid broad terms like
+            // "cloudflare", "please wait", or "ray id" which can appear on legitimate
+            // pages (footers, cookie notices, loading messages) and cause false-positive
+            // rejections that prevent content AND metadata from loading.
             bodyText.contains("just a moment", ignoreCase = true)
                 || bodyText.contains("cf-mitigated", ignoreCase = true)
                 || bodyText.contains("verify you are human", ignoreCase = true)
                 || bodyText.contains("checking your browser", ignoreCase = true)
-                || bodyText.contains("please wait", ignoreCase = true)
-                || bodyText.contains("ray id", ignoreCase = true)
-                || bodyText.contains("cloudflare", ignoreCase = true)
+                || bodyText.contains("attention required", ignoreCase = true)
+                || titleText.contains("just a moment", ignoreCase = true)
         },
     ): Document {
         val factories = listOf<() -> CloudflareKiller>(
@@ -296,85 +300,91 @@ class MultimoviesProvider : MainAPI() {
         // enrichment (cast with photos, richer ratings) and for metadata fetches.
         val imdbId = CinemetaService.extractImdbId(doc)
 
-        // Keyless cast + artwork (poster/background/logo) from the AIOStreams / TMDB
-        // Stremio addon. Shows cast photos WITHOUT requiring the user to enable TMDB
-        // in CloudStream (unlike addImdbId, which only triggers the meta-provider).
-        val aioMeta = if (imdbId != null) {
-            TvdbDataService.fetchMeta(imdbId, if (isMovie) "movie" else "series")
-        } else null
-
-        return if (isMovie) {
-            newMovieLoadResponse(title, url, TvType.Movie, url) {
-                this.posterUrl = aioMeta?.poster ?: poster
-                this.backgroundPosterUrl = aioMeta?.background
-                this.logoUrl = aioMeta?.logo
-                this.year = year
-                this.plot = plot
-                this.tags = tags
-                this.actors = aioMeta?.cast
-                if (imdbId != null) {
-                    addImdbId(imdbId)
-                    score?.let { s -> s.toDoubleOrNull()?.let { addScore(s, 10) } }
-                } else {
-                    this.score = score?.let { Score.from10(it) }
-                }
-            }
-        } else {
-            // TV / Seasons: collect all episodes from season + episode archive pages.
-            val episodes = arrayListOf<Episode>()
-            val seasonLinks = doc.select("div.se-c div.se-q a[href], ul.episodios li a[href], .seasons a[href]")
-                .mapNotNull { it.attr("href").takeIf { h -> h.contains(mainUrl) } }
-                .distinct()
-
-            val pages = if (seasonLinks.isEmpty()) listOf(url) else seasonLinks
-            val videoMeta = if (imdbId != null) {
-                CinemetaService.fetchMeta(imdbId, "series")
+        // Fetch keyless cast + artwork (from AIOStreams/TVDB addon) and Cinemeta
+        // episode metadata concurrently. Both are independent API calls, each with its
+        // own internal error handling (return null on failure), so neither can block or
+        // crash load(). This parallel fetch keeps load() fast even on slow networks.
+        val aioType = if (isMovie) "movie" else "series"
+        return coroutineScope {
+            val aioMetaDeferred = if (imdbId != null) {
+                async { TvdbDataService.fetchMeta(imdbId, aioType) }
             } else null
+            val videoMetaDeferred = if (imdbId != null && !isMovie) {
+                async { CinemetaService.fetchMeta(imdbId, "series") }
+            } else null
+            val aioMeta = aioMetaDeferred?.await()
 
-            for (seasonUrl in pages) {
-                val sDoc = try {
-                    solveDocument(seasonUrl)
-                } catch (e: Exception) {
-                    continue
-                }
-                sDoc.select("ul.episodios li, div.eps div.ep, .episodios li").forEachIndexed { i, ep ->
-                    val epLink = ep.selectFirst("a[href]")?.attr("href")?.takeIf { it.contains(mainUrl) }
-                        ?: return@forEachIndexed
-                    val epNum = Regex("(?i)(\\d+)x(\\d+)").find(epLink)?.groupValues?.getOrNull(2)?.toIntOrNull()
-                        ?: Regex("(\\d+)").find(epLink)?.value?.toIntOrNull() ?: (i + 1)
-                    val seasonNum = Regex("(?i)(\\d+)x(\\d+)").find(epLink)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 1
-                    val epTitle = ep.selectFirst(".episodiotitle a, .title, a")?.text()?.trim()
-                    val ep = newEpisode(epLink) {
-                        this.name = epTitle
-                        this.episode = epNum
-                        this.season = seasonNum
+            if (isMovie) {
+                newMovieLoadResponse(title, url, TvType.Movie, url) {
+                    this.posterUrl = aioMeta?.poster ?: poster
+                    this.backgroundPosterUrl = aioMeta?.background
+                    this.logoUrl = aioMeta?.logo
+                    this.year = year
+                    this.plot = plot
+                    this.tags = tags
+                    this.actors = aioMeta?.cast
+                    if (imdbId != null) {
+                        addImdbId(imdbId)
+                        score?.let { s -> s.toDoubleOrNull()?.let { addScore(s, 10) } }
+                    } else {
+                        this.score = score?.let { Score.from10(it) }
                     }
-                    // Enrich with Cinemeta episode metadata: description, release date, thumbnail.
-                    videoMeta?.videos?.find {
-                        it.season == seasonNum && it.episode == epNum
-                    }?.let { vid ->
-                        ep.description = vid.overview
-                        vid.released?.let { ep.addDate(it) }
-                        vid.thumbnail?.let { ep.posterUrl = it }
-                        vid.rating?.toDoubleOrNull()?.let { ep.score = Score.from10(it) }
-                    }
-                    episodes.add(ep)
                 }
-            }
+            } else {
+                // TV / Seasons: collect all episodes from season + episode archive pages.
+                val episodes = arrayListOf<Episode>()
+                val seasonLinks = doc.select("div.se-c div.se-q a[href], ul.episodios li a[href], .seasons a[href]")
+                    .mapNotNull { it.attr("href").takeIf { h -> h.contains(mainUrl) } }
+                    .distinct()
 
-            newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
-                this.posterUrl = aioMeta?.poster ?: poster
-                this.backgroundPosterUrl = aioMeta?.background
-                this.logoUrl = aioMeta?.logo
-                this.year = year
-                this.plot = plot
-                this.tags = tags
-                this.actors = aioMeta?.cast
-                if (imdbId != null) {
-                    addImdbId(imdbId)
-                    score?.let { s -> s.toDoubleOrNull()?.let { addScore(s, 10) } }
-                } else {
-                    this.score = score?.let { Score.from10(it) }
+                val pages = if (seasonLinks.isEmpty()) listOf(url) else seasonLinks
+                val videoMeta = videoMetaDeferred?.await()
+
+                for (seasonUrl in pages) {
+                    val sDoc = try {
+                        solveDocument(seasonUrl)
+                    } catch (e: Exception) {
+                        continue
+                    }
+                    sDoc.select("ul.episodios li, div.eps div.ep, .episodios li").forEachIndexed { i, ep ->
+                        val epLink = ep.selectFirst("a[href]")?.attr("href")?.takeIf { it.contains(mainUrl) }
+                            ?: return@forEachIndexed
+                        val epNum = Regex("(?i)(\\d+)x(\\d+)").find(epLink)?.groupValues?.getOrNull(2)?.toIntOrNull()
+                            ?: Regex("(\\d+)").find(epLink)?.value?.toIntOrNull() ?: (i + 1)
+                        val seasonNum = Regex("(?i)(\\d+)x(\\d+)").find(epLink)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 1
+                        val epTitle = ep.selectFirst(".episodiotitle a, .title, a")?.text()?.trim()
+                        val ep = newEpisode(epLink) {
+                            this.name = epTitle
+                            this.episode = epNum
+                            this.season = seasonNum
+                        }
+                        // Enrich with Cinemeta episode metadata: description, release date, thumbnail.
+                        videoMeta?.videos?.find {
+                            it.season == seasonNum && it.episode == epNum
+                        }?.let { vid ->
+                            ep.description = vid.overview
+                            vid.released?.let { ep.addDate(it) }
+                            vid.thumbnail?.let { ep.posterUrl = it }
+                            vid.rating?.toDoubleOrNull()?.let { ep.score = Score.from10(it) }
+                        }
+                        episodes.add(ep)
+                    }
+                }
+
+                newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
+                    this.posterUrl = aioMeta?.poster ?: poster
+                    this.backgroundPosterUrl = aioMeta?.background
+                    this.logoUrl = aioMeta?.logo
+                    this.year = year
+                    this.plot = plot
+                    this.tags = tags
+                    this.actors = aioMeta?.cast
+                    if (imdbId != null) {
+                        addImdbId(imdbId)
+                        score?.let { s -> s.toDoubleOrNull()?.let { addScore(s, 10) } }
+                    } else {
+                        this.score = score?.let { Score.from10(it) }
+                    }
                 }
             }
         }
