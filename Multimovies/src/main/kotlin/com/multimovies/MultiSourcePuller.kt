@@ -68,6 +68,8 @@ object MultiSourcePuller {
      * @param timeoutMs per-source hard timeout in ms (project default: 30_000)
      * @param priorityOf maps a server name to a sort index (lower = better)
      * @param onSubtitle called for each subtitle found
+     * @param onLink optional: called immediately for every extracted link (streaming —
+     *        lets the player start the fastest source instead of waiting for all sources)
      * @return list of extractor links, ordered by source priority
      */
     suspend fun pull(
@@ -75,6 +77,7 @@ object MultiSourcePuller {
         timeoutMs: Long = MultimoviesProvider.SOURCE_TIMEOUT_MS,
         priorityOf: (String) -> Int,
         onSubtitle: (SubtitleFile) -> Unit,
+        onLink: (ExtractorLink) -> Unit = {},
     ): List<ExtractorLink> = withContext(Dispatchers.IO) {
         if (sources.isEmpty()) return@withContext emptyList()
 
@@ -92,19 +95,19 @@ object MultiSourcePuller {
                                 referer = src.referer,
                                 subtitleCallback = { subs.add(it) },
                                 callback = { l ->
-                                    links.add(
-                                        ExtractorLink(
-                                            source = src.name + INDICATOR,
-                                            name = l.name,
-                                            url = l.url,
-                                            referer = l.referer,
-                                            quality = l.quality,
-                                            headers = l.headers,
-                                            extractorData = null,
-                                            type = l.type,
-                                            audioTracks = emptyList()
-                                        )
+                                    val link = ExtractorLink(
+                                        source = src.name + INDICATOR,
+                                        name = l.name,
+                                        url = l.url,
+                                        referer = l.referer,
+                                        quality = l.quality,
+                                        headers = l.headers,
+                                        extractorData = null,
+                                        type = l.type,
+                                        audioTracks = emptyList()
                                     )
+                                    links.add(link)
+                                    onLink(link)
                                 }
                             )
                         }

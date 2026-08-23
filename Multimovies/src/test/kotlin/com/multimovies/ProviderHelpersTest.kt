@@ -103,17 +103,11 @@ class ProviderHelpersTest {
     // ---- SOURCE_PRIORITY ordering ----
 
     @Test
-    fun `priorityOf ranks CineMM and VidHide at the top`() {
-        val idxCinemm = SOURCE_PRIORITY.indexOf("CineMM")
-        val idxVid = SOURCE_PRIORITY.indexOf("VidHide")
-        val idxGdm = SOURCE_PRIORITY.indexOf("GDMIRROR - Recommended")
-        assertTrue(idxCinemm == 0 && idxVid == 1 && idxGdm > 1)
-    }
-
-    @Test
-    fun `priorityOf ranks VidHide above Cineverse`() {
-        val idxVid = SOURCE_PRIORITY.indexOf("VidHide")
-        val idxCine = SOURCE_PRIORITY.indexOf("Cineverse")
-        assertTrue(idxVid >= 0 && idxCine >= 0 && idxVid < idxCine)
+    fun `SOURCE_PRIORITY ranks GDMIRROR and screenscape_me at the top`() {
+        val idxGdm = SOURCE_PRIORITY.indexOf("GDMIRROR")
+        val idxScrn = SOURCE_PRIORITY.indexOf("screenscape.me")
+        val idxVidZee = SOURCE_PRIORITY.indexOf("VidZee")
+        assertTrue(idxGdm == 0 || idxGdm == 1, "GDMIRROR should be in first two positions, was $idxGdm")
+        assertTrue(idxVidZee > idxScrn, "VidZee should be after screenscape.me")
     }
 }

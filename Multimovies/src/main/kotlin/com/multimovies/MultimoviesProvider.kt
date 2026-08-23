@@ -138,25 +138,25 @@ internal fun parseRating(item: Element): Double? {
  *  most-reliable/fast to least. Defined at top level so tests can read the
  *  ordering without class-loading the (Android-dependent) provider. Servers not
  *  listed here are still pulled (with the generic sniffer as a fallback), but
- *  with the lowest priority. Confirmed-working sources come first. */
+ *  with the lowest priority. Order mirrors the site's own ranking (GDMIRROR is
+ *  the recommended/top source), so the fastest/most reliable hosts surface first. */
 internal val SOURCE_PRIORITY: List<String> = listOf(
-    "CineMM",
-    "VidHide",
-    "Cineverse",
-    "Nexa",
     "GDMIRROR - Recommended",
     "GDMIRROR",
-    "Nxsha",
-    "GDFlix",
-    "HubCloud",
-    "FastDL",
-    "StreamWish",
     "screenscape.me",
     "VidZee",
     "VidZee v2",
     "vixsrc.to",
     "CinemaOS",
     "vidlink.pro",
+    "Cineverse",
+    "Nxsha",
+    "CineMM",
+    "VidHide",
+    "GDFlix",
+    "HubCloud",
+    "FastDL",
+    "StreamWish",
     "Multimovies",
 )
 
@@ -212,10 +212,10 @@ class MultimoviesProvider : MainAPI() {
 
     /** Per-source timeout in milliseconds. */
     companion object {
-        const val SOURCE_TIMEOUT_MS = 30_000L
+        const val SOURCE_TIMEOUT_MS = 15_000L
 
         /** Per-source timeout for the generic embed sniffer (seconds). */
-        const val SNIFF_TIMEOUT_S = 8L
+        const val SNIFF_TIMEOUT_S = 5L
 
         /** In-memory search result cache TTL (ms). */
         const val SEARCH_CACHE_TTL_MS = 5 * 60 * 1000L
@@ -535,80 +535,95 @@ class MultimoviesProvider : MainAPI() {
 
         if (options.isEmpty()) return false
 
-        // Resolve every source's embed via the dooplayer admin-ajax endpoint,
-        // then hand each embed to CloudStream's extractor registry.
-        val servers = options.mapNotNull { (name, triple) ->
-            val (post, nume, type) = triple
-            val body = mapOf(
-                "action" to "doo_player_ajax",
-                "post" to post,
-                "nume" to nume,
-                "type" to type,
-            )
-            val resp = runCatching {
-                app.post(
-                    "$mainUrl/wp-admin/admin-ajax.php",
-                    headers = commonHeaders + mapOf(
-                        "X-Requested-With" to "XMLHttpRequest",
-                        "Referer" to data,
-                    ),
-                    data = body,
-                    referer = data,
-                    timeout = 12,
-                    interceptor = getCfKiller(),
-                ).text
-            }.getOrNull() ?: return@mapNotNull null
+        // Resolve every source's embed URL via the dooplayer admin-ajax endpoint.
+        // These are independent POSTs → run in parallel so the fastest source isn't
+        // blocked by the slowest. As a side effect we measure response time (latencyMs)
+        // so results can be sorted by speed.
+        data class Embed(val name: String, val url: String, val latencyMs: Long)
+        val servers: List<Embed> = coroutineScope {
+            options.map { (name, triple) ->
+                async {
+                    val (post, nume, type) = triple
+                    val startMs = System.currentTimeMillis()
+                    val body = mapOf(
+                        "action" to "doo_player_ajax",
+                        "post" to post,
+                        "nume" to nume,
+                        "type" to type,
+                    )
+                    val resp = runCatching {
+                        app.post(
+                            "$mainUrl/wp-admin/admin-ajax.php",
+                            headers = commonHeaders + mapOf(
+                                "X-Requested-With" to "XMLHttpRequest",
+                                "Referer" to data,
+                            ),
+                            data = body,
+                            referer = data,
+                            timeout = 6,
+                            interceptor = getCfKiller(),
+                        ).text
+                    }.getOrNull() ?: return@async null
+                    val latencyMs = System.currentTimeMillis() - startMs
 
-            // The ajax response is JSON like {"embed_url":"...","type":"iframe"}.
-            // embed_url is EITHER a direct host URL OR an HTML snippet containing
-            // an <iframe>. Extract the JSON string value robustly (handling
-            // escaped quotes) and pull the iframe src when present.
-            val rawEmbed = Regex("\"embed_url\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\"")
-                .find(resp)?.groupValues?.get(1)
-                ?.replace("\\/", "/")
-                ?.replace("\\\"", "\"")
-                ?: return@mapNotNull null
-
-            val embed = if (rawEmbed.contains("<iframe", ignoreCase = true)) {
-                Jsoup.parse(rawEmbed).selectFirst("iframe")?.attr("src")
-                    ?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
-            } else {
-                rawEmbed.replace("\\/", "/").trim()
-            }
-            name to embed
+                    val rawEmbed = Regex("\"embed_url\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\"")
+                        .find(resp)?.groupValues?.get(1)
+                        ?.replace("\\/", "/")
+                        ?.replace("\\\"", "\"")
+                        ?: return@async null
+                    val embed = if (rawEmbed.contains("<iframe", ignoreCase = true)) {
+                        Jsoup.parse(rawEmbed).selectFirst("iframe")?.attr("src")
+                            ?.takeIf { it.isNotBlank() } ?: return@async null
+                    } else {
+                        rawEmbed.replace("\\/", "/").trim()
+                    }
+                    Embed(name, embed, latencyMs)
+                }
+            }.awaitAll().filterNotNull()
         }
 
         if (servers.isEmpty()) return false
 
-        val sources = servers.map { (name, href) ->
-            MultiSourcePuller.Source(name = name, url = href, referer = data)
+        // Sort resolved embeds by measured latency first (fastest respond first),
+        // then by the static priority list. This means the quickest-responding
+        // sources are extracted and streamed to the player first.
+        val orderedServers = servers.sortedWith(
+            compareBy<Embed>({ it.latencyMs }).thenBy { priorityOf(it.name) }
+        )
+        val sources = orderedServers.map { e ->
+            MultiSourcePuller.Source(name = e.name, url = e.url, referer = data)
         }
 
-        // Parallel pull, per-source timeout, priority-ordered results.
-        var links = runCatching {
+        // Parallel pull, per-source timeout, streaming: every extracted link is
+        // pushed to the player immediately (onLink) instead of waiting for all
+        // sources to finish — video starts as soon as the fastest source yields a
+        // link. The returned list is still used for the unlinked-source fallback.
+        val links = runCatching {
             MultiSourcePuller.pull(
                 sources = sources,
                 timeoutMs = SOURCE_TIMEOUT_MS,
                 priorityOf = { priorityOf(it) },
                 onSubtitle = subtitleCallback,
+                onLink = { runCatching { callback(it) } },
             )
         }.getOrElse { emptyList() }
 
         // Fallback: for sources that yielded no links via CloudStream's extractor
         // registry, try a generic HLS/direct-file sniffer. Some Dooplay embed hosts
-        // (e.g. Cineverse, Nexa) are not registered extractors, so we scrape the
-        // embed page for m3u8/mp4 URLs. Per-source bounded by SNIFF_TIMEOUT_S.
+        // are not registered extractors, so we scrape the embed page for m3u8/mp4
+        // URLs. Per-source bounded by SNIFF_TIMEOUT_S.
         val linkedSources = links.mapNotNull { it.source?.removeSuffix(MultiSourcePuller.INDICATOR) }
         val unlinkedNames = sources.map { it.name }.toSet() - linkedSources.toSet()
-        val unlinkedUrls = servers.filter { it.first in unlinkedNames }
-        if (unlinkedUrls.isNotEmpty()) {
-            val sniffs = runCatching {
+        val unlinkedUrls = orderedServers.filter { it.name in unlinkedNames }.map { it.name to it.url }
+        val sniffs = if (unlinkedUrls.isNotEmpty()) {
+            runCatching {
                 MultiSourcePuller.sniffEmbeds(unlinkedUrls, SNIFF_TIMEOUT_S, data)
             }.getOrElse { emptyList() }
-            links += sniffs
+        } else {
+            emptyList()
         }
+        sniffs.forEach { runCatching { callback(it) } }
 
-        links.forEach { runCatching { callback(it) } }
-        return links.isNotEmpty()
+        return links.isNotEmpty() || sniffs.isNotEmpty()
     }
 }
