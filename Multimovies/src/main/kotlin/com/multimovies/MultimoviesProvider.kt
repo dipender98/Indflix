@@ -166,7 +166,7 @@ class MultimoviesProvider : MainAPI() {
             { getCfKiller() },
             { CloudflareKiller().also { cfKiller = it } },
         )
-        return try {
+        val result = withTimeoutOrNull(SOURCE_TIMEOUT_MS) {
             retryUntilSolved(
                 attempts = factories.size,
                 fetch = { i -> fetch(factories[i]) },
@@ -174,10 +174,8 @@ class MultimoviesProvider : MainAPI() {
                 onBlocked = { cfKiller = null },
                 failureMessage = { lastErr -> lastErr?.localizedMessage ?: "Failed to load $url" },
             )
-        } catch (e: IllegalStateException) {
-            // Surface as a CloudStream error ONCE (no retry loop).
-            throw ErrorLoadingException(e.message)
         }
+        return result ?: throw ErrorLoadingException("Timed out solving Cloudflare challenge for $url")
     }
 
 
@@ -308,31 +306,27 @@ class MultimoviesProvider : MainAPI() {
                 .distinct()
 
             val pages = if (seasonLinks.isEmpty()) listOf(url) else seasonLinks
-            coroutineScope {
-                pages.map { seasonUrl ->
-                    async {
-                        val sDoc = try {
-                            solveDocument(seasonUrl)
-                        } catch (e: Exception) {
-                            return@async
+            for (seasonUrl in pages) {
+                val sDoc = try {
+                    solveDocument(seasonUrl)
+                } catch (e: Exception) {
+                    continue
+                }
+                sDoc.select("ul.episodios li, div.eps div.ep, .episodios li").forEachIndexed { i, ep ->
+                    val epLink = ep.selectFirst("a[href]")?.attr("href")?.takeIf { it.contains(mainUrl) }
+                        ?: return@forEachIndexed
+                    val epNum = Regex("(?i)(\\d+)x(\\d+)").find(epLink)?.groupValues?.getOrNull(2)?.toIntOrNull()
+                        ?: Regex("(\\d+)").find(epLink)?.value?.toIntOrNull() ?: (i + 1)
+                    val seasonNum = Regex("(?i)(\\d+)x(\\d+)").find(epLink)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 1
+                    val epTitle = ep.selectFirst(".episodiotitle a, .title, a")?.text()?.trim()
+                    episodes.add(
+                        newEpisode(epLink) {
+                            this.name = epTitle
+                            this.episode = epNum
+                            this.season = seasonNum
                         }
-                        sDoc.select("ul.episodios li, div.eps div.ep, .episodios li").forEachIndexed { i, ep ->
-                            val epLink = ep.selectFirst("a[href]")?.attr("href")?.takeIf { it.contains(mainUrl) }
-                                ?: return@forEachIndexed
-                            val epNum = Regex("(?i)(\\d+)x(\\d+)").find(epLink)?.groupValues?.getOrNull(2)?.toIntOrNull()
-                                ?: Regex("(\\d+)").find(epLink)?.value?.toIntOrNull() ?: (i + 1)
-                            val seasonNum = Regex("(?i)(\\d+)x(\\d+)").find(epLink)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 1
-                            val epTitle = ep.selectFirst(".episodiotitle a, .title, a")?.text()?.trim()
-                            episodes.add(
-                                newEpisode(epLink) {
-                                    this.name = epTitle
-                                    this.episode = epNum
-                                    this.season = seasonNum
-                                }
-                            )
-                        }
-                    }
-                }.awaitAll()
+                    )
+                }
             }
 
             newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
