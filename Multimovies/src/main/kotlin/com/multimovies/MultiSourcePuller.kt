@@ -11,14 +11,57 @@ import org.jsoup.Jsoup
 import java.util.Collections
 
 /**
+ * Session-scoped memory of per-source extraction speed. [MultiSourcePuller.pull]
+ * records how long each source took to produce links (or fail/timeout), and the
+ * final link sort uses the measured average — so "fast" is decided by the user's
+ * actual network, with the curated SOURCE_PRIORITY list only as the cold-start
+ * fallback.
+ *
+ * In-memory only (this CloudStream build exposes no persistent settings API);
+ * resets on app restart.
+ */
+internal object SourceSpeedTracker {
+    /** Penalty (ms) added per failed attempt, so sources that fail often are
+     *  demoted below consistently-fast ones. */
+    private const val FAILURE_PENALTY_MS = 30_000L
+
+    private data class Stats(var successes: Int = 0, var totalMs: Long = 0L, var failures: Int = 0) {
+        fun avgMs(): Double = if (successes == 0) Double.MAX_VALUE
+        else (totalMs + failures * FAILURE_PENALTY_MS).toDouble() / successes
+    }
+
+    private val map = java.util.concurrent.ConcurrentHashMap<String, Stats>()
+
+    fun record(name: String, durationMs: Long, success: Boolean) {
+        map.compute(name) { _, s ->
+            val stats = s ?: Stats()
+            if (success) {
+                stats.successes++
+                stats.totalMs += durationMs
+            } else {
+                stats.failures++
+            }
+            stats
+        }
+    }
+
+    /** Learned average extraction latency for [name], or null when never measured.
+     *  Measured-but-never-succeeded sources return [Double.MAX_VALUE] (slowest). */
+    fun averageLatency(name: String): Double? = map[name]?.avgMs()
+
+    fun reset() = map.clear()
+}
+
+/**
  * MultiSourcePuller - the source-priority / parallel-pull / timeout engine.
  *
  * Given a list of (serverName, url) pairs it:
- *   1. Orders them by [priorityOf] (reliable + fast first).
+ *   1. Orders them by measured speed ([SourceSpeedTracker]) with the static
+ *      [MultimoviesProvider.SOURCE_PRIORITY] as fallback.
  *   2. Launches ALL of them concurrently (parallel pulling).
  *   3. Wraps each individual source in a [timeoutMs] timeout (default 30s).
  *      A single slow/dead source can never block the others.
- *   4. Returns the successfully extracted links, sorted by priority/latency.
+ *   4. Returns the successfully extracted links, sorted by measured speed.
  *
  * Per source it runs a unified extraction pipeline:
  *     a. CloudStream's extractor registry (loadExtractor)
@@ -219,7 +262,7 @@ object MultiSourcePuller {
      * @param onSubtitle called for each subtitle found
      * @param onLink optional: called immediately for every extracted link (streaming —
      *        lets the player start the fastest source instead of waiting for all sources)
-     * @return list of extractor links, ordered by priority then latency then Hindi
+     * @return list of extractor links, ordered by measured speed then priority then latency then Hindi
      */
     suspend fun pull(
         sources: List<Source>,
@@ -237,37 +280,76 @@ object MultiSourcePuller {
         coroutineScope {
             sources.map { src ->
                 async {
-                    withTimeoutOrNull(timeoutMs) {
+                    val startedMs = System.currentTimeMillis()
+                    val result = withTimeoutOrNull(timeoutMs) {
                         runCatching {
                             val found = extractSource(src, onSubtitle = { subs.add(it) })
-                            found.forEach { l ->
-                                val link = ExtractorLink(
-                                    source = src.name + INDICATOR,
-                                    name = l.name,
-                                    url = l.url,
-                                    referer = l.referer ?: src.url,
-                                    quality = l.quality,
-                                    headers = l.headers ?: src.headers,
-                                    extractorData = null,
-                                    type = l.type,
-                                    audioTracks = l.audioTracks ?: emptyList(),
-                                )
+                            found.map { l ->
+                                val link = toExtractorLink(src, l)
                                 links.add(link)
                                 onLink(link)
+                                link
                             }
                         }
                     }
+                    val made = result?.getOrNull().orEmpty()
+                    SourceSpeedTracker.record(
+                        src.name,
+                        System.currentTimeMillis() - startedMs,
+                        success = made.isNotEmpty(),
+                    )
                 }
             }.awaitAll()
         }
 
         subs.forEach { onSubtitle(it) }
+        sortLinks(links, sources, priorityOf, preferHindi)
+    }
 
+    /** Wrap a raw extractor link with the source's name/label, headers and referer. */
+    private fun toExtractorLink(src: Source, l: ExtractorLink): ExtractorLink =
+        ExtractorLink(
+            source = src.name + INDICATOR,
+            name = l.name,
+            url = l.url,
+            referer = l.referer ?: src.url,
+            quality = l.quality,
+            headers = l.headers ?: src.headers,
+            extractorData = null,
+            type = l.type,
+            audioTracks = l.audioTracks ?: emptyList(),
+        )
+
+    /** Normalize an [ExtractorLink.source] / [Source.name] into a stable key for
+     *  speed tracking and priority lookup: strips the "(Multimovies)" indicator
+     *  and any trailing language annotation such as " Hindi". */
+    internal fun sourceKey(source: String?): String {
+        if (source == null) return ""
+        return source
+            .replace(Regex("""\s+Hindi$""", RegexOption.IGNORE_CASE), "")
+            .removeSuffix(INDICATOR)
+            .trim()
+    }
+
+    /**
+     * Order links for the player. Primary key is the *measured* per-source speed
+     * ([SourceSpeedTracker.averageLatency]); unmeasured sources (cold start) fall
+     * back to the curated static [priorityOf] ranking; then per-call embed
+     * latency; then the Hindi preference.
+     */
+    internal fun sortLinks(
+        links: List<ExtractorLink>,
+        sources: List<Source>,
+        priorityOf: (String) -> Int,
+        preferHindi: Boolean = true,
+    ): List<ExtractorLink> {
         val latencyByName = sources.associate { it.name to it.latencyMs }
-        val comparator = compareBy<ExtractorLink>({ priorityOf(it.source?.removeSuffix(INDICATOR).orEmpty()) })
-            .thenBy({ latencyByName[it.source?.removeSuffix(INDICATOR)] ?: Long.MAX_VALUE })
-            .thenByDescending { if (preferHindi) isHindi(it) else false }
-        links.sortedWith(comparator)
+        val comparator = compareBy<ExtractorLink>(
+            { SourceSpeedTracker.averageLatency(sourceKey(it.source)) ?: Double.MAX_VALUE },
+            { priorityOf(sourceKey(it.source)) },
+            { latencyByName[sourceKey(it.source)] ?: Long.MAX_VALUE },
+        ).thenByDescending { if (preferHindi) isHindi(it) else false }
+        return links.sortedWith(comparator)
     }
 
     /** Unified per-source extraction: inline extractor first, then registry, then sniff. */

@@ -351,7 +351,8 @@ class MultimoviesProvider : MainAPI() {
         val searchUrl = "$mainUrl/?s=$encodedQuery"
         // Fast path: reuse persisted cookies (skip the slow Cloudflare WebView solve)
         // via fetchDoc; only fall back to solving when a challenge is detected.
-        val doc = fetchDoc(searchUrl, timeoutSeconds = 12, required = false) ?: return null
+        // Tight timeout: search must return quickly alongside other providers.
+        val doc = fetchDoc(searchUrl, timeoutSeconds = 8, required = false) ?: return null
 
         val items = doc.select(
             "div#archive-content div.item, " +
@@ -365,10 +366,6 @@ class MultimoviesProvider : MainAPI() {
         )
 
         val results = items.mapNotNull { it.toSearchResponse() }
-        // Backfill posters only for items whose own markup yielded none. Bounded
-        // (max 3 concurrent, ~3s each) so search latency stays ~1-2s; if an item
-        // doesn't resolve in time it simply keeps no poster.
-        backfillPosters(results)
         return results.takeIf { it.isNotEmpty() }?.also { SearchCache.put(query, it) }
     }
 
@@ -687,12 +684,19 @@ class MultimoviesProvider : MainAPI() {
     ): Boolean {
         var meta = SourceMetaCache.get(data)
 
-        // Fast path: cached links for this title/episode (no probing, no CF solve).
+        // Fast path: cached links, but only if they are still live. Stale cached
+        // URLs (expired signed tokens) are filtered out by a quick liveness probe;
+        // if none survive we fall through to fresh resolution so CloudStream's
+        // loading dialog (with source-switch options) appears instead of silently
+        // buffering a dead link.
         if (meta != null) {
             LinkCache.get(meta.imdbId, meta.season, meta.episode)?.let { cached ->
                 if (cached.isNotEmpty()) {
-                    cached.forEach { runCatching { callback(it) } }
-                    return true
+                    val verified = LinkVerifier.verify(cached)
+                    if (verified.isNotEmpty()) {
+                        verified.forEach { runCatching { callback(it) } }
+                        return true
+                    }
                 }
             }
         }
@@ -722,49 +726,118 @@ class MultimoviesProvider : MainAPI() {
                 name to Triple(post, nume, type)
             }
 
-        // Path B: dooplayer-resolved embeds (admin-ajax + recursive iframe unwrap).
-        val dooplayerResult = if (options.isNotEmpty()) {
-            resolveDooplayerSources(data, options)
-        } else {
-            DooplayerResult(emptyList(), null)
+        // Resolve every dooplayer server's embed URL in parallel (admin-ajax).
+        // The embed URLs also carry the IMDB id, which recovers meta when load()
+        // never resolved one.
+        val embeds = coroutineScope {
+            options.map { (name, triple) ->
+                async {
+                    runCatching { resolveEmbed(data, name, triple.first, triple.second, triple.third) }.getOrNull()
+                }
+            }.awaitAll().filterNotNull()
         }
 
-        // Path A: dooplayer-independent direct sources built from the resolved ids.
-        // If load() never resolved an IMDB id (page exposes none and Cinemeta
-        // search missed), recover it from the dooplayer embed URLs, which embed
-        // the IMDB id in every embed_url.
         if (meta == null) {
-            dooplayerResult.imdbId?.let { id ->
+            embeds.firstNotNullOfOrNull { extractImdbIdFromUrl(it.url) }?.let { id ->
                 meta = SourceMeta(id, null, parseSeason(data), parseEpisode(data))
                 SourceMetaCache.put(data, meta)
             }
         }
-        val globalSources = buildGlobalSources(meta)
-        val dooplayerSources = dooplayerResult.sources
 
-        val sources = globalSources + dooplayerSources
-        if (sources.isEmpty()) return false
-
-        // Dedupe at emit time so a host reached through multiple paths surfaces once.
+        // Streaming pipeline: every source (global id-based + each dooplayer embed)
+        // is unwrapped and pulled concurrently, so the fastest working source emits
+        // its link first — CloudStream's loading dialog stays visible while slower
+        // sources resolve and populates the source list the user can switch between.
         val emitted = Collections.synchronizedSet(HashSet<String>())
+        val found = Collections.synchronizedList(mutableListOf<ExtractorLink>())
+        val sourceRefs = Collections.synchronizedList(mutableListOf<MultiSourcePuller.Source>())
 
-        val links = runCatching {
-            MultiSourcePuller.pull(
-                sources = sources,
-                timeoutMs = SOURCE_TIMEOUT_MS,
-                priorityOf = { priorityOf(it) },
-                onSubtitle = subtitleCallback,
-                onLink = { l ->
-                    val key = "${hostOf(l.url ?: "")}|${l.quality}"
-                    if (emitted.add(key)) runCatching { callback(l) }
-                },
-            )
-        }.getOrElse { emptyList() }
+        coroutineScope {
+            val globalJobs = buildGlobalSources(meta).map { g ->
+                sourceRefs.add(g)
+                async {
+                    pullSource(g, data, emitted, found, subtitleCallback, callback)
+                }
+            }
+            val embedJobs = embeds.map { e ->
+                async {
+                    val finalUrl = MultiSourcePuller.unwrapEmbed(e.url, referer = data, headers = commonHeaders)
+                    val src = MultiSourcePuller.Source(
+                        name = e.name,
+                        url = finalUrl,
+                        referer = data,
+                        headers = commonHeaders,
+                        latencyMs = e.latencyMs,
+                    )
+                    sourceRefs.add(src)
+                    pullSource(src, data, emitted, found, subtitleCallback, callback)
+                }
+            }
+            (globalJobs + embedJobs).awaitAll()
+        }
 
-        val deduped = dedupeByHostQuality(links)
+        val sorted = MultiSourcePuller.sortLinks(found.toList(), sourceRefs.toList(), ::priorityOf, preferHindi = true)
+        val deduped = dedupeByHostQuality(sorted)
         if (meta != null) LinkCache.put(meta.imdbId, meta.season, meta.episode, deduped)
 
         return deduped.isNotEmpty()
+    }
+
+    /** Pull a single source, streaming found links to [callback] as they arrive and
+     *  collecting them (deduped at emission time) into [found] for the final sort
+     *  and link cache. */
+    private suspend fun pullSource(
+        src: MultiSourcePuller.Source,
+        data: String,
+        emitted: MutableSet<String>,
+        found: MutableList<ExtractorLink>,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit,
+    ): List<ExtractorLink> = MultiSourcePuller.pull(
+        sources = listOf(src),
+        timeoutMs = SOURCE_TIMEOUT_MS,
+        priorityOf = ::priorityOf,
+        onSubtitle = subtitleCallback,
+        onLink = { l ->
+            val key = "${hostOf(l.url ?: "")}|${l.quality}"
+            if (emitted.add(key)) {
+                found.add(l)
+                runCatching { callback(l) }
+            }
+        },
+    )
+
+    private data class ResolvedEmbed(val name: String, val url: String, val latencyMs: Long)
+
+    /** Resolve a single dooplayer server's embed URL via the site's admin-ajax
+     *  endpoint, measuring the round-trip latency as a speed hint. */
+    private suspend fun resolveEmbed(data: String, name: String, post: String, nume: String, type: String): ResolvedEmbed? {
+        val startMs = System.currentTimeMillis()
+        val resp = runCatching {
+            app.post(
+                "$mainUrl/wp-admin/admin-ajax.php",
+                headers = commonHeaders + mapOf(
+                    "X-Requested-With" to "XMLHttpRequest",
+                    "Referer" to data,
+                ),
+                data = mapOf(
+                    "action" to "doo_player_ajax",
+                    "post" to post,
+                    "nume" to nume,
+                    "type" to type,
+                ),
+                referer = data,
+                timeout = 6,
+                interceptor = getCfKiller(),
+            ).text
+        }.getOrNull() ?: return null
+        val latencyMs = System.currentTimeMillis() - startMs
+
+        val rawEmbed = Regex("\"embed_url\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\"")
+            .find(resp)?.groupValues?.get(1)
+            ?: return null
+        val embed = cleanEmbedUrl(rawEmbed).takeIf { it.isNotBlank() } ?: return null
+        return ResolvedEmbed(name, embed, latencyMs)
     }
 
     private fun parseSeason(url: String): Int? =
@@ -795,74 +868,6 @@ class MultimoviesProvider : MainAPI() {
             )
         }
     }
-
-    /** Resolve every dooplayer server's embed URL (parallel admin-ajax POSTs) and
-     *  recursively unwrap wrapper pages to the deepest player URL. Also surfaces
-     *  the IMDB id embedded in the first embed URL so global id-based sources can
-     *  be built even when the detail page never exposed an IMDB id. */
-    private suspend fun resolveDooplayerSources(
-        data: String,
-        options: List<Pair<String, Triple<String, String, String>>>,
-    ): DooplayerResult {
-        data class Embed(val name: String, val url: String, val latencyMs: Long)
-        val servers: List<Embed> = coroutineScope {
-            options.map { (name, triple) ->
-                async {
-                    val (post, nume, type) = triple
-                    val startMs = System.currentTimeMillis()
-                    val body = mapOf(
-                        "action" to "doo_player_ajax",
-                        "post" to post,
-                        "nume" to nume,
-                        "type" to type,
-                    )
-                    val resp = runCatching {
-                        app.post(
-                            "$mainUrl/wp-admin/admin-ajax.php",
-                            headers = commonHeaders + mapOf(
-                                "X-Requested-With" to "XMLHttpRequest",
-                                "Referer" to data,
-                            ),
-                            data = body,
-                            referer = data,
-                            timeout = 6,
-                            interceptor = getCfKiller(),
-                        ).text
-                    }.getOrNull() ?: return@async null
-                    val latencyMs = System.currentTimeMillis() - startMs
-
-                    val rawEmbed = Regex("\"embed_url\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\"")
-                        .find(resp)?.groupValues?.get(1)
-                        ?: return@async null
-                    val embed = cleanEmbedUrl(rawEmbed).takeIf { it.isNotBlank() } ?: return@async null
-                    Embed(name, embed, latencyMs)
-                }
-            }.awaitAll().filterNotNull()
-        }
-
-        return DooplayerResult(
-            sources = servers.map { e ->
-                val finalUrl = MultiSourcePuller.unwrapEmbed(
-                    e.url,
-                    referer = data,
-                    headers = commonHeaders,
-                )
-                MultiSourcePuller.Source(
-                    name = e.name,
-                    url = finalUrl,
-                    referer = data,
-                    headers = commonHeaders,
-                    latencyMs = e.latencyMs,
-                )
-            },
-            imdbId = servers.firstNotNullOfOrNull { extractImdbIdFromUrl(it.url) },
-        )
-    }
-
-    private data class DooplayerResult(
-        val sources: List<MultiSourcePuller.Source>,
-        val imdbId: String?,
-    )
 
     /** Normalize a raw dooplayer embed_url: unescape JSON slashes/quotes, pull the
      *  iframe src when the value is an HTML snippet, and HTML-decode entities

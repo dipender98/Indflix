@@ -2,6 +2,7 @@ package com.multimovies
 
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -115,5 +116,48 @@ class HostExtractorsTest {
             MultiSourcePuller.extractM3u8FromVidlink("""{"url":"https://cdn.example/master.m3u8"}""")
         )
         assertNull(MultiSourcePuller.extractM3u8FromVidlink("{}"))
+    }
+
+    // ---- sourceKey normalization ----
+
+    @Test
+    fun `sourceKey strips indicator only`() {
+        assertEquals("Cineverse", MultiSourcePuller.sourceKey("Cineverse (Multimovies)"))
+        assertEquals("screenscape.me", MultiSourcePuller.sourceKey("screenscape.me (Multimovies)"))
+    }
+
+    @Test
+    fun `sourceKey strips indicator and Hindi suffix`() {
+        assertEquals("Cineverse", MultiSourcePuller.sourceKey("Cineverse (Multimovies) Hindi"))
+        assertEquals("screenscape.me", MultiSourcePuller.sourceKey("screenscape.me (Multimovies) Hindi"))
+    }
+
+    @Test
+    fun `sourceKey handles blank and null`() {
+        assertEquals("", MultiSourcePuller.sourceKey(null))
+        assertEquals("", MultiSourcePuller.sourceKey(""))
+    }
+
+    // ---- LinkVerifier isVerifiedStream ----
+
+    @Test
+    fun `isVerifiedStream accepts 2xx and 3xx`() {
+        assertTrue(LinkVerifier.isVerifiedStream(200, null))
+        assertTrue(LinkVerifier.isVerifiedStream(206, null))
+        assertTrue(LinkVerifier.isVerifiedStream(302, null))
+    }
+
+    @Test
+    fun `isVerifiedStream accepts stream content types even on error status`() {
+        assertTrue(LinkVerifier.isVerifiedStream(403, "application/vnd.apple.mpegurl"))
+        assertTrue(LinkVerifier.isVerifiedStream(403, "application/x-mpegurl"))
+        assertTrue(LinkVerifier.isVerifiedStream(403, "video/mp4"))
+        assertTrue(LinkVerifier.isVerifiedStream(403, "application/octet-stream"))
+    }
+
+    @Test
+    fun `isVerifiedStream rejects unknown content type on error status`() {
+        assertFalse(LinkVerifier.isVerifiedStream(404, "text/html"))
+        assertFalse(LinkVerifier.isVerifiedStream(500, null))
     }
 }
