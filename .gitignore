@@ -11,3 +11,11 @@
 local.properties
 .vscode
 .kilo/
+# Local debugging artifacts
+/playwright-report
+/.playwright-mcp/
+/chunks2/
+/gradle_out.txt
+/screenscape_report.txt
+/sscap*.txt
+

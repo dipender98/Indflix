@@ -76,6 +76,8 @@ subprojects {
         testImplementation(kotlin("test-junit5"))
         testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")
         testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")
+        testImplementation("org.mockito:mockito-core:5.7.0")
+        testImplementation("org.mockito:mockito-inline:5.2.0")
         implementation(kotlin("stdlib"))
         implementation("com.github.Blatzar:NiceHttp:0.4.18")
         implementation("org.jsoup:jsoup:1.22.2")

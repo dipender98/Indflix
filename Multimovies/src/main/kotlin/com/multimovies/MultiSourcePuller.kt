@@ -52,11 +52,11 @@ object MultiSourcePuller {
 
     /** Regexes for the generic embed sniffer: stream URLs to harvest directly. */
     internal val STREAM_URL_REGEXES = listOf(
-        Regex("""https?://[^\s"'<>]+\.m3u8[^\s"'<>]*"""),
-        Regex("""https?://[^\s"'<>]+\.m3u8"""),
-        Regex("""https?://[^\s"'<>]+\.mp4[^\s"'<>]*"""),
-        Regex("""https?://[^\s"'<>]+\.webm[^\s"'<>]*"""),
-        Regex("""https?://[^\s"'<>]+\.mkv[^\s"'<>]*"""),
+        Regex("""https?://[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*"""),
+        Regex("""https?://[^\s"'<>\\]+\.m3u8"""),
+        Regex("""https?://[^\s"'<>\\]+\.mp4[^\s"'<>\\]*"""),
+        Regex("""https?://[^\s"'<>\\]+\.webm[^\s"'<>\\]*"""),
+        Regex("""https?://[^\s"'<>\\]+\.mkv[^\s"'<>\\]*"""),
     )
 
     /**
@@ -77,6 +77,62 @@ object MultiSourcePuller {
         return null
     }
 
+    /** Detect a modiplay-style proxy player endpoint in page text, e.g.
+     *  `\/proxy.php?serve_m3u8=1&ref=...&url=<url-encoded m3u8>&ebd=...`.
+     *  The proxy endpoint serves the playlist directly (Content-Type mpegurl),
+     *  so the returned URL is playable as-is. Returns null when absent. */
+    internal fun buildProxyStreamUrl(text: String, baseUrl: String): String? {
+        if (text.isBlank()) return null
+        val normalized = text.replace("\\/", "/")
+        val m = Regex("""(?:https?:)?//[^"'\s<>]*proxy\.php\?[^"'\s<>]*serve_m3u8=1[^"'\s<>]*""")
+            .find(normalized)
+            ?: Regex("""/(?:[^"'\s<>]*proxy\.php\?[^"'\s<>]*serve_m3u8=1[^"'\s<>]*)""")
+                .find(normalized)
+        val raw = m?.value?.trim('"', '\'', '\\') ?: return null
+        return resolveRelative(baseUrl, raw).takeIf { it.startsWith("http") }
+    }
+
+    /** Pull a stream URL from a `<video src>` / `<source src>` element. */
+    internal fun extractVideoSourceUrl(text: String, baseUrl: String): String? {
+        if (text.isBlank()) return null
+        val src = Jsoup.parse(text).selectFirst("video[src], video source[src], source[src]")
+            ?.attr("src")?.trim() ?: return null
+        if (src.isBlank()) return null
+        return resolveRelative(baseUrl, src).takeIf { it.startsWith("http") }
+    }
+
+    /** Pull a stream URL from common JS player config shapes embedded in the page:
+     *  `sources:[{file:"...m3u8"}]`, `file:"...m3u8"`, `url:"...m3u8"`,
+     *  `hlsUrl:"..."`, `streamUrl:"..."`. Returns null when absent. */
+    internal fun extractFromJsConfig(text: String): String? {
+        if (text.isBlank()) return null
+        val normalized = text.replace("\\/", "/")
+        val patterns = listOf(
+            Regex("""["']?(?:file|url|src|hlsUrl|hls_source|streamUrl|stream_url|playUrl)["']?\s*[:=]\s*["']([^"']+\.(?:m3u8|mp4)[^"']*)["']""", RegexOption.IGNORE_CASE),
+            Regex("""sources\s*[:=]\s*\[\s*\{\s*["']?file["']?\s*[:=]\s*["']([^"']+\.(?:m3u8|mp4)[^"']*)["']""", RegexOption.IGNORE_CASE),
+            Regex("""["'](?:source|src)["']\s*[:=]\s*["']([^"']+\.(?:m3u8|mp4)[^"']*)["']""", RegexOption.IGNORE_CASE),
+        )
+        for (p in patterns) {
+            p.findAll(normalized).firstOrNull()?.groupValues?.get(1)?.let {
+                val v = it.trim()
+                if (v.isNotBlank()) return v
+            }
+        }
+        return null
+    }
+
+    /** Decode a URL-encoded m3u8 URL found inside a query string (e.g. `url=%2F..%2Fmaster.m3u8...`)
+     *  and return it as a plain https URL. */
+    internal fun decodeEncodedStreamUrl(text: String): String? {
+        if (text.isBlank()) return null
+        val m = Regex("""url=([^"'&\s]+?%2F[^"'&\s]*master\.m3u8[^"'&\s]*)""", RegexOption.IGNORE_CASE)
+            .find(text) ?: return null
+        val encoded = m.groupValues[1]
+        return runCatching {
+            java.net.URLDecoder.decode(encoded, "UTF-8")
+        }.getOrNull()?.takeIf { it.startsWith("http") }
+    }
+
     private val sharedHeaders = mapOf(
         "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
     )
@@ -84,10 +140,22 @@ object MultiSourcePuller {
     private fun hostOf(url: String): String =
         url.substringAfter("://").substringBefore("/").lowercase()
 
+    /** Resolve a possibly-relative [path] against [baseUrl], producing an absolute
+     *  https URL. Handles protocol-relative (//), absolute, and root-relative. */
+    internal fun resolveRelative(baseUrl: String, path: String): String {
+        if (path.startsWith("//")) return "https:$path"
+        if (path.startsWith("http", ignoreCase = true)) return path
+        val schemeHost = Regex("""^https?://[^/]+""").find(baseUrl)?.value ?: return path
+        return if (path.startsWith("/")) "$schemeHost$path" else "$schemeHost/$path"
+    }
+
     /**
      * Recursively follow iframes until the deepest player URL is found. A wrapper
      * page (e.g. an aggregator/redirector) is fetched and its first iframe src
-     * followed, up to [MAX_UNWRAP_LEVELS]. Direct stream URLs (.m3u8/.mp4) short-circuit.
+     * followed, up to [MAX_UNWRAP_LEVELS]. Direct stream URLs (.m3u8/.mp4) and
+     * proxy relay URLs (serve_m3u8=1) short-circuit: the page that exposes them
+     * IS the stream, so [MultiSourcePuller.pull] can emit it directly without
+     * re-fetching.
      */
     suspend fun unwrapEmbed(
         url: String,
@@ -106,17 +174,13 @@ object MultiSourcePuller {
                     if (referer != null) put("Referer", referer)
                 }).text
             }.getOrNull() ?: return current
+            // Short-circuit: a page exposing a proxy/stream URL is the player itself.
+            buildProxyStreamUrl(text, current)?.let { return it }
+            extractStreamUrl(text)?.let { return it }
+            extractVideoSourceUrl(text, current)?.let { return it }
             val next = Jsoup.parse(text).selectFirst("iframe")?.attr("src")?.takeIf { it.isNotBlank() }
                 ?: return current
-            val resolved = when {
-                next.startsWith("//") -> "https:$next"
-                next.startsWith("http", ignoreCase = true) -> next
-                next.startsWith("/") -> {
-                    val base = current.substringBefore("/", missingDelimiterValue = current)
-                    base + next
-                }
-                else -> next
-            }
+            val resolved = resolveRelative(current, next)
             if (resolved == current) return current
             current = resolved
         }
@@ -131,6 +195,20 @@ object MultiSourcePuller {
             link.source?.let { append(it) }
         }.lowercase()
         return hay.contains("hindi") || hay.contains("हिन्दी") || hay.contains("हिंदी")
+    }
+
+    /** True when a source URL, name, or stream URL contains a Hindi/streamhg hint.
+     *  Used by [sniff] to name the extracted link so the Hindi-preference sort
+     *  can prefer it. Checks the proxy platform (streamhg = Hindi), explicit
+     *  language params (lan=hindi), and any Hindi text in the source name. */
+    internal fun isHindiHint(sourceName: String, sourceUrl: String, streamUrl: String?): Boolean {
+        val hay = buildString {
+            append(sourceName.lowercase())
+            append('|')
+            append(sourceUrl.lowercase())
+            if (streamUrl != null) { append('|'); append(streamUrl.lowercase()) }
+        }
+        return hay.contains("streamhg") || hay.contains("hindi") || hay.contains("हिन्दी") || hay.contains("हिंदी") || hay.contains("lan=hindi") || hay.contains("modiplay") || hay.contains("serve_m3u8")
     }
 
     /**
@@ -199,13 +277,77 @@ object MultiSourcePuller {
     ): List<ExtractorLink> = when (src.extraction) {
         ExtractionType.MASTER_PLAYLIST -> extractVixsrc(src)
         ExtractionType.VIDLINK -> extractVidlink(src)
-        ExtractionType.GENERIC -> extractGeneric(src, onSubtitle)
+        ExtractionType.GENERIC -> {
+            // If unwrapEmbed already surfaced a playable stream or proxy relay URL,
+            // emit it directly — no extra page fetch needed.
+            directStreamLink(src)?.let { listOf(it) } ?: extractGeneric(src, onSubtitle)
+        }
+    }
+
+    /** When [src.url] is itself a playable stream (serve_m3u8 proxy relay, m3u8 or
+     *  mp4), build the ExtractorLink right away. Returns null otherwise so the
+     *  generic pipeline runs. */
+    private fun directStreamLink(src: Source): ExtractorLink? {
+        val u = src.url
+        val isStream = u.contains("serve_m3u8=1", ignoreCase = true) ||
+            u.contains(".m3u8", ignoreCase = true) ||
+            u.contains(".mp4", ignoreCase = true) ||
+            u.contains(".webm", ignoreCase = true)
+        if (!isStream) return null
+        val source = src.name + INDICATOR
+        val name = if (isHindiHint(src.name, src.url, u)) "$source Hindi" else source
+        val type = if (u.contains(".m3u8", ignoreCase = true)) ExtractorLinkType.M3U8
+        else ExtractorLinkType.VIDEO
+        val headers = buildMap {
+            putAll(src.headers)
+            src.referer?.let { put("Referer", it) }
+        }
+        return ExtractorLink(
+            source = source,
+            name = name,
+            url = u,
+            referer = src.referer ?: u,
+            quality = getQualityFromName(u),
+            headers = headers,
+            extractorData = null,
+            type = type,
+            audioTracks = emptyList(),
+        )
     }
 
     private suspend fun extractGeneric(
         src: Source,
         onSubtitle: (SubtitleFile) -> Unit,
     ): List<ExtractorLink> {
+        // screenscape.me: JS-rendered player, but its API is deterministic client-side
+        // crypto (HMAC-signed routes + CryptoJS-AES responses). Route to the dedicated
+        // extractor which reproduces that flow (no browser needed).
+        if (hostOf(src.url).contains("screenscape")) {
+            val subs = mutableListOf<SubtitleFile>()
+            val screenLinks = ScreenscapeExtractor.extract(src) { subs.add(SubtitleFile(it.lang, it.url)) }
+            subs.forEach { onSubtitle(it) }
+            return screenLinks.map { s ->
+                val source = s.name
+                val type = if (s.url.contains(".m3u8", ignoreCase = true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                val headers = buildMap {
+                    put("Referer", s.headers["Referer"] ?: src.url)
+                    putAll(src.headers)
+                    putAll(s.headers)
+                }
+                ExtractorLink(
+                    source = source,
+                    name = s.name,
+                    url = s.url,
+                    referer = s.headers["Referer"] ?: src.url,
+                    quality = getQualityFromName(s.quality.ifEmpty { s.url }),
+                    headers = headers,
+                    extractorData = null,
+                    type = type,
+                    audioTracks = emptyList(),
+                )
+            }
+        }
+
         // Stage a: CloudStream extractor registry (installed/built-in extractors).
         val found = mutableListOf<ExtractorLink>()
         val registryOk = runCatching {
@@ -352,7 +494,9 @@ object MultiSourcePuller {
         }
     }
 
-    /** Generic fallback: fetch the player page and harvest the first stream URL. */
+    /** Generic fallback: fetch the player page and harvest the first stream URL
+     *  using a multi-strategy approach (direct regex, proxy pattern, video/source
+     *  tags, JS config objects, URL-encoded m3u8). */
     private suspend fun sniff(src: Source): List<ExtractorLink> {
         val headers = buildMap {
             putAll(sharedHeaders)
@@ -362,14 +506,22 @@ object MultiSourcePuller {
         val text = runCatching {
             app.get(src.url, timeout = 5, headers = headers).text
         }.getOrNull() ?: return emptyList()
-        val stream = extractStreamUrl(text) ?: return emptyList()
+
+        val stream = buildProxyStreamUrl(text, src.url)
+            ?: extractStreamUrl(text)
+            ?: extractVideoSourceUrl(text, src.url)
+            ?: extractFromJsConfig(text)
+            ?: decodeEncodedStreamUrl(text)
+            ?: return emptyList()
+
         val source = src.name + INDICATOR
+        val name = if (isHindiHint(src.name, src.url, stream)) "$source Hindi" else source
         val linkType = if (stream.contains(".m3u8", ignoreCase = true)) ExtractorLinkType.M3U8
         else ExtractorLinkType.VIDEO
         return listOf(
             ExtractorLink(
                 source = source,
-                name = source,
+                name = name,
                 url = stream,
                 referer = src.url,
                 quality = getQualityFromName(stream),

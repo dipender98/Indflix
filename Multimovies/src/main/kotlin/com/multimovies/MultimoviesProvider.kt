@@ -96,16 +96,31 @@ internal fun isChallenge(doc: Document): Boolean =
             || titleText.contains("just a moment", ignoreCase = true)
     }
 
+/** TMDB image CDN size prefixes that are too small for a poster. Anything from
+ *  w92 to w500 is upgraded to `original`; w780/w1280 are kept (already good). */
+private val TMDB_SIZE_REGEX = Regex("""/(w92|w154|w185|w342|w500|w780|w1280)/""")
+
+/** Amazon (IMDB) CDN thumbnail suffix, e.g. `_SX250` / `_SY450`. Upgraded to a
+ *  larger variant so posters aren't pixelated. */
+private val AMAZON_SIZE_REGEX = Regex("""_SX\d{2,4}(?=\.|_|$)""", RegexOption.IGNORE_CASE)
+
 /** Upgrades a thumbnail URL to the full-resolution image by stripping only
- * genuine thumbnail resize markers (-WxH where W,H are small) and query-size
- * params. Conservative: never strips -scaled (a real WordPress file variant)
- * and only drops -WxH when both dims <= 500 and the result still ends in an
- * image extension; otherwise returns the original so a poster is always shown.
- * Pure function, used for both search and detail posters. */
+ *  genuine thumbnail resize markers (-WxH where W,H are small, TMDB CDN size
+ *  prefixes, Amazon _SX* suffixes) and query-size params. Conservative: never
+ *  strips -scaled (a real WordPress file variant) and only drops -WxH when both
+ *  dims <= 500; otherwise returns the original so a poster is always shown.
+ *  Pure function, used for both search and detail posters. */
 internal fun upgradePosterUrl(url: String?): String? {
     if (url.isNullOrBlank()) return null
     var fixed = if (url.startsWith("//")) "https:$url" else url
     fixed = stripSmallSizeSuffix(fixed)
+    fixed = TMDB_SIZE_REGEX.replace(fixed) { m ->
+        when (m.groupValues[1]) {
+            "w92", "w154", "w185", "w342", "w500" -> "/original/"
+            else -> m.value
+        }
+    }
+    fixed = AMAZON_SIZE_REGEX.replace(fixed, "_SX500")
     val qIdx = fixed.indexOf("?")
     if (qIdx >= 0) {
         val base = fixed.substring(0, qIdx)
@@ -127,19 +142,22 @@ internal fun upgradePosterUrl(url: String?): String? {
 }
 
 /** True when [url] still carries a resize/thumbnail marker that [upgradePosterUrl]
- * could not remove (e.g. a large -WxH variant that is still smaller than the
- * original, or a CDN resize query token). Used to decide when a search result
- * should be overridden with a known-good full-resolution poster from Cinemeta. */
+ *  could not remove (e.g. a large -WxH variant that is still smaller than the
+ *  original, a TMDB CDN small-size prefix, or an Amazon _SX* suffix). Used to
+ *  decide when a search result should be overridden with a known-good
+ *  full-resolution poster from Cinemeta. */
 internal fun isThumbnailish(url: String?): Boolean {
     if (url.isNullOrBlank()) return false
     return Regex("""-\d{2,4}x\d{2,4}""", RegexOption.IGNORE_CASE).containsMatchIn(url)
+        || Regex("""/(w92|w154|w185|w342|w500)/""", RegexOption.IGNORE_CASE).containsMatchIn(url)
+        || Regex("""_SX\d{2,4}(?=\.|_|$)""", RegexOption.IGNORE_CASE).containsMatchIn(url)
         || Regex("""[?&](resize|w|h|width|height|fit|im|q|quality)=""", RegexOption.IGNORE_CASE).containsMatchIn(url)
 }
 
 /** Strips a "-WxH" size marker (e.g. -300x450) only when it represents a
- * small thumbnail: both dims <= 500. Left intact: -scaled (a real WP file
- * variant), large dims (the image is already full-res). Returns [url] unchanged
- * when the marker dims exceed the thumbnail threshold or there is none. */
+ *  small thumbnail: both dims <= 500. Left intact: -scaled (a real WP file
+ *  variant), large dims (the image is already full-res). Returns [url] unchanged
+ *  when the marker dims exceed the thumbnail threshold or there is none. */
 private fun stripSmallSizeSuffix(url: String): String {
     val m = Regex("""-(\d{2,4})x(\d{2,4})""", RegexOption.IGNORE_CASE).find(url) ?: return url
     val w = m.groupValues[1].toInt()
@@ -147,6 +165,12 @@ private fun stripSmallSizeSuffix(url: String): String {
     if (w > 500 || h > 500) return url
     return url.removeRange(m.range)
 }
+
+/** Pull the first `tt\d{7,8}` IMDB id from any text (URL, JSON, HTML). Used
+ *  to extract the IMDB id from dooplayer admin-ajax embed URLs, which always
+ *  carry the id (e.g. tt1979320) inside the embed_url field. */
+internal fun extractImdbIdFromUrl(text: String?): String? =
+    text?.let { Regex("""tt\d{7,8}""").find(it)?.value }
 
 internal fun upgradeUrl(url: String?): String? = upgradePosterUrl(url)
 
@@ -173,22 +197,19 @@ internal fun parseRating(item: Element): Double? {
 
 /** Server names as they appear on the Multimovies "Video Sources" list, plus the
  *  direct global sources, ordered by speed/reliability (fastest/most reliable
- *  first). GDMIRROR is the recommended/top dooplayer source; vixsrc.to (direct,
- *  no-JS HLS) is the fastest global source. Servers not listed here are still
+ *  first). Verified Aug 2026: current titles only expose Cineverse, screenscape.me,
+ *  gdmirror/GD, Nxsha and occasionally nhdapi. Cineverse (the modiplay serve_m3u8
+ *  proxy) is the verified fast + Hindi source; Nxsha uses the same modiplay/vibuxer
+ *  CDN backend but its embed needs JS; screenscape.me is the site's lan=hindi source;
+ *  gdmirror is the site's recommended server. Servers not listed here are still
  *  pulled (generic sniffer fallback) but with the lowest priority. */
 internal val SOURCE_PRIORITY: List<String> = listOf(
-    "GDMIRROR",
-    "vixsrc.to",
-    "autoembed",
-    "2embed",
-    "vidlink.pro",
-    "multiembed",
-    "screenscape.me",
-    "VidZee",
-    "VidZee v2",
-    "CinemaOS",
     "Cineverse",
+    "screenscape.me",
+    "gdmirror",
     "Nxsha",
+    "nhdapi",
+    "2embed",
 )
 
 
@@ -245,8 +266,9 @@ class MultimoviesProvider : MainAPI() {
     companion object {
         const val SOURCE_TIMEOUT_MS = 15_000L
 
-        /** In-memory search result cache TTL (ms). */
-        const val SEARCH_CACHE_TTL_MS = 5 * 60 * 1000L
+        /** In-memory search result cache TTL (ms). Results don't change
+         *  minute-to-minute; a longer TTL makes repeat/quick searches instant. */
+        const val SEARCH_CACHE_TTL_MS = 15 * 60 * 1000L
     }
 
     private fun priorityOf(serverName: String): Int {
@@ -352,7 +374,8 @@ class MultimoviesProvider : MainAPI() {
 
     /** Concurrently resolve Cinemeta posters for search results that are missing one
      *  or still carry a thumbnail size marker. Bounded to 3 concurrent lookups with
-     *  a 3s per-item timeout so search stays fast. */
+     *  a 3s per-item timeout, AND an overall 2.5s budget so a search can never be
+     *  stalled by many poster-less items. */
     private suspend fun backfillPosters(results: List<SearchResponse>) {
         val toFetch = results.mapNotNull { r ->
             val poster = r.posterUrl
@@ -361,24 +384,26 @@ class MultimoviesProvider : MainAPI() {
         }
         if (toFetch.isEmpty()) return
         val semaphore = Semaphore(3)
-        coroutineScope {
-            toFetch.map { item ->
-                async {
-                    semaphore.acquire()
-                    try {
-                        withTimeoutOrNull(3000L) {
-                            val imdbId = CinemetaService.searchImdbId(
-                                item.title, null, if (item.tvType == TvType.Movie) "movie" else "series"
-                            ) ?: return@withTimeoutOrNull null
-                            val metaType = if (item.tvType == TvType.Movie) "movie" else "series"
-                            CinemetaService.fetchMeta(imdbId, metaType)?.poster
-                        }?.takeIf { it.isNotBlank() }
-                    } finally {
-                        semaphore.release()
+        withTimeoutOrNull(2500L) {
+            coroutineScope {
+                toFetch.map { item ->
+                    async {
+                        semaphore.acquire()
+                        try {
+                            withTimeoutOrNull(3000L) {
+                                val imdbId = CinemetaService.searchImdbId(
+                                    item.title, null, if (item.tvType == TvType.Movie) "movie" else "series"
+                                ) ?: return@withTimeoutOrNull null
+                                val metaType = if (item.tvType == TvType.Movie) "movie" else "series"
+                                CinemetaService.fetchMeta(imdbId, metaType)?.poster
+                            }?.takeIf { it.isNotBlank() }
+                        } finally {
+                            semaphore.release()
+                        }
                     }
+                }.awaitAll().forEachIndexed { idx, url ->
+                    if (url != null) toFetch[idx].response.posterUrl = url
                 }
-            }.awaitAll().forEachIndexed { idx, url ->
-                if (url != null) toFetch[idx].response.posterUrl = url
             }
         }
     }
@@ -433,6 +458,7 @@ class MultimoviesProvider : MainAPI() {
         val items = doc.select("article.item, div#archive-content div.item, div.items div.item").mapNotNull {
             it.toSearchResponse()
         }
+        backfillPosters(items)
         return newHomePageResponse(request.name, items)
     }
 
@@ -472,19 +498,20 @@ class MultimoviesProvider : MainAPI() {
 
         // The IMDB id is the linchpin for meta-provider enrichment (cast photos,
         // episode ratings/thumbnails) AND for building direct stream hosts. Resolve
-        // it concurrently with season-page fetching. No external metadata API is
-        // awaited inside load() so the response renders fast (progressive loading):
-        // episodes appear immediately, then the app's meta-providers fill cast,
-        // artwork, episode ratings and thumbnails via addImdbId.
+        // it concurrently with season-page fetching:
+        //   1. from the page markup,
+        //   2. else from the first dooplayer embed URL (the site embeds the IMDB
+        //      id inside every admin-ajax embed URL),
+        //   3. else a Cinemeta title search.
         return coroutineScope {
             val imdbIdJob = async {
-                imdbIdFromPage ?: if (title.isNotBlank()) {
-                    runCatching {
-                        withTimeoutOrNull(4000L) {
+                imdbIdFromPage ?: runCatching {
+                    withTimeoutOrNull(6000L) {
+                        firstEmbedImdbId(doc) ?: if (title.isNotBlank()) {
                             CinemetaService.searchImdbId(title, year, aioType)
-                        }
-                    }.getOrNull()
-                } else null
+                        } else null
+                    }
+                }.getOrNull()
             }
 
             if (isMovie) {
@@ -492,11 +519,18 @@ class MultimoviesProvider : MainAPI() {
                 if (resolvedImdbId != null) {
                     SourceMetaCache.put(url, SourceMeta(resolvedImdbId, tmdbIdFromPage, null, null))
                 }
+                // Background keyless enrichment: cast photos + full-res artwork.
+                val enrichment = if (resolvedImdbId != null) {
+                    async { withTimeoutOrNull(6000L) { TvdbDataService.fetchMeta(resolvedImdbId, "movie") } }.await()
+                } else null
                 newMovieLoadResponse(title, url, TvType.Movie, url) {
-                    this.posterUrl = poster
+                    this.posterUrl = enrichment?.poster ?: poster
+                    this.backgroundPosterUrl = enrichment?.background
+                    this.logoUrl = enrichment?.logo
                     this.year = year
                     this.plot = plot
                     this.tags = tags
+                    this.actors = enrichment?.cast
                     if (resolvedImdbId != null) {
                         addImdbId(resolvedImdbId)
                         score?.let { s -> s.toDoubleOrNull()?.let { addScore(s, 10) } }
@@ -505,17 +539,16 @@ class MultimoviesProvider : MainAPI() {
                     }
                 }
             } else {
-                // TV / Seasons: collect all episodes from season + episode archive pages.
+                // TV / Seasons: collect all episodes. Many series list every episode
+                // inline on the detail page (ul.episodios per season); others link to
+                // /seasons/... archive pages that must be fetched. When archive links
+                // exist, fetch those in parallel; otherwise parse the detail page.
                 val episodes = arrayListOf<Episode>()
-                val seasonLinks = doc.select("div.se-c div.se-q a[href], ul.episodios li a[href], .seasons a[href]")
+                val seasonLinks = doc.select("a[href*='/seasons/']")
                     .mapNotNull { it.attr("href").takeIf { h -> h.contains(mainUrl) } }
                     .distinct()
                 val pages = if (seasonLinks.isEmpty()) listOf(url) else seasonLinks
 
-                // Fetch all season/episode pages in PARALLEL (fast-path fetchDoc reuses
-                // the already-solved cookies and never triggers a fresh CF solve). Each
-                // page is bounded by a 10s timeout and wrapped so a failure just skips
-                // that season. Concurrency capped to avoid hammering the site.
                 val seasonDocsJob = async {
                     val sem = Semaphore(4)
                     pages.map { seasonUrl ->
@@ -532,6 +565,20 @@ class MultimoviesProvider : MainAPI() {
 
                 val resolvedImdbId = imdbIdJob.await()
                 val seasonDocs = seasonDocsJob.await()
+
+                // Keyless enrichment (cast + episode metadata) runs once the IMDB id
+                // is known, in parallel with the episode parsing below.
+                val enrichmentJob = if (resolvedImdbId != null) {
+                    async {
+                        withTimeoutOrNull(6000L) {
+                            coroutineScope {
+                                val tvdb = async { TvdbDataService.fetchMeta(resolvedImdbId, "series") }
+                                val cinemeta = async { CinemetaService.fetchMeta(resolvedImdbId, "series") }
+                                EnrichmentData(tvdb.await(), cinemeta.await())
+                            }
+                        }
+                    }
+                } else null
 
                 seasonDocs.forEach { sDoc ->
                     if (sDoc == null) return@forEach
@@ -555,11 +602,29 @@ class MultimoviesProvider : MainAPI() {
                     }
                 }
 
+                // Apply keyless Cinemeta episode metadata (description, date,
+                // thumbnail, rating) so the detail page is fully populated.
+                val enrichment = enrichmentJob?.await()
+                val videoByEp = enrichment?.cinemeta?.videos
+                    ?.associateBy { (it.season to it.episode) } ?: emptyMap()
+                episodes.forEach { ep ->
+                    videoByEp[(ep.season to ep.episode)]?.let { vid ->
+                        if (ep.name.isNullOrBlank()) ep.name = vid.name
+                        ep.description = vid.overview
+                        vid.released?.let { ep.addDate(it) }
+                        vid.thumbnail?.let { ep.posterUrl = it }
+                        vid.rating?.toDoubleOrNull()?.let { ep.score = Score.from10(it) }
+                    }
+                }
+
                 newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
-                    this.posterUrl = poster
+                    this.posterUrl = enrichment?.tvdb?.poster ?: poster
+                    this.backgroundPosterUrl = enrichment?.tvdb?.background
+                    this.logoUrl = enrichment?.tvdb?.logo
                     this.year = year
                     this.plot = plot
                     this.tags = tags
+                    this.actors = enrichment?.tvdb?.cast
                     if (resolvedImdbId != null) {
                         addImdbId(resolvedImdbId)
                         score?.let { s -> s.toDoubleOrNull()?.let { addScore(s, 10) } }
@@ -569,6 +634,44 @@ class MultimoviesProvider : MainAPI() {
                 }
             }
         }
+    }
+
+    /** Enrichment fetched in the background during load(): keyless cast/artwork
+     *  plus Cinemeta episode metadata. */
+    private data class EnrichmentData(
+        val tvdb: TvdbDataService.ExtractedMediaData?,
+        val cinemeta: CinemetaService.CinemetaMeta?,
+    )
+
+    /** Resolve the IMDB id from the site's first (non-trailer) dooplayer embed
+     *  URL. Every dooplayer admin-ajax response carries an embed_url that embeds
+     *  the IMDB id (e.g. tt1979320), so this is a very reliable fallback when the
+     *  detail page doesn't expose the id directly. */
+    private suspend fun firstEmbedImdbId(doc: Document): String? {
+        val option = doc.selectFirst("li.dooplay_player_option:not([data-nume='trailer'])") ?: return null
+        val post = doc.selectFirst("meta#dooplay-ajax-counter")?.attr("data-postid")
+            ?.takeIf { it.isNotBlank() } ?: option.attr("data-post").takeIf { it.isNotBlank() } ?: return null
+        val nume = option.attr("data-nume").takeIf { it.isNotBlank() } ?: return null
+        val type = option.attr("data-type").takeIf { it.isNotBlank() } ?: "movie"
+        val resp = runCatching {
+            app.post(
+                "$mainUrl/wp-admin/admin-ajax.php",
+                headers = commonHeaders + mapOf(
+                    "X-Requested-With" to "XMLHttpRequest",
+                    "Referer" to mainUrl,
+                ),
+                data = mapOf(
+                    "action" to "doo_player_ajax",
+                    "post" to post,
+                    "nume" to nume,
+                    "type" to type,
+                ),
+                referer = mainUrl,
+                timeout = 5,
+                interceptor = getCfKiller(),
+            ).text
+        }.getOrNull() ?: return null
+        return extractImdbIdFromUrl(resp)
     }
 
 
@@ -582,7 +685,7 @@ class MultimoviesProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val meta = SourceMetaCache.get(data)
+        var meta = SourceMetaCache.get(data)
 
         // Fast path: cached links for this title/episode (no probing, no CF solve).
         if (meta != null) {
@@ -619,10 +722,25 @@ class MultimoviesProvider : MainAPI() {
                 name to Triple(post, nume, type)
             }
 
-        // Path A: dooplayer-independent direct sources built from the resolved ids.
-        val globalSources = buildGlobalSources(meta)
         // Path B: dooplayer-resolved embeds (admin-ajax + recursive iframe unwrap).
-        val dooplayerSources = if (options.isNotEmpty()) resolveDooplayerSources(data, options) else emptyList()
+        val dooplayerResult = if (options.isNotEmpty()) {
+            resolveDooplayerSources(data, options)
+        } else {
+            DooplayerResult(emptyList(), null)
+        }
+
+        // Path A: dooplayer-independent direct sources built from the resolved ids.
+        // If load() never resolved an IMDB id (page exposes none and Cinemeta
+        // search missed), recover it from the dooplayer embed URLs, which embed
+        // the IMDB id in every embed_url.
+        if (meta == null) {
+            dooplayerResult.imdbId?.let { id ->
+                meta = SourceMeta(id, null, parseSeason(data), parseEpisode(data))
+                SourceMetaCache.put(data, meta)
+            }
+        }
+        val globalSources = buildGlobalSources(meta)
+        val dooplayerSources = dooplayerResult.sources
 
         val sources = globalSources + dooplayerSources
         if (sources.isEmpty()) return false
@@ -649,6 +767,12 @@ class MultimoviesProvider : MainAPI() {
         return deduped.isNotEmpty()
     }
 
+    private fun parseSeason(url: String): Int? =
+        Regex("(?i)(\\d+)x\\d+").find(url)?.groupValues?.get(1)?.toIntOrNull()
+
+    private fun parseEpisode(url: String): Int? =
+        Regex("(?i)\\d+x(\\d+)").find(url)?.groupValues?.get(1)?.toIntOrNull()
+
     /** Build dooplayer-independent direct sources from the ids cached during load(). */
     private fun buildGlobalSources(meta: SourceMeta?): List<MultiSourcePuller.Source> {
         if (meta == null) return emptyList()
@@ -673,11 +797,13 @@ class MultimoviesProvider : MainAPI() {
     }
 
     /** Resolve every dooplayer server's embed URL (parallel admin-ajax POSTs) and
-     *  recursively unwrap wrapper pages to the deepest player URL. */
+     *  recursively unwrap wrapper pages to the deepest player URL. Also surfaces
+     *  the IMDB id embedded in the first embed URL so global id-based sources can
+     *  be built even when the detail page never exposed an IMDB id. */
     private suspend fun resolveDooplayerSources(
         data: String,
         options: List<Pair<String, Triple<String, String, String>>>,
-    ): List<MultiSourcePuller.Source> {
+    ): DooplayerResult {
         data class Embed(val name: String, val url: String, val latencyMs: Long)
         val servers: List<Embed> = coroutineScope {
             options.map { (name, triple) ->
@@ -707,33 +833,53 @@ class MultimoviesProvider : MainAPI() {
 
                     val rawEmbed = Regex("\"embed_url\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\"")
                         .find(resp)?.groupValues?.get(1)
-                        ?.replace("\\/", "/")
-                        ?.replace("\\\"", "\"")
                         ?: return@async null
-                    val embed = if (rawEmbed.contains("<iframe", ignoreCase = true)) {
-                        Jsoup.parse(rawEmbed).selectFirst("iframe")?.attr("src")
-                            ?.takeIf { it.isNotBlank() } ?: return@async null
-                    } else {
-                        rawEmbed.replace("\\/", "/").trim()
-                    }
+                    val embed = cleanEmbedUrl(rawEmbed).takeIf { it.isNotBlank() } ?: return@async null
                     Embed(name, embed, latencyMs)
                 }
             }.awaitAll().filterNotNull()
         }
 
-        return servers.map { e ->
-            val finalUrl = MultiSourcePuller.unwrapEmbed(
-                e.url,
-                referer = data,
-                headers = commonHeaders,
-            )
-            MultiSourcePuller.Source(
-                name = e.name,
-                url = finalUrl,
-                referer = data,
-                headers = commonHeaders,
-                latencyMs = e.latencyMs,
-            )
+        return DooplayerResult(
+            sources = servers.map { e ->
+                val finalUrl = MultiSourcePuller.unwrapEmbed(
+                    e.url,
+                    referer = data,
+                    headers = commonHeaders,
+                )
+                MultiSourcePuller.Source(
+                    name = e.name,
+                    url = finalUrl,
+                    referer = data,
+                    headers = commonHeaders,
+                    latencyMs = e.latencyMs,
+                )
+            },
+            imdbId = servers.firstNotNullOfOrNull { extractImdbIdFromUrl(it.url) },
+        )
+    }
+
+    private data class DooplayerResult(
+        val sources: List<MultiSourcePuller.Source>,
+        val imdbId: String?,
+    )
+
+    /** Normalize a raw dooplayer embed_url: unescape JSON slashes/quotes, pull the
+     *  iframe src when the value is an HTML snippet, and HTML-decode entities
+     *  (`&amp;` -> `&`) that the admin-ajax JSON embeds inside query strings.
+     *  Without the entity decode, multi-param embeds like
+     *  `?imdb=tt1&amp;type=movie` break because the server sees a literal
+     *  `&amp;` separator instead of `&`. */
+    private fun cleanEmbedUrl(raw: String): String {
+        var url = raw.replace("\\/", "/").replace("\\\"", "\"").trim()
+        if (url.contains("<iframe", ignoreCase = true)) {
+            url = Jsoup.parseBodyFragment(url).selectFirst("iframe")?.attr("src")?.trim().orEmpty()
+        }
+        if (url.isBlank()) return ""
+        return if (url.contains("&amp;", ignoreCase = true) || url.contains("&#038;", ignoreCase = true)) {
+            Jsoup.parseBodyFragment(url).text()
+        } else {
+            url
         }
     }
 

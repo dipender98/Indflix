@@ -65,31 +65,15 @@ class GlobalSource(
 )
 
 /** Curated global source registry (dooplayer-independent). URL patterns verified
- *  from public documentation / health-checked provider lists. */
+ *  from public documentation / health-checked provider lists. Note: many public
+ *  embed hosts rotate/expire fast (vixsrc.to went Next.js, vidsrc.net died,
+ *  vidlink.pro API 404, multiembed.mov 403), so the list is kept to hosts that
+ *  actually respond; the dooplayer embeds resolved from the site remain the
+ *  primary source path. Append new hosts as they become available — the runtime
+ *  probe (in loadLinks/pull) keeps only the ones that answer from the user's
+ *  network. */
 object GlobalSources {
     val list: List<GlobalSource> = listOf(
-        GlobalSource(
-            name = "vixsrc.to",
-            idType = SourceId.IMDB,
-            extraction = MultiSourcePuller.ExtractionType.MASTER_PLAYLIST,
-            buildUrl = { id, s, e ->
-                if (s != null && e != null) "https://vixsrc.to/tv/$id/$s/$e"
-                else "https://vixsrc.to/movie/$id"
-            },
-            headers = mapOf("Referer" to "https://vixsrc.to/", "Origin" to "https://vixsrc.to/"),
-            priority = 0,
-        ),
-        GlobalSource(
-            name = "autoembed",
-            idType = SourceId.IMDB,
-            extraction = MultiSourcePuller.ExtractionType.GENERIC,
-            buildUrl = { id, s, e ->
-                if (s != null && e != null) "https://player.autoembed.app/embed/tv/$id/$s/$e"
-                else "https://player.autoembed.app/embed/movie/$id"
-            },
-            headers = mapOf("Referer" to "https://player.autoembed.app/"),
-            priority = 1,
-        ),
         GlobalSource(
             name = "2embed.cc",
             idType = SourceId.IMDB,
@@ -99,39 +83,7 @@ object GlobalSources {
                 else "https://www.2embed.cc/embed/movie?imdb=$id"
             },
             headers = mapOf("Referer" to "https://www.2embed.cc/"),
-            priority = 2,
-        ),
-        GlobalSource(
-            name = "vidlink.pro",
-            idType = SourceId.TMDB,
-            extraction = MultiSourcePuller.ExtractionType.VIDLINK,
-            buildUrl = { id, s, e ->
-                if (s != null && e != null) "https://vidlink.pro/tv/$id/$s/$e"
-                else "https://vidlink.pro/movie/$id"
-            },
-            headers = mapOf("Referer" to "https://vidlink.pro/", "Origin" to "https://vidlink.pro/"),
-            priority = 3,
-        ),
-        GlobalSource(
-            name = "multiembed.mov",
-            idType = SourceId.TMDB,
-            extraction = MultiSourcePuller.ExtractionType.GENERIC,
-            buildUrl = { id, s, e ->
-                if (s != null && e != null) "https://multiembed.mov/?video_id=$id&tmdb=1&s=$s&e=$e"
-                else "https://multiembed.mov/?video_id=$id&tmdb=1"
-            },
-            headers = mapOf("Referer" to "https://multiembed.mov/"),
-            priority = 4,
-        ),
-        GlobalSource(
-            name = "vidsrc.net",
-            idType = SourceId.TMDB,
-            extraction = MultiSourcePuller.ExtractionType.GENERIC,
-            buildUrl = { id, s, e ->
-                if (s != null && e != null) "https://vidsrc.net/embed/tv?tmdb=$id&season=$s&episode=$e"
-                else "https://vidsrc.net/embed/movie?tmdb=$id"
-            },
-            priority = 5,
+            priority = 0,
         ),
     )
 }

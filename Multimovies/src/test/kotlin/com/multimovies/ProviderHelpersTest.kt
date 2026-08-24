@@ -85,6 +85,34 @@ class ProviderHelpersTest {
         assertNull(upgradePosterUrl(""))
     }
 
+    @Test
+    fun `upgradePosterUrl upgrades small tmdb size prefix to original`() {
+        assertEquals("https://image.tmdb.org/t/p/original/poster.jpg",
+            upgradePosterUrl("https://image.tmdb.org/t/p/w185/poster.jpg"))
+        assertEquals("https://image.tmdb.org/t/p/original/poster.jpg",
+            upgradePosterUrl("https://image.tmdb.org/t/p/w342/poster.jpg"))
+    }
+
+    @Test
+    fun `upgradePosterUrl keeps large tmdb size prefix`() {
+        assertEquals("https://image.tmdb.org/t/p/w780/poster.jpg",
+            upgradePosterUrl("https://image.tmdb.org/t/p/w780/poster.jpg"))
+    }
+
+    @Test
+    fun `upgradePosterUrl upgrades amazon SX thumbnail suffix`() {
+        assertEquals("https://m.media-amazon.com/images/M/ab12._SX500.jpg",
+            upgradePosterUrl("https://m.media-amazon.com/images/M/ab12._SX250.jpg"))
+    }
+
+    @Test
+    fun `isThumbnailish detects tmdb and amazon small sizes`() {
+        assertTrue(isThumbnailish("https://image.tmdb.org/t/p/w185/poster.jpg"))
+        assertTrue(isThumbnailish("https://m.media-amazon.com/images/M/ab12._SX250.jpg"))
+        assertFalse(isThumbnailish("https://image.tmdb.org/t/p/original/poster.jpg"))
+        assertFalse(isThumbnailish("https://image.tmdb.org/t/p/w780/poster.jpg"))
+    }
+
     // ---- parseRating ----
 
     @Test
@@ -181,15 +209,43 @@ class ProviderHelpersTest {
 
     @Test
     fun `SOURCE_PRIORITY ranks fastest reliable sources at the top`() {
-        assertEquals("GDMIRROR", SOURCE_PRIORITY.first())
-        assertEquals("vixsrc.to", SOURCE_PRIORITY[1])
-        assertEquals("Nxsha", SOURCE_PRIORITY.last())
-        // exactly the expected order: dooplayer labels + direct global sources
+        assertEquals("Cineverse", SOURCE_PRIORITY.first())
+        assertEquals("screenscape.me", SOURCE_PRIORITY[1])
+        assertEquals("2embed", SOURCE_PRIORITY.last())
+        // reflects the actual servers on current Multimovies pages (verified Aug 2026)
         assertEquals(
-            listOf("GDMIRROR", "vixsrc.to", "autoembed", "2embed", "vidlink.pro",
-                "multiembed", "screenscape.me", "VidZee", "VidZee v2",
-                "CinemaOS", "Cineverse", "Nxsha"),
+            listOf("Cineverse", "screenscape.me", "gdmirror", "Nxsha", "nhdapi", "2embed"),
             SOURCE_PRIORITY
         )
+    }
+
+    // ---- Hindi hint detection ----
+
+    @Test
+    fun `isHindiHint detects streamhg platform proxy`() {
+        assertTrue(
+            MultiSourcePuller.isHindiHint(
+                "Cineverse",
+                "https://rozgarlelo.modiplay.xyz/proxy.php?p=streamhg&c=abc&title=Rush",
+                null
+            )
+        )
+    }
+
+    @Test
+    fun `isHindiHint detects lan=hindi and hindi text`() {
+        assertTrue(
+            MultiSourcePuller.isHindiHint(
+                "screenscape.me",
+                "https://screenscape.me/embed?imdb=tt1&type=movie&lan=hindi",
+                null
+            )
+        )
+        assertTrue(MultiSourcePuller.isHindiHint("Hindi Server", "https://x.com/e", "https://cdn.example/master.m3u8"))
+    }
+
+    @Test
+    fun `isHindiHint false for plain sources`() {
+        assertFalse(MultiSourcePuller.isHindiHint("Nxsha", "https://nxsha.space/embed/movie/tt1", null))
     }
 }
