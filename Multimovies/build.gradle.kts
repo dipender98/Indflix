@@ -95,3 +95,7 @@ tasks.register("shrinkCs3") {
 }
 
 tasks.named("make") { finalizedBy("shrinkCs3") }
+
+// makePluginsJson -> writeCacheEntry reads build/Multimovies.cs3, which shrinkCs3
+// replaces. Declare the dependency explicitly (Gradle 9 fails otherwise).
+tasks.named("writeCacheEntry") { dependsOn("shrinkCs3") }
