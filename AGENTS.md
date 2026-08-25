@@ -1,137 +1,134 @@
 # Indflix
 
-CloudStream 3 extension (provider + multi-source streamer) that scrapes
-**Multimovies** (`https://multimovies.motorcycles`, Dooplay theme). Technical
-demo of a multi-source scraper/streamer; forked from the CloudStream plugin
-template.
+CloudStream 3 plugin. One provider, `Multimovies`, for
+[multimovies.motorcycles](https://multimovies.motorcycles) (Dooplay theme).
+Pulls several stream sources in parallel and gives the player the first one
+that responds.
 
-## Architecture
+## Layout
 
-- `Multimovies/src/main/kotlin/com/multimovies/MultimoviesProvider.kt` — the
-  `MainAPI` provider. Implements `search`, `getMainPage`, `load`, `loadLinks`,
-  plus the search-relevance engine (pure, JVM-testable) and all cache wiring.
-  `mainPage` exposes 18 rows (5 Bollywood, 5 global movies, 5 series, 3 anime).
-  Emitted links are named `<Server>[_Hindi]_<Quality>` via
-  `MultiSourcePuller.LinkNamer` (duplicates get `-2` suffixes); YouTube/trailer
-  embeds are excluded from sources.
-- `Multimovies/src/main/kotlin/com/multimovies/MultiSourcePuller.kt` — the **source engine**:
-  - **Source priority**: `MultimoviesProvider.SOURCE_PRIORITY` orders servers from
-    most reliable/fast to least (primary sort key).
-  - **Learned latency**: `SourceSpeedTracker` records per-source extraction times;
-    breaks ties within the same priority.
-  - **Parallel pulling**: every server is launched concurrently via
-    `coroutineScope` + `async`/`awaitAll`.
-  - **Per-source timeout**: each source is wrapped in `withTimeoutOrNull(SOURCE_TIMEOUT_MS)`
-    (15 s). A slow/dead source can never block the others.
-  - Sort order: priority -> learned latency -> embed latency -> Hindi audio ->
-    adaptive HLS (m3u8) over fixed progressive files.
-- `Multimovies/src/main/kotlin/com/multimovies/TmdbService.kt` — TMDB metadata
-  engine (search / detail / find-by-imdb / episodes) with an optional SIMKL
-  search override. See Metadata below.
-- `Multimovies/src/main/kotlin/com/multimovies/ScreenscapeExtractor.kt` —
-  self-contained screenscape.me extractor (client-side crypto port, no WebView);
-  uses its own OkHttp client and returns plain data classes adapted by the puller.
-- `Multimovies/src/main/kotlin/com/multimovies/HostExtractors.kt` — session
-  caches (`SourceMetaCache`, `LinkCache`, `EmbedPrefetchCache`) and the curated
-  id-based `GlobalSources` registry (2embed.cc, VidSrc, 111Movies).
-- `Multimovies/src/main/kotlin/com/multimovies/MultimoviesPlugin.kt` — registers the provider.
-- Build uses the **Kotlin DSL** multi-provider layout: root `build.gradle.kts` +
-  `settings.gradle.kts` auto-includes each provider dir that has a
-  `build.gradle.kts` (here: `Multimovies/`). The CloudStream gradle plugin
-  (`com.github.recloudstream.gradle:gradle:81b1d424d2`) is declared in the root
-  buildscript block with pinned commit. `make` is finalized by `shrinkCs3`,
-  which re-dexes the R8-minified release classes into the `.cs3`.
+```
+Multimovies/
+  src/main/kotlin/com/multimovies/
+    MultimoviesProvider.kt   MainAPI impl: search, getMainPage, load, loadLinks
+    MultiSourcePuller.kt     parallel-pull engine, per-source timeout, sort
+    TmdbService.kt           TMDB search/detail/episodes + optional SIMKL
+    ScreenscapeExtractor.kt  screenscape.me crypto port (no WebView)
+    HostExtractors.kt        GlobalSources registry + session caches
+    MultimoviesPlugin.kt     plugin entrypoint
+```
 
-## Fast start (~1 s playback)
+Root `build.gradle.kts` + `settings.gradle.kts` auto-include any provider dir
+that has its own `build.gradle.kts`. CloudStream gradle plugin is pinned to
+`com.github.recloudstream.gradle:gradle:81b1d424d2` in the root buildscript.
+`make` ends with `shrinkCs3`, which re-dexes R8-minified release classes into
+the `.cs3`.
 
-Order of fast paths in `loadLinks()`:
+## Source engine
 
-1. `LinkCache` hit -> emit instantly (5 min TTL, keyed imdbId|season|episode).
-2. `EmbedPrefetchCache` hit -> page fetch AND admin-ajax skipped entirely.
-   Movies only: during `load()`, `prefetchEmbeds()` resolves the top
-   `EMBED_PREFETCH_COUNT` (2) dooplayer servers by static priority to their
-   post-unwrap stream URLs on `searchScope`. Failures are silent; a fully dead
-   entry is invalidated on empty result so retries take the full path.
-3. `cachedDocOrFetch()` reuses the memoized detail-page doc (`mmDocCache`)
-   before any network fetch (populated by both the TMDB-resolution path and
-   direct main-page loads).
+All knobs live in `MultimoviesProvider.kt`:
 
-Adaptive HLS preference (last sort tie-break) makes the player start at a lower
-rendition and ramp quality up automatically.
+- `SOURCE_PRIORITY` — static order, most-reliable first. The primary sort key.
+  Cineverse wins. If the site adds a new dooplayer server, add its name here.
+- `SOURCE_TIMEOUT_MS = 15_000L` — per-source hard cap. A dead host can never
+  block the others.
+
+`MultiSourcePuller.pull()` does the following for every source:
+
+1. Sort by static priority.
+2. Launch all sources concurrently with `coroutineScope` + `async` / `awaitAll`.
+3. Each source is wrapped in `withTimeoutOrNull(SOURCE_TIMEOUT_MS)`.
+4. Record the time in `SourceSpeedTracker`; learned latency breaks ties
+   within the same priority bucket.
+5. Final link sort: `priority ? learned latency ? embed latency ? Hindi ? HLS`.
+
+Per source it tries, in order: a dedicated host extractor (screenscape) ?
+`loadExtractor` (the CloudStream registry) ? a generic m3u8/mp4 sniff of the
+player page. YouTube/trailer embeds are filtered out.
+
+## Fast start
+
+`loadLinks()` checks three fast paths before doing any real work:
+
+1. `LinkCache` (5 min TTL, key = imdbId|season|episode) — same episode, same
+   streams, instant playback.
+2. `EmbedPrefetchCache` — while `load()` is rendering the detail page, the
+   provider starts `prefetchEmbeds()` on `searchScope`, resolving the top
+   `EMBED_PREFETCH_COUNT = 2` dooplayer servers through admin-ajax and the
+   unwrap pipeline. Play tap reads the result. If prefetch is still running,
+   `awaitInFlight(1200ms)` joins it instead of re-doing the work. Empty
+   results are invalidated so the next tap takes the full path.
+3. `cachedDocOrFetch()` — `mmDocCache` (bounded at 24) is populated by both
+   the search?TMDB?slug-guess path and direct main-page card taps. No re-fetch.
+
+Adaptive HLS is the last tie-break so the player starts at the lowest
+rendition and ramps up.
 
 ## Search
 
-Search never queries Multimovies synchronously: one TMDB `/search/multi` call
-(optional SIMKL override) returns posters + ratings inline, then a strict
-relevance gate removes every non-matching hit:
+TMDB-only. One `/search/multi` call (or SIMKL when its client id is set)
+returns poster + rating + year inline — no enrichment round-trips. Each hit
+is then run through `relevanceOf()` which requires every significant query
+token to match the title (exact / substring / small Levenshtein tolerance)
+and a weighted score above `SEARCH_RELEVANCE_THRESHOLD = 0.5`. Hindi /
+Devanagari combining marks survive normalization.
 
-- `relevanceOf()` — every significant query token must match (exact, substring,
-  or small Levenshtein tolerance); unicode-aware normalization keeps Devanagari
-  combining marks intact.
-- Constants: `SEARCH_MAX_RESULTS = 6`, `SEARCH_RELEVANCE_THRESHOLD = 0.5`,
-  `SEARCH_TOTAL_BUDGET_MS = 2500`, `SEARCH_CACHE_TTL_MS = 15 min`.
-- Each hit's real Multimovies page URL resolves in the background so `load()` is
-  instant on tap.
+Constants: `SEARCH_MAX_RESULTS = 6`, `SEARCH_TOTAL_BUDGET_MS = 2500`,
+`SEARCH_CACHE_TTL_MS = 15 min`.
 
-## Source policy (requirement)
-
-```text
-timeout per source <= 15s
-pull all sources in parallel
-prefer reliable + fast sources first (priority order)
-```
-
-Tune in one place: `SOURCE_TIMEOUT_MS` and `SOURCE_PRIORITY` in
-`MultimoviesProvider.kt` (consumed by `MultiSourcePuller`).
+After the user sees results, the real Multimovies page URL for each hit
+resolves in the background (slug-guess first, site search as fallback), so
+`load()` doesn't re-solve the slug on tap.
 
 ## Metadata
 
-Metadata comes from **TMDB** via `TmdbService`; there is no Cinemeta/TMDB-web
-scraping anywhere in the pipeline.
+`TmdbService` is the single source of truth. No Cinemeta, no TMDB-web
+scraping. Search: `/search/multi`. Detail: `/movie|tv/{id}?append_to_response=external_ids,credits`.
+Episodes: `/tv/{id}/season/{n}`. IMDB lookup: `/find/{imdbId}`.
 
-- Search: TMDB `/search/multi`. Detail: `/movie|tv/{id}?append_to_response=external_ids,credits`
-  (imdb id, cast). Episodes: `/tv/{id}/season/{n}`. IMDB lookup: `/find/{imdbId}`.
-- `SIMKL_CLIENT_ID` is embedded but blank -> TMDB-only. Setting it switches
-  SEARCH to SIMKL (detail still TMDB via the tmdb id SIMKL returns).
-- The TMDB api key is the public key shipped with the CloudStream app; the pinned
-  library exposes no `preferences` settings DSL on `MainAPI`, so no user-facing
-  key setting exists.
-- Enrichment fills poster/backdrop/year/plot/genres/cast/score; every
-  LoadResponse also calls `addImdbId(imdbId)` so CloudStream's built-in TMDB
-  meta-provider can add richer episode data when enabled in the app.
+`SIMKL_CLIENT_ID` is embedded but blank — TMDB only. Set it and the search
+call switches to SIMKL; detail still resolves through TMDB using the
+returned id.
 
-### Poster quality
+`addImdbId(imdbId)` is always called on the `LoadResponse` so the host app's
+built-in TMDB meta-provider can layer richer episode data on top when the
+user enables it.
 
-`upgradePosterUrl()` strips Dooplay `-WxH` thumbnail size suffixes (small dims
-only), TMDB CDN size prefixes, and Amazon `_SX*` suffixes so search/detail
-posters load at full resolution.
+### Posters
 
-## Publishing (extension link)
-
-The Actions workflow (`.github/workflows/build.yml`) builds the plugin with
-`./gradlew make makePluginsJson`, then deploys `plugins.json`, `repo.json` and
-`Multimovies.cs3` to the **builds branch**. The resulting install link is:
-
-```text
-https://raw.githubusercontent.com/dipender98/Indflix/builds/repo.json
-```
-
-To make it live, enable **Settings > Pages > Source: GitHub Actions** and ensure
-Actions have write permission. The `repo.json` at the repo root mirrors this URL
-for documentation.
+`upgradePosterUrl()` strips Dooplay `-WxH` thumbnails (?500px only — leaves
+`scaled` alone), TMDB CDN size prefixes (`/w92..w500/`), and Amazon
+`_SX*` suffixes so search/detail posters come in at full resolution.
 
 ## Build
 
-Requires Android SDK + JDK 17.
+JDK 17 + Android SDK.
 
 ```bash
-./gradlew make            # builds Multimovies/build/Multimovies.cs3 (R8-shrunk)
-./gradlew makePluginsJson # generates build/plugins.json
-./gradlew :Multimovies:testDebugUnitTest   # JVM unit tests, if present
+./gradlew make                    # Multimovies/build/Multimovies.cs3 (R8-shrunk)
+./gradlew makePluginsJson         # build/plugins.json
+./gradlew :Multimovies:testDebugUnitTest
 ```
+
+The plugin ships `jsoup`, `okhttp`, `kotlinx-coroutines`, `NiceHttp` and
+`kotlin-stdlib` as `compileOnly` (the host app provides them); they're
+`testImplementation` for the JVM unit tests. That's how the `.cs3` stays
+under 50 KB.
+
+## Publishing
+
+`.github/workflows/build.yml` runs `make` + `makePluginsJson` and deploys
+`plugins.json`, `repo.json`, and `Multimovies.cs3` to the `builds` branch.
+Install link:
+
+```
+https://raw.githubusercontent.com/dipender98/Indflix/builds/repo.json
+```
+
+Enable **Settings ? Pages ? Source: GitHub Actions** and make sure Actions
+has write permission on the repo.
 
 ## Legal
 
-This is a technical demonstration of source aggregation. It does not host any
-content. Streaming copyrighted material may violate the source site's ToS and
-applicable law; use at your own risk and only with content you have rights to.
+Doesn't host anything. Aggregates public embed hosts. Use at your own risk
+and only on content you have rights to.
