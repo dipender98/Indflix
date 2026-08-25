@@ -92,6 +92,9 @@ subprojects {
         testImplementation("org.jsoup:jsoup:1.22.2")
         testImplementation("com.squareup.okhttp3:okhttp:4.12.0")
         testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
+        // android.jar stubs org.json; the real implementation is needed so
+        // NxshaProtocol's envelope/parsing logic runs in unit tests.
+        testImplementation("org.json:json:20240303")
     }
 }
 

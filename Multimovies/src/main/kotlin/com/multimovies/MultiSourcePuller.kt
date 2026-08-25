@@ -79,6 +79,7 @@ object MultiSourcePuller {
         val referer: String? = null,
         val headers: Map<String, String> = emptyMap(),
         val tmdbId: String? = null,
+        val imdbId: String? = null,
         val season: Int? = null,
         val episode: Int? = null,
         val latencyMs: Long = Long.MAX_VALUE,
@@ -459,6 +460,41 @@ object MultiSourcePuller {
                     name = s.name,
                     url = s.url,
                     referer = s.headers["Referer"] ?: src.url,
+                    quality = getQualityFromName(s.quality.ifEmpty { s.url }),
+                    headers = headers,
+                    extractorData = null,
+                    type = type,
+                    audioTracks = emptyList(),
+                )
+            }
+        }
+
+        // Nxsha: the web player resolves servers/sources through same-origin
+        // CryptoJS-AES envelopes (no stream URL in any HTML), so it needs the
+        // dedicated extractor too. Ordered after screenscape so
+        // nxsha.screenscape.me keeps hitting the screenscape extractor.
+        if (hostOf(src.url).contains("nxsha")) {
+            val subs = mutableListOf<SubtitleFile>()
+            val nxLinks = NxshaExtractor.extract(src) { subs.add(SubtitleFile(it.lang, it.url)) }
+            subs.forEach { onSubtitle(it) }
+            return nxLinks.map { s ->
+                val source = s.name
+                val type = if (s.isM3u8 || s.url.contains(".m3u8", ignoreCase = true)) {
+                    ExtractorLinkType.M3U8
+                } else ExtractorLinkType.VIDEO
+                // Streams come back without headers; mirror browser behavior by
+                // advertising the embed page as Referer unless told otherwise.
+                val refererHeader = s.headers["Referer"] ?: src.referer ?: src.url
+                val headers = buildMap {
+                    putAll(src.headers)
+                    putAll(s.headers)
+                    if (!s.headers.containsKey("Referer")) put("Referer", refererHeader)
+                }
+                ExtractorLink(
+                    source = source,
+                    name = source,
+                    url = s.url,
+                    referer = refererHeader,
                     quality = getQualityFromName(s.quality.ifEmpty { s.url }),
                     headers = headers,
                     extractorData = null,

@@ -208,5 +208,17 @@ object GlobalSources {
             },
             headers = mapOf("Referer" to "https://player.vidlove.cc/"),
         ),
+        GlobalSource(
+            // Aug 2026: Nxsha's own player API (nitro, MbPly, Citadel, StremFx,
+            // ...). TMDB-keyed; the dedicated NxshaExtractor branch in
+            // MultiSourcePuller resolves its encrypted /api/servers + /api/sources.
+            name = "Nxsha",
+            idType = SourceId.TMDB,
+            buildUrl = { id, s, e ->
+                if (s != null && e != null) "https://nxsha.space/embed/tv/$id/$s/$e"
+                else "https://nxsha.space/embed/movie/$id"
+            },
+            headers = mapOf("Referer" to "https://nxsha.space/"),
+        ),
     )
 }

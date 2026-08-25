@@ -193,14 +193,26 @@ internal fun parseRating(item: Element): Double? {
 /** Server names as they appear on the Multimovies "Video Sources" list, plus the
  *  direct global sources, ordered by speed/reliability (fastest/most reliable
  *  first). Verified Aug 2026: live diagnostic confirmed Cineverse (current CDN
- *  vibuxer.com, serve_m3u8=1 proxy), screenscape.me, nxsha (.cc) and nhdapi
- *  respond; the legacy modiplay.com / gdmirror.com / nxsha.com back-ends are all
- *  dead. Cineverse is the verified fast + Hindi source; screenscape.me is the
- *  site's lan=hindi source; nxsha and nhdapi round out the dooplayer embeds.
+ *  vibuxer.com, serve_m3u8=1 proxy), screenscape.me, nxsha (.cc/.space) and
+ *  nhdapi respond; the legacy modiplay.com / gdmirror.com / nxsha.com back-ends
+ *  are all dead. Cineverse is the verified fast + Hindi source; screenscape.me
+ *  is the site's lan=hindi source.
+ *
+ *  Nxsha (index 2) expands internally into its own server fleet resolved by
+ *  [NxshaExtractor] through nxsha.space's encrypted /api/servers+/api/sources:
+ *  Nitro (fastest), MbPly, MhPly, Citadel, AwsPly, StremFx, VidHindi(4K embed),
+ *  CastVid, Lolly, Prvibd, Stvvid, Ophm, AsiaLug, TunWatch, Gbru. Nitro-first
+ *  ordering lives in NxshaExtractor.orderServers; SourceSpeedTracker re-ranks
+ *  after the first load.
+ *
  *  The tail lists the id-based GlobalSources (2embed.cc, VidSrc, 111Movies) —
- *  verified-responding public embed hosts; learned per-source speed promotes
- *  whichever is fastest. Note: gdmirror was removed entirely (host refused TCP,
- *  no alt TLD resolves); add it back here if it ever comes back to life. */
+ *  verified-responding public hosts; Nxsha's own sources match the "nxsha"
+ *  entry above. Nxsha's hardcoded player fallbacks (videasy/vidnest/vidfast/
+ *  moviesapi/vidzee) were probed Aug 2026: all JS-rendered SPAs or 403 for
+ *  non-browsers, so they are NOT added here; their upstreams still arrive via
+ *  Nxsha's own provider pipeline.
+ *  Note: gdmirror was removed entirely (host refused TCP, no alt TLD resolves);
+ *  add it back here if it ever comes back to life. */
 internal val SOURCE_PRIORITY: List<String> = listOf(
     "Cineverse",
     "screenscape.me",
@@ -1072,6 +1084,10 @@ class MultimoviesProvider : MainAPI() {
                         url = finalUrl,
                         referer = data,
                         headers = srcHeaders,
+                        // Cached ids let the Nxsha extractor resolve even when the
+                        // embed URL itself carries no tmdb/imdb marker.
+                        tmdbId = meta?.tmdbId,
+                        imdbId = meta?.imdbId,
                         latencyMs = e.latencyMs,
                     )
                     sourceRefs.add(src)
@@ -1239,6 +1255,7 @@ class MultimoviesProvider : MainAPI() {
                 referer = url,
                 headers = commonHeaders + g.headers,
                 tmdbId = meta.tmdbId,
+                imdbId = meta.imdbId,
                 season = meta.season,
                 episode = meta.episode,
             )
