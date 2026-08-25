@@ -9,6 +9,8 @@ import com.lagradost.cloudstream3.utils.loadExtractor
 import kotlinx.coroutines.*
 import org.jsoup.Jsoup
 import java.util.Collections
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Session-scoped memory of per-source extraction speed. [MultiSourcePuller.pull]
@@ -48,8 +50,6 @@ internal object SourceSpeedTracker {
     /** Learned average extraction latency for [name], or null when never measured.
      *  Measured-but-never-succeeded sources return [Double.MAX_VALUE] (slowest). */
     fun averageLatency(name: String): Double? = map[name]?.avgMs()
-
-    fun reset() = map.clear()
 }
 
 /**
@@ -92,7 +92,6 @@ object MultiSourcePuller {
     /** Regexes for the generic embed sniffer: stream URLs to harvest directly. */
     internal val STREAM_URL_REGEXES = listOf(
         Regex("""https?://[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*"""),
-        Regex("""https?://[^\s"'<>\\]+\.m3u8"""),
         Regex("""https?://[^\s"'<>\\]+\.mp4[^\s"'<>\\]*"""),
         Regex("""https?://[^\s"'<>\\]+\.webm[^\s"'<>\\]*"""),
         Regex("""https?://[^\s"'<>\\]+\.mkv[^\s"'<>\\]*"""),
@@ -203,9 +202,14 @@ object MultiSourcePuller {
     ): String {
         var current = url
         repeat(MAX_UNWRAP_LEVELS) {
-            val host = hostOf(current)
-            if (host.endsWith(".m3u8") || host.contains(".m3u8", ignoreCase = true) ||
-                host.contains(".mp4", ignoreCase = true)
+            // Terminal: a URL that IS a stream — direct m3u8/mp4 file, or a
+            // modiplay/proxy relay (serve_m3u8=1) that serves the playlist
+            // directly. Checked on the whole URL string (not just the host)
+            // because these markers live in the path/query; fetching them as
+            // HTML would only re-download a playlist and risk misparsing it.
+            if (current.contains(".m3u8", ignoreCase = true) ||
+                current.contains(".mp4", ignoreCase = true) ||
+                current.contains("serve_m3u8=", ignoreCase = true)
             ) return current
             val text = runCatching {
                 app.get(current, timeout = 5, headers = buildMap {
@@ -319,6 +323,30 @@ object MultiSourcePuller {
             audioTracks = l.audioTracks ?: emptyList(),
         )
 
+    /** Map a quality int to a display label; adaptive/unknown masters → "Auto". */
+    internal fun qualityLabel(q: Int?): String = when (q) {
+        2160 -> "2160p"
+        1080 -> "1080p"
+        720 -> "720p"
+        480 -> "480p"
+        360 -> "360p"
+        else -> "Auto"
+    }
+
+    /** Per-load link namer producing `<Server>[_Hindi]_<Quality>` labels, with
+     *  duplicate servers numbered `-2`, `-3`… in emission order. Stateless across
+     *  loads (one instance per loadLinks call). */
+    class LinkNamer {
+        private val counters = ConcurrentHashMap<String, AtomicInteger>()
+
+        fun nameFor(source: String?, hindi: Boolean, quality: Int): String {
+            val base = sourceKey(source)
+            val n = counters.computeIfAbsent(base) { AtomicInteger(0) }.incrementAndGet()
+            val numbered = if (n == 1) base else "$base-$n"
+            return numbered + (if (hindi) "_Hindi" else "") + "_" + qualityLabel(quality)
+        }
+    }
+
     /** Normalize an [ExtractorLink.source] / [Source.name] into a stable key for
      *  speed tracking and priority lookup: strips the "(Multimovies)" indicator
      *  and any trailing language annotation such as " Hindi". */
@@ -334,7 +362,9 @@ object MultiSourcePuller {
      * Order links for the player. Primary key is the curated static [priorityOf]
      * ranking (so Cineverse / the reliable fast sources always come first);
      * measured per-source speed and per-call embed latency only break ties within
-     * the same priority, then the Hindi preference.
+     * the same priority, then the Hindi preference, then adaptive HLS over fixed
+     * progressive files — an m3u8 manifest lets the player start quickly at a
+     * lower rendition and ramp quality up automatically.
      */
     internal fun sortLinks(
         links: List<ExtractorLink>,
@@ -348,7 +378,15 @@ object MultiSourcePuller {
             { SourceSpeedTracker.averageLatency(sourceKey(it.source)) ?: Double.MAX_VALUE },
             { latencyByName[sourceKey(it.source)] ?: Long.MAX_VALUE },
         ).thenByDescending { if (preferHindi) isHindi(it) else false }
+            .thenByDescending { it.type == ExtractorLinkType.M3U8 }
         return links.sortedWith(comparator)
+    }
+
+    /** True when [url] points at a YouTube host (trailer embeds). */
+    internal fun isYouTubeHost(url: String): Boolean {
+        val host = hostOf(url)
+        return host.contains("youtube.com") || host.contains("youtu.be") ||
+            host.contains("youtube-nocookie")
     }
 
     /** Unified per-source extraction: dedicated host extractor, then registry, then sniff. */
@@ -356,6 +394,8 @@ object MultiSourcePuller {
         src: Source,
         onSubtitle: (SubtitleFile) -> Unit,
     ): List<ExtractorLink> {
+        // Trailers/YouTube embeds are not streams — never surface them as sources.
+        if (isYouTubeHost(src.url)) return emptyList()
         // screenscape.me: JS-rendered player, but its API is deterministic client-side
         // crypto (HMAC-signed routes + CryptoJS-AES responses). Route to the dedicated
         // extractor which reproduces that flow (no browser needed).

@@ -197,7 +197,9 @@ internal fun parseRating(item: Element): Double? {
  *  proxy) is the verified fast + Hindi source; Nxsha uses the same modiplay/vibuxer
  *  CDN backend but its embed needs JS; screenscape.me is the site's lan=hindi source;
  *  gdmirror is the site's recommended server. Servers not listed here are still
- *  pulled (generic sniffer fallback) but with the lowest priority. */
+ *  pulled (generic sniffer fallback) but with the lowest priority. The tail lists
+ *  the id-based GlobalSources (2embed.cc, VidSrc, 111Movies) — verified-responding
+ *  public embed hosts; learned per-source speed promotes whichever is fastest. */
 internal val SOURCE_PRIORITY: List<String> = listOf(
     "Cineverse",
     "screenscape.me",
@@ -205,6 +207,8 @@ internal val SOURCE_PRIORITY: List<String> = listOf(
     "Nxsha",
     "nhdapi",
     "2embed",
+    "VidSrc",
+    "111Movies",
 )
 
 /** CSS selector for the item containers on a Multimovies search-results page. */
@@ -344,14 +348,28 @@ class MultimoviesProvider : MainAPI() {
     )
 
     override val mainPage = mainPageOf(
-        Pair("$mainUrl/movies/", "Movies"),
-        Pair("$mainUrl/tvshows/", "TV Shows"),
-        Pair("$mainUrl/seasons/", "Seasons"),
-        Pair("$mainUrl/genre/bollywood-movies/", "Bollywood"),
+        // Bollywood (5)
+        Pair("$mainUrl/genre/bollywood-movies/", "Bollywood Movies"),
+        Pair("$mainUrl/genre/netflix/", "Netflix"),
+        Pair("$mainUrl/genre/amazon-prime/", "Amazon Prime"),
+        Pair("$mainUrl/genre/disney-hotstar/", "Disney+ Hotstar"),
+        Pair("$mainUrl/genre/zee-5/", "Zee5"),
+        // Global Movies (5)
         Pair("$mainUrl/genre/hollywood/", "Hollywood"),
+        Pair("$mainUrl/genre/action/", "Action"),
+        Pair("$mainUrl/genre/comedy/", "Comedy"),
+        Pair("$mainUrl/genre/horror/", "Horror"),
+        Pair("$mainUrl/genre/science-fiction/", "Sci-Fi"),
+        // Series (5)
+        Pair("$mainUrl/tvshows/", "Web Series"),
+        Pair("$mainUrl/genre/k-drama/", "K-Drama"),
+        Pair("$mainUrl/genre/crime/", "Crime Series"),
+        Pair("$mainUrl/genre/thriller/", "Thriller Series"),
         Pair("$mainUrl/genre/south-indian/", "South Indian"),
+        // Anime (3)
         Pair("$mainUrl/genre/anime-hindi/", "Hindi Dub Anime"),
-        Pair("$mainUrl/trending/", "Top Rated"),
+        Pair("$mainUrl/genre/anime-series/", "Anime Series"),
+        Pair("$mainUrl/genre/anime-movies/", "Anime Movies"),
     )
 
     // ------------------------------------------------------------------
@@ -375,6 +393,14 @@ class MultimoviesProvider : MainAPI() {
 
         /** Worst-case budget for an uncached search before giving up. */
         const val SEARCH_TOTAL_BUDGET_MS = 2500L
+
+        /** How many top-priority player servers the movie-page background
+         *  prefetch resolves ahead of the Play tap. */
+        const val EMBED_PREFETCH_COUNT = 2
+
+        /** Max number of detail-page Documents cached in memory. Beyond this,
+         *  oldest entries are evicted when a new page is fetched. */
+        private const val MM_DOC_CACHE_MAX_SIZE = 24
     }
 
     private fun priorityOf(serverName: String): Int {
@@ -445,6 +471,18 @@ class MultimoviesProvider : MainAPI() {
     ): Document = fetchDoc(url, timeoutSeconds = timeoutSeconds, required = true)
         ?: throw ErrorLoadingException("Failed to fetch $url")
 
+    /** Reuses the memoized detail-page doc when present; otherwise fetches,
+     *  memoizes, and returns it — so main-page card taps get the same doc reuse
+     *  as search taps. Returns null on failure (never throws). */
+    internal suspend fun cachedDocOrFetch(url: String): Document? {
+        mmDocCache[url]?.let { return it }
+        val doc = runCatching { solveDocument(url) }.getOrNull() ?: return null
+        if (mmDocCache.size >= MM_DOC_CACHE_MAX_SIZE) {
+            mmDocCache.keys.firstOrNull()?.let { mmDocCache.remove(it) }
+        }
+        mmDocCache[url] = doc
+        return doc
+    }
 
     // ------------------------------------------------------------------
     // Search (TMDB/SIMKL-driven; Multimovies is only touched in the background
@@ -702,7 +740,7 @@ class MultimoviesProvider : MainAPI() {
                 if (tmdb != null) {
                     resolveMultimoviesDoc(tmdb.first, null, tmdb.second, cached?.first.orEmpty(), cached?.second)
                 } else {
-                    runCatching { solveDocument(url) }.getOrNull()
+                    cachedDocOrFetch(url)
                 }
             }
             val metaJob = async {
@@ -726,6 +764,11 @@ class MultimoviesProvider : MainAPI() {
 
             val isMovie = tmdb?.second == "movie" || realUrl.contains("/movies/")
             val pageType = if (isMovie) "movie" else "series"
+
+            // Fire-and-forget: pre-resolve the top-priority player servers while
+            // the user reads the detail page, so tapping Play emits links without
+            // waiting for a page fetch + admin-ajax round-trips.
+            if (isMovie) prefetchEmbeds(realUrl, doc)
 
             // Direct MM page (main-page card): ids come from the page markup, then
             // metadata is fetched from TMDB; the dooplayer embed URL is a last resort.
@@ -764,7 +807,7 @@ class MultimoviesProvider : MainAPI() {
             val plot = resolvedDetail?.overview ?: doc.selectFirst("div.wp-content, div.description, .wp-content p")?.text()
                 ?.replace("Overview:", "")?.trim()
             val tags = resolvedDetail?.genres
-                ?: doc.select("div.sgeneros a, .genre a, .sgeneros a").mapNotNull { it.text() }
+                ?: doc.select("div.sgeneros a, .genre a").mapNotNull { it.text() }
             val score = resolvedDetail?.rating
             val pageScore = doc.selectFirst("span.dt_rating_vgs, .imdb, .rating span")?.text()
                 ?.removePrefix("IMDb:")?.trim()?.toDoubleOrNull()
@@ -890,9 +933,65 @@ class MultimoviesProvider : MainAPI() {
         return extractImdbIdFromUrl(resp)
     }
 
+    /** Parse the Dooplay "Video Sources" list: each li.dooplay_player_option
+     *  carries data-nume (source index) and data-type; the post id comes from
+     *  meta#dooplay-ajax-counter with the li's own data-post as fallback.
+     *  Trailers (YouTube embeds) are excluded — they are not playable sources. */
+    private fun parsePlayerOptions(doc: Document, pageUrl: String): List<Pair<String, Triple<String, String, String>>> {
+        val postId = doc.selectFirst("meta#dooplay-ajax-counter")
+            ?.attr("data-postid")
+            ?.takeIf { it.isNotBlank() }
+        return doc.select("ul#playeroptionsul li.dooplay_player_option, li.dooplay_player_option")
+            .mapNotNull { li ->
+                val name = li.selectFirst(".title")?.text()?.trim() ?: return@mapNotNull null
+                val nume = li.attr("data-nume").takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                if (nume.equals("trailer", ignoreCase = true) ||
+                    name.contains("trailer", ignoreCase = true) ||
+                    name.contains("youtube", ignoreCase = true)
+                ) return@mapNotNull null
+                val post = postId ?: li.attr("data-post").takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                val type = li.attr("data-type").takeIf { it.isNotBlank() }
+                    ?: if (pageUrl.contains("/movies/")) "movie" else "tv"
+                name to Triple(post, nume, type)
+            }
+    }
+
+    /** Background movie-only prefetch: resolve the top [EMBED_PREFETCH_COUNT]
+     *  dooplayer servers (static priority order) through admin-ajax and unwrap,
+     *  then park the results in [EmbedPrefetchCache] so a Play tap can skip the
+     *  page fetch AND admin-ajax entirely. [EmbedPrefetchCache.resolveOrJoin]
+     *  deduplicates concurrent starts; any error simply leaves the cache empty.
+     *  Never blocks or fails load(). */
+    private fun prefetchEmbeds(pageUrl: String, doc: Document) {
+        searchScope.launch {
+            runCatching {
+                EmbedPrefetchCache.resolveOrJoin(pageUrl, resolve = { resolveTopEmbeds(pageUrl, doc) })
+            }
+        }
+    }
+
+    /** Resolve the top-priority player servers for [pageUrl] to their final
+     *  post-unwrap URLs. Empty when the page exposes no usable options. */
+    private suspend fun resolveTopEmbeds(pageUrl: String, doc: Document): List<ResolvedEmbed> {
+        val options = parsePlayerOptions(doc, pageUrl)
+            .sortedBy { priorityOf(it.first) }
+            .take(EMBED_PREFETCH_COUNT)
+        if (options.isEmpty()) return emptyList()
+        return coroutineScope {
+            options.map { (name, triple) ->
+                async {
+                    runCatching {
+                        val e = resolveEmbed(pageUrl, name, triple.first, triple.second, triple.third)
+                            ?: return@runCatching null
+                        e.copy(url = MultiSourcePuller.unwrapEmbed(e.url, referer = pageUrl, headers = commonHeaders))
+                    }.getOrNull()
+                }
+            }.awaitAll().filterNotNull()
+        }
+    }
 
     // ------------------------------------------------------------------
-    // Load links - parallel pulling with per-source 30s timeout + priority
+    // Load links - parallel pulling with per-source timeout + priority
     // ------------------------------------------------------------------
 
     override suspend fun loadLinks(
@@ -903,7 +1002,7 @@ class MultimoviesProvider : MainAPI() {
     ): Boolean {
         var meta = SourceMetaCache.get(data)
 
-        // Fast path: cached links emit instantly so playback starts right away
+        // Fast path 1: cached links emit instantly so playback starts right away
         // (like other plugins). The LinkCache TTL is short (5 min) so stale URLs
         // don't linger; no liveness probe delays the first frame.
         if (meta != null) {
@@ -915,44 +1014,29 @@ class MultimoviesProvider : MainAPI() {
             }
         }
 
-        val doc = try {
-            solveDocument(data)
-        } catch (e: Exception) {
-            null
-        } ?: return false
+        // Fast path 2: embeds prefetched in the background while the detail page
+        // was open — skips the page fetch AND admin-ajax entirely. If a prefetch
+        // is still running (Play tapped early), await it briefly rather than
+        // duplicating the network work.
+        val awaited = EmbedPrefetchCache.awaitInFlight(data, timeoutMs = 1200L)
+        val prefetched = awaited != null && awaited.isNotEmpty()
+        var embeds: List<ResolvedEmbed> = awaited.orEmpty()
 
-        // Each "Video Source" on a Multimovies episode page is a
-        // li.dooplayer_player_option carrying data-nume (source index) and data-type.
-        // The real embed URL comes from the site's dooplayer admin-ajax endpoint,
-        // keyed by the post id. The post id is Dooplay-standard in
-        // <meta id="dooplay-ajax-counter" data-postid="...">; the <li> data-post
-        // is a fallback when the meta tag is absent.
-        val postId = doc.selectFirst("meta#dooplay-ajax-counter")
-            ?.attr("data-postid")
-            ?.takeIf { it.isNotBlank() }
-        val options = doc.select("ul#playeroptionsul li.dooplay_player_option, li.dooplay_player_option")
-            .mapNotNull { li ->
-                val name = li.selectFirst(".title")?.text()?.trim() ?: return@mapNotNull null
-                val post = postId ?: li.attr("data-post").takeIf { it.isNotBlank() } ?: return@mapNotNull null
-                val nume = li.attr("data-nume").takeIf { it.isNotBlank() } ?: return@mapNotNull null
-                val type = li.attr("data-type").takeIf { it.isNotBlank() }
-                    ?: if (data.contains("/movies/")) "movie" else "tv"
-                name to Triple(post, nume, type)
+        if (embeds.isEmpty()) {
+            val doc = cachedDocOrFetch(data) ?: return false
+            embeds = coroutineScope {
+                parsePlayerOptions(doc, data).map { (name, triple) ->
+                    async {
+                        runCatching { resolveEmbed(data, name, triple.first, triple.second, triple.third) }.getOrNull()
+                    }
+                }.awaitAll().filterNotNull()
             }
-
-        // Resolve every dooplayer server's embed URL in parallel (admin-ajax).
-        // The embed URLs also carry the IMDB id, which recovers meta when load()
-        // never resolved one.
-        val embeds = coroutineScope {
-            options.map { (name, triple) ->
-                async {
-                    runCatching { resolveEmbed(data, name, triple.first, triple.second, triple.third) }.getOrNull()
-                }
-            }.awaitAll().filterNotNull()
         }
 
+        // The raw dooplayer embed URLs also carry the IMDB id, which recovers
+        // meta when load() never resolved one.
         if (meta == null) {
-            embeds.firstNotNullOfOrNull { extractImdbIdFromUrl(it.url) }?.let { id ->
+            embeds.firstNotNullOfOrNull { extractImdbIdFromUrl(it.embedUrl ?: it.url) }?.let { id ->
                 meta = SourceMeta(id, null, parseSeason(data), parseEpisode(data))
                 SourceMetaCache.put(data, meta)
             }
@@ -972,6 +1056,7 @@ class MultimoviesProvider : MainAPI() {
         // lower-priority fallbacks join as they resolve.
         val globalSources = buildGlobalSources(meta)
         val orderedEmbeds = embeds.sortedBy { priorityOf(it.name) }
+        val namer = MultiSourcePuller.LinkNamer()
 
         coroutineScope {
             val embedJobs = orderedEmbeds.map { e ->
@@ -985,13 +1070,13 @@ class MultimoviesProvider : MainAPI() {
                         latencyMs = e.latencyMs,
                     )
                     sourceRefs.add(src)
-                    pullSource(src, data, emitted, found, subtitleCallback, callback)
+                    pullSource(src, namer, data, emitted, found, subtitleCallback, callback)
                 }
             }
             val globalJobs = globalSources.map { g ->
                 sourceRefs.add(g)
                 async {
-                    pullSource(g, data, emitted, found, subtitleCallback, callback)
+                    pullSource(g, namer, data, emitted, found, subtitleCallback, callback)
                 }
             }
             (embedJobs + globalJobs).awaitAll()
@@ -999,16 +1084,24 @@ class MultimoviesProvider : MainAPI() {
 
         val sorted = MultiSourcePuller.sortLinks(found.toList(), sourceRefs.toList(), ::priorityOf, preferHindi = true)
         val deduped = dedupeByHostQuality(sorted)
-        if (meta != null) LinkCache.put(meta.imdbId, meta.season, meta.episode, deduped)
+        if (deduped.isEmpty()) {
+            // A fully dead prefetched entry would otherwise poison every retry
+            // within its TTL — drop it so the next attempt takes the full path.
+            if (prefetched) EmbedPrefetchCache.invalidate(data)
+        } else if (meta != null) {
+            LinkCache.put(meta.imdbId, meta.season, meta.episode, deduped)
+        }
 
         return deduped.isNotEmpty()
     }
 
     /** Pull a single source, streaming found links to [callback] as they arrive and
      *  collecting them (deduped at emission time) into [found] for the final sort
-     *  and link cache. */
+     *  and link cache. Every emitted link is renamed to the `<Server>[_Hindi]_<Quality>`
+     *  format via [namer] before it reaches the player. */
     private suspend fun pullSource(
         src: MultiSourcePuller.Source,
+        namer: MultiSourcePuller.LinkNamer,
         data: String,
         emitted: MutableSet<String>,
         found: MutableList<ExtractorLink>,
@@ -1022,13 +1115,22 @@ class MultimoviesProvider : MainAPI() {
         onLink = { l ->
             val key = "${hostOf(l.url ?: "")}|${l.quality}"
             if (emitted.add(key)) {
-                found.add(l)
-                runCatching { callback(l) }
+                val named = ExtractorLink(
+                    source = l.source,
+                    name = namer.nameFor(l.source, MultiSourcePuller.isHindi(l), l.quality),
+                    url = l.url,
+                    referer = l.referer,
+                    quality = l.quality,
+                    headers = l.headers,
+                    extractorData = l.extractorData,
+                    type = l.type,
+                    audioTracks = l.audioTracks ?: emptyList(),
+                )
+                found.add(named)
+                runCatching { callback(named) }
             }
         },
     )
-
-    private data class ResolvedEmbed(val name: String, val url: String, val latencyMs: Long)
 
     /** Resolve a single dooplayer server's embed URL via the site's admin-ajax
      *  endpoint, measuring the round-trip latency as a speed hint. */
@@ -1058,7 +1160,7 @@ class MultimoviesProvider : MainAPI() {
             .find(resp)?.groupValues?.get(1)
             ?: return null
         val embed = cleanEmbedUrl(rawEmbed).takeIf { it.isNotBlank() } ?: return null
-        return ResolvedEmbed(name, embed, latencyMs)
+        return ResolvedEmbed(name, embed, latencyMs, embedUrl = embed)
     }
 
     private fun parseSeason(url: String): Int? =
@@ -1084,7 +1186,6 @@ class MultimoviesProvider : MainAPI() {
                 tmdbId = meta.tmdbId,
                 season = meta.season,
                 episode = meta.episode,
-                latencyMs = g.priority.toLong(),
             )
         }
     }

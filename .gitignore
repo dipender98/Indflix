@@ -15,7 +15,10 @@ local.properties
 /playwright-report
 /.playwright-mcp/
 /chunks2/
+/tmp_chunks/
+/.kotlin/
 /gradle_out.txt
 /screenscape_report.txt
 /sscap*.txt
+
 
