@@ -3,14 +3,14 @@ import java.util.Properties
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
-version = 480
+version = 1
 
 plugins {
     id("com.lagradost.cloudstream3.gradle")
 }
 
 cloudstream {
-    language = "en"
+    language = "hi"
     authors = listOf("Indflix")
     description = "CloudStream provider that scrapes Multimovies and pulls sources in parallel with a per-source timeout."
     status = 1
