@@ -4,10 +4,7 @@ import com.lagradost.cloudstream3.Actor
 import com.lagradost.cloudstream3.ActorData
 import com.lagradost.cloudstream3.app
 import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 import org.jsoup.nodes.Document
 import java.util.concurrent.ConcurrentHashMap
@@ -241,42 +238,35 @@ object CinemetaService {
     )
 
     /**
-     * Search Cinemeta's public catalog for [query] and enrich every hit with its
-     * IMDB rating and a larger poster (from the per-title meta endpoint). Both
-     * movies and series are queried; results are deduped by IMDB id. This is the
-     * keyless, Multimovies-free source for search results.
+     * Search Cinemeta's public catalog for [query]. The movie and series catalogs
+     * are fetched CONCURRENTLY (async/await) and returned raw: no per-hit metadata
+     * round-trips, so this is a single parallel fetch (~0.3-0.8s). Posters are
+     * upgraded small->medium by string replacement (free); ratings stay null and
+     * are enriched by the provider for the top-ranked hits only, behind its own
+     * short cap. Results are deduped by IMDB id.
      */
     suspend fun searchCatalog(query: String): List<CinemetaSearchResult> {
         if (query.isBlank()) return emptyList()
         val encoded = java.net.URLEncoder.encode(query.trim(), "UTF-8")
-        val raw = mutableListOf<CinemetaSearchResult>()
-        for (type in listOf("movie", "series")) {
-            val text = runCatching {
-                app.get("$CATALOG_URL/$type/top/search=$encoded.json", timeout = 4).text
-            }.getOrNull() ?: continue
-            parseCatalogMetas(text, type)?.let { raw.addAll(it) }
-        }
-        if (raw.isEmpty()) return emptyList()
-
-        val semaphore = Semaphore(4)
         return coroutineScope {
-            raw.distinctBy { it.imdbId }.map { r ->
-                async {
-                    semaphore.acquire()
-                    try {
-                        val meta = withTimeoutOrNull(3000L) { fetchMeta(r.imdbId, r.type) }
-                        r.copy(
-                            poster = meta?.poster?.replace("poster/small/", "poster/medium/")
-                                ?: r.poster,
-                            rating = meta?.imdbRating?.toDoubleOrNull() ?: r.rating,
-                        )
-                    } finally {
-                        semaphore.release()
-                    }
-                }
-            }.awaitAll()
+            val movies = async { fetchCatalogMetas("movie", encoded) }
+            val series = async { fetchCatalogMetas("series", encoded) }
+            (movies.await() + series.await())
         }
+            .distinctBy { it.imdbId }
+            .map { it.copy(poster = it.poster?.replace("poster/small/", "poster/medium/")) }
     }
+
+    /** One catalog GET parsed into raw hits (empty list on any failure). */
+    private suspend fun fetchCatalogMetas(type: String, encodedQuery: String): List<CinemetaSearchResult> =
+        try {
+            parseCatalogMetas(
+                app.get("$CATALOG_URL/$type/top/search=$encodedQuery.json", timeout = 4).text,
+                type,
+            ) ?: emptyList()
+        } catch (e: Exception) {
+            emptyList()
+        }
 
     /** Parse a Cinemeta catalog `metas` array into [CinemetaSearchResult]s. */
     fun parseCatalogMetas(raw: String?, type: String): List<CinemetaSearchResult>? {

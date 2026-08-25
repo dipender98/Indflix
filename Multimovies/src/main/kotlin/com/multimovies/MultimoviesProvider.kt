@@ -210,6 +210,95 @@ internal val SOURCE_PRIORITY: List<String> = listOf(
 /** CSS selector for the item containers on a Multimovies search-results page. */
 private val SEARCH_ITEMS_SELECTOR = "div#archive-content div.item, div.search-page div.result-item, article.item, div.ml-items div.item, div.results div.result, ul.ml-posts li, div#content div.post, div.items div.item"
 
+// ----------------------------------------------------------------------
+// Search relevance engine (pure functions, JVM-testable, no network)
+//
+// Matching is deliberately NOT word-to-word: tokens match exactly, as
+// substrings ("spiderman" hits "Spider-Man", "ave" hits "Avengers") or
+// fuzzily via Levenshtein (typos). But the gate is strict — EVERY
+// significant query token must match somewhere in the title, so all
+// irrelevant "other" catalog hits are removed outright.
+// ----------------------------------------------------------------------
+
+/** Unicode-aware normalization (lowercase; letters, marks, digits only) so
+ *  Hindi/Devanagari queries survive: vowel signs like ि/ी are combining marks
+ *  (Unicode \p{M}), not letters, so they must be kept or scripts get mangled. */
+private val NON_ALNUM_UNICODE = Regex("""[^\p{L}\p{M}\p{N}]+""")
+
+internal fun normalizeTitle(t: String): String =
+    t.lowercase().trim().replace(NON_ALNUM_UNICODE, " ").trim()
+
+/** Classic Levenshtein edit distance (two-row implementation). */
+internal fun levenshtein(a: String, b: String): Int {
+    if (a == b) return 0
+    if (a.isEmpty()) return b.length
+    if (b.isEmpty()) return a.length
+    var prev = IntArray(b.length + 1) { it }
+    var cur = IntArray(b.length + 1)
+    for (i in 1..a.length) {
+        cur[0] = i
+        for (j in 1..b.length) {
+            val cost = if (a[i - 1] == b[j - 1]) 0 else 1
+            cur[j] = minOf(cur[j - 1] + 1, prev[j] + 1, prev[j - 1] + cost)
+        }
+        val tmp = prev
+        prev = cur
+        cur = tmp
+    }
+    return prev[b.length]
+}
+
+/** Query words that carry meaning (>=2 chars); digit tokens such as years are
+ *  kept so "iron man 2010" can match a release year too. */
+internal fun significantQueryTokens(query: String): List<String> =
+    normalizeTitle(query).split(' ').filter { it.length >= 2 }.distinct()
+
+/** Best fuzzy match score for one query [token] against the title's tokens:
+ *  1.0 exact or substring in either direction (long words only for the
+ *  query-contains-title direction to avoid false hits like "spiderman" vs
+ *  "Man"), 0.7 within a small Levenshtein tolerance (typos), else 0.0. */
+internal fun tokenMatchScore(token: String, titleTokens: List<String>): Double {
+    if (titleTokens.any { it == token || it.contains(token) }) return 1.0
+    if (titleTokens.any { token.contains(it) && it.length >= 4 }) return 1.0
+    val tolerance = if (token.length <= 5) 1 else 2
+    if (titleTokens.any { levenshtein(it, token) <= tolerance }) return 0.7
+    return 0.0
+}
+
+/** Relevance verdict for one search candidate. [score] is in [0,1];
+ *  [allTokensMatched] drives the hard "remove every other" gate. */
+internal data class Relevance(val score: Double, val allTokensMatched: Boolean)
+
+/** Fuzzy relevance of [query] against a candidate [title] (+ optional release
+ *  [year], which pure-digit tokens may match). Score = weighted mean of
+ *  per-token matches with a small penalty for bloated titles, clamped [0,1]. */
+internal fun relevanceOf(query: String, title: String, year: String?): Relevance {
+    val qNorm = normalizeTitle(query)
+    if (qNorm.isEmpty()) return Relevance(0.0, false)
+    val tNorm = normalizeTitle(title)
+    if (qNorm == tNorm) return Relevance(1.0, true)
+
+    val qTokens = significantQueryTokens(query)
+    if (qTokens.isEmpty()) {
+        // Single-character query: substring containment is the whole signal.
+        val contained = tNorm.contains(qNorm)
+        return Relevance(if (contained) 1.0 else 0.0, contained)
+    }
+    val tTokens = tNorm.split(' ').filter { it.isNotEmpty() }
+
+    var sum = 0.0
+    var matchedAll = true
+    for (token in qTokens) {
+        var best = tokenMatchScore(token, tTokens)
+        if (best < 1.0 && token.all { it.isDigit() } && year.orEmpty().contains(token)) best = 1.0
+        if (best == 0.0) matchedAll = false
+        sum += best
+    }
+    val extraTitleWords = (tTokens.size - qTokens.size).coerceAtLeast(0)
+    val score = (sum / qTokens.size - 0.03 * minOf(extraTitleWords, 5)).coerceIn(0.0, 1.0)
+    return Relevance(score, matchedAll)
+}
+
 
 /**
  * Multimovies - a CloudStream provider that scrapes the Multimovies (multimovies.motorcycles) site.
@@ -272,6 +361,23 @@ class MultimoviesProvider : MainAPI() {
         /** In-memory search result cache TTL (ms). Results don't change
          *  minute-to-minute; a longer TTL makes repeat/quick searches instant. */
         const val SEARCH_CACHE_TTL_MS = 15 * 60 * 1000L
+
+        /** Search returns at most this many results. */
+        const val SEARCH_MAX_RESULTS = 6
+
+        /** Weighted relevance score a result must clear AFTER passing the hard
+         *  every-token-matched gate; anything below is removed outright. */
+        const val SEARCH_RELEVANCE_THRESHOLD = 0.5
+
+        /** How many top-ranked results get full metadata/rating enrichment. */
+        const val SEARCH_RATING_ENRICH_COUNT = 4
+
+        /** Hard cap for the PARALLEL rating-enrichment batch (one shared await,
+         *  never per-item serialization). */
+        const val SEARCH_RATING_TIMEOUT_MS = 1300L
+
+        /** Worst-case budget for an uncached search before giving up. */
+        const val SEARCH_TOTAL_BUDGET_MS = 2500L
     }
 
     private fun priorityOf(serverName: String): Int {
@@ -351,29 +457,62 @@ class MultimoviesProvider : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse>? {
         SearchCache.get(query)?.let { return it }
 
-        val results = CinemetaService.searchCatalog(query)
-        if (results.isEmpty()) return null
-        val responses = results.mapNotNull { it.toSearchResponse() }
-        if (responses.isEmpty()) return null
+        // Phase 1 (fast): both catalogs fetched concurrently, then ranked by
+        // fuzzy relevance. The gate is strict — every significant query token
+        // must match and the score must clear the threshold; anything else is
+        // REMOVED outright ("remove every others"), with no fallback padding.
+        val ranked: List<Pair<Double, CinemetaService.CinemetaSearchResult>> =
+            withTimeoutOrNull(SEARCH_TOTAL_BUDGET_MS) {
+                val raw = CinemetaService.searchCatalog(query)
+                if (raw.isEmpty()) return@withTimeoutOrNull null
+                raw.mapNotNull { r ->
+                    val rel = relevanceOf(query, r.name, r.year)
+                    if (!rel.allTokensMatched || rel.score < SEARCH_RELEVANCE_THRESHOLD) null
+                    else rel.score to r
+                }.sortedByDescending { it.first }
+                    .take(SEARCH_MAX_RESULTS)
+                    .ifEmpty { null }
+            } ?: return null
 
-        // Background: resolve the top hits to their real Multimovies page URL and
-        // cache the mapping, so load() resolves instantly on tap. Best-effort —
-        // load() falls back to resolving on the fly when this hasn't finished.
-        responses.take(6).forEach { r ->
+        // Phase 2 (parallel, capped): full metadata enrichment (IMDB rating) for
+        // ONLY the top hits. All fetches launch concurrently behind ONE shared
+        // timeout cap — never serialized, so the whole batch costs at most
+        // SEARCH_RATING_TIMEOUT_MS regardless of item count.
+        val ratings: Map<Int, Double?> = coroutineScope {
+            ranked.take(SEARCH_RATING_ENRICH_COUNT).mapIndexed { idx, (_, r) ->
+                async {
+                    val meta = withTimeoutOrNull(SEARCH_RATING_TIMEOUT_MS) {
+                        CinemetaService.fetchMeta(r.imdbId, r.type)
+                    }
+                    idx to meta?.imdbRating?.toDoubleOrNull()
+                }
+            }.awaitAll().toMap()
+        }
+
+        val responses = ranked.mapIndexed { idx, (_, r) ->
+            r.toSearchResponse(ratings[idx])
+        }.filterNotNull()
+
+        // Background: resolve each hit to its real Multimovies page URL so load()
+        // opens instantly on tap. Fire-and-forget — search never waits for this.
+        responses.forEach { r ->
             val parsed = parseCinemetaUrl(r.url) ?: return@forEach
             searchScope.launch {
                 runCatching { resolveMultimoviesUrl(parsed.first, parsed.second, r.name) }
             }
         }
 
+        if (responses.isEmpty()) return null
         return responses.also { SearchCache.put(query, it) }
     }
 
     override suspend fun quickSearch(query: String): List<SearchResponse>? = search(query)
 
-    /** Build a CloudStream search result straight from a Cinemeta hit — poster and
-     *  rating come from Cinemeta, so search never fetches Multimovies. */
-    private fun CinemetaService.CinemetaSearchResult.toSearchResponse(): SearchResponse? {
+    /** Build a CloudStream search result straight from a Cinemeta hit — poster
+     *  comes from the catalog hit itself (already medium-sized, no extra fetch);
+     *  the IMDB [rating] is passed in pre-enriched by search() for the top hits
+     *  only, keeping search fast. */
+    private fun CinemetaService.CinemetaSearchResult.toSearchResponse(rating: Double?): SearchResponse? {
         if (imdbId.isBlank() || name.isBlank()) return null
         val url = "https://v3-cinemeta.strem.io/meta/${type}/$imdbId.json"
         val tvType = if (type == "movie") TvType.Movie else TvType.TvSeries
@@ -438,9 +577,6 @@ class MultimoviesProvider : MainAPI() {
             else -> 2
         }
     }
-
-    private fun normalizeTitle(t: String): String =
-        t.lowercase().trim().replace(Regex("[^a-z0-9]+"), " ").trim()
 
     /** Concurrently resolve Cinemeta posters for search results that are missing one
      *  or still carry a thumbnail size marker. Bounded to 3 concurrent lookups with
