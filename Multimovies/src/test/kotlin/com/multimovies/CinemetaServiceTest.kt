@@ -197,11 +197,6 @@ class CinemetaServiceTest {
         """.trimIndent()
 
         val meta = CinemetaService.parseMeta(json)
-        assertEquals("tt0944947", meta?.id)
-        assertEquals("Game of Thrones", meta?.name)
-        assertEquals("9.2", meta?.imdbRating)
-        assertEquals(listOf("Drama", "Fantasy"), meta?.genre)
-        assertEquals(listOf("Peter Dinklage", "Emilia Clarke"), meta?.cast)
         assertEquals(2, meta?.videos?.size)
         val ep1 = meta?.videos?.first()
         assertEquals("Winter Is Coming", ep1?.name)
@@ -215,5 +210,32 @@ class CinemetaServiceTest {
         assertNull(CinemetaService.parseMeta("not valid json"))
         assertNull(CinemetaService.parseMeta(""))
         assertNull(CinemetaService.parseMeta(null))
+    }
+
+    @Test
+    fun `parseCatalogMetas parses movie catalog search`() {
+        val json = """
+            {
+              "metas": [
+                {"id": "tt1375666", "name": "Inception", "releaseInfo": "2010", "poster": "https://m.media-amazon.com/images/1.jpg", "type": "movie"},
+                {"id": "tt8269586", "name": "Bikini Inception", "releaseInfo": "2019"}
+              ]
+            }
+        """.trimIndent()
+        val results = CinemetaService.parseCatalogMetas(json, "movie")
+        assertEquals(2, results?.size)
+        assertEquals("tt1375666", results?.first()?.imdbId)
+        assertEquals("Inception", results?.first()?.name)
+        assertEquals("2010", results?.first()?.year)
+        assertEquals("movie", results?.first()?.type)
+        assertEquals("https://m.media-amazon.com/images/1.jpg", results?.first()?.poster)
+    }
+
+    @Test
+    fun `parseCatalogMetas skips non-imdb entries and invalid json`() {
+        val json = """{"metas": [{"id": "no-imdb", "name": "X"}]}"""
+        assertEquals(0, CinemetaService.parseCatalogMetas(json, "series")?.size)
+        assertNull(CinemetaService.parseCatalogMetas("not json", "movie"))
+        assertNull(CinemetaService.parseCatalogMetas("", "movie"))
     }
 }

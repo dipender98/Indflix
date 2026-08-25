@@ -174,37 +174,6 @@ class ProviderHelpersTest {
         assertFalse(isThumbnailish(""))
     }
 
-    // ---- buildSignedVixsrcUrl ----
-
-    @Test
-    fun `buildSignedVixsrcUrl parses masterPlaylist object`() {
-        val html = """window.masterPlaylist = { "url": "https://cdn.example/master.m3u8", "token": "abc123", "expires": "1700000000" };"""
-        assertEquals(
-            "https://cdn.example/master.m3u8?token=abc123&expires=1700000000&h=1&lang=en",
-            MultiSourcePuller.buildSignedVixsrcUrl(html)
-        )
-    }
-
-    @Test
-    fun `buildSignedVixsrcUrl handles protocol-relative and numeric expires`() {
-        val html = """window.masterPlaylist = { url: "//cdn.example/master.m3u8", token: "tok", expires: 999 };"""
-        assertEquals(
-            "https://cdn.example/master.m3u8?token=tok&expires=999&h=1&lang=en",
-            MultiSourcePuller.buildSignedVixsrcUrl(html)
-        )
-    }
-
-    @Test
-    fun `buildSignedVixsrcUrl falls back to bare m3u8 url`() {
-        assertEquals("https://cdn.example/stream.m3u8",
-            MultiSourcePuller.buildSignedVixsrcUrl("""<video src="https://cdn.example/stream.m3u8">"""))
-    }
-
-    @Test
-    fun `buildSignedVixsrcUrl returns null when no playlist or stream`() {
-        assertNull(MultiSourcePuller.buildSignedVixsrcUrl("nothing here"))
-    }
-
     // ---- SOURCE_PRIORITY ordering ----
 
     @Test

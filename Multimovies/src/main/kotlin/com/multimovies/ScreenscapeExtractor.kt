@@ -3,7 +3,6 @@ package com.multimovies
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.nio.charset.StandardCharsets
@@ -20,18 +19,15 @@ import javax.crypto.spec.SecretKeySpec
  * Result types returned by [ScreenscapeExtractor]. These are plain Kotlin data
  * classes (no cloudstream dependencies) so the extractor's crypto/HTTP logic can
  * be unit- and live-tested without the compile-only cloudstream library on the
- * test classpath. [MultiSourcePuller.extractGeneric] adapts them into
- * cloudstream [ExtractorLink]s.
+ * test classpath. [MultiSourcePuller] adapts them into cloudstream
+ * [ExtractorLink]s.
  */
-data class ScreenSubtitle(val lang: String, val url: String, val type: String = "vtt")
+data class ScreenSubtitle(val lang: String, val url: String)
 data class ScreenSource(
     val name: String,
     val url: String,
     val quality: String = "",
-    val lang: String = "",
-    val isHindi: Boolean = false,
     val headers: Map<String, String> = emptyMap(),
-    val subtitles: List<ScreenSubtitle> = emptyList(),
 )
 
 /**
@@ -226,14 +222,6 @@ object ScreenscapeExtractor {
         return "$t.$a"
     }
 
-    private fun buildCipherContext(path: String, query: String, method: String): String {
-        // The site sorts query params by key then value (URLSearchParams entries sorted).
-        val sorted = query.split("&").filter { it.isNotBlank() }
-            .sortedWith(compareBy({ it.substringBefore("=") }, { it.substringAfter("=") }))
-            .joinToString("&")
-        return "${method.uppercase()}:$path?$sorted"
-    }
-
     // ---- response decryption (module k, ported verbatim) ----
 
     private fun decryptEnvelope(envelopeD: String, envelopeS: String, envelopeV: Int, token: String, context: String): String? {
@@ -331,17 +319,11 @@ object ScreenscapeExtractor {
 
     // ---- public entry point ----
 
-    private var debug = false
-    private fun dbg(msg: () -> String) { if (debug) println(msg()) }
-
     suspend fun extract(src: MultiSourcePuller.Source, onSubtitle: (ScreenSubtitle) -> Unit): List<ScreenSource> {
         val embedUrl = src.url
-        val html = httpGet(embedUrl)
-        if (html == null) { dbg { "[sscap] html null" }; return emptyList() }
-        dbg { "[sscap] html=${html.length}" }
+        val html = httpGet(embedUrl) ?: return emptyList()
         val tmdbId = extractTmdbId(html) ?: Regex("""[?&]tmdb=(\d{4,8})""").find(embedUrl)?.groupValues?.getOrNull(1)
-        if (tmdbId == null) { dbg { "[sscap] tmdbId null" }; return emptyList() }
-        dbg { "[sscap] tmdbId=$tmdbId" }
+            ?: return emptyList()
         val season = src.season ?: Regex("""(\d+)x(\d+)""").find(src.referer ?: embedUrl)
             ?.groupValues?.getOrNull(1)?.toIntOrNull()
         val episode = src.episode ?: Regex("""(\d+)x(\d+)""").find(src.referer ?: embedUrl)
@@ -352,29 +334,21 @@ object ScreenscapeExtractor {
             (SecureRandom().nextInt(256)).toString(16).padStart(2, '0')
         }
         val route = createTokenRouteCode(e)
-        dbg { "[sscap] boot route=$route" }
         val bootText = httpPost(
             "$BASE_URL/api/$route",
             headers = mapOf("x-screenscape-bootstrap" to e),
             referer = embedUrl,
-        )
-        if (bootText == null) { dbg { "[sscap] bootText null" }; return emptyList() }
-        dbg { "[sscap] bootText=${bootText.take(80)}" }
+        ) ?: return emptyList()
 
-        val bootEnv = runCatching { JSONObject(bootText) }.getOrNull()
-        if (bootEnv == null) { dbg { "[sscap] bootEnv parse fail" }; return emptyList() }
+        val bootEnv = runCatching { JSONObject(bootText) }.getOrNull() ?: return emptyList()
         val bootDecrypted = if (bootEnv.has("d") && bootEnv.has("s")) {
             decryptEnvelope(
                 bootEnv.optString("d"), bootEnv.optString("s"), bootEnv.optInt("v", 1),
                 e, "POST:/api/$route?",
             )?.let { runCatching { JSONObject(it) }.getOrNull() }
         } else bootEnv
-        dbg { "[sscap] bootDecrypted=$bootDecrypted" }
-        val apiToken = bootDecrypted?.optString("apiToken")?.takeIf { it.isNotBlank() }
-        if (apiToken == null) { dbg { "[sscap] apiToken empty" }; return emptyList() }
-        val responseKey = bootDecrypted?.optString("responseKey")?.takeIf { it.isNotBlank() }
-        if (responseKey == null) { dbg { "[sscap] responseKey empty" }; return emptyList() }
-        dbg { "[sscap] apiToken=${apiToken.take(24)}... key=${responseKey.take(16)}..." }
+        val apiToken = bootDecrypted?.optString("apiToken")?.takeIf { it.isNotBlank() } ?: return emptyList()
+        val responseKey = bootDecrypted?.optString("responseKey")?.takeIf { it.isNotBlank() } ?: return emptyList()
 
         // 2) server request (screenscape backend) -> stream.
         // Signing uses responseKey; apiToken goes in the x-api-token header.
@@ -383,25 +357,19 @@ object ScreenscapeExtractor {
         val q = createServerTmdbRequestId(tmdbId, season, episode, responseKey)
         val apiPath = "/api/$serverRoute/$hostSeg"
         val query = "q=$q"
-        dbg { "[sscap] GET $apiPath?${query.take(50)}..." }
         val srvText = httpGet(
             "$BASE_URL$apiPath?$query",
             headers = mapOf("Referer" to embedUrl, "x-api-token" to apiToken),
-        )
-        if (srvText == null) { dbg { "[sscap] srvText null" }; return emptyList() }
-        dbg { "[sscap] srvText=${srvText.take(80)}" }
+        ) ?: return emptyList()
 
-        val env = runCatching { JSONObject(srvText) }.getOrNull()
-        if (env == null) { dbg { "[sscap] env parse fail" }; return emptyList() }
+        val env = runCatching { JSONObject(srvText) }.getOrNull() ?: return emptyList()
         val decrypted = if (env.has("d") && env.has("s")) {
             decryptEnvelope(
                 env.optString("d"), env.optString("s"), env.optInt("v", 1),
                 responseKey, "GET:$apiPath?$query",
             )?.let { runCatching { JSONObject(it) }.getOrNull() }
         } else env
-        val json = decrypted
-        if (json == null) { dbg { "[sscap] server decrypt fail" }; return emptyList() }
-        dbg { "[sscap] json=$json" }
+        val json = decrypted ?: return emptyList()
 
         val sources = mutableListOf<ScreenSource>()
         val subs = mutableListOf<ScreenSubtitle>()
@@ -418,7 +386,6 @@ object ScreenscapeExtractor {
                         url = url,
                         quality = o.optString("quality"),
                         name = src.name,
-                        referer = embedUrl,
                         headers = jsonHeaders(o),
                         lang = o.optString("language"),
                     )
@@ -434,7 +401,6 @@ object ScreenscapeExtractor {
                         url = url,
                         quality = o.optString("quality"),
                         name = src.name,
-                        referer = embedUrl,
                         headers = jsonHeaders(o),
                         lang = o.optString("language"),
                     )
@@ -443,7 +409,7 @@ object ScreenscapeExtractor {
         }
         if (sources.isEmpty()) {
             json.optString("url").takeIf { it.isNotBlank() }?.let {
-                sources.add(mkSource(it, "", src.name, embedUrl))
+                sources.add(mkSource(it, "", src.name))
             }
         }
         json.optJSONArray("subtitles")?.let { arr ->
@@ -463,7 +429,6 @@ object ScreenscapeExtractor {
         url: String,
         quality: String,
         name: String,
-        referer: String,
         headers: Map<String, String> = emptyMap(),
         lang: String = "",
     ): ScreenSource {
@@ -475,10 +440,7 @@ object ScreenscapeExtractor {
             name = if (hindi) "$source Hindi" else source,
             url = url,
             quality = quality,
-            lang = if (hindi) "hi" else lang,
-            isHindi = hindi,
             headers = headers,
-            subtitles = emptyList(),
         )
     }
 }

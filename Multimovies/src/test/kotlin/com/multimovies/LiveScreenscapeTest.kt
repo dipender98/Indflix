@@ -55,7 +55,7 @@ class LiveScreenscapeTest {
                     log("  NO LINKS")
                 } else {
                     links.forEach { l ->
-                        log("  - [${l.name}] q=${l.quality} hi=${l.isHindi} url=${l.url}")
+                        log("  - [${l.name}] q=${l.quality} hi=${l.name.contains("Hindi")} url=${l.url}")
                     }
                     if (subs.isNotEmpty()) log("  subtitles: ${subs.size} (${subs.take(3).joinToString { it.lang }})")
                 }

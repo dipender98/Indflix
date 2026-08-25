@@ -11,7 +11,6 @@ import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URLEncoder
-import java.nio.charset.StandardCharsets
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
 
@@ -42,8 +41,6 @@ internal object SearchCache {
         }
         cache[key] = Entry(results, System.currentTimeMillis() + TTL_MS)
     }
-
-    fun clear() = cache.clear()
 
     private fun key(query: String) = query.trim().lowercase()
 }
@@ -172,8 +169,6 @@ private fun stripSmallSizeSuffix(url: String): String {
 internal fun extractImdbIdFromUrl(text: String?): String? =
     text?.let { Regex("""tt\d{7,8}""").find(it)?.value }
 
-internal fun upgradeUrl(url: String?): String? = upgradePosterUrl(url)
-
 /** Tries common lazy-load attributes in order so a poster URL is found even when
  * the theme stores the real image in a data-* attribute instead of src. */
 private fun Element.posterUrl(): String? =
@@ -212,6 +207,9 @@ internal val SOURCE_PRIORITY: List<String> = listOf(
     "2embed",
 )
 
+/** CSS selector for the item containers on a Multimovies search-results page. */
+private val SEARCH_ITEMS_SELECTOR = "div#archive-content div.item, div.search-page div.result-item, article.item, div.ml-items div.item, div.results div.result, ul.ml-posts li, div#content div.post, div.items div.item"
+
 
 /**
  * Multimovies - a CloudStream provider that scrapes the Multimovies (multimovies.motorcycles) site.
@@ -237,6 +235,11 @@ class MultimoviesProvider : MainAPI() {
     private fun getCfKiller(): CloudflareKiller {
         return cfKiller ?: CloudflareKiller().also { cfKiller = it }
     }
+    /** Fire-and-forget scope for resolving Cinemeta search hits to Multimovies
+     *  page URLs in the background (search itself never blocks on Multimovies). */
+    private val searchScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    /** Maps "imdbId|type" to the resolved Multimovies page URL. */
+    private val imdbUrlCache = ConcurrentHashMap<String, String>()
     override val hasMainPage = true
     override val hasQuickSearch = true
     override val supportedTypes = setOf(
@@ -341,33 +344,103 @@ class MultimoviesProvider : MainAPI() {
 
 
     // ------------------------------------------------------------------
-    // Search
+    // Search (Cinemeta-driven; Multimovies is only touched in the background
+    // to resolve each hit to its real page URL, never for metadata).
     // ------------------------------------------------------------------
 
     override suspend fun search(query: String): List<SearchResponse>? {
         SearchCache.get(query)?.let { return it }
 
-        val encodedQuery = URLEncoder.encode(query, StandardCharsets.UTF_8.toString())
-        val searchUrl = "$mainUrl/?s=$encodedQuery"
-        // Fast path: reuse persisted cookies (skip the slow Cloudflare WebView solve)
-        // via fetchDoc; only fall back to solving when a challenge is detected.
-        // Tight timeout: search must return quickly alongside other providers.
-        val doc = fetchDoc(searchUrl, timeoutSeconds = 8, required = false) ?: return null
+        val results = CinemetaService.searchCatalog(query)
+        if (results.isEmpty()) return null
+        val responses = results.mapNotNull { it.toSearchResponse() }
+        if (responses.isEmpty()) return null
 
-        val items = doc.select(
-            "div#archive-content div.item, " +
-            "div.search-page div.result-item, " +
-            "article.item, " +
-            "div.ml-items div.item, " +
-            "div.results div.result, " +
-            "ul.ml-posts li, " +
-            "div#content div.post, " +
-            "div.items div.item"
-        )
+        // Background: resolve the top hits to their real Multimovies page URL and
+        // cache the mapping, so load() resolves instantly on tap. Best-effort —
+        // load() falls back to resolving on the fly when this hasn't finished.
+        responses.take(6).forEach { r ->
+            val parsed = parseCinemetaUrl(r.url) ?: return@forEach
+            searchScope.launch {
+                runCatching { resolveMultimoviesUrl(parsed.first, parsed.second, r.name) }
+            }
+        }
 
-        val results = items.mapNotNull { it.toSearchResponse() }
-        return results.takeIf { it.isNotEmpty() }?.also { SearchCache.put(query, it) }
+        return responses.also { SearchCache.put(query, it) }
     }
+
+    override suspend fun quickSearch(query: String): List<SearchResponse>? = search(query)
+
+    /** Build a CloudStream search result straight from a Cinemeta hit — poster and
+     *  rating come from Cinemeta, so search never fetches Multimovies. */
+    private fun CinemetaService.CinemetaSearchResult.toSearchResponse(): SearchResponse? {
+        if (imdbId.isBlank() || name.isBlank()) return null
+        val url = "https://v3-cinemeta.strem.io/meta/${type}/$imdbId.json"
+        val tvType = if (type == "movie") TvType.Movie else TvType.TvSeries
+        val poster = this.poster ?: "https://images.metahub.space/poster/medium/$imdbId/img"
+        val releaseYear = year?.substringBefore("-")?.trim()?.toIntOrNull()
+        return if (tvType == TvType.Movie) {
+            newMovieSearchResponse(name, url, tvType) {
+                this.posterUrl = poster
+                this.year = releaseYear
+                rating?.let { this.score = Score.from10(it.toString()) }
+            }
+        } else {
+            newTvSeriesSearchResponse(name, url, tvType) {
+                this.posterUrl = poster
+                this.year = releaseYear
+                rating?.let { this.score = Score.from10(it.toString()) }
+            }
+        }
+    }
+
+    /** Parse a Cinemeta meta URL into (imdbId, type). Returns null for non-Cinemeta URLs. */
+    private fun parseCinemetaUrl(url: String?): Pair<String, String>? {
+        if (url.isNullOrBlank()) return null
+        val m = Regex("""v3-cinemeta\.strem\.io/meta/(movie|series)/(tt\d{7,8})\.json""").find(url)
+            ?: return null
+        return m.groupValues[2] to m.groupValues[1]
+    }
+
+    /** Resolve a Cinemeta hit to its real Multimovies page URL (cached). [title]
+     *  is a hint to avoid a Cinemeta meta round-trip; when null it is fetched. */
+    private suspend fun resolveMultimoviesUrl(imdbId: String, type: String, title: String?): String? {
+        val key = "$imdbId|$type"
+        imdbUrlCache[key]?.let { return it }
+        val searchTitle = title ?: CinemetaService.fetchMeta(imdbId, type)?.name ?: return null
+        val doc = fetchDoc(
+            "$mainUrl/?s=${URLEncoder.encode(searchTitle, "UTF-8")}",
+            timeoutSeconds = 8,
+            required = false,
+        ) ?: return null
+        val candidate = doc.select(SEARCH_ITEMS_SELECTOR).mapNotNull { it.candidateHref() }
+            .minByOrNull { titleDistance(it.second, searchTitle) }?.first ?: return null
+        imdbUrlCache[key] = candidate
+        return candidate
+    }
+
+    /** Extract (href, item title) from a Multimovies search-result element. */
+    private fun Element.candidateHref(): Pair<String, String>? {
+        val a = selectFirst("a[href], div.data a h2, div.poster a") ?: return null
+        val href = a.attr("href").takeIf { it.contains(mainUrl) } ?: return null
+        val itemTitle = selectFirst("img")?.attr("alt")
+            ?: a.selectFirst("h2, div.data h3 a, .title")?.text()
+            ?: a.text()?.trim()
+        return if (itemTitle.isNullOrBlank()) null else href to itemTitle
+    }
+
+    private fun titleDistance(itemTitle: String, target: String): Int {
+        val a = normalizeTitle(itemTitle)
+        val b = normalizeTitle(target)
+        return when {
+            a == b -> 0
+            a.startsWith(b) || b.startsWith(a) -> 1
+            else -> 2
+        }
+    }
+
+    private fun normalizeTitle(t: String): String =
+        t.lowercase().trim().replace(Regex("[^a-z0-9]+"), " ").trim()
 
     /** Concurrently resolve Cinemeta posters for search results that are missing one
      *  or still carry a thumbnail size marker. Bounded to 3 concurrent lookups with
@@ -410,8 +483,6 @@ class MultimoviesProvider : MainAPI() {
         val title: String,
         val tvType: TvType,
     )
-
-    override suspend fun quickSearch(query: String): List<SearchResponse>? = search(query)
 
     private fun Element.toSearchResponse(): SearchResponse? {
         val a = selectFirst("a[href], div.data a h2, div.poster a") ?: return null
@@ -464,14 +535,25 @@ class MultimoviesProvider : MainAPI() {
     // ------------------------------------------------------------------
 
     override suspend fun load(url: String): LoadResponse? {
+        // Search results arrive as Cinemeta meta URLs; resolve them to the real
+        // Multimovies page (cache-first) so detail + streams hit the actual page.
+        val cinemetaId = parseCinemetaUrl(url)?.first
+        val realUrl = if (cinemetaId != null) {
+            val parsed = parseCinemetaUrl(url) ?: return null
+            resolveMultimoviesUrl(parsed.first, parsed.second, null)
+                ?: throw ErrorLoadingException("Could not match $url to a Multimovies page")
+        } else {
+            url
+        }
+
         // solveDocument() surfaces failures via ErrorLoadingException (no retry loop).
-        val doc = solveDocument(url)
+        val doc = solveDocument(realUrl)
 
         val title = doc.selectFirst("h1, div.sheader h1, meta[property=og:title]")?.let {
             if (it.tagName() == "meta") it.attr("content") else it.text()
-        }?.trim() ?: throw ErrorLoadingException("No title found on $url")
+        }?.trim() ?: throw ErrorLoadingException("No title found on $realUrl")
 
-        val poster = upgradeUrl(
+        val poster = upgradePosterUrl(
             doc.selectFirst("meta[property=og:image]")?.attr("content")
                 ?: doc.selectFirst("div.poster img, img.wp-post-image")?.attr("src")
         )
@@ -487,7 +569,7 @@ class MultimoviesProvider : MainAPI() {
         val score = doc.selectFirst("span.dt_rating_vgs, .imdb, .rating span")?.text()
             ?.removePrefix("IMDb:")?.trim()
 
-        val isMovie = url.contains("/movies/")
+        val isMovie = realUrl.contains("/movies/")
         val aioType = if (isMovie) "movie" else "series"
 
         val imdbIdFromPage = CinemetaService.extractImdbId(doc)
@@ -496,13 +578,14 @@ class MultimoviesProvider : MainAPI() {
         // The IMDB id is the linchpin for meta-provider enrichment (cast photos,
         // episode ratings/thumbnails) AND for building direct stream hosts. Resolve
         // it concurrently with season-page fetching:
-        //   1. from the page markup,
-        //   2. else from the first dooplayer embed URL (the site embeds the IMDB
+        //   1. from the Cinemeta search URL (when the result came from search),
+        //   2. else from the page markup,
+        //   3. else from the first dooplayer embed URL (the site embeds the IMDB
         //      id inside every admin-ajax embed URL),
-        //   3. else a Cinemeta title search.
+        //   4. else a Cinemeta title search.
         return coroutineScope {
             val imdbIdJob = async {
-                imdbIdFromPage ?: runCatching {
+                cinemetaId ?: imdbIdFromPage ?: runCatching {
                     withTimeoutOrNull(6000L) {
                         firstEmbedImdbId(doc) ?: if (title.isNotBlank()) {
                             CinemetaService.searchImdbId(title, year, aioType)
@@ -514,13 +597,13 @@ class MultimoviesProvider : MainAPI() {
             if (isMovie) {
                 val resolvedImdbId = imdbIdJob.await()
                 if (resolvedImdbId != null) {
-                    SourceMetaCache.put(url, SourceMeta(resolvedImdbId, tmdbIdFromPage, null, null))
+                    SourceMetaCache.put(realUrl, SourceMeta(resolvedImdbId, tmdbIdFromPage, null, null))
                 }
                 // Background keyless enrichment: cast photos + full-res artwork.
                 val enrichment = if (resolvedImdbId != null) {
                     async { withTimeoutOrNull(6000L) { TvdbDataService.fetchMeta(resolvedImdbId, "movie") } }.await()
                 } else null
-                newMovieLoadResponse(title, url, TvType.Movie, url) {
+                newMovieLoadResponse(title, realUrl, TvType.Movie, realUrl) {
                     this.posterUrl = enrichment?.poster ?: poster
                     this.backgroundPosterUrl = enrichment?.background
                     this.logoUrl = enrichment?.logo
@@ -544,7 +627,7 @@ class MultimoviesProvider : MainAPI() {
                 val seasonLinks = doc.select("a[href*='/seasons/']")
                     .mapNotNull { it.attr("href").takeIf { h -> h.contains(mainUrl) } }
                     .distinct()
-                val pages = if (seasonLinks.isEmpty()) listOf(url) else seasonLinks
+                val pages = if (seasonLinks.isEmpty()) listOf(realUrl) else seasonLinks
 
                 val seasonDocsJob = async {
                     val sem = Semaphore(4)
@@ -614,7 +697,7 @@ class MultimoviesProvider : MainAPI() {
                     }
                 }
 
-                newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
+                newTvSeriesLoadResponse(title, realUrl, TvType.TvSeries, episodes) {
                     this.posterUrl = enrichment?.tvdb?.poster ?: poster
                     this.backgroundPosterUrl = enrichment?.tvdb?.background
                     this.logoUrl = enrichment?.tvdb?.logo
@@ -684,19 +767,14 @@ class MultimoviesProvider : MainAPI() {
     ): Boolean {
         var meta = SourceMetaCache.get(data)
 
-        // Fast path: cached links, but only if they are still live. Stale cached
-        // URLs (expired signed tokens) are filtered out by a quick liveness probe;
-        // if none survive we fall through to fresh resolution so CloudStream's
-        // loading dialog (with source-switch options) appears instead of silently
-        // buffering a dead link.
+        // Fast path: cached links emit instantly so playback starts right away
+        // (like other plugins). The LinkCache TTL is short (5 min) so stale URLs
+        // don't linger; no liveness probe delays the first frame.
         if (meta != null) {
             LinkCache.get(meta.imdbId, meta.season, meta.episode)?.let { cached ->
                 if (cached.isNotEmpty()) {
-                    val verified = LinkVerifier.verify(cached)
-                    if (verified.isNotEmpty()) {
-                        verified.forEach { runCatching { callback(it) } }
-                        return true
-                    }
+                    cached.forEach { runCatching { callback(it) } }
+                    return true
                 }
             }
         }
@@ -752,14 +830,15 @@ class MultimoviesProvider : MainAPI() {
         val found = Collections.synchronizedList(mutableListOf<ExtractorLink>())
         val sourceRefs = Collections.synchronizedList(mutableListOf<MultiSourcePuller.Source>())
 
+        // Streaming pipeline: every source (global id-based + each dooplayer embed)
+        // is pulled concurrently, launched in priority order so Cineverse (the
+        // reliable/fast Hindi source) starts resolving and emits its link first;
+        // lower-priority fallbacks join as they resolve.
+        val globalSources = buildGlobalSources(meta)
+        val orderedEmbeds = embeds.sortedBy { priorityOf(it.name) }
+
         coroutineScope {
-            val globalJobs = buildGlobalSources(meta).map { g ->
-                sourceRefs.add(g)
-                async {
-                    pullSource(g, data, emitted, found, subtitleCallback, callback)
-                }
-            }
-            val embedJobs = embeds.map { e ->
+            val embedJobs = orderedEmbeds.map { e ->
                 async {
                     val finalUrl = MultiSourcePuller.unwrapEmbed(e.url, referer = data, headers = commonHeaders)
                     val src = MultiSourcePuller.Source(
@@ -773,7 +852,13 @@ class MultimoviesProvider : MainAPI() {
                     pullSource(src, data, emitted, found, subtitleCallback, callback)
                 }
             }
-            (globalJobs + embedJobs).awaitAll()
+            val globalJobs = globalSources.map { g ->
+                sourceRefs.add(g)
+                async {
+                    pullSource(g, data, emitted, found, subtitleCallback, callback)
+                }
+            }
+            (embedJobs + globalJobs).awaitAll()
         }
 
         val sorted = MultiSourcePuller.sortLinks(found.toList(), sourceRefs.toList(), ::priorityOf, preferHindi = true)
@@ -860,7 +945,6 @@ class MultimoviesProvider : MainAPI() {
                 url = url,
                 referer = url,
                 headers = commonHeaders + g.headers,
-                extraction = g.extraction,
                 tmdbId = meta.tmdbId,
                 season = meta.season,
                 episode = meta.episode,

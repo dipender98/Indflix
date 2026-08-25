@@ -3,7 +3,11 @@ package com.multimovies
 import com.lagradost.cloudstream3.Actor
 import com.lagradost.cloudstream3.ActorData
 import com.lagradost.cloudstream3.app
-import org.json.JSONArray
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 import org.jsoup.nodes.Document
 import java.util.concurrent.ConcurrentHashMap
@@ -27,49 +31,49 @@ private fun str(obj: JSONObject, key: String): String? {
  * additionally pull richer ratings, episode descriptions, and cast with profile
  * photos -- no provider setting required.
  */
-    object CinemetaService {
+object CinemetaService {
 
-        private const val META_URL = "https://v3-cinemeta.strem.io/meta"
-        private const val CATALOG_URL = "https://v3-cinemeta.strem.io/catalog"
+    private const val META_URL = "https://v3-cinemeta.strem.io/meta"
+    private const val CATALOG_URL = "https://v3-cinemeta.strem.io/catalog"
 
-        /** In-memory cache for title-based IMDB id lookups, shared by the search
-         *  poster backfill and the detail page, so a given title resolves its
-         *  IMDB id at most once per session. */
-        private val imdbCache = ConcurrentHashMap<String, String?>()
+    /** In-memory cache for title-based IMDB id lookups, shared by the search
+     *  poster backfill and the detail page, so a given title resolves its
+     *  IMDB id at most once per session. */
+    private val imdbCache = ConcurrentHashMap<String, String?>()
 
-        /** Fetch Cinemeta metadata for [imdbId] of [type] ("movie" or "series"). */
-        suspend fun fetchMeta(imdbId: String, type: String): CinemetaMeta? {
-            if (imdbId.isBlank()) return null
-            return try {
-                val text = app.get("$META_URL/$type/$imdbId.json", timeout = 15).text
-                parseMeta(text)
-            } catch (e: Exception) {
-                null
-            }
+    /** Fetch Cinemeta metadata for [imdbId] of [type] ("movie" or "series"). */
+    suspend fun fetchMeta(imdbId: String, type: String): CinemetaMeta? {
+        if (imdbId.isBlank()) return null
+        return try {
+            val text = app.get("$META_URL/$type/$imdbId.json", timeout = 15).text
+            parseMeta(text)
+        } catch (e: Exception) {
+            null
         }
+    }
 
-        /**
-         * Search for an IMDB id by [title] and optional [year] using Cinemeta's
-         * public catalog search. This is a fallback when the page doesn't expose
-         * an IMDB id directly. Cached by (title, year, type) so repeated lookups
-         * are instant.
-         */
-        suspend fun searchImdbId(title: String, year: Int?, type: String): String? {
-            val cached = imdbCache[cacheKey(title, year, type)]
-            if (cached != null) return cached
-            val query = java.net.URLEncoder.encode(title.trim(), "UTF-8")
-            val json = try {
-                app.get("$CATALOG_URL/$type/top/search=$query.json", timeout = 4).text
-            } catch (e: Exception) {
-                null
-            }
-            val result = if (json.isNullOrBlank()) null else pickBestImdbId(json, title, year)
-            imdbCache[cacheKey(title, year, type)] = result
-            return result
+    /**
+     * Search for an IMDB id by [title] and optional [year] using Cinemeta's
+     * public catalog search. This is a fallback when the page doesn't expose
+     * an IMDB id directly. Cached by (title, year, type) so repeated lookups
+     * are instant.
+     */
+    suspend fun searchImdbId(title: String, year: Int?, type: String): String? {
+        val cached = imdbCache[cacheKey(title, year, type)]
+        if (cached != null) return cached
+        val query = java.net.URLEncoder.encode(title.trim(), "UTF-8")
+        val json = try {
+            app.get("$CATALOG_URL/$type/top/search=$query.json", timeout = 4).text
+        } catch (e: Exception) {
+            null
         }
+        val result = if (json.isNullOrBlank()) null else pickBestImdbId(json, title, year)
+        imdbCache[cacheKey(title, year, type)] = result
+        return result
+    }
 
-        private fun cacheKey(title: String, year: Int?, type: String) =
-            "$type:${title.trim().lowercase()}|$year"
+    private fun cacheKey(title: String, year: Int?, type: String) =
+        "$type:${title.trim().lowercase()}|$year"
 
     /** Parse a Cinemeta catalog search response and pick the best IMDB id match. */
     fun pickBestImdbId(raw: String?, title: String, year: Int?): String? {
@@ -186,24 +190,13 @@ private fun str(obj: JSONObject, key: String): String? {
             val obj = JSONObject(raw)
             val meta = obj.optJSONObject("meta") ?: return null
             CinemetaMeta(
-                id = str(meta, "id"),
                 name = str(meta, "name"),
-                year = str(meta, "year"),
-                description = str(meta, "description"),
                 poster = str(meta, "poster"),
-                background = str(meta, "background"),
                 imdbRating = str(meta, "imdbRating"),
-                genre = meta.optJSONArray("genre")?.let { arr ->
-                    (0 until arr.length()).mapNotNull { i -> arr.optString(i).takeIf { it.isNotBlank() } }
-                },
-                cast = meta.optJSONArray("cast")?.let { arr ->
-                    (0 until arr.length()).mapNotNull { i -> arr.optString(i).takeIf { it.isNotBlank() } }
-                },
                 videos = meta.optJSONArray("videos")?.let { arr ->
                     (0 until arr.length()).mapNotNull { i ->
                         val v = arr.optJSONObject(i) ?: return@mapNotNull null
                         CinemetaVideo(
-                            id = str(v, "id"),
                             name = str(v, "name"),
                             overview = str(v, "overview"),
                             season = v.optInt("season", -1).takeIf { it >= 0 },
@@ -221,20 +214,13 @@ private fun str(obj: JSONObject, key: String): String? {
     }
 
     data class CinemetaMeta(
-        val id: String? = null,
         val name: String? = null,
-        val year: String? = null,
-        val description: String? = null,
         val poster: String? = null,
-        val background: String? = null,
         val imdbRating: String? = null,
-        val genre: List<String>? = null,
-        val cast: List<String>? = null,
         val videos: List<CinemetaVideo>? = null,
     )
 
     data class CinemetaVideo(
-        val id: String? = null,
         val name: String? = null,
         val overview: String? = null,
         val season: Int? = null,
@@ -243,6 +229,78 @@ private fun str(obj: JSONObject, key: String): String? {
         val thumbnail: String? = null,
         val rating: String? = null,
     )
+
+    /** One Cinemeta catalog search hit (movie or series). */
+    data class CinemetaSearchResult(
+        val imdbId: String,
+        val name: String,
+        val type: String,
+        val year: String?,
+        val poster: String?,
+        val rating: Double?,
+    )
+
+    /**
+     * Search Cinemeta's public catalog for [query] and enrich every hit with its
+     * IMDB rating and a larger poster (from the per-title meta endpoint). Both
+     * movies and series are queried; results are deduped by IMDB id. This is the
+     * keyless, Multimovies-free source for search results.
+     */
+    suspend fun searchCatalog(query: String): List<CinemetaSearchResult> {
+        if (query.isBlank()) return emptyList()
+        val encoded = java.net.URLEncoder.encode(query.trim(), "UTF-8")
+        val raw = mutableListOf<CinemetaSearchResult>()
+        for (type in listOf("movie", "series")) {
+            val text = runCatching {
+                app.get("$CATALOG_URL/$type/top/search=$encoded.json", timeout = 4).text
+            }.getOrNull() ?: continue
+            parseCatalogMetas(text, type)?.let { raw.addAll(it) }
+        }
+        if (raw.isEmpty()) return emptyList()
+
+        val semaphore = Semaphore(4)
+        return coroutineScope {
+            raw.distinctBy { it.imdbId }.map { r ->
+                async {
+                    semaphore.acquire()
+                    try {
+                        val meta = withTimeoutOrNull(3000L) { fetchMeta(r.imdbId, r.type) }
+                        r.copy(
+                            poster = meta?.poster?.replace("poster/small/", "poster/medium/")
+                                ?: r.poster,
+                            rating = meta?.imdbRating?.toDoubleOrNull() ?: r.rating,
+                        )
+                    } finally {
+                        semaphore.release()
+                    }
+                }
+            }.awaitAll()
+        }
+    }
+
+    /** Parse a Cinemeta catalog `metas` array into [CinemetaSearchResult]s. */
+    fun parseCatalogMetas(raw: String?, type: String): List<CinemetaSearchResult>? {
+        if (raw.isNullOrBlank()) return null
+        return try {
+            val root = JSONObject(raw)
+            val metas = root.optJSONArray("metas") ?: return null
+            (0 until metas.length()).mapNotNull { i ->
+                val m = metas.optJSONObject(i) ?: return@mapNotNull null
+                val id = str(m, "id")?.takeIf { it.startsWith("tt") } ?: return@mapNotNull null
+                val name = str(m, "name") ?: return@mapNotNull null
+                CinemetaSearchResult(
+                    imdbId = id,
+                    name = name,
+                    type = type,
+                    year = str(m, "releaseInfo") ?: str(m, "year"),
+                    poster = str(m, "poster"),
+                    rating = null,
+                )
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
 }
 
 /**

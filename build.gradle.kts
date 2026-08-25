@@ -1,5 +1,4 @@
 import com.android.build.api.dsl.LibraryExtension
-import com.lagradost.cloudstream3.gradle.CloudstreamExtension
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile
 
@@ -24,20 +23,11 @@ allprojects {
     }
 }
 
-fun Project.cloudstream(configuration: CloudstreamExtension.() -> Unit) =
-    extensions.getByName<CloudstreamExtension>("cloudstream").configuration()
-
 fun Project.android(configuration: LibraryExtension.() -> Unit) =
     extensions.getByName<LibraryExtension>("android").configuration()
 
 subprojects {
     apply(plugin = "com.android.library")
-    apply(plugin = "com.lagradost.cloudstream3.gradle")
-
-    cloudstream {
-        setRepo(System.getenv("GITHUB_REPOSITORY") ?: "https://github.com/dipender98/Indflix")
-        authors = listOf("Indflix")
-    }
 
     android {
         namespace = "com.example"
@@ -51,6 +41,20 @@ subprojects {
         }
         testOptions {
             unitTests.all { it.useJUnitPlatform() }
+        }
+        buildTypes {
+            release {
+                isMinifyEnabled = true
+                isShrinkResources = false
+                proguardFiles(
+                    getDefaultProguardFile("proguard-android-optimize.txt"),
+                    "proguard-rules.pro"
+                )
+            }
+            debug {
+                isMinifyEnabled = false
+                isShrinkResources = false
+            }
         }
     }
 
@@ -68,29 +72,29 @@ subprojects {
     }
 
     dependencies {
-        val implementation by configurations
-        val cloudstream by configurations
+        val compileOnly by configurations
         val testImplementation by configurations
-        cloudstream("com.lagradost:cloudstream3:pre-release")
         testImplementation(kotlin("test"))
         testImplementation(kotlin("test-junit5"))
         testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")
         testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")
         testImplementation("org.mockito:mockito-core:5.7.0")
         testImplementation("org.mockito:mockito-inline:5.2.0")
-        implementation(kotlin("stdlib"))
-        implementation("com.github.Blatzar:NiceHttp:0.4.18")
-        implementation("org.jsoup:jsoup:1.22.2")
-        implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.13.1")
-        implementation("com.squareup.okhttp3:okhttp:4.12.0")
-        implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
-        implementation("org.mozilla:rhino:1.8.1")
-        implementation("androidx.annotation:annotation:1.10.0")
-        implementation("androidx.browser:browser:1.8.0")
-        implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.0")
+        // These are all provided by the CloudStream app at runtime, so they must be
+        // compileOnly: bundling them into the plugin dex is what made the .cs3 ~100KB.
+        compileOnly(kotlin("stdlib"))
+        compileOnly("com.github.Blatzar:NiceHttp:0.4.18")
+        compileOnly("org.jsoup:jsoup:1.22.2")
+        compileOnly("com.squareup.okhttp3:okhttp:4.12.0")
+        compileOnly("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
+        // JVM unit tests execute outside the app, so re-add the libs for test runtime.
+        testImplementation("com.github.Blatzar:NiceHttp:0.4.18")
+        testImplementation("org.jsoup:jsoup:1.22.2")
+        testImplementation("com.squareup.okhttp3:okhttp:4.12.0")
+        testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
     }
 }
 
-    tasks.register<Delete>("clean") {
-        delete(rootProject.layout.buildDirectory)
-    }
+tasks.register<Delete>("clean") {
+    delete(rootProject.layout.buildDirectory)
+}
