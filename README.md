@@ -52,8 +52,12 @@ Multimovies/
     MultiSourcePuller.kt        parallel-pull engine, timeouts, sorting
     TmdbService.kt              TMDB metadata (+ optional SIMKL)
     ScreenscapeExtractor.kt     screenscape.me crypto, no WebView
-    HostExtractors.kt           caches + global source registry
+    NxshaExtractor.kt           nxsha.space encrypted API, server fleet
+    NxshaProtocol.kt            nxsha wire rules (crypto, ids, ordering)
+    CryptoJs.kt                 shared CryptoJS-AES envelope helpers
+    GlobalSources.kt            caches + global source registry
     MultimoviesPlugin.kt        entrypoint
+  icon.png                      plugin icon served from the repo
 ```
 
 Pushing to `main` triggers CI, which builds and force-pushes the `.cs3` and

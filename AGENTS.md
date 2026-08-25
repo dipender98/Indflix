@@ -14,8 +14,12 @@ Multimovies/
     MultiSourcePuller.kt     parallel-pull engine, per-source timeout, sort
     TmdbService.kt           TMDB search/detail/episodes + optional SIMKL
     ScreenscapeExtractor.kt  screenscape.me crypto port (no WebView)
-    HostExtractors.kt        GlobalSources registry + session caches
+    NxshaExtractor.kt        nxsha.space encrypted /api/servers+/api/sources
+    NxshaProtocol.kt         nxsha wire rules (crypto, ids, ordering) - testable
+    CryptoJs.kt              CryptoJS AES envelope crypto shared by extractors
+    GlobalSources.kt         id-based source registry + session caches
     MultimoviesPlugin.kt     plugin entrypoint
+  icon.png                   plugin icon, served from the repo (iconUrl)
 ```
 
 Root `build.gradle.kts` + `settings.gradle.kts` auto-include any provider dir

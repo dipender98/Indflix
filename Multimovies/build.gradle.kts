@@ -3,7 +3,7 @@ import java.util.Properties
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
-version = 1
+version = 2
 
 plugins {
     id("com.lagradost.cloudstream3.gradle")
@@ -17,6 +17,8 @@ cloudstream {
     tvTypes = listOf("Movie", "TvSeries", "Anime", "AnimeMovie", "Cartoon")
     requiresResources = false
     setRepo(System.getenv("GITHUB_REPOSITORY") ?: "https://github.com/dipender98/Indflix")
+    // Icon served from the repo; CloudStream fetches it from plugins.json.
+    iconUrl = "https://raw.githubusercontent.com/dipender98/Indflix/main/Multimovies/icon.png"
 }
 
 android {

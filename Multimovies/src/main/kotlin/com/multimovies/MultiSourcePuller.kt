@@ -197,6 +197,27 @@ object MultiSourcePuller {
         cineverseCdnHosts.contains(hostOf(url)) ||
             hostOf(url).let { h -> cineverseCdnHosts.any { h == it || h.endsWith(".$it") } }
 
+    /** Best-effort upstream server label from a stream URL's host, so players
+     *  show the server that actually serves the bytes: "www.vibuxer.com" ->
+     *  "Vibuxer", "cdn.awish.cloud" -> "Awish", "proxy.modiplay.com" ->
+     *  "Modiplay". Returns null when no usable domain label is present. */
+    internal fun cdnLabel(url: String): String? {
+        val host = hostOf(url).substringBefore(':')
+            .removePrefix("www.").removePrefix("ww2.")
+        val parts = host.split('.').filter { it.isNotBlank() }
+        val label = if (parts.size >= 2) parts[parts.size - 2] else parts.firstOrNull()
+        return label?.takeIf { it.length >= 3 }?.replaceFirstChar { it.uppercase() }
+    }
+
+    /** `<Provider> (ActualServer)` display label. Uses the real upstream host
+     *  behind [streamUrl] when it can be named and differs from [provider];
+     *  falls back to the generic "(Multimovies)" tag otherwise. */
+    internal fun displaySource(provider: String, streamUrl: String): String =
+        cdnLabel(streamUrl)
+            ?.takeIf { !provider.contains(it, ignoreCase = true) }
+            ?.let { "$provider ($it)" }
+            ?: (provider + INDICATOR)
+
     /** Build the header set for a request to [url]. The Cineverse CDN requires
      *  the page that linked to it as Referer/Origin; for other hosts the
      *  caller-supplied headers and shared UA are used as-is. Pure / cheap. */
@@ -356,7 +377,7 @@ object MultiSourcePuller {
     /** Wrap a raw extractor link with the source's name/label, headers and referer. */
     private fun toExtractorLink(src: Source, l: ExtractorLink): ExtractorLink =
         ExtractorLink(
-            source = src.name + INDICATOR,
+            source = displaySource(src.name, l.url),
             name = l.name,
             url = l.url,
             referer = l.referer ?: src.url,
@@ -392,13 +413,15 @@ object MultiSourcePuller {
     }
 
     /** Normalize an [ExtractorLink.source] / [Source.name] into a stable key for
-     *  speed tracking and priority lookup: strips the "(Multimovies)" indicator
-     *  and any trailing language annotation such as " Hindi". */
+     *  speed tracking and priority lookup: strips any trailing language
+     *  annotation (" Hindi") and the trailing parenthesized server label, so
+     *  "Nxsha (Nitro) Hindi", "Cineverse (Vibuxer)" and "Cineverse (Multimovies)"
+     *  all reduce to their SOURCE_PRIORITY name. */
     internal fun sourceKey(source: String?): String {
         if (source == null) return ""
         return source
             .replace(Regex("""\s+Hindi$""", RegexOption.IGNORE_CASE), "")
-            .removeSuffix(INDICATOR)
+            .replace(Regex("""\s+\([^)]*\)$"""), "")
             .trim()
     }
 
@@ -534,7 +557,7 @@ object MultiSourcePuller {
             u.contains(".mp4", ignoreCase = true) ||
             u.contains(".webm", ignoreCase = true)
         if (!isStream) return null
-        val source = src.name + INDICATOR
+        val source = displaySource(src.name, u)
         val name = if (isHindiHint(src.name, src.url, u)) "$source Hindi" else source
         val type = if (u.contains(".m3u8", ignoreCase = true)) ExtractorLinkType.M3U8
         else ExtractorLinkType.VIDEO
@@ -571,7 +594,7 @@ object MultiSourcePuller {
             ?: decodeEncodedStreamUrl(text)
             ?: return emptyList()
 
-        val source = src.name + INDICATOR
+        val source = displaySource(src.name, stream)
         val name = if (isHindiHint(src.name, src.url, stream)) "$source Hindi" else source
         val linkType = if (stream.contains(".m3u8", ignoreCase = true)) ExtractorLinkType.M3U8
         else ExtractorLinkType.VIDEO

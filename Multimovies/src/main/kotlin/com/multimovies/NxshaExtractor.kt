@@ -262,7 +262,7 @@ object NxshaExtractor {
             SOURCES_BUDGET_MS,
         ) ?: return emptyList()
 
-        val label = "Nxsha/" + NxshaProtocol.shortServerName(server.name)
+        val label = "Nxsha (" + NxshaProtocol.shortServerName(server.name) + ")"
         val arr = json.optJSONArray("sources") ?: return emptyList()
         val out = mutableListOf<NxshaSource>()
         for (i in 0 until arr.length()) {

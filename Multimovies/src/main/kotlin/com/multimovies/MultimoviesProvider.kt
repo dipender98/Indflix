@@ -1184,7 +1184,7 @@ class MultimoviesProvider : MainAPI() {
         namer: MultiSourcePuller.LinkNamer,
     ): ExtractorLink {
         val u = src.url
-        val source = src.name + MultiSourcePuller.INDICATOR
+        val source = MultiSourcePuller.displaySource(src.name, u)
         val hindi = MultiSourcePuller.isHindiHint(src.name, src.url, u)
         val headers = MultiSourcePuller.headersFor(u, src.referer, src.headers)
         val type = if (u.contains(".m3u8", ignoreCase = true)) ExtractorLinkType.M3U8
