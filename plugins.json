@@ -2,14 +2,14 @@
     {
         "url": "https://raw.githubusercontent.com/dipender98/Indflix/builds/Multimovies.cs3",
         "status": 1,
-        "version": 1,
+        "version": 2,
         "name": "Multimovies",
         "internalName": "Multimovies",
         "authors": [
             "Indflix"
         ],
         "description": "CloudStream provider that scrapes Multimovies and pulls sources in parallel with a per-source timeout.",
-        "fileSize": 74238,
+        "fileSize": 74488,
         "repositoryUrl": "https://github.com/dipender98/Indflix",
         "language": "hi",
         "tvTypes": [
@@ -19,7 +19,8 @@
             "AnimeMovie",
             "Cartoon"
         ],
+        "iconUrl": "https://raw.githubusercontent.com/dipender98/Indflix/main/Multimovies/icon.png",
         "apiVersion": 1,
-        "fileHash": "sha256-432cd9dd32d1b405f799a6365c31a864a2effdc9c0b66775225bcabd4e17a262"
+        "fileHash": "sha256-be9dd06ca570fa9e6667a9883b29746508e6df6d862100c95bfb9f75cd91d98d"
     }
 ]
