@@ -142,7 +142,7 @@ internal fun upgradePosterUrl(url: String?): String? {
  *  could not remove (e.g. a large -WxH variant that is still smaller than the
  *  original, a TMDB CDN small-size prefix, or an Amazon _SX* suffix). Used to
  *  decide when a search result should be overridden with a known-good
- *  full-resolution poster from Cinemeta. */
+ *  full-resolution poster from TMDB. */
 internal fun isThumbnailish(url: String?): Boolean {
     if (url.isNullOrBlank()) return false
     return Regex("""-\d{2,4}x\d{2,4}""", RegexOption.IGNORE_CASE).containsMatchIn(url)
@@ -324,11 +324,15 @@ class MultimoviesProvider : MainAPI() {
     private fun getCfKiller(): CloudflareKiller {
         return cfKiller ?: CloudflareKiller().also { cfKiller = it }
     }
-    /** Fire-and-forget scope for resolving Cinemeta search hits to Multimovies
-     *  page URLs in the background (search itself never blocks on Multimovies). */
+    /** Fire-and-forget scope for resolving TMDB search hits to Multimovies page
+     *  docs in the background (search itself never blocks on Multimovies). */
     private val searchScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    /** Maps "imdbId|type" to the resolved Multimovies page URL. */
+    /** Maps "tmdbId|type" (fallback "imdbId|type") to the resolved MM page URL. */
     private val imdbUrlCache = ConcurrentHashMap<String, String>()
+    /** Memoized detail-page docs keyed by MM URL, so load() never fetches twice. */
+    private val mmDocCache = ConcurrentHashMap<String, Document>()
+    /** Maps "tmdbId|type" to (name, year) so load() can slug-guess the MM page. */
+    private val tmdbSearchCache = ConcurrentHashMap<String, Pair<String, String?>>()
     override val hasMainPage = true
     override val hasQuickSearch = true
     override val supportedTypes = setOf(
@@ -368,13 +372,6 @@ class MultimoviesProvider : MainAPI() {
         /** Weighted relevance score a result must clear AFTER passing the hard
          *  every-token-matched gate; anything below is removed outright. */
         const val SEARCH_RELEVANCE_THRESHOLD = 0.5
-
-        /** How many top-ranked results get full metadata/rating enrichment. */
-        const val SEARCH_RATING_ENRICH_COUNT = 4
-
-        /** Hard cap for the PARALLEL rating-enrichment batch (one shared await,
-         *  never per-item serialization). */
-        const val SEARCH_RATING_TIMEOUT_MS = 1300L
 
         /** Worst-case budget for an uncached search before giving up. */
         const val SEARCH_TOTAL_BUDGET_MS = 2500L
@@ -450,55 +447,44 @@ class MultimoviesProvider : MainAPI() {
 
 
     // ------------------------------------------------------------------
-    // Search (Cinemeta-driven; Multimovies is only touched in the background
+    // Search (TMDB/SIMKL-driven; Multimovies is only touched in the background
     // to resolve each hit to its real page URL, never for metadata).
     // ------------------------------------------------------------------
 
     override suspend fun search(query: String): List<SearchResponse>? {
         SearchCache.get(query)?.let { return it }
 
-        // Phase 1 (fast): both catalogs fetched concurrently, then ranked by
-        // fuzzy relevance. The gate is strict — every significant query token
-        // must match and the score must clear the threshold; anything else is
-        // REMOVED outright ("remove every others"), with no fallback padding.
-        val ranked: List<Pair<Double, CinemetaService.CinemetaSearchResult>> =
+        // One request to TMDB /search/multi (or SIMKL search when its client_id is
+        // set) returns posters + ratings inline — no enrichment round-trips. The
+        // strict relevance gate still removes every non-matching hit.
+        val ranked: List<Pair<Double, TmdbService.TmdbItem>> =
             withTimeoutOrNull(SEARCH_TOTAL_BUDGET_MS) {
-                val raw = CinemetaService.searchCatalog(query)
+                val raw = TmdbService.search(query)
                 if (raw.isEmpty()) return@withTimeoutOrNull null
-                raw.mapNotNull { r ->
-                    val rel = relevanceOf(query, r.name, r.year)
+                raw.mapNotNull { item ->
+                    val rel = relevanceOf(query, item.name, item.year)
                     if (!rel.allTokensMatched || rel.score < SEARCH_RELEVANCE_THRESHOLD) null
-                    else rel.score to r
+                    else rel.score to item
                 }.sortedByDescending { it.first }
                     .take(SEARCH_MAX_RESULTS)
                     .ifEmpty { null }
             } ?: return null
 
-        // Phase 2 (parallel, capped): full metadata enrichment (IMDB rating) for
-        // ONLY the top hits. All fetches launch concurrently behind ONE shared
-        // timeout cap — never serialized, so the whole batch costs at most
-        // SEARCH_RATING_TIMEOUT_MS regardless of item count.
-        val ratings: Map<Int, Double?> = coroutineScope {
-            ranked.take(SEARCH_RATING_ENRICH_COUNT).mapIndexed { idx, (_, r) ->
-                async {
-                    val meta = withTimeoutOrNull(SEARCH_RATING_TIMEOUT_MS) {
-                        CinemetaService.fetchMeta(r.imdbId, r.type)
-                    }
-                    idx to meta?.imdbRating?.toDoubleOrNull()
-                }
-            }.awaitAll().toMap()
+        // Remember (name, year) per hit so load() can slug-guess its MM page.
+        ranked.forEach { (_, item) ->
+            item.tmdbId?.let { tmdbSearchCache["$it|${item.type}"] = item.name to item.year }
         }
 
-        val responses = ranked.mapIndexed { idx, (_, r) ->
-            r.toSearchResponse(ratings[idx])
-        }.filterNotNull()
+        val responses = ranked.mapNotNull { (_, item) -> item.toSearchResponse() }
 
-        // Background: resolve each hit to its real Multimovies page URL so load()
-        // opens instantly on tap. Fire-and-forget — search never waits for this.
+        // Background: resolve each hit's real MM page so load() is instant on tap.
         responses.forEach { r ->
-            val parsed = parseCinemetaUrl(r.url) ?: return@forEach
+            val parsed = parseTmdbUrl(r.url) ?: return@forEach
+            val cached = tmdbSearchCache["${parsed.first}|${parsed.second}"] ?: return@forEach
             searchScope.launch {
-                runCatching { resolveMultimoviesUrl(parsed.first, parsed.second, r.name) }
+                runCatching {
+                    resolveMultimoviesDoc(parsed.first, null, parsed.second, cached.first, cached.second)
+                }
             }
         }
 
@@ -508,54 +494,92 @@ class MultimoviesProvider : MainAPI() {
 
     override suspend fun quickSearch(query: String): List<SearchResponse>? = search(query)
 
-    /** Build a CloudStream search result straight from a Cinemeta hit — poster
-     *  comes from the catalog hit itself (already medium-sized, no extra fetch);
-     *  the IMDB [rating] is passed in pre-enriched by search() for the top hits
-     *  only, keeping search fast. */
-    private fun CinemetaService.CinemetaSearchResult.toSearchResponse(rating: Double?): SearchResponse? {
-        if (imdbId.isBlank() || name.isBlank()) return null
-        val url = "https://v3-cinemeta.strem.io/meta/${type}/$imdbId.json"
+    /** Build a CloudStream search result from a TMDB/SIMKL hit — poster, year and
+     *  IMDB rating all come straight from the search payload (no extra network). */
+    private fun TmdbService.TmdbItem.toSearchResponse(): SearchResponse? {
+        val id = tmdbId ?: return null
+        if (name.isBlank()) return null
+        val url = "https://www.themoviedb.org/${if (type == "movie") "movie" else "tv"}/$id"
         val tvType = if (type == "movie") TvType.Movie else TvType.TvSeries
-        val poster = this.poster ?: "https://images.metahub.space/poster/medium/$imdbId/img"
-        val releaseYear = year?.substringBefore("-")?.trim()?.toIntOrNull()
+        val releaseYear = year?.toIntOrNull()
         return if (tvType == TvType.Movie) {
             newMovieSearchResponse(name, url, tvType) {
                 this.posterUrl = poster
                 this.year = releaseYear
-                rating?.let { this.score = Score.from10(it.toString()) }
+                rating?.let { this.score = Score.from10(it) }
             }
         } else {
             newTvSeriesSearchResponse(name, url, tvType) {
                 this.posterUrl = poster
                 this.year = releaseYear
-                rating?.let { this.score = Score.from10(it.toString()) }
+                rating?.let { this.score = Score.from10(it) }
             }
         }
     }
 
-    /** Parse a Cinemeta meta URL into (imdbId, type). Returns null for non-Cinemeta URLs. */
-    private fun parseCinemetaUrl(url: String?): Pair<String, String>? {
+    /** Parse a TMDB web URL into (tmdbId, type). Returns null for non-TMDB URLs. */
+    private fun parseTmdbUrl(url: String?): Pair<Int, String>? {
         if (url.isNullOrBlank()) return null
-        val m = Regex("""v3-cinemeta\.strem\.io/meta/(movie|series)/(tt\d{7,8})\.json""").find(url)
-            ?: return null
-        return m.groupValues[2] to m.groupValues[1]
+        val m = Regex("""themoviedb\.org/(movie|tv)/(\d+)""").find(url) ?: return null
+        return m.groupValues[2].toIntOrNull()?.let { id ->
+            id to if (m.groupValues[1] == "movie") "movie" else "series"
+        }
     }
 
-    /** Resolve a Cinemeta hit to its real Multimovies page URL (cached). [title]
-     *  is a hint to avoid a Cinemeta meta round-trip; when null it is fetched. */
-    private suspend fun resolveMultimoviesUrl(imdbId: String, type: String, title: String?): String? {
-        val key = "$imdbId|$type"
-        imdbUrlCache[key]?.let { return it }
-        val searchTitle = title ?: CinemetaService.fetchMeta(imdbId, type)?.name ?: return null
-        val doc = fetchDoc(
-            "$mainUrl/?s=${URLEncoder.encode(searchTitle, "UTF-8")}",
+    /** Resolve a TMDB hit to its real Multimovies page Document (cached). Slugs are
+     *  guessed first so load() avoids the site's `?s=` search endpoint entirely;
+     *  the site search is only a fallback when the guess misses. [title] is the
+     *  search-result title (from [tmdbSearchCache]); when blank nothing is fetched. */
+    private suspend fun resolveMultimoviesDoc(
+        tmdbId: Int?,
+        imdbId: String?,
+        type: String,
+        title: String,
+        year: String?,
+    ): Document? {
+        val key = "${tmdbId ?: imdbId ?: "?"}|$type"
+        imdbUrlCache[key]?.let { cachedUrl ->
+            return mmDocCache[cachedUrl] ?: fetchDoc(cachedUrl, timeoutSeconds = 8, required = false)
+        }
+        if (title.isBlank()) return null
+
+        // Slug-guess first (/{movies|tvshows}/{slug}-{year}/), validated by title.
+        val base = if (type == "movie") "$mainUrl/movies/" else "$mainUrl/tvshows/"
+        val slug = title.lowercase().trim().replace(Regex("[^a-z0-9]+"), "-").trim('-')
+        val variants = buildList {
+            year?.take(4)?.let { y -> add("${slug}-$y") }
+            add(slug)
+        }
+        for (variant in variants.distinct()) {
+            if (variant.isBlank()) continue
+            val guessUrl = "$base$variant/"
+            val guessed = fetchDoc(guessUrl, timeoutSeconds = 6, required = false) ?: continue
+            if (isChallenge(guessed)) continue
+            val guessedTitle = guessed.selectFirst("h1, div.sheader h1, meta[property=og:title]")?.let {
+                if (it.tagName() == "meta") it.attr("content") else it.text()
+            }?.trim()
+            if (guessedTitle != null && titleDistance(guessedTitle, title) <= 1) {
+                imdbUrlCache[key] = guessUrl
+                mmDocCache[guessUrl] = guessed
+                return guessed
+            }
+        }
+
+        // Fallback: site search by title, pick the closest title match.
+        val searchDoc = fetchDoc(
+            "$mainUrl/?s=${URLEncoder.encode(title, "UTF-8")}",
             timeoutSeconds = 8,
             required = false,
         ) ?: return null
-        val candidate = doc.select(SEARCH_ITEMS_SELECTOR).mapNotNull { it.candidateHref() }
-            .minByOrNull { titleDistance(it.second, searchTitle) }?.first ?: return null
-        imdbUrlCache[key] = candidate
-        return candidate
+        val candidate = searchDoc.select(SEARCH_ITEMS_SELECTOR).mapNotNull { it.candidateHref() }
+            .minByOrNull { titleDistance(it.second, title) } ?: return null
+        val detailDoc = mmDocCache[candidate.first]
+            ?: fetchDoc(candidate.first, timeoutSeconds = 8, required = false)
+        if (detailDoc != null) {
+            imdbUrlCache[key] = candidate.first
+            mmDocCache[candidate.first] = detailDoc
+        }
+        return detailDoc
     }
 
     /** Extract (href, item title) from a Multimovies search-result element. */
@@ -578,10 +602,10 @@ class MultimoviesProvider : MainAPI() {
         }
     }
 
-    /** Concurrently resolve Cinemeta posters for search results that are missing one
+    /** Concurrently resolve TMDB posters for main-page results that are missing one
      *  or still carry a thumbnail size marker. Bounded to 3 concurrent lookups with
-     *  a 3s per-item timeout, AND an overall 2.5s budget so a search can never be
-     *  stalled by many poster-less items. */
+     *  a 3s per-item timeout, AND an overall 2.5s budget so a page is never stalled
+     *  by many poster-less items. */
     private suspend fun backfillPosters(results: List<SearchResponse>) {
         val toFetch = results.mapNotNull { r ->
             val poster = r.posterUrl
@@ -597,11 +621,8 @@ class MultimoviesProvider : MainAPI() {
                         semaphore.acquire()
                         try {
                             withTimeoutOrNull(3000L) {
-                                val imdbId = CinemetaService.searchImdbId(
-                                    item.title, null, if (item.tvType == TvType.Movie) "movie" else "series"
-                                ) ?: return@withTimeoutOrNull null
-                                val metaType = if (item.tvType == TvType.Movie) "movie" else "series"
-                                CinemetaService.fetchMeta(imdbId, metaType)?.poster
+                                val type = if (item.tvType == TvType.Movie) "movie" else "series"
+                                TmdbService.search(item.title).firstOrNull { it.type == type }?.poster
                             }?.takeIf { it.isNotBlank() }
                         } finally {
                             semaphore.release()
@@ -671,101 +692,109 @@ class MultimoviesProvider : MainAPI() {
     // ------------------------------------------------------------------
 
     override suspend fun load(url: String): LoadResponse? {
-        // Search results arrive as Cinemeta meta URLs; resolve them to the real
-        // Multimovies page (cache-first) so detail + streams hit the actual page.
-        val cinemetaId = parseCinemetaUrl(url)?.first
-        val realUrl = if (cinemetaId != null) {
-            val parsed = parseCinemetaUrl(url) ?: return null
-            resolveMultimoviesUrl(parsed.first, parsed.second, null)
-                ?: throw ErrorLoadingException("Could not match $url to a Multimovies page")
-        } else {
-            url
-        }
+        // Search results arrive as TMDB web URLs; main-page cards arrive as MM URLs.
+        val tmdb = parseTmdbUrl(url)
+        val cached = tmdb?.let { (id, type) -> tmdbSearchCache["$id|$type"] }
 
-        // solveDocument() surfaces failures via ErrorLoadingException (no retry loop).
-        val doc = solveDocument(realUrl)
-
-        val title = doc.selectFirst("h1, div.sheader h1, meta[property=og:title]")?.let {
-            if (it.tagName() == "meta") it.attr("content") else it.text()
-        }?.trim() ?: throw ErrorLoadingException("No title found on $realUrl")
-
-        val poster = upgradePosterUrl(
-            doc.selectFirst("meta[property=og:image]")?.attr("content")
-                ?: doc.selectFirst("div.poster img, img.wp-post-image")?.attr("src")
-        )
-
-        val year = doc.selectFirst("span.date, .year, .extra span")?.text()
-            ?.let { Regex("\\d{4}").find(it)?.value?.toIntOrNull() }
-
-        val plot = doc.selectFirst("div.wp-content, div.description, .wp-content p")?.text()
-            ?.replace("Overview:", "")?.trim()
-
-        val tags = doc.select("div.sgeneros a, .genre a, .sgeneros a").mapNotNull { it.text() }
-
-        val score = doc.selectFirst("span.dt_rating_vgs, .imdb, .rating span")?.text()
-            ?.removePrefix("IMDb:")?.trim()
-
-        val isMovie = realUrl.contains("/movies/")
-        val aioType = if (isMovie) "movie" else "series"
-
-        val imdbIdFromPage = CinemetaService.extractImdbId(doc)
-        val tmdbIdFromPage = CinemetaService.extractTmdbId(doc)
-
-        // The IMDB id is the linchpin for meta-provider enrichment (cast photos,
-        // episode ratings/thumbnails) AND for building direct stream hosts. Resolve
-        // it concurrently with season-page fetching:
-        //   1. from the Cinemeta search URL (when the result came from search),
-        //   2. else from the page markup,
-        //   3. else from the first dooplayer embed URL (the site embeds the IMDB
-        //      id inside every admin-ajax embed URL),
-        //   4. else a Cinemeta title search.
         return coroutineScope {
-            val imdbIdJob = async {
-                cinemetaId ?: imdbIdFromPage ?: runCatching {
-                    withTimeoutOrNull(6000L) {
-                        firstEmbedImdbId(doc) ?: if (title.isNotBlank()) {
-                            CinemetaService.searchImdbId(title, year, aioType)
-                        } else null
-                    }
-                }.getOrNull()
+            // MM page (stream sources only) and TMDB metadata resolve in parallel.
+            val pageJob = async {
+                if (tmdb != null) {
+                    resolveMultimoviesDoc(tmdb.first, null, tmdb.second, cached?.first.orEmpty(), cached?.second)
+                } else {
+                    runCatching { solveDocument(url) }.getOrNull()
+                }
+            }
+            val metaJob = async {
+                if (tmdb != null) withTimeoutOrNull(6000L) { TmdbService.fetchMeta(tmdb.first, tmdb.second) } else null
+            }
+
+            val detail = metaJob.await()
+            var doc = pageJob.await()
+
+            // A pasted TMDB URL with no cached title: retry page resolution with the
+            // real title once metadata arrives.
+            if (doc == null && tmdb != null && detail?.name != null) {
+                doc = resolveMultimoviesDoc(tmdb.first, null, tmdb.second, detail.name, detail.year)
+            }
+            doc ?: throw ErrorLoadingException("Could not match $url to a Multimovies page")
+            // The real MM URL is what loadLinks() receives; never fall back to the
+            // TMDB search URL for search taps.
+            val realUrl = doc.location()?.takeIf { it.isNotBlank() }
+                ?: (if (tmdb != null) imdbUrlCache["${tmdb.first}|${tmdb.second}"] else null)
+                ?: url
+
+            val isMovie = tmdb?.second == "movie" || realUrl.contains("/movies/")
+            val pageType = if (isMovie) "movie" else "series"
+
+            // Direct MM page (main-page card): ids come from the page markup, then
+            // metadata is fetched from TMDB; the dooplayer embed URL is a last resort.
+            var resolvedDetail = detail
+            if (tmdb == null && resolvedDetail == null) {
+                val imdbFromPage = TmdbService.extractImdbId(doc)
+                val tmdbFromPage = TmdbService.extractTmdbId(doc)?.toIntOrNull()
+                resolvedDetail = withTimeoutOrNull(4000L) {
+                    tmdbFromPage?.let { TmdbService.fetchMeta(it, pageType) }
+                        ?: imdbFromPage?.let { imdb ->
+                            TmdbService.findByImdb(imdb)?.let { (id, t) -> TmdbService.fetchMeta(id, t) }
+                        }
+                        ?: firstEmbedImdbId(doc)?.let { imdb ->
+                            TmdbService.findByImdb(imdb)?.let { (id, t) -> TmdbService.fetchMeta(id, t) }
+                        }
+                }
+            }
+
+            val tmdbId = resolvedDetail?.tmdbId ?: tmdb?.first
+            val imdbId = resolvedDetail?.imdbId
+                ?: if (tmdb == null) TmdbService.extractImdbId(doc) else null
+
+            // Page-scraped fallbacks (only when TMDB gave nothing).
+            val pageTitle = doc.selectFirst("h1, div.sheader h1, meta[property=og:title]")?.let {
+                if (it.tagName() == "meta") it.attr("content") else it.text()
+            }?.trim()
+            val title = resolvedDetail?.name ?: pageTitle
+                ?: throw ErrorLoadingException("No title found on $realUrl")
+            val poster = resolvedDetail?.poster ?: upgradePosterUrl(
+                doc.selectFirst("meta[property=og:image]")?.attr("content")
+                    ?: doc.selectFirst("div.poster img, img.wp-post-image")?.attr("src")
+            )
+            val year = resolvedDetail?.year?.toIntOrNull()
+                ?: doc.selectFirst("span.date, .year, .extra span")?.text()
+                    ?.let { Regex("\\d{4}").find(it)?.value?.toIntOrNull() }
+            val plot = resolvedDetail?.overview ?: doc.selectFirst("div.wp-content, div.description, .wp-content p")?.text()
+                ?.replace("Overview:", "")?.trim()
+            val tags = resolvedDetail?.genres
+                ?: doc.select("div.sgeneros a, .genre a, .sgeneros a").mapNotNull { it.text() }
+            val score = resolvedDetail?.rating
+            val pageScore = doc.selectFirst("span.dt_rating_vgs, .imdb, .rating span")?.text()
+                ?.removePrefix("IMDb:")?.trim()?.toDoubleOrNull()
+
+            // Stash ids for loadLinks() (movie page + every TV episode page).
+            if (imdbId != null || tmdbId != null) {
+                SourceMetaCache.put(realUrl, SourceMeta(imdbId ?: "", tmdbId?.toString(), null, null))
             }
 
             if (isMovie) {
-                val resolvedImdbId = imdbIdJob.await()
-                if (resolvedImdbId != null) {
-                    SourceMetaCache.put(realUrl, SourceMeta(resolvedImdbId, tmdbIdFromPage, null, null))
-                }
-                // Background keyless enrichment: cast photos + full-res artwork.
-                val enrichment = if (resolvedImdbId != null) {
-                    async { withTimeoutOrNull(6000L) { TvdbDataService.fetchMeta(resolvedImdbId, "movie") } }.await()
-                } else null
                 newMovieLoadResponse(title, realUrl, TvType.Movie, realUrl) {
-                    this.posterUrl = enrichment?.poster ?: poster
-                    this.backgroundPosterUrl = enrichment?.background
-                    this.logoUrl = enrichment?.logo
+                    this.posterUrl = poster
+                    this.backgroundPosterUrl = resolvedDetail?.backdrop
                     this.year = year
                     this.plot = plot
                     this.tags = tags
-                    this.actors = enrichment?.cast
-                    if (resolvedImdbId != null) {
-                        addImdbId(resolvedImdbId)
-                        score?.let { s -> s.toDoubleOrNull()?.let { addScore(s, 10) } }
-                    } else {
-                        this.score = score?.let { Score.from10(it) }
-                    }
+                    this.actors = resolvedDetail?.cast
+                    imdbId?.let { addImdbId(it) }
+                    (score ?: pageScore)?.let { addScore(it.toString(), 10) }
                 }
             } else {
-                // TV / Seasons: collect all episodes. Many series list every episode
-                // inline on the detail page (ul.episodios per season); others link to
-                // /seasons/... archive pages that must be fetched. When archive links
-                // exist, fetch those in parallel; otherwise parse the detail page.
+                // TV / Seasons: episode LINKS come from the MM season pages (streams
+                // only); titles/descriptions/thumbnails/ratings come from TMDB.
                 val episodes = arrayListOf<Episode>()
                 val seasonLinks = doc.select("a[href*='/seasons/']")
                     .mapNotNull { it.attr("href").takeIf { h -> h.contains(mainUrl) } }
                     .distinct()
                 val pages = if (seasonLinks.isEmpty()) listOf(realUrl) else seasonLinks
 
-                val seasonDocsJob = async {
+                val seasonDocs = coroutineScope {
                     val sem = Semaphore(4)
                     pages.map { seasonUrl ->
                         async {
@@ -779,23 +808,7 @@ class MultimoviesProvider : MainAPI() {
                     }.awaitAll()
                 }
 
-                val resolvedImdbId = imdbIdJob.await()
-                val seasonDocs = seasonDocsJob.await()
-
-                // Keyless enrichment (cast + episode metadata) runs once the IMDB id
-                // is known, in parallel with the episode parsing below.
-                val enrichmentJob = if (resolvedImdbId != null) {
-                    async {
-                        withTimeoutOrNull(6000L) {
-                            coroutineScope {
-                                val tvdb = async { TvdbDataService.fetchMeta(resolvedImdbId, "series") }
-                                val cinemeta = async { CinemetaService.fetchMeta(resolvedImdbId, "series") }
-                                EnrichmentData(tvdb.await(), cinemeta.await())
-                            }
-                        }
-                    }
-                } else null
-
+                val seasonNums = mutableSetOf<Int>()
                 seasonDocs.forEach { sDoc ->
                     if (sDoc == null) return@forEach
                     sDoc.select("ul.episodios li, div.eps div.ep, .episodios li").forEachIndexed { i, ep ->
@@ -811,53 +824,40 @@ class MultimoviesProvider : MainAPI() {
                             this.season = seasonNum
                         }
                         episodes.add(ep)
-                        // Stash ids + season/episode keyed by the exact url loadLinks() will receive.
-                        if (resolvedImdbId != null) {
-                            SourceMetaCache.put(epLink, SourceMeta(resolvedImdbId, tmdbIdFromPage, seasonNum, epNum))
+                        seasonNums.add(seasonNum)
+                        if (imdbId != null || tmdbId != null) {
+                            SourceMetaCache.put(epLink, SourceMeta(imdbId ?: "", tmdbId?.toString(), seasonNum, epNum))
                         }
                     }
                 }
 
-                // Apply keyless Cinemeta episode metadata (description, date,
-                // thumbnail, rating) so the detail page is fully populated.
-                val enrichment = enrichmentJob?.await()
-                val videoByEp = enrichment?.cinemeta?.videos
-                    ?.associateBy { (it.season to it.episode) } ?: emptyMap()
-                episodes.forEach { ep ->
-                    videoByEp[(ep.season to ep.episode)]?.let { vid ->
-                        if (ep.name.isNullOrBlank()) ep.name = vid.name
-                        ep.description = vid.overview
-                        vid.released?.let { ep.addDate(it) }
-                        vid.thumbnail?.let { ep.posterUrl = it }
-                        vid.rating?.toDoubleOrNull()?.let { ep.score = Score.from10(it) }
+                // TMDB episode enrichment (parallel, bounded, best-effort).
+                if (tmdbId != null && seasonNums.isNotEmpty()) {
+                    val epMeta = TmdbService.fetchEpisodes(tmdbId, seasonNums)
+                    episodes.forEach { ep ->
+                        epMeta[ep.season to ep.episode]?.let { m ->
+                            if (ep.name.isNullOrBlank()) ep.name = m.name
+                            ep.description = m.overview
+                            m.released?.let { ep.addDate(it) }
+                            m.thumbnail?.let { ep.posterUrl = it }
+                            m.rating?.let { ep.score = Score.from10(it) }
+                        }
                     }
                 }
 
                 newTvSeriesLoadResponse(title, realUrl, TvType.TvSeries, episodes) {
-                    this.posterUrl = enrichment?.tvdb?.poster ?: poster
-                    this.backgroundPosterUrl = enrichment?.tvdb?.background
-                    this.logoUrl = enrichment?.tvdb?.logo
+                    this.posterUrl = poster
+                    this.backgroundPosterUrl = resolvedDetail?.backdrop
                     this.year = year
                     this.plot = plot
                     this.tags = tags
-                    this.actors = enrichment?.tvdb?.cast
-                    if (resolvedImdbId != null) {
-                        addImdbId(resolvedImdbId)
-                        score?.let { s -> s.toDoubleOrNull()?.let { addScore(s, 10) } }
-                    } else {
-                        this.score = score?.let { Score.from10(it) }
-                    }
+                    this.actors = resolvedDetail?.cast
+                    imdbId?.let { addImdbId(it) }
+                    (score ?: pageScore)?.let { addScore(it.toString(), 10) }
                 }
             }
         }
     }
-
-    /** Enrichment fetched in the background during load(): keyless cast/artwork
-     *  plus Cinemeta episode metadata. */
-    private data class EnrichmentData(
-        val tvdb: TvdbDataService.ExtractedMediaData?,
-        val cinemeta: CinemetaService.CinemetaMeta?,
-    )
 
     /** Resolve the IMDB id from the site's first (non-trailer) dooplayer embed
      *  URL. Every dooplayer admin-ajax response carries an embed_url that embeds
