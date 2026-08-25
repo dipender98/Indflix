@@ -432,12 +432,11 @@ object ScreenscapeExtractor {
         headers: Map<String, String> = emptyMap(),
         lang: String = "",
     ): ScreenSource {
-        val source = MultiSourcePuller.displaySource(name, url)
         val hindi = lang.contains("hindi", ignoreCase = true) ||
             MultiSourcePuller.isHindiHint(name, url, null) ||
             url.contains("lan=hindi", ignoreCase = true)
         return ScreenSource(
-            name = if (hindi) "$source Hindi" else source,
+            name = MultiSourcePuller.linkLabel(name, hindi),
             url = url,
             quality = quality,
             headers = headers,

@@ -36,6 +36,11 @@ All knobs live in `MultimoviesProvider.kt`:
   Cineverse wins. If the site adds a new dooplayer server, add its name here.
 - `SOURCE_TIMEOUT_MS = 15_000L` — per-source hard cap. A dead host can never
   block the others.
+- Every emitted link carries `source == name == "<Server>[ Hindi]"`
+  (`MultiSourcePuller.linkLabel`). CloudStream sorts and saves player priorities
+  by exact match on `source` while the server list displays `name` — one
+  unstable character (CDN suffix, quality suffix, load counter) breaks the
+  user's ranking forever. Never add runtime-derived parts to the label.
 
 `MultiSourcePuller.pull()` does the following for every source:
 

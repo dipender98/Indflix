@@ -1068,7 +1068,6 @@ class MultimoviesProvider : MainAPI() {
         // lower-priority fallbacks join as they resolve.
         val globalSources = buildGlobalSources(meta)
         val orderedEmbeds = embeds.sortedBy { priorityOf(it.name) }
-        val namer = MultiSourcePuller.LinkNamer()
 
         coroutineScope {
             val embedJobs = orderedEmbeds.map { e ->
@@ -1091,13 +1090,13 @@ class MultimoviesProvider : MainAPI() {
                         latencyMs = e.latencyMs,
                     )
                     sourceRefs.add(src)
-                    pullSource(src, namer, data, emitted, found, subtitleCallback, callback)
+                    pullSource(src, data, emitted, found, subtitleCallback, callback)
                 }
             }
             val globalJobs = globalSources.map { g ->
                 sourceRefs.add(g)
                 async {
-                    pullSource(g, namer, data, emitted, found, subtitleCallback, callback)
+                    pullSource(g, data, emitted, found, subtitleCallback, callback)
                 }
             }
             (embedJobs + globalJobs).awaitAll()
@@ -1118,8 +1117,9 @@ class MultimoviesProvider : MainAPI() {
 
     /** Pull a single source, streaming found links to [callback] as they arrive and
      *  collecting them (deduped at emission time) into [found] for the final sort
-     *  and link cache. Every emitted link is renamed to the `<Server>[_Hindi]_<Quality>`
-     *  format via [namer] before it reaches the player.
+     *  and link cache. Links arrive already carrying their stable identity
+     *  (`source == name == "<Server>[ Hindi]"`, set at origin in
+     *  MultiSourcePuller) — no renaming happens here.
      *
      *  Cineverse fast path: if [src] is a Cineverse CDN URL that already points
      *  straight at a stream (the `serve_m3u8=1` proxy URL that `unwrapEmbed`
@@ -1129,7 +1129,6 @@ class MultimoviesProvider : MainAPI() {
      *  reflects the win. */
     private suspend fun pullSource(
         src: MultiSourcePuller.Source,
-        namer: MultiSourcePuller.LinkNamer,
         data: String,
         emitted: MutableSet<String>,
         found: MutableList<ExtractorLink>,
@@ -1140,7 +1139,7 @@ class MultimoviesProvider : MainAPI() {
             (src.url.contains("serve_m3u8=1", ignoreCase = true) ||
                 src.url.contains(".m3u8", ignoreCase = true) ||
                 src.url.contains(".mp4", ignoreCase = true))
-        ) buildDirectLink(src, namer) else null
+        ) buildDirectLink(src) else null
         if (cineverseFastLink != null) {
             val key = "${hostOf(cineverseFastLink.url ?: "")}|${cineverseFastLink.quality}"
             if (emitted.add(key)) {
@@ -1158,41 +1157,31 @@ class MultimoviesProvider : MainAPI() {
             onLink = { l ->
                 val key = "${hostOf(l.url ?: "")}|${l.quality}"
                 if (emitted.add(key)) {
-                    val named = ExtractorLink(
-                        source = l.source,
-                        name = namer.nameFor(l.source, MultiSourcePuller.isHindi(l), l.quality),
-                        url = l.url,
-                        referer = l.referer,
-                        quality = l.quality,
-                        headers = l.headers,
-                        extractorData = l.extractorData,
-                        type = l.type,
-                        audioTracks = l.audioTracks ?: emptyList(),
-                    )
-                    found.add(named)
-                    runCatching { callback(named) }
+                    found.add(l)
+                    runCatching { callback(l) }
                 }
             },
         )
     }
 
     /** Build the ExtractorLink emitted by the Cineverse fast path. Mirrors
-     *  [MultiSourcePuller.directStreamLink]'s naming + header logic so the
+     *  [MultiSourcePuller.directStreamLink]'s labeling + header logic so the
      *  link shape matches what the registry path would have produced. */
     private fun buildDirectLink(
         src: MultiSourcePuller.Source,
-        namer: MultiSourcePuller.LinkNamer,
     ): ExtractorLink {
         val u = src.url
-        val source = MultiSourcePuller.displaySource(src.name, u)
-        val hindi = MultiSourcePuller.isHindiHint(src.name, src.url, u)
+        val label = MultiSourcePuller.linkLabel(
+            src.name,
+            MultiSourcePuller.isHindiHint(src.name, src.url, u),
+        )
         val headers = MultiSourcePuller.headersFor(u, src.referer, src.headers)
         val type = if (u.contains(".m3u8", ignoreCase = true)) ExtractorLinkType.M3U8
         else ExtractorLinkType.VIDEO
         val quality = getQualityFromName(u)
         return ExtractorLink(
-            source = source,
-            name = namer.nameFor(source, hindi, quality),
+            source = label,
+            name = label,
             url = u,
             referer = src.referer ?: u,
             quality = quality,

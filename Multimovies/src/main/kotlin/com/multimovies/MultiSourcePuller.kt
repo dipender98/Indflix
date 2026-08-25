@@ -10,7 +10,6 @@ import kotlinx.coroutines.*
 import org.jsoup.Jsoup
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Session-scoped memory of per-source extraction speed. [MultiSourcePuller.pull]
@@ -84,8 +83,6 @@ object MultiSourcePuller {
         val episode: Int? = null,
         val latencyMs: Long = Long.MAX_VALUE,
     )
-
-    const val INDICATOR = " (Multimovies)"
 
     /** Max iframe levels to unwrap before treating a page as the player. */
     private const val MAX_UNWRAP_LEVELS = 4
@@ -197,26 +194,16 @@ object MultiSourcePuller {
         cineverseCdnHosts.contains(hostOf(url)) ||
             hostOf(url).let { h -> cineverseCdnHosts.any { h == it || h.endsWith(".$it") } }
 
-    /** Best-effort upstream server label from a stream URL's host, so players
-     *  show the server that actually serves the bytes: "www.vibuxer.com" ->
-     *  "Vibuxer", "cdn.awish.cloud" -> "Awish", "proxy.modiplay.com" ->
-     *  "Modiplay". Returns null when no usable domain label is present. */
-    internal fun cdnLabel(url: String): String? {
-        val host = hostOf(url).substringBefore(':')
-            .removePrefix("www.").removePrefix("ww2.")
-        val parts = host.split('.').filter { it.isNotBlank() }
-        val label = if (parts.size >= 2) parts[parts.size - 2] else parts.firstOrNull()
-        return label?.takeIf { it.length >= 3 }?.replaceFirstChar { it.uppercase() }
-    }
-
-    /** `<Provider> (ActualServer)` display label. Uses the real upstream host
-     *  behind [streamUrl] when it can be named and differs from [provider];
-     *  falls back to the generic "(Multimovies)" tag otherwise. */
-    internal fun displaySource(provider: String, streamUrl: String): String =
-        cdnLabel(streamUrl)
-            ?.takeIf { !provider.contains(it, ignoreCase = true) }
-            ?.let { "$provider ($it)" }
-            ?: (provider + INDICATOR)
+    /** Deterministic identity for an emitted link: `<Server>[ Hindi]`.
+     *  Every ExtractorLink must carry this exact string in BOTH `source` and
+     *  `name`: CloudStream saves player priorities keyed on an exact match of
+     *  `source` while the server list displays `name`, so any drift (CDN
+     *  suffixes, quality suffixes, per-load counters) breaks the user's
+     *  ranking. Deliberately free of runtime-derived parts — extractor/extension
+     *  availability and CDN hosts must never influence it. */
+    internal fun linkLabel(base: String?, hindi: Boolean): String =
+        (base?.trim()?.takeIf { it.isNotEmpty() } ?: "Multimovies") +
+            (if (hindi) " Hindi" else "")
 
     /** Build the header set for a request to [url]. The Cineverse CDN requires
      *  the page that linked to it as Referer/Origin; for other hosts the
@@ -374,10 +361,12 @@ object MultiSourcePuller {
         sortLinks(links, sources, priorityOf, preferHindi)
     }
 
-    /** Wrap a raw extractor link with the source's name/label, headers and referer. */
+    /** Wrap a raw extractor link with the source's headers/referer defaults.
+     *  Identity is NOT touched here: every extractSource branch already emits
+     *  final `source == name == linkLabel(...)` labels. */
     private fun toExtractorLink(src: Source, l: ExtractorLink): ExtractorLink =
         ExtractorLink(
-            source = displaySource(src.name, l.url),
+            source = l.source,
             name = l.name,
             url = l.url,
             referer = l.referer ?: src.url,
@@ -387,30 +376,6 @@ object MultiSourcePuller {
             type = l.type,
             audioTracks = l.audioTracks ?: emptyList(),
         )
-
-    /** Map a quality int to a display label; adaptive/unknown masters → "Auto". */
-    internal fun qualityLabel(q: Int?): String = when (q) {
-        2160 -> "2160p"
-        1080 -> "1080p"
-        720 -> "720p"
-        480 -> "480p"
-        360 -> "360p"
-        else -> "Auto"
-    }
-
-    /** Per-load link namer producing `<Server>[_Hindi]_<Quality>` labels, with
-     *  duplicate servers numbered `-2`, `-3`… in emission order. Stateless across
-     *  loads (one instance per loadLinks call). */
-    class LinkNamer {
-        private val counters = ConcurrentHashMap<String, AtomicInteger>()
-
-        fun nameFor(source: String?, hindi: Boolean, quality: Int): String {
-            val base = sourceKey(source)
-            val n = counters.computeIfAbsent(base) { AtomicInteger(0) }.incrementAndGet()
-            val numbered = if (n == 1) base else "$base-$n"
-            return numbered + (if (hindi) "_Hindi" else "") + "_" + qualityLabel(quality)
-        }
-    }
 
     /** Normalize an [ExtractorLink.source] / [Source.name] into a stable key for
      *  speed tracking and priority lookup: strips any trailing language
@@ -532,6 +497,9 @@ object MultiSourcePuller {
         directStreamLink(src)?.let { return listOf(it) }
 
         // Stage a: CloudStream extractor registry (installed/built-in extractors).
+        // Relabeled to the source's stable identity — registry links carry bare
+        // extractor names that would miss SOURCE_PRIORITY and drift whenever
+        // extensions are installed or removed.
         val found = mutableListOf<ExtractorLink>()
         val registryOk = runCatching {
             loadExtractor(
@@ -541,7 +509,25 @@ object MultiSourcePuller {
                 callback = { found.add(it) },
             )
         }.getOrDefault(false)
-        if (registryOk && found.isNotEmpty()) return found
+        if (registryOk && found.isNotEmpty()) {
+            return found.map { l ->
+                val label = linkLabel(
+                    src.name,
+                    isHindi(l) || isHindiHint(src.name, src.url, l.url),
+                )
+                ExtractorLink(
+                    source = label,
+                    name = label,
+                    url = l.url,
+                    referer = l.referer,
+                    quality = l.quality,
+                    headers = l.headers,
+                    extractorData = null,
+                    type = l.type,
+                    audioTracks = l.audioTracks ?: emptyList(),
+                )
+            }
+        }
 
         // Stage b: generic m3u8/mp4 sniff.
         return sniff(src)
@@ -557,8 +543,7 @@ object MultiSourcePuller {
             u.contains(".mp4", ignoreCase = true) ||
             u.contains(".webm", ignoreCase = true)
         if (!isStream) return null
-        val source = displaySource(src.name, u)
-        val name = if (isHindiHint(src.name, src.url, u)) "$source Hindi" else source
+        val label = linkLabel(src.name, isHindiHint(src.name, src.url, u))
         val type = if (u.contains(".m3u8", ignoreCase = true)) ExtractorLinkType.M3U8
         else ExtractorLinkType.VIDEO
         // Use headersFor so the Cineverse serve_m3u8 proxy request, which the
@@ -566,8 +551,8 @@ object MultiSourcePuller {
         // Referer/Origin pair the embed originally needed.
         val headers = headersFor(u, src.referer, src.headers)
         return ExtractorLink(
-            source = source,
-            name = name,
+            source = label,
+            name = label,
             url = u,
             referer = src.referer ?: u,
             quality = getQualityFromName(u),
@@ -594,14 +579,13 @@ object MultiSourcePuller {
             ?: decodeEncodedStreamUrl(text)
             ?: return emptyList()
 
-        val source = displaySource(src.name, stream)
-        val name = if (isHindiHint(src.name, src.url, stream)) "$source Hindi" else source
+        val label = linkLabel(src.name, isHindiHint(src.name, src.url, stream))
         val linkType = if (stream.contains(".m3u8", ignoreCase = true)) ExtractorLinkType.M3U8
         else ExtractorLinkType.VIDEO
         return listOf(
             ExtractorLink(
-                source = source,
-                name = name,
+                source = label,
+                name = label,
                 url = stream,
                 referer = src.url,
                 quality = getQualityFromName(stream),
