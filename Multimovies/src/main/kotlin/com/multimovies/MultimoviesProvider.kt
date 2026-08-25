@@ -192,19 +192,19 @@ internal fun parseRating(item: Element): Double? {
 
 /** Server names as they appear on the Multimovies "Video Sources" list, plus the
  *  direct global sources, ordered by speed/reliability (fastest/most reliable
- *  first). Verified Aug 2026: current titles only expose Cineverse, screenscape.me,
- *  gdmirror/GD, Nxsha and occasionally nhdapi. Cineverse (the modiplay serve_m3u8
- *  proxy) is the verified fast + Hindi source; Nxsha uses the same modiplay/vibuxer
- *  CDN backend but its embed needs JS; screenscape.me is the site's lan=hindi source;
- *  gdmirror is the site's recommended server. Servers not listed here are still
- *  pulled (generic sniffer fallback) but with the lowest priority. The tail lists
- *  the id-based GlobalSources (2embed.cc, VidSrc, 111Movies) — verified-responding
- *  public embed hosts; learned per-source speed promotes whichever is fastest. */
+ *  first). Verified Aug 2026: live diagnostic confirmed Cineverse (current CDN
+ *  vibuxer.com, serve_m3u8=1 proxy), screenscape.me, nxsha (.cc) and nhdapi
+ *  respond; the legacy modiplay.com / gdmirror.com / nxsha.com back-ends are all
+ *  dead. Cineverse is the verified fast + Hindi source; screenscape.me is the
+ *  site's lan=hindi source; nxsha and nhdapi round out the dooplayer embeds.
+ *  The tail lists the id-based GlobalSources (2embed.cc, VidSrc, 111Movies) —
+ *  verified-responding public embed hosts; learned per-source speed promotes
+ *  whichever is fastest. Note: gdmirror was removed entirely (host refused TCP,
+ *  no alt TLD resolves); add it back here if it ever comes back to life. */
 internal val SOURCE_PRIORITY: List<String> = listOf(
     "Cineverse",
     "screenscape.me",
-    "gdmirror",
-    "Nxsha",
+    "nxsha",
     "nhdapi",
     "2embed",
     "VidSrc",
@@ -1062,11 +1062,16 @@ class MultimoviesProvider : MainAPI() {
             val embedJobs = orderedEmbeds.map { e ->
                 async {
                     val finalUrl = MultiSourcePuller.unwrapEmbed(e.url, referer = data, headers = commonHeaders)
+                    // After unwrap, the URL may now point at a downstream CDN
+                    // (Cineverse -> vibuxer / serve_m3u8 proxy). Augment headers
+                    // with the host-specific pair the proxy requires so the
+                    // link the player replays against doesn't 403.
+                    val srcHeaders = commonHeaders + MultiSourcePuller.headersFor(finalUrl, referer = data)
                     val src = MultiSourcePuller.Source(
                         name = e.name,
                         url = finalUrl,
                         referer = data,
-                        headers = commonHeaders,
+                        headers = srcHeaders,
                         latencyMs = e.latencyMs,
                     )
                     sourceRefs.add(src)
@@ -1098,7 +1103,14 @@ class MultimoviesProvider : MainAPI() {
     /** Pull a single source, streaming found links to [callback] as they arrive and
      *  collecting them (deduped at emission time) into [found] for the final sort
      *  and link cache. Every emitted link is renamed to the `<Server>[_Hindi]_<Quality>`
-     *  format via [namer] before it reaches the player. */
+     *  format via [namer] before it reaches the player.
+     *
+     *  Cineverse fast path: if [src] is a Cineverse CDN URL that already points
+     *  straight at a stream (the `serve_m3u8=1` proxy URL that `unwrapEmbed`
+     *  surfaces), the playable link is emitted immediately via [callback] — no
+     *  second `pull()` round-trip, no registry lookup, no `loadExtractor` step.
+     *  Recorded as a fast success in [SourceSpeedTracker] so the sort key
+     *  reflects the win. */
     private suspend fun pullSource(
         src: MultiSourcePuller.Source,
         namer: MultiSourcePuller.LinkNamer,
@@ -1107,30 +1119,73 @@ class MultimoviesProvider : MainAPI() {
         found: MutableList<ExtractorLink>,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
-    ): List<ExtractorLink> = MultiSourcePuller.pull(
-        sources = listOf(src),
-        timeoutMs = SOURCE_TIMEOUT_MS,
-        priorityOf = ::priorityOf,
-        onSubtitle = subtitleCallback,
-        onLink = { l ->
-            val key = "${hostOf(l.url ?: "")}|${l.quality}"
+    ): List<ExtractorLink> {
+        val cineverseFastLink = if (MultiSourcePuller.isCineverseHost(src.url) &&
+            (src.url.contains("serve_m3u8=1", ignoreCase = true) ||
+                src.url.contains(".m3u8", ignoreCase = true) ||
+                src.url.contains(".mp4", ignoreCase = true))
+        ) buildDirectLink(src, namer) else null
+        if (cineverseFastLink != null) {
+            val key = "${hostOf(cineverseFastLink.url ?: "")}|${cineverseFastLink.quality}"
             if (emitted.add(key)) {
-                val named = ExtractorLink(
-                    source = l.source,
-                    name = namer.nameFor(l.source, MultiSourcePuller.isHindi(l), l.quality),
-                    url = l.url,
-                    referer = l.referer,
-                    quality = l.quality,
-                    headers = l.headers,
-                    extractorData = l.extractorData,
-                    type = l.type,
-                    audioTracks = l.audioTracks ?: emptyList(),
-                )
-                found.add(named)
-                runCatching { callback(named) }
+                found.add(cineverseFastLink)
+                SourceSpeedTracker.record(src.name, 0L, success = true)
+                runCatching { callback(cineverseFastLink) }
             }
-        },
-    )
+            return listOf(cineverseFastLink)
+        }
+        return MultiSourcePuller.pull(
+            sources = listOf(src),
+            timeoutMs = SOURCE_TIMEOUT_MS,
+            priorityOf = ::priorityOf,
+            onSubtitle = subtitleCallback,
+            onLink = { l ->
+                val key = "${hostOf(l.url ?: "")}|${l.quality}"
+                if (emitted.add(key)) {
+                    val named = ExtractorLink(
+                        source = l.source,
+                        name = namer.nameFor(l.source, MultiSourcePuller.isHindi(l), l.quality),
+                        url = l.url,
+                        referer = l.referer,
+                        quality = l.quality,
+                        headers = l.headers,
+                        extractorData = l.extractorData,
+                        type = l.type,
+                        audioTracks = l.audioTracks ?: emptyList(),
+                    )
+                    found.add(named)
+                    runCatching { callback(named) }
+                }
+            },
+        )
+    }
+
+    /** Build the ExtractorLink emitted by the Cineverse fast path. Mirrors
+     *  [MultiSourcePuller.directStreamLink]'s naming + header logic so the
+     *  link shape matches what the registry path would have produced. */
+    private fun buildDirectLink(
+        src: MultiSourcePuller.Source,
+        namer: MultiSourcePuller.LinkNamer,
+    ): ExtractorLink {
+        val u = src.url
+        val source = src.name + MultiSourcePuller.INDICATOR
+        val hindi = MultiSourcePuller.isHindiHint(src.name, src.url, u)
+        val headers = MultiSourcePuller.headersFor(u, src.referer, src.headers)
+        val type = if (u.contains(".m3u8", ignoreCase = true)) ExtractorLinkType.M3U8
+        else ExtractorLinkType.VIDEO
+        val quality = getQualityFromName(u)
+        return ExtractorLink(
+            source = source,
+            name = namer.nameFor(source, hindi, quality),
+            url = u,
+            referer = src.referer ?: u,
+            quality = quality,
+            headers = headers,
+            extractorData = null,
+            type = type,
+            audioTracks = emptyList(),
+        )
+    }
 
     /** Resolve a single dooplayer server's embed URL via the site's admin-ajax
      *  endpoint, measuring the round-trip latency as a speed hint. */

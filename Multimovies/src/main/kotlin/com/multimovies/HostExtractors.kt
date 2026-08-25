@@ -168,7 +168,12 @@ class GlobalSource(
  *  actually respond; the dooplayer embeds resolved from the site remain the
  *  primary source path. Append new hosts as they become available — the runtime
  *  probe (in loadLinks/pull) keeps only the ones that answer from the user's
- *  network. */
+ *  network.
+ *
+ *  Aug 2026 live diagnostic: each host is called on its final hop so we skip
+ *  any 301 chain at runtime (vidsrc-embed.su -> vsembed.ru, 111movies.com ->
+ *  111movies.net -> player.vidlove.cc). The Referer matches the live final
+ *  host so the player page actually renders. */
 object GlobalSources {
     val list: List<GlobalSource> = listOf(
         GlobalSource(
@@ -181,22 +186,27 @@ object GlobalSources {
             headers = mapOf("Referer" to "https://www.2embed.cc/"),
         ),
         GlobalSource(
+            // Aug 2026: vidsrc-embed.su now 301-redirects to vsembed.ru; pointing
+            // straight at the live host saves a round-trip on every loadLinks.
             name = "VidSrc",
             idType = SourceId.IMDB,
             buildUrl = { id, s, e ->
-                if (s != null && e != null) "https://vidsrc-embed.su/embed/$id/$s-$e"
-                else "https://vidsrc-embed.su/embed/$id"
+                if (s != null && e != null) "https://vsembed.ru/embed/$id/$s-$e"
+                else "https://vsembed.ru/embed/$id"
             },
-            headers = mapOf("Referer" to "https://vidsrc-embed.su/"),
+            headers = mapOf("Referer" to "https://vsembed.ru/"),
         ),
         GlobalSource(
+            // Aug 2026: 111movies.com -> 111movies.net -> player.vidlove.cc is the
+            // final hop. Pointing at the live final host means the player page
+            // renders on the first request with no chained 301s.
             name = "111Movies",
             idType = SourceId.IMDB,
             buildUrl = { id, s, e ->
-                if (s != null && e != null) "https://111movies.com/tv/$id/$s/$e"
-                else "https://111movies.com/movie/$id"
+                if (s != null && e != null) "https://player.vidlove.cc/embed/tv/$id/$s/$e"
+                else "https://player.vidlove.cc/embed/movie/$id"
             },
-            headers = mapOf("Referer" to "https://111movies.com/"),
+            headers = mapOf("Referer" to "https://player.vidlove.cc/"),
         ),
     )
 }

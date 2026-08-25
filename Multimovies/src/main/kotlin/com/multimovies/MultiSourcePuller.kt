@@ -175,8 +175,54 @@ object MultiSourcePuller {
         "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
     )
 
+    /** Hosts that back the Cineverse modiplay/vibuxer serve_m3u8=1 proxy. The
+     *  proxy returns 403 to bare requests; it requires a same-site Referer and
+     *  Origin (it was handed out by the Multimovies dooplayer player) or it
+     *  won't sign the playlist. Used by [headersFor] so every Cineverse call
+     *  - admin-ajax wrap, unwrap, and the final proxy fetch - carries the
+     *  required pair. */
+    private val cineverseCdnHosts = setOf(
+        "vibuxer.com",
+        "www.vibuxer.com",
+        "modiplay.com",
+        "www.modiplay.com",
+    )
+
     private fun hostOf(url: String): String =
         url.substringAfter("://").substringBefore("/").lowercase()
+
+    /** True when the URL belongs to the Cineverse modiplay/vibuxer CDN. */
+    internal fun isCineverseHost(url: String): Boolean =
+        cineverseCdnHosts.contains(hostOf(url)) ||
+            hostOf(url).let { h -> cineverseCdnHosts.any { h == it || h.endsWith(".$it") } }
+
+    /** Build the header set for a request to [url]. The Cineverse CDN requires
+     *  the page that linked to it as Referer/Origin; for other hosts the
+     *  caller-supplied headers and shared UA are used as-is. Pure / cheap. */
+    internal fun headersFor(
+        url: String,
+        referer: String?,
+        extra: Map<String, String> = emptyMap(),
+    ): Map<String, String> {
+        val out = LinkedHashMap<String, String>(sharedHeaders.size + extra.size + 2)
+        out.putAll(sharedHeaders)
+        out.putAll(extra)
+        if (!referer.isNullOrBlank()) out["Referer"] = referer
+        if (isCineverseHost(url)) {
+            // vibuxer.com / proxy.php signs only when it sees the originating
+            // site as Referer and a matching Origin. The plugin's embed URL
+            // comes from the dooplayer player on multimovies.motorcycles, so
+            // that's the referer we advertise.
+            val ref = referer?.takeIf { it.isNotBlank() } ?: "https://multimovies.motorcycles/"
+            out["Referer"] = ref
+            val origin = ref.substringBefore("/seasons/")
+                .substringBefore("/movies/")
+                .substringBefore("/tvshows/")
+                .takeIf { it.startsWith("http") } ?: "https://multimovies.motorcycles"
+            out["Origin"] = origin
+        }
+        return out
+    }
 
     /** Resolve a possibly-relative [path] against [baseUrl], producing an absolute
      *  https URL. Handles protocol-relative (//), absolute, and root-relative. */
@@ -212,10 +258,7 @@ object MultiSourcePuller {
                 current.contains("serve_m3u8=", ignoreCase = true)
             ) return current
             val text = runCatching {
-                app.get(current, timeout = 5, headers = buildMap {
-                    putAll(headers)
-                    if (referer != null) put("Referer", referer)
-                }).text
+                app.get(current, timeout = 5, headers = headersFor(current, referer, headers)).text
             }.getOrNull() ?: return current
             // Short-circuit: a page exposing a proxy/stream URL is the player itself.
             buildProxyStreamUrl(text, current)?.let { return it }
@@ -459,10 +502,10 @@ object MultiSourcePuller {
         val name = if (isHindiHint(src.name, src.url, u)) "$source Hindi" else source
         val type = if (u.contains(".m3u8", ignoreCase = true)) ExtractorLinkType.M3U8
         else ExtractorLinkType.VIDEO
-        val headers = buildMap {
-            putAll(src.headers)
-            src.referer?.let { put("Referer", it) }
-        }
+        // Use headersFor so the Cineverse serve_m3u8 proxy request, which the
+        // player will replay against the emitted link, carries the same
+        // Referer/Origin pair the embed originally needed.
+        val headers = headersFor(u, src.referer, src.headers)
         return ExtractorLink(
             source = source,
             name = name,
@@ -480,11 +523,7 @@ object MultiSourcePuller {
      *  using a multi-strategy approach (direct regex, proxy pattern, video/source
      *  tags, JS config objects, URL-encoded m3u8). */
     private suspend fun sniff(src: Source): List<ExtractorLink> {
-        val headers = buildMap {
-            putAll(sharedHeaders)
-            putAll(src.headers)
-            if (src.referer != null) put("Referer", src.referer)
-        }
+        val headers = headersFor(src.url, src.referer, src.headers)
         val text = runCatching {
             app.get(src.url, timeout = 5, headers = headers).text
         }.getOrNull() ?: return emptyList()
