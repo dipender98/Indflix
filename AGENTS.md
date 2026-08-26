@@ -20,7 +20,24 @@ Multimovies/
     GlobalSources.kt         id-based source registry + session caches
     MultimoviesPlugin.kt     plugin entrypoint
   icon.png                   plugin icon, served from the repo (iconUrl)
-```
+
+OTTMirror/
+  src/main/kotlin/com/ottmirror/
+    OTTMirrorPlugin.kt           entrypoint: registers 4 providers
+    OTTMirrorNetflix.kt          MainAPI (Netflix, ott=nf, /mobile/*)
+    OTTMirrorHotstar.kt          MainAPI (Hotstar, ott=hs, /mobile/hs/*)
+    OTTMirrorPrimeVideo.kt       MainAPI (Prime Video, ott=pv, /mobile/pv/*)
+    OTTMirrorDisneyPlus.kt       MainAPI (Disney+, ott=ds, /mobile/*)
+    OTTMirrorProvider.kt         abstract base: home/search/load/loadLinks via backend
+    OTTMirrorBackend.kt          NetMirror engine: verify, home, search, post, episodes, link flow (NewTV + native)
+    NetMirrorConfig.kt           per-OTT config + host lists + cookie/NewTvBase caches
+    Base64Decode.kt              pure-JVM base64 decoder (no android.jar dependency)
+    Parsers.kt                   pure parsers for SearchData/PostData/EpisodesData/Playlist/NewTv
+    HostThrottler.kt             per-host rate limiter + 429 exponential backoff + jitter
+    DomainRotator.kt             host-list rotation + failure marking + stale-cache invalidation
+    LinkCache.kt                 fast replay cache (5 min TTL, keyed by content id)
+    TmdbMeta.kt                  TMDB metadata ONLY (detail enrichment + poster rating, no stream resolution)
+  icon.png
 
 Root `build.gradle.kts` + `settings.gradle.kts` auto-include any provider dir
 that has its own `build.gradle.kts`. CloudStream gradle plugin is pinned to
@@ -109,14 +126,67 @@ user enables it.
 `scaled` alone), TMDB CDN size prefixes (`/w92..w500/`), and Amazon
 `_SX*` suffixes so search/detail posters come in at full resolution.
 
+## OTTMirror
+
+Second provider module (added Aug 2026). Same NetMirror backend the
+CNC Verse / NetMirror plugins use — NOT the Multimovies dooplayer pipeline and
+NOT id-based GlobalSources hosts. Four providers in one plugin:
+`OTTMirror: Netflix` (ott=nf, base `/mobile/*`), `Hotstar` (ott=hs, `/mobile/hs/*`),
+`Prime Video` (ott=pv, `/mobile/pv/*`), `Disney+` (ott=ds, base `/mobile/*` —
+probed Aug 2026: the mobile API has NO `/ds` namespace, so Disney maps to the
+base path; CNC Verse serves Disney through a separate studio API).
+
+### TMDB scope
+
+TMDB is metadata ONLY (`TmdbMeta.kt`): detail-page enrichment in `load()`
+(plot, backdrop, cast, genres, year, episode names/thumbnails via the
+`tmdb_id` the NetMirror `post.php` payload returns) and the poster rating badge
+on search/home results (background title+year lookup, never blocking). TMDB is
+NOT used for search (NetMirror's `/mobile/search.php` is) and NOT used to
+resolve stream links. Keep it that way — no net27 embed-tmdb fallback.
+
+### Reliability (the whole point)
+
+`OTTMirrorBackend` re-implements the NetMirror flow (verify ? home ? search ?
+post ? episodes ? NewTV player ? native play.php/playlist.php) with the layers
+the forks lack:
+
+- `HostThrottler` — per-host rate limiter (1 s base) + 429 exponential backoff
+  (2 s ? 4 s ? … ? 60 s cap, reset on success) + ±20% jitter. Not the forks'
+  single 1.2 s global spacer.
+- `DomainRotator` — ordered host lists per role (`VERIFY_HOSTS`, base64
+  `NEWTV_DOMAINS`); on 429/5xx/timeout a host is pinned dead and the role
+  advances. A failed NewTV base is cleared so the token probe re-runs instead of
+  trusting a stale `tv.imgcdn.kim` for hours.
+- `CookieBox` — `t_hash_t` cached 15 min (not 15 h): the backend invalidates
+  server-side well before the forks' window, and a stale cookie is the classic
+  "no link found" trap.
+- `warmUp()` — session health probe hits the current mobile host + NewTV base
+  once; dead hosts never burn the 15 s timeout during real work.
+- Distinct errors: a NewTV outage or a seen 429 surfaces
+  "NetMirror servers busy — retry in a minute" (`ErrorLoadingException`) instead
+  of a silent "no link found".
+- Stable link identity: every emitted link has `source == name ==` the OTT name
+  (`Netflix` / `Hotstar` / `Prime Video` / `Disney+`) — no quality/CDN/runtime
+  parts, so player priority saves stay stable.
+- `LinkCache` (5 min, keyed by the content id `loadLinks()` receives) for
+  instant replay.
+
+Everything is session-scoped in-memory, matching the CNC Verse family. When the
+backend rotates domains or adds a `t_hash_t` variant, update
+`NetMirrorConfig.kt` (host lists) / `Parsers.kt` (wire shape).
+
 ## Build
 
 JDK 17 + Android SDK.
 
 ```bash
-./gradlew make                    # Multimovies/build/Multimovies.cs3 (R8-shrunk)
+./gradlew make                    # all modules: Multimovies.cs3 + OTTMirror.cs3 (R8-shrunk)
+./gradlew :Multimovies:make       # Multimovies only
+./gradlew :OTTMirror:make         # OTTMirror only
 ./gradlew makePluginsJson         # build/plugins.json
 ./gradlew :Multimovies:testDebugUnitTest
+./gradlew :OTTMirror:testDebugUnitTest
 ```
 
 The plugin ships `jsoup`, `okhttp`, `kotlinx-coroutines`, `NiceHttp` and
@@ -127,8 +197,8 @@ under 50 KB.
 ## Publishing
 
 `.github/workflows/build.yml` runs `make` + `makePluginsJson` and deploys
-`plugins.json`, `repo.json`, and `Multimovies.cs3` to the `builds` branch.
-Install link:
+`plugins.json`, `repo.json`, and `Multimovies.cs3` + `OTTMirror.cs3` to the
+`builds` branch. Install link:
 
 ```
 https://raw.githubusercontent.com/dipender98/Indflix/builds/repo.json

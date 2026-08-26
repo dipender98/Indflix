@@ -1,0 +1,17 @@
+-keep class com.ottmirror.OTTMirrorPlugin { *; }
+-keepattributes *Annotation*
+-keepattributes Signature
+-keepattributes InnerClasses
+-keepattributes EnclosingMethod
+-keep class kotlin.Metadata { *; }
+-dontwarn okhttp3.**
+-dontwarn com.lagradost.nicehttp.**
+-dontwarn io.ktor.**
+-dontwarn org.jsoup.**
+-dontwarn org.json.**
+-dontwarn javax.crypto.**
+-dontwarn java.security.**
+-dontwarn com.fasterxml.jackson.**
+-dontwarn kotlinx.datetime.**
+-dontwarn kotlinx.serialization.**
+-dontwarn java.time.**
