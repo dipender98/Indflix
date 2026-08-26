@@ -1068,6 +1068,7 @@ class MultimoviesProvider : MainAPI() {
         // lower-priority fallbacks join as they resolve.
         val globalSources = buildGlobalSources(meta)
         val orderedEmbeds = embeds.sortedBy { priorityOf(it.name) }
+        val labelCounter = ConcurrentHashMap<String, Int>()
 
         coroutineScope {
             val embedJobs = orderedEmbeds.map { e ->
@@ -1090,13 +1091,13 @@ class MultimoviesProvider : MainAPI() {
                         latencyMs = e.latencyMs,
                     )
                     sourceRefs.add(src)
-                    pullSource(src, data, emitted, found, subtitleCallback, callback)
+                    pullSource(src, labelCounter, data, emitted, found, subtitleCallback, callback)
                 }
             }
             val globalJobs = globalSources.map { g ->
                 sourceRefs.add(g)
                 async {
-                    pullSource(g, data, emitted, found, subtitleCallback, callback)
+                    pullSource(g, labelCounter, data, emitted, found, subtitleCallback, callback)
                 }
             }
             (embedJobs + globalJobs).awaitAll()
@@ -1129,12 +1130,30 @@ class MultimoviesProvider : MainAPI() {
      *  reflects the win. */
     private suspend fun pullSource(
         src: MultiSourcePuller.Source,
+        labelCounter: ConcurrentHashMap<String, Int>,
         data: String,
         emitted: MutableSet<String>,
         found: MutableList<ExtractorLink>,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
     ): List<ExtractorLink> {
+        /** Disambiguate duplicate labels within a single load: the first link
+         *  with a given label keeps it; subsequent links with the same label
+         *  get "-2", "-3" … appended. Both source and name are rewritten so
+         *  priority entries and the player list stay in sync. */
+        fun disambiguate(l: ExtractorLink): ExtractorLink {
+            val label = l.source
+            val n = labelCounter.compute(label) { _, v -> (v ?: 0) + 1 }!!
+            if (n == 1) return l
+            val dis = "$label-$n"
+            return ExtractorLink(
+                source = dis, name = dis, url = l.url,
+                referer = l.referer, quality = l.quality,
+                headers = l.headers, extractorData = l.extractorData,
+                type = l.type, audioTracks = l.audioTracks ?: emptyList(),
+            )
+        }
+
         val cineverseFastLink = if (MultiSourcePuller.isCineverseHost(src.url) &&
             (src.url.contains("serve_m3u8=1", ignoreCase = true) ||
                 src.url.contains(".m3u8", ignoreCase = true) ||
@@ -1143,9 +1162,10 @@ class MultimoviesProvider : MainAPI() {
         if (cineverseFastLink != null) {
             val key = "${hostOf(cineverseFastLink.url ?: "")}|${cineverseFastLink.quality}"
             if (emitted.add(key)) {
-                found.add(cineverseFastLink)
+                val dis = disambiguate(cineverseFastLink)
+                found.add(dis)
                 SourceSpeedTracker.record(src.name, 0L, success = true)
-                runCatching { callback(cineverseFastLink) }
+                runCatching { callback(dis) }
             }
             return listOf(cineverseFastLink)
         }
@@ -1157,8 +1177,9 @@ class MultimoviesProvider : MainAPI() {
             onLink = { l ->
                 val key = "${hostOf(l.url ?: "")}|${l.quality}"
                 if (emitted.add(key)) {
-                    found.add(l)
-                    runCatching { callback(l) }
+                    val dis = disambiguate(l)
+                    found.add(dis)
+                    runCatching { callback(dis) }
                 }
             },
         )

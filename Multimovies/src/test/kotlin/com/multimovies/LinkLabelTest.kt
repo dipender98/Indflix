@@ -56,4 +56,28 @@ class LinkLabelTest {
         assertEquals("screenscape.me Hindi", labeled)
         assertEquals("screenscape.me", MultiSourcePuller.sourceKey(labeled))
     }
+
+    // ---- sourceKey strips duplicate counter -N ----------------------------
+
+    @Test
+    fun `sourceKey strips duplicate counter suffix`() {
+        assertEquals("Cineverse", MultiSourcePuller.sourceKey("Cineverse-2"))
+        assertEquals("Cineverse", MultiSourcePuller.sourceKey("Cineverse-3"))
+    }
+
+    @Test
+    fun `sourceKey strips counter before paren and Hindi`() {
+        assertEquals("Cineverse", MultiSourcePuller.sourceKey("Cineverse Hindi-2"))
+        assertEquals("Nxsha", MultiSourcePuller.sourceKey("Nxsha (Nitro)-2"))
+    }
+
+    @Test
+    fun `sourceKey acts on labels that already have the counter`() {
+        // round-trip: linkLabel -> sourceKey should survive every SOURCE_PRIORITY entry
+        for (entry in SOURCE_PRIORITY) {
+            val plain = MultiSourcePuller.linkLabel(entry, false)
+            assertEquals(entry.trim(), MultiSourcePuller.sourceKey("$plain-2"))
+            assertEquals(entry.trim(), MultiSourcePuller.sourceKey("$plain-99"))
+        }
+    }
 }

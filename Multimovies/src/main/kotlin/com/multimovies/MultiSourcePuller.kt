@@ -378,13 +378,15 @@ object MultiSourcePuller {
         )
 
     /** Normalize an [ExtractorLink.source] / [Source.name] into a stable key for
-     *  speed tracking and priority lookup: strips any trailing language
-     *  annotation (" Hindi") and the trailing parenthesized server label, so
-     *  "Nxsha (Nitro) Hindi", "Cineverse (Vibuxer)" and "Cineverse (Multimovies)"
-     *  all reduce to their SOURCE_PRIORITY name. */
+     *  speed tracking and priority lookup: strips any duplicate counter
+     *  ("Name-2"), trailing language annotation (" Hindi") and the trailing
+     *  parenthesized server label, so "Nxsha (Nitro) Hindi-2",
+     *  "Cineverse-2" and "Cineverse (Vibuxer)" all reduce to their
+     *  SOURCE_PRIORITY name. */
     internal fun sourceKey(source: String?): String {
         if (source == null) return ""
         return source
+            .replace(Regex("""-\d+$"""), "")
             .replace(Regex("""\s+Hindi$""", RegexOption.IGNORE_CASE), "")
             .replace(Regex("""\s+\([^)]*\)$"""), "")
             .trim()
