@@ -242,7 +242,24 @@ private val SEARCH_ITEMS_SELECTOR = "div#archive-content div.item, div.search-pa
 private val NON_ALNUM_UNICODE = Regex("""[^\p{L}\p{M}\p{N}]+""")
 
 internal fun normalizeTitle(t: String): String =
-    t.lowercase().trim().replace(NON_ALNUM_UNICODE, " ").trim()
+    t.lowercase().replace("'", "").replace("’", "").trim()
+        .replace(NON_ALNUM_UNICODE, " ").trim()
+
+/** Alternative spellings of a title that a Dooplay site may store, so slug
+ *  guessing and the site-search fallback survive "&" vs "and", dropped
+ *  apostrophes ("King's Man" -> "Kings Man") and stray punctuation such as
+ *  "(", ")", ":", ";", "," that a WordPress search treats literally. */
+internal fun titleVariants(title: String): List<String> {
+    val andWord = Regex("\\band\\b", RegexOption.IGNORE_CASE)
+    return buildList {
+        add(title)
+        if (title.contains('&')) add(title.replace("&", " and "))
+        if (andWord.containsMatchIn(title)) add(title.replace(andWord, "&"))
+        val noApostrophe = title.replace("'", "").replace("’", "")
+        if (noApostrophe != title) add(noApostrophe)
+        add(title.replace(Regex("[^\\p{L}\\p{M}\\p{N} ]+"), " "))
+    }.map { it.replace(Regex("\\s+"), " ").trim() }.distinct()
+}
 
 /** Classic Levenshtein edit distance (two-row implementation). */
 internal fun levenshtein(a: String, b: String): Int {
@@ -262,6 +279,24 @@ internal fun levenshtein(a: String, b: String): Int {
         cur = tmp
     }
     return prev[b.length]
+}
+
+/** Coarse title match distance for validating a fetched page / search hit
+ *  against the queried title: 0 identical (also when they differ only by the
+ *  "&"/"and" join or a dropped apostrophe), 1 when one is a prefix of the
+ *  other, else 2. */
+internal fun titleDistance(itemTitle: String, target: String): Int {
+    val a = normalizeTitle(itemTitle)
+    val b = normalizeTitle(target)
+    return when {
+        a == b -> 0
+        // TMDB spells "Locke & Key" where the site says "Locke and Key";
+        // dropping the "and" join on either side makes them identical.
+        a.replace(" and ", " ") == b && a.contains(" and ") -> 0
+        b.replace(" and ", " ") == a && b.contains(" and ") -> 0
+        a.startsWith(b) || b.startsWith(a) -> 1
+        else -> 2
+    }
 }
 
 /** Query words that carry meaning (>=2 chars); digit tokens such as years are
@@ -595,12 +630,19 @@ class MultimoviesProvider : MainAPI() {
 
         // Slug-guess first (/{movies|tvshows}/{slug}-{year}/), validated by title.
         val base = if (type == "movie") "$mainUrl/movies/" else "$mainUrl/tvshows/"
-        val slug = title.lowercase().trim().replace(Regex("[^a-z0-9]+"), "-").trim('-')
+        // Emit slugs for every common spelling of the title ("&" vs "and",
+        // apostrophes dropped, punctuation stripped) so a TMDB title still
+        // guesses the site's URL.
+        val slugVariants = titleVariants(title)
+            .map { t -> t.lowercase().trim().replace(Regex("[^a-z0-9]+"), "-").trim('-') }
+            .distinct()
         val variants = buildList {
-            year?.take(4)?.let { y -> add("${slug}-$y") }
-            add(slug)
+            for (slug in slugVariants) {
+                year?.take(4)?.let { y -> add("${slug}-$y") }
+                add(slug)
+            }
         }
-        for (variant in variants.distinct()) {
+        for (variant in variants) {
             if (variant.isBlank()) continue
             val guessUrl = "$base$variant/"
             val guessed = fetchDoc(guessUrl, timeoutSeconds = 6, required = false) ?: continue
@@ -615,14 +657,22 @@ class MultimoviesProvider : MainAPI() {
             }
         }
 
-        // Fallback: site search by title, pick the closest title match.
-        val searchDoc = fetchDoc(
-            "$mainUrl/?s=${URLEncoder.encode(title, "UTF-8")}",
-            timeoutSeconds = 8,
-            required = false,
-        ) ?: return null
-        val candidate = searchDoc.select(SEARCH_ITEMS_SELECTOR).mapNotNull { it.candidateHref() }
-            .minByOrNull { titleDistance(it.second, title) } ?: return null
+        // Fallback: site search by title, pick the closest title match. The
+        // server drops queries carrying a literal "&" or certain punctuation
+        // ("?s=Locke+%26+Key" returns nothing), so retry the alternative
+        // spellings until one returns results.
+        val searchTerms = titleVariants(title)
+        var searchDoc: Document? = null
+        for (term in searchTerms) {
+            searchDoc = fetchDoc(
+                "$mainUrl/?s=${URLEncoder.encode(term, "UTF-8")}",
+                timeoutSeconds = 8,
+                required = false,
+            )
+            if (searchDoc != null && searchDoc.select(SEARCH_ITEMS_SELECTOR).isNotEmpty()) break
+        }
+        val candidate = searchDoc?.select(SEARCH_ITEMS_SELECTOR)?.mapNotNull { it.candidateHref() }
+            ?.minByOrNull { titleDistance(it.second, title) } ?: return null
         val detailDoc = mmDocCache[candidate.first]
             ?: fetchDoc(candidate.first, timeoutSeconds = 8, required = false)
         if (detailDoc != null) {
@@ -640,16 +690,6 @@ class MultimoviesProvider : MainAPI() {
             ?: a.selectFirst("h2, div.data h3 a, .title")?.text()
             ?: a.text()?.trim()
         return if (itemTitle.isNullOrBlank()) null else href to itemTitle
-    }
-
-    private fun titleDistance(itemTitle: String, target: String): Int {
-        val a = normalizeTitle(itemTitle)
-        val b = normalizeTitle(target)
-        return when {
-            a == b -> 0
-            a.startsWith(b) || b.startsWith(a) -> 1
-            else -> 2
-        }
     }
 
     /** Concurrently resolve TMDB posters for main-page results that are missing one
