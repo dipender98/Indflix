@@ -67,7 +67,9 @@ object NetMirrorParsers {
             val arr: JSONArray = if (trimmed.startsWith("[")) {
                 JSONArray(trimmed)
             } else {
-                JSONObject(trimmed).optJSONArray("searchResult") ?: return emptyList()
+                val obj = JSONObject(trimmed)
+                if (obj.optString("status") == "n" && obj.optString("head") == "Top Searches") return emptyList()
+                obj.optJSONArray("searchResult") ?: return emptyList()
             }
             (0 until arr.length()).mapNotNull { i ->
                 val m = arr.optJSONObject(i) ?: return@mapNotNull null

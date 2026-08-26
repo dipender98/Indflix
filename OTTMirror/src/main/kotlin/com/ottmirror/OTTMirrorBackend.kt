@@ -11,9 +11,14 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.MediaType.Companion.toMediaType
 import org.json.JSONObject
 import org.jsoup.nodes.Document
 import java.util.UUID
+import java.util.concurrent.TimeUnit
 
 internal object OTTMirrorBackend {
 
@@ -70,20 +75,44 @@ internal object OTTMirrorBackend {
     }
 
     private suspend fun tryVerifyHost(host: String): String? {
-        for (url in listOf("$host/mobile/verify2.php", "$host/verify.php")) {
+        // CNC Verse approach: POST /verify.php with redirects disabled, the
+        // server answers 301 carrying Set-Cookie: t_hash_t=... on the redirect
+        // response itself. Following the redirect (what app.post does) loses it.
+        val body = "g-recaptcha-response=${UUID.randomUUID()}"
+        val client = OkHttpClient.Builder()
+            .followRedirects(false)
+            .followSslRedirects(false)
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(10, TimeUnit.SECONDS)
+            .build()
+        for (url in listOf("$host/verify.php", "$host/mobile/verify2.php")) {
             val h = hostOf(url)
             HostThrottler.throttle(h)
-            val resp = runCatching {
-                app.post(
-                    url,
-                    headers = mobileHeaders("$host/verify2") + mapOf("Content-Type" to "application/x-www-form-urlencoded; charset=UTF-8"),
-                    data = mapOf("g-recaptcha-response" to UUID.randomUUID().toString()),
-                    timeout = 10,
-                )
-            }.getOrNull() ?: continue
-            val token = resp.headers.values("Set-Cookie").firstOrNull { it.startsWith("t_hash_t=") }
-                ?.substringAfter("t_hash_t=")?.substringBefore(";")
+            val req = Request.Builder()
+                .url(url)
+                .post(body.toRequestBody("application/x-www-form-urlencoded; charset=UTF-8".toMediaType()))
+                .apply {
+                    (mobileHeaders("$host/verify2") + mapOf("Origin" to host)).forEach { (k, v) -> header(k, v) }
+                }
+                .build()
+            val token = runCatching {
+                client.newCall(req).execute().use { resp ->
+                    resp.headers.values("Set-Cookie").firstOrNull { it.startsWith("t_hash_t=") }
+                        ?.substringAfter("t_hash_t=")?.substringBefore(";")
+                }
+            }.getOrNull()
             if (!token.isNullOrBlank()) return token
+            val bodyToken = app.post(
+                url,
+                headers = mobileHeaders("$host/verify2") + mapOf("Content-Type" to "application/x-www-form-urlencoded; charset=UTF-8"),
+                data = mapOf("g-recaptcha-response" to UUID.randomUUID().toString()),
+                timeout = 10,
+            ).text.let { html ->
+                val start = "data-addhash=\""
+                val idx = html.indexOf(start)
+                if (idx >= 0) html.substring(idx + start.length).substringBefore("\"").takeIf { it.isNotBlank() } else null
+            }
+            if (bodyToken != null) return bodyToken
         }
         return null
     }
@@ -186,7 +215,7 @@ internal object OTTMirrorBackend {
         val host = DomainRotator.current(Role.MOBILE) ?: throw ErrorLoadingException("All NetMirror hosts dead")
         val h = hostOf(host)
         HostThrottler.throttle(h)
-        val url = "$host/mobile${ott.mobilePrefix}/search.php?s=$query&t=${System.currentTimeMillis() / 1000}"
+        val url = "$host/mobile${ott.mobilePrefix}/search.php?s=${java.net.URLEncoder.encode(query, "UTF-8")}&t=${System.currentTimeMillis() / 1000}"
         val resp = runCatching {
             app.get(
                 url,
