@@ -21,7 +21,7 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/dipender98/Indflix/main/Multimovies/icon.png",
         "apiVersion": 1,
-        "fileHash": "sha256-face907476834b6fa7131e355e2fe9fc6c71f40b2c8b771f15bb119d6711074b"
+        "fileHash": "sha256-e13cb5a68a7727d630bf2faafc10566b93008524af79fe55a87e8fa2e9f9d9cb"
     },
     {
         "url": "https://raw.githubusercontent.com/dipender98/Indflix/builds/OTTMirror.cs3",
@@ -42,6 +42,6 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/dipender98/Indflix/main/OTTMirror/icon.png",
         "apiVersion": 1,
-        "fileHash": "sha256-e3e2f570c9905cc63a0dffa9e4c4fc5739767d191167d358718135df629a74e9"
+        "fileHash": "sha256-edd1f82ec7abec5a374e0a43acf99fdb39a4e2b6fc658463610891e6c5880368"
     }
 ]
