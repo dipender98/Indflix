@@ -4,12 +4,11 @@ enum class OttService(
     val id: String,
     val ottCookie: String,
     val mobilePrefix: String,
-    val artFolder: String,
 ) {
-    NETFLIX("netflix", "nf", "", "nf"),
-    HOTSTAR("hotstar", "hs", "/hs", "hs"),
-    PRIME("prime", "pv", "/pv", "pv"),
-    DISNEY("disney", "ds", "", "ds"),
+    NETFLIX("netflix", "nf", ""),
+    HOTSTAR("hotstar", "hs", "/hs"),
+    PRIME("prime", "pv", "/pv"),
+    DISNEY("disney", "dp", "/hs"),   // reference repo: ott=dp, Hotstar namespace
 }
 
 internal val VERIFY_HOSTS = listOf(
@@ -57,10 +56,15 @@ internal object NewTvBase {
 internal object CookieBox {
     @Volatile var tHashT: String = ""
         private set
+    @Volatile var issuedHost: String = ""
+        private set
     @Volatile var expiresAt: Long = 0L
-    fun put(value: String) { tHashT = value; expiresAt = System.currentTimeMillis() + 15 * 60 * 1000L }
+    fun put(value: String, host: String) {
+        tHashT = value; issuedHost = host
+        expiresAt = System.currentTimeMillis() + 15 * 60 * 1000L
+    }
     fun fresh(): Boolean = tHashT.isNotBlank() && System.currentTimeMillis() < expiresAt
-    fun clear() { tHashT = ""; expiresAt = 0L }
+    fun clear() { tHashT = ""; issuedHost = ""; expiresAt = 0L }
 }
 
 internal fun decodeBase64(value: String): String = Base64Decode.decodeUtf8(value).orEmpty()

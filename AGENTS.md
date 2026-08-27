@@ -27,7 +27,7 @@ OTTMirror/
     OTTMirrorNetflix.kt          MainAPI (Netflix, ott=nf, /mobile/*)
     OTTMirrorHotstar.kt          MainAPI (Hotstar, ott=hs, /mobile/hs/*)
     OTTMirrorPrimeVideo.kt       MainAPI (Prime Video, ott=pv, /mobile/pv/*)
-    OTTMirrorDisneyPlus.kt       MainAPI (Disney+, ott=ds, /mobile/*)
+    OTTMirrorDisneyPlus.kt       MainAPI (Disney+, ott=dp, /mobile/hs/*)
     OTTMirrorProvider.kt         abstract base: home/search/load/loadLinks via backend
     OTTMirrorBackend.kt          NetMirror engine: verify, home, search, post, episodes, link flow (NewTV + native)
     NetMirrorConfig.kt           per-OTT config + host lists + cookie/NewTvBase caches
@@ -132,9 +132,9 @@ Second provider module (added Aug 2026). Same NetMirror backend the
 CNC Verse / NetMirror plugins use — NOT the Multimovies dooplayer pipeline and
 NOT id-based GlobalSources hosts. Four providers in one plugin:
 `OTTMirror: Netflix` (ott=nf, base `/mobile/*`), `Hotstar` (ott=hs, `/mobile/hs/*`),
-`Prime Video` (ott=pv, `/mobile/pv/*`), `Disney+` (ott=ds, base `/mobile/*` —
-probed Aug 2026: the mobile API has NO `/ds` namespace, so Disney maps to the
-base path; CNC Verse serves Disney through a separate studio API).
+`Prime Video` (ott=pv, `/mobile/pv/*`), `Disney+` (ott=dp, `/mobile/hs/*` —
+per the reference repo, Disney shares the Hotstar mobile namespace with the
+`dp` ott cookie).
 
 ### TMDB scope
 
@@ -160,9 +160,17 @@ the forks lack:
   trusting a stale `tv.imgcdn.kim` for hours.
 - `CookieBox` — `t_hash_t` cached 15 min (not 15 h): the backend invalidates
   server-side well before the forks' window, and a stale cookie is the classic
-  "no link found" trap.
+  "no link found" trap. The cache also tracks which host issued it
+  (`issuedHost`): after `DomainRotator` rotates to another mirror, `verify()`
+  re-runs against the new host instead of reusing the old host's cookie.
 - `warmUp()` — session health probe hits the current mobile host + NewTV base
   once; dead hosts never burn the 15 s timeout during real work.
+- Search is fail-closed: only the OTT-scoped `/mobile/{ott}/search.php` endpoint
+  is used (never the unscoped desktop search), so results are always in the
+  correct OTT's ID namespace — empty is a correct answer, wrong-platform is not.
+- Posters are per-OTT CDN paths (`poster/v/`, `hs/v/`, `pv/341/` for search/home;
+  `hsepimg/`, `pvepimg/`, `poster/v/150/` for episodes), with TMDB silently
+  upgrading the poster/rating in the background.
 - Distinct errors: a NewTV outage or a seen 429 surfaces
   "NetMirror servers busy — retry in a minute" (`ErrorLoadingException`) instead
   of a silent "no link found".

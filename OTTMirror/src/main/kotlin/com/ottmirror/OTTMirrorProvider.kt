@@ -41,12 +41,18 @@ abstract class OTTMirrorProvider(
         }
     }
 
-    // imgcdn.kim serves posters under the literal "poster" folder, not the OTT
-    // folder (nf/hs/pv/ds). Catalog-wide numeric IDs from the desktop search map
-    // to poster/v/<id>.jpg; OTT-specific alphanumeric IDs (e.g. Prime 0QH…) do
-    // not, so the server-provided poster field / TMDB poster is preferred.
-    private fun posterUrl(id: String): String = "https://imgcdn.kim/poster/v/$id.jpg"
-    private fun episodePosterUrl(id: String): String = "https://imgcdn.kim/poster/v/150/$id.jpg"
+    // Per-OTT CDN poster paths (reference repo values). TMDB upgrades the
+    // poster in the background when it has a better one (search pass below).
+    private fun posterUrl(id: String): String = when (ott) {
+        OttService.NETFLIX -> "https://imgcdn.kim/poster/v/$id.jpg"
+        OttService.HOTSTAR, OttService.DISNEY -> "https://imgcdn.kim/hs/v/$id.jpg"
+        OttService.PRIME -> "https://imgcdn.kim/pv/341/$id.jpg"
+    }
+    private fun episodePosterUrl(id: String): String = when (ott) {
+        OttService.NETFLIX -> "https://imgcdn.kim/poster/v/150/$id.jpg"
+        OttService.HOTSTAR, OttService.DISNEY -> "https://imgcdn.kim/hsepimg/$id.jpg"
+        OttService.PRIME -> "https://img.nfmirrorcdn.top/pvepimg/$id.jpg"
+    }
     private fun posterHeaders(): Map<String, String> = mapOf("Referer" to "${DomainRotator.current(Role.MOBILE) ?: mainUrl}/home")
 
     private fun encode(id: String, title: String, tmdbId: String? = null): String =
@@ -108,7 +114,10 @@ abstract class OTTMirrorProvider(
         results.forEach { r ->
             bgScope.launch {
                 runCatching {
-                    TmdbMeta.resolvePosterRating(r.name, null, r.type == TvType.Movie)?.rating?.let { r.score = Score.from10(it) }
+                    TmdbMeta.resolvePosterRating(r.name, null, r.type == TvType.Movie)?.let { info ->
+                        info.rating?.let { r.score = Score.from10(it) }
+                        info.poster?.let { r.posterUrl = it }
+                    }
                 }
             }
         }

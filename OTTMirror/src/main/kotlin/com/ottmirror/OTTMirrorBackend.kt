@@ -56,14 +56,15 @@ internal object OTTMirrorBackend {
     // ------------------------------------------------------------------
 
     suspend fun verify(): String {
-        CookieBox.tHashT.takeIf { CookieBox.fresh() }?.let { return it }
+        CookieBox.tHashT.takeIf { CookieBox.fresh() && CookieBox.issuedHost == DomainRotator.current(Role.MOBILE) }
+            ?.let { return it }
         return withContext(Dispatchers.IO) {
             val maxTries = DomainRotator.liveCount(Role.MOBILE).coerceAtLeast(1)
             for (attempt in 1..maxTries) {
                 val host = DomainRotator.current(Role.MOBILE) ?: break
                 val ok = tryVerifyHost(host)
                 if (ok != null) {
-                    CookieBox.put(ok)
+                    CookieBox.put(ok, host)
                     HostThrottler.recordSuccess(host)
                     return@withContext ok
                 }
@@ -209,47 +210,42 @@ internal object OTTMirrorBackend {
     // Search / load
     // ------------------------------------------------------------------
 
-    // Per-OTT mobile search is the primary: with a valid t_hash_t cookie each
+    // Per-OTT mobile search is the only path: with a valid t_hash_t cookie each
     // /mobile/{ott}/search.php returns OTT-scoped results in that OTT's own ID
-    // namespace (base numeric for nf/ds, alphanumeric for pv, distinct for hs).
-    // The catalog-wide desktop endpoint is only a last-resort fallback.
+    // namespace (base numeric for nf, alphanumeric for pv, distinct for hs).
+    // Empty is a correct, scoped answer — never fall back to the unscoped
+    // desktop endpoint. On failure the host rotates so the next attempt gets a
+    // fresh cookie from the new host (see CookieBox.issuedHost).
     suspend fun search(ott: OttService, query: String): List<SearchHit> {
         if (query.isBlank()) return emptyList()
-        val host = DomainRotator.current(Role.MOBILE) ?: throw ErrorLoadingException("All NetMirror hosts dead")
-        val h = hostOf(host)
-        HostThrottler.throttle(h)
         val encoded = java.net.URLEncoder.encode(query, "UTF-8")
+        val maxTries = DomainRotator.liveCount(Role.MOBILE).coerceAtLeast(1)
 
-        val cookie = verify()
-        val url = "$host/mobile${ott.mobilePrefix}/search.php?s=$encoded&t=${System.currentTimeMillis() / 1000}"
-        val resp = runCatching {
-            app.get(
-                url,
-                headers = mobileHeaders("$host/home"),
-                cookies = mapOf("t_hash_t" to cookie, "ott" to ott.ottCookie, "hd" to "on"),
-                referer = "$host/home",
-                timeout = 10,
-            )
-        }.getOrNull()
-        if (resp != null && resp.code in 200..299) {
-            HostThrottler.recordSuccess(h)
-            val hits = NetMirrorParsers.parseSearch(resp.text)
-            if (hits.isNotEmpty()) return hits
-        }
+        for (attempt in 1..maxTries) {
+            val cookie = verify()
+            val host = DomainRotator.current(Role.MOBILE) ?: break
+            val h = hostOf(host)
+            HostThrottler.throttle(h)
+            val url = "$host/mobile${ott.mobilePrefix}/search.php?s=$encoded&t=${System.currentTimeMillis() / 1000}"
+            val resp = runCatching {
+                app.get(
+                    url,
+                    headers = mobileHeaders("$host/home"),
+                    cookies = mapOf("t_hash_t" to cookie, "ott" to ott.ottCookie, "hd" to "on"),
+                    referer = "$host/home",
+                    timeout = 10,
+                )
+            }.getOrNull()
 
-        val desktop = runCatching {
-            app.get(
-                "$host/search.php?s=$encoded",
-                headers = mobileHeaders("$host/home"),
-                timeout = 10,
-            )
-        }.getOrNull()
-        if (desktop != null && desktop.code in 200..299) {
+            if (resp == null || isFailCode(resp.code)) {
+                HostThrottler.recordBackoff(h)
+                DomainRotator.markFailed(Role.MOBILE, host)
+                continue
+            }
             HostThrottler.recordSuccess(h)
-            val hits = NetMirrorParsers.parseSearch(desktop.text)
-            if (hits.isNotEmpty()) return hits
+            return NetMirrorParsers.parseSearch(resp.text)
         }
-        return emptyList()
+        throw ErrorLoadingException("NetMirror is unreachable right now — retry in a minute")
     }
 
     suspend fun loadPost(ott: OttService, id: String): NetMirrorPost? {
