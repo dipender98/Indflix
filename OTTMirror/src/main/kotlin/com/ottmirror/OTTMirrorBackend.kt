@@ -47,6 +47,17 @@ internal object OTTMirrorBackend {
         "Referer" to referer,
     )
 
+    // Headers the stream CDN expects on every .m3u8 / segment request. A bare
+    // Referer is enough for the first few segments, then the CDN rate-limits
+    // the player (429 "Too many requests"). The mobile app sends the full set.
+    private fun streamHeaders(referer: String, cookie: String, ott: OttService): Map<String, String> = mapOf(
+        "User-Agent" to MOBILE_UA,
+        "Referer" to referer,
+        "Origin" to referer.substringBefore("/home").ifBlank { referer },
+        "Accept" to "*/*",
+        "Cookie" to "t_hash_t=$cookie; ott=${ott.ottCookie}; hd=on",
+    )
+
     private fun hostOf(url: String): String = url.substringAfter("://").substringBefore("/").lowercase()
 
     private fun isFailCode(code: Int): Boolean =
@@ -362,6 +373,7 @@ internal object OTTMirrorBackend {
         url: String,
         referer: String?,
         quality: Int,
+        cookie: String,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
         tracks: List<PlaylistTrack> = emptyList(),
@@ -378,22 +390,23 @@ internal object OTTMirrorBackend {
             }
         }
         val type = if (url.contains(".m3u8", ignoreCase = true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+        val ref = referer ?: url
         callback(
             ExtractorLink(
                 source = label, name = label, url = url,
-                referer = referer ?: url, quality = quality,
-                headers = mapOf("Referer" to (referer ?: url)),
+                referer = ref, quality = quality,
+                headers = streamHeaders(ref, cookie, ott),
                 extractorData = null, type = type, audioTracks = emptyList(),
             )
         )
     }
 
-    private fun collect(ott: OttService, urls: List<String>): List<ExtractorLink> {
+    private fun collect(ott: OttService, urls: List<String>, cookie: String): List<ExtractorLink> {
         val label = ottLabel(ott)
         return urls.distinct().map { u ->
             ExtractorLink(
                 source = label, name = label, url = u, referer = u,
-                quality = getQualityFromName(u), headers = mapOf("Referer" to u),
+                quality = getQualityFromName(u), headers = streamHeaders(u, cookie, ott),
                 extractorData = null,
                 type = if (u.contains(".m3u8", ignoreCase = true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO,
                 audioTracks = emptyList(),
@@ -416,6 +429,10 @@ internal object OTTMirrorBackend {
                 return@withContext true
             }
         }
+
+        // Live t_hash_t for the stream CDN headers; NewTV links work without
+        // it, so an unreachable verify host must not kill the primary path.
+        val cookie = runCatching { verify() }.getOrDefault("")
 
         var saw429 = false
         var newTvFailure: Throwable? = null
@@ -448,13 +465,13 @@ internal object OTTMirrorBackend {
 
         if (newTvLinks.isNotEmpty()) {
             newTvLinks.forEach { (vlink, ref) ->
-                emit(ott, vlink, ref, getQualityFromName(vlink), subtitleCallback, callback)
+                emit(ott, vlink, ref, getQualityFromName(vlink), cookie, subtitleCallback, callback)
             }
-            LinkCache.put(contentId, collect(ott, newTvLinks.map { it.first }))
+            LinkCache.put(contentId, collect(ott, newTvLinks.map { it.first }, cookie))
             return@withContext true
         }
 
-        val nativeOk = runCatching { nativePlaylistFlow(ott, ld, subtitleCallback, callback) }.getOrDefault(false)
+        val nativeOk = runCatching { nativePlaylistFlow(ott, ld, cookie, subtitleCallback, callback) }.getOrDefault(false)
         if (nativeOk) return@withContext true
 
         newTvFailure?.let { throw it }
@@ -465,14 +482,16 @@ internal object OTTMirrorBackend {
     private suspend fun nativePlaylistFlow(
         ott: OttService,
         ld: LoadData,
+        cookie: String,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
     ): Boolean {
-        val cookie = verify()
         val host = DomainRotator.current(Role.MOBILE) ?: return false
         val h = hostOf(host)
-        // play.php lives on the net77 domain (net52.cc answers "Page Not Found")
-        val playHost = "https://net77.cc"
+        // play.php lives on a mobile mirror, not net52.cc. Using the rotated
+        // host instead of a hardcoded mirror spreads play requests across the
+        // list, so one mirror can't absorb all the load and 429.
+        val playHost = host
 
         HostThrottler.throttle(playHost)
         val playResp = runCatching {
@@ -513,11 +532,11 @@ internal object OTTMirrorBackend {
         val referer = "$host/home"
         val emittedUrls = sources.mapNotNull { s ->
             val streamUrl = if (s.file.startsWith("http", ignoreCase = true)) s.file else "$host${s.file}"
-            emit(ott, streamUrl, referer, qualityFromLabel(s.label), subtitleCallback, callback, tracks = playlist.tracks.orEmpty())
+            emit(ott, streamUrl, referer, qualityFromLabel(s.label), cookie, subtitleCallback, callback, tracks = playlist.tracks.orEmpty())
             streamUrl
         }
         if (emittedUrls.isEmpty()) return false
-        LinkCache.put(ld.id, collect(ott, emittedUrls))
+        LinkCache.put(ld.id, collect(ott, emittedUrls, cookie))
         return true
     }
 

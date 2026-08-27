@@ -7,7 +7,7 @@ import java.util.concurrent.ConcurrentHashMap
 import kotlin.random.Random
 
 object HostThrottler {
-    const val BASE_INTERVAL_MS = 1000L
+    const val BASE_INTERVAL_MS = 1500L
     const val MAX_BACKOFF_MS = 60_000L
 
     fun nextInterval(current: Long): Long =
