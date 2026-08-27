@@ -48,15 +48,17 @@ Layout:
 ```
 Multimovies/
   src/main/kotlin/com/multimovies/
-    MultimoviesProvider.kt      search / mainPage / load / loadLinks
-    MultiSourcePuller.kt        parallel-pull engine, timeouts, sorting
-    TmdbService.kt              TMDB metadata (+ optional SIMKL)
-    ScreenscapeExtractor.kt     screenscape.me crypto, no WebView
-    NxshaExtractor.kt           nxsha.space encrypted API, server fleet
-    NxshaProtocol.kt            nxsha wire rules (crypto, ids, ordering)
-    CryptoJs.kt                 shared CryptoJS-AES envelope helpers
-    GlobalSources.kt            caches + global source registry
-    MultimoviesPlugin.kt        entrypoint
+    MultimoviesPlugin.kt     plugin entrypoint
+    MultimoviesProvider.kt   search / mainPage / load / loadLinks + domain resolver
+    SearchRanking.kt         pure search ranking, poster upgrade, retry helpers
+    MultiSourcePuller.kt     parallel-pull engine, timeouts, sorting
+    GlobalSources.kt         caches + global source registry
+    TmdbService.kt           TMDB metadata (+ optional SIMKL)
+    HttpKit.kt               shared HTTP client (get/getJson/post) for extractors
+    CryptoJs.kt              shared CryptoJS-AES envelope helpers
+    ScreenscapeExtractor.kt  screenscape.me crypto, no WebView
+    NxshaExtractor.kt        nxsha.space encrypted API + wire rules
+    ApiExtractors.kt         Shows (111Movies) + VidEm JSON-API extractors
   icon.png                      plugin icon served from the repo
 ```
 

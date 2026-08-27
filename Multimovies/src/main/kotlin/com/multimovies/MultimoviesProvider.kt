@@ -6,7 +6,9 @@ import com.lagradost.cloudstream3.LoadResponse.Companion.addScore
 import com.lagradost.cloudstream3.network.CloudflareKiller
 import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.*
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
@@ -45,129 +47,14 @@ internal object SearchCache {
     private fun key(query: String) = query.trim().lowercase()
 }
 
-/**
- * Retry [fetch] up to [attempts] times. If a result is "blocked" (e.g. a Cloudflare
- * challenge page rather than the real document), [onBlocked] is invoked and the next
- * attempt is tried. If every attempt fails or is blocked, throws an exception built by
- * [failureMessage].
- *
- * This is the core of the detail-page fix: it tries a fixed, finite number of solvers
- * and then surfaces a single error instead of CloudStream's LoadFragment retrying
- * load() forever (the "keep refreshing" loop). Kept CloudStream-free so it is
- * unit-testable on the JVM without an Android/WebView runtime.
- */
-internal suspend fun <T> retryUntilSolved(
-    attempts: Int,
-    fetch: suspend (attempt: Int) -> T,
-    isBlocked: (T) -> Boolean,
-    onBlocked: () -> Unit = {},
-    failureMessage: (Throwable?) -> String,
-): T {
-    var lastErr: Throwable? = null
-    repeat(attempts) { i ->
-        try {
-            val result = fetch(i)
-            if (isBlocked(result)) {
-                lastErr = IllegalStateException(failureMessage(null))
-                onBlocked()
-                return@repeat
-            }
-            return result
-        } catch (e: Throwable) {
-            lastErr = e
-        }
-    }
-    throw IllegalStateException(failureMessage(lastErr))
-}
+/** Matches any multimovies.* host (the site rotates its TLD, so URL checks must
+ *  never pin the hostname — old cached-domain URLs still count as on-site after
+ *  [MultimoviesDomainResolver] points at a fresh mirror). */
+private val MULTIMOVIES_HOST_REGEX =
+    Regex("""^https?://(?:www\.)?multimovies\.[a-z]{2,10}(?:/|$)""", RegexOption.IGNORE_CASE)
 
-
-/** True when [doc] is the site's Cloudflare interstitial rather than real content. */
-internal fun isChallenge(doc: Document): Boolean =
-    doc.body()?.text().orEmpty().let { bodyText ->
-        val titleText = doc.selectFirst("title")?.text()?.lowercase() ?: ""
-        bodyText.contains("just a moment", ignoreCase = true)
-            || bodyText.contains("cf-mitigated", ignoreCase = true)
-            || bodyText.contains("verify you are human", ignoreCase = true)
-            || bodyText.contains("checking your browser", ignoreCase = true)
-            || bodyText.contains("attention required", ignoreCase = true)
-            || titleText.contains("just a moment", ignoreCase = true)
-    }
-
-/** TMDB image CDN size prefixes that are too small for a poster. Anything from
- *  w92 to w500 is upgraded to `original`; w780/w1280 are kept (already good). */
-private val TMDB_SIZE_REGEX = Regex("""/(w92|w154|w185|w342|w500|w780|w1280)/""")
-
-/** Amazon (IMDB) CDN thumbnail suffix, e.g. `_SX250` / `_SY450`. Upgraded to a
- *  larger variant so posters aren't pixelated. */
-private val AMAZON_SIZE_REGEX = Regex("""_SX\d{2,4}(?=\.|_|$)""", RegexOption.IGNORE_CASE)
-
-/** Upgrades a thumbnail URL to the full-resolution image by stripping only
- *  genuine thumbnail resize markers (-WxH where W,H are small, TMDB CDN size
- *  prefixes, Amazon _SX* suffixes) and query-size params. Conservative: never
- *  strips -scaled (a real WordPress file variant) and only drops -WxH when both
- *  dims <= 500; otherwise returns the original so a poster is always shown.
- *  Pure function, used for both search and detail posters. */
-internal fun upgradePosterUrl(url: String?): String? {
-    if (url.isNullOrBlank()) return null
-    var fixed = if (url.startsWith("//")) "https:$url" else url
-    fixed = stripSmallSizeSuffix(fixed)
-    fixed = TMDB_SIZE_REGEX.replace(fixed) { m ->
-        when (m.groupValues[1]) {
-            "w92", "w154", "w185", "w342", "w500" -> "/original/"
-            else -> m.value
-        }
-    }
-    fixed = AMAZON_SIZE_REGEX.replace(fixed, "_SX500")
-    val qIdx = fixed.indexOf("?")
-    if (qIdx >= 0) {
-        val base = fixed.substring(0, qIdx)
-        val kept = fixed.substring(qIdx + 1).split("&").mapNotNull { p ->
-            val k = p.substringBefore("=").trim()
-            if (k.equals("resize", ignoreCase = true) || k.equals("w", ignoreCase = true)
-                || k.equals("width", ignoreCase = true)
-                || k.equals("h", ignoreCase = true)
-                || k.equals("height", ignoreCase = true)
-                || k.equals("fit", ignoreCase = true)
-                || k.equals("im", ignoreCase = true)
-                || k.equals("q", ignoreCase = true)
-                || k.equals("quality", ignoreCase = true)
-            ) null else p
-        }.joinToString("&")
-        fixed = if (kept.isBlank()) base else "$base?$kept"
-    }
-    return fixed
-}
-
-/** True when [url] still carries a resize/thumbnail marker that [upgradePosterUrl]
- *  could not remove (e.g. a large -WxH variant that is still smaller than the
- *  original, a TMDB CDN small-size prefix, or an Amazon _SX* suffix). Used to
- *  decide when a search result should be overridden with a known-good
- *  full-resolution poster from TMDB. */
-internal fun isThumbnailish(url: String?): Boolean {
-    if (url.isNullOrBlank()) return false
-    return Regex("""-\d{2,4}x\d{2,4}""", RegexOption.IGNORE_CASE).containsMatchIn(url)
-        || Regex("""/(w92|w154|w185|w342|w500)/""", RegexOption.IGNORE_CASE).containsMatchIn(url)
-        || Regex("""_SX\d{2,4}(?=\.|_|$)""", RegexOption.IGNORE_CASE).containsMatchIn(url)
-        || Regex("""[?&](resize|w|h|width|height|fit|im|q|quality)=""", RegexOption.IGNORE_CASE).containsMatchIn(url)
-}
-
-/** Strips a "-WxH" size marker (e.g. -300x450) only when it represents a
- *  small thumbnail: both dims <= 500. Left intact: -scaled (a real WP file
- *  variant), large dims (the image is already full-res). Returns [url] unchanged
- *  when the marker dims exceed the thumbnail threshold or there is none. */
-private fun stripSmallSizeSuffix(url: String): String {
-    val m = Regex("""-(\d{2,4})x(\d{2,4})""", RegexOption.IGNORE_CASE).find(url) ?: return url
-    val w = m.groupValues[1].toInt()
-    val h = m.groupValues[2].toInt()
-    if (w > 500 || h > 500) return url
-    return url.removeRange(m.range)
-}
-
-/** Pull the first `tt\d{7,8}` IMDB id from any text (URL, JSON, HTML). Used
- *  to extract the IMDB id from dooplayer admin-ajax embed URLs, which always
- *  carry the id (e.g. tt1979320) inside the embed_url field. */
-internal fun extractImdbIdFromUrl(text: String?): String? =
-    text?.let { Regex("""tt\d{7,8}""").find(it)?.value }
+/** Matches the scheme+host prefix of a URL (for host rewriting in [MultimoviesProvider.liveUrl]). */
+private val URL_HOST_REGEX = Regex("""^(https?://[^/]+)""")
 
 /** Tries common lazy-load attributes in order so a poster URL is found even when
  * the theme stores the real image in a data-* attribute instead of src. */
@@ -221,138 +108,18 @@ internal val SOURCE_PRIORITY: List<String> = listOf(
     "2embed",
     "VidSrc",
     "111Movies",
+    // VidEm (videm.xyz): fast multi-server HLS player verified Aug 2026 via the
+    // vidapi.xyz aggregator; resolved by VidemExtractor's signed-token API.
+    "VidEm",
 )
 
 /** CSS selector for the item containers on a Multimovies search-results page. */
 private val SEARCH_ITEMS_SELECTOR = "div#archive-content div.item, div.search-page div.result-item, article.item, div.ml-items div.item, div.results div.result, ul.ml-posts li, div#content div.post, div.items div.item"
 
-// ----------------------------------------------------------------------
-// Search relevance engine (pure functions, JVM-testable, no network)
-//
-// Matching is deliberately NOT word-to-word: tokens match exactly, as
-// substrings ("spiderman" hits "Spider-Man", "ave" hits "Avengers") or
-// fuzzily via Levenshtein (typos). But the gate is strict — EVERY
-// significant query token must match somewhere in the title, so all
-// irrelevant "other" catalog hits are removed outright.
-// ----------------------------------------------------------------------
-
-/** Unicode-aware normalization (lowercase; letters, marks, digits only) so
- *  Hindi/Devanagari queries survive: vowel signs like ि/ी are combining marks
- *  (Unicode \p{M}), not letters, so they must be kept or scripts get mangled. */
-private val NON_ALNUM_UNICODE = Regex("""[^\p{L}\p{M}\p{N}]+""")
-
-internal fun normalizeTitle(t: String): String =
-    t.lowercase().replace("'", "").replace("’", "").trim()
-        .replace(NON_ALNUM_UNICODE, " ").trim()
-
-/** Alternative spellings of a title that a Dooplay site may store, so slug
- *  guessing and the site-search fallback survive "&" vs "and", dropped
- *  apostrophes ("King's Man" -> "Kings Man") and stray punctuation such as
- *  "(", ")", ":", ";", "," that a WordPress search treats literally. */
-internal fun titleVariants(title: String): List<String> {
-    val andWord = Regex("\\band\\b", RegexOption.IGNORE_CASE)
-    return buildList {
-        add(title)
-        if (title.contains('&')) add(title.replace("&", " and "))
-        if (andWord.containsMatchIn(title)) add(title.replace(andWord, "&"))
-        val noApostrophe = title.replace("'", "").replace("’", "")
-        if (noApostrophe != title) add(noApostrophe)
-        add(title.replace(Regex("[^\\p{L}\\p{M}\\p{N} ]+"), " "))
-    }.map { it.replace(Regex("\\s+"), " ").trim() }.distinct()
-}
-
-/** Classic Levenshtein edit distance (two-row implementation). */
-internal fun levenshtein(a: String, b: String): Int {
-    if (a == b) return 0
-    if (a.isEmpty()) return b.length
-    if (b.isEmpty()) return a.length
-    var prev = IntArray(b.length + 1) { it }
-    var cur = IntArray(b.length + 1)
-    for (i in 1..a.length) {
-        cur[0] = i
-        for (j in 1..b.length) {
-            val cost = if (a[i - 1] == b[j - 1]) 0 else 1
-            cur[j] = minOf(cur[j - 1] + 1, prev[j] + 1, prev[j - 1] + cost)
-        }
-        val tmp = prev
-        prev = cur
-        cur = tmp
-    }
-    return prev[b.length]
-}
-
-/** Coarse title match distance for validating a fetched page / search hit
- *  against the queried title: 0 identical (also when they differ only by the
- *  "&"/"and" join or a dropped apostrophe), 1 when one is a prefix of the
- *  other, else 2. */
-internal fun titleDistance(itemTitle: String, target: String): Int {
-    val a = normalizeTitle(itemTitle)
-    val b = normalizeTitle(target)
-    return when {
-        a == b -> 0
-        // TMDB spells "Locke & Key" where the site says "Locke and Key";
-        // dropping the "and" join on either side makes them identical.
-        a.replace(" and ", " ") == b && a.contains(" and ") -> 0
-        b.replace(" and ", " ") == a && b.contains(" and ") -> 0
-        a.startsWith(b) || b.startsWith(a) -> 1
-        else -> 2
-    }
-}
-
-/** Query words that carry meaning (>=2 chars); digit tokens such as years are
- *  kept so "iron man 2010" can match a release year too. */
-internal fun significantQueryTokens(query: String): List<String> =
-    normalizeTitle(query).split(' ').filter { it.length >= 2 }.distinct()
-
-/** Best fuzzy match score for one query [token] against the title's tokens:
- *  1.0 exact or substring in either direction (long words only for the
- *  query-contains-title direction to avoid false hits like "spiderman" vs
- *  "Man"), 0.7 within a small Levenshtein tolerance (typos), else 0.0. */
-internal fun tokenMatchScore(token: String, titleTokens: List<String>): Double {
-    if (titleTokens.any { it == token || it.contains(token) }) return 1.0
-    if (titleTokens.any { token.contains(it) && it.length >= 4 }) return 1.0
-    val tolerance = if (token.length <= 5) 1 else 2
-    if (titleTokens.any { levenshtein(it, token) <= tolerance }) return 0.7
-    return 0.0
-}
-
-/** Relevance verdict for one search candidate. [score] is in [0,1];
- *  [allTokensMatched] drives the hard "remove every other" gate. */
-internal data class Relevance(val score: Double, val allTokensMatched: Boolean)
-
-/** Fuzzy relevance of [query] against a candidate [title] (+ optional release
- *  [year], which pure-digit tokens may match). Score = weighted mean of
- *  per-token matches with a small penalty for bloated titles, clamped [0,1]. */
-internal fun relevanceOf(query: String, title: String, year: String?): Relevance {
-    val qNorm = normalizeTitle(query)
-    if (qNorm.isEmpty()) return Relevance(0.0, false)
-    val tNorm = normalizeTitle(title)
-    if (qNorm == tNorm) return Relevance(1.0, true)
-
-    val qTokens = significantQueryTokens(query)
-    if (qTokens.isEmpty()) {
-        // Single-character query: substring containment is the whole signal.
-        val contained = tNorm.contains(qNorm)
-        return Relevance(if (contained) 1.0 else 0.0, contained)
-    }
-    val tTokens = tNorm.split(' ').filter { it.isNotEmpty() }
-
-    var sum = 0.0
-    var matchedAll = true
-    for (token in qTokens) {
-        var best = tokenMatchScore(token, tTokens)
-        if (best < 1.0 && token.all { it.isDigit() } && year.orEmpty().contains(token)) best = 1.0
-        if (best == 0.0) matchedAll = false
-        sum += best
-    }
-    val extraTitleWords = (tTokens.size - qTokens.size).coerceAtLeast(0)
-    val score = (sum / qTokens.size - 0.03 * minOf(extraTitleWords, 5)).coerceIn(0.0, 1.0)
-    return Relevance(score, matchedAll)
-}
-
-
 /**
- * Multimovies - a CloudStream provider that scrapes the Multimovies (multimovies.motorcycles) site.
+ * Multimovies - a CloudStream provider that scrapes the Multimovies site. The site
+ * rotates its live domain every few days (announced on the multimovies.wtf gateway);
+ * [MultimoviesDomainResolver] keeps mainUrl pointed at the current mirror.
  *
  * Source handling policy (per project requirements):
  *  - Multiple streaming sources are pulled in PARALLEL.
@@ -363,12 +130,12 @@ internal fun relevanceOf(query: String, title: String, year: String?): Relevance
  */
 class MultimoviesProvider : MainAPI() {
 
-    override var mainUrl = "https://multimovies.motorcycles"
+    override var mainUrl = MultimoviesDomainResolver.SEED_DOMAIN
     override var name = "Multimovies"
 
     private val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
     private val commonHeaders = mapOf("User-Agent" to userAgent)
-    // Solves the Cloudflare managed challenge on multimovies.motorcycles. Created
+    // Solves the Cloudflare managed challenge on the live multimovies.* domain. Created
     // on first use (not at plugin install) so CookieManager/WebView setup happens
     // during a network call. Cached so solved cookies persist across calls.
     private var cfKiller: CloudflareKiller? = null
@@ -394,7 +161,10 @@ class MultimoviesProvider : MainAPI() {
         TvType.Cartoon,
     )
 
-    override val mainPage = mainPageOf(
+    // Getter (not a one-shot val): the genre URLs must follow mainUrl whenever
+    // MultimoviesDomainResolver rotates to a new live domain mid-session.
+    override val mainPage
+        get() = mainPageOf(
         // Bollywood (5)
         Pair("$mainUrl/genre/bollywood-movies/", "Bollywood Movies"),
         Pair("$mainUrl/genre/netflix/", "Netflix"),
@@ -455,6 +225,47 @@ class MultimoviesProvider : MainAPI() {
         return if (idx == -1) SOURCE_PRIORITY.size else idx
     }
 
+    /** True when [url] belongs to any multimovies.* domain. The site rotates its
+     *  TLD, so the check must not pin the hostname — URLs from a doc cached under
+     *  an old domain still count after [MultimoviesDomainResolver] self-heals. */
+    private fun isMultimoviesUrl(url: String?): Boolean {
+        if (url.isNullOrBlank()) return false
+        return MULTIMOVIES_HOST_REGEX.containsMatchIn(url)
+    }
+
+    /** Rewrite [url]'s scheme+host to the current live domain when it's a
+     *  multimovies.* URL, so old-domain URLs (session caches, home-page requests
+     *  built before a rotation) fetch from the live mirror. Other hosts pass
+     *  through untouched. */
+    private fun liveUrl(url: String): String {
+        val m = URL_HOST_REGEX.find(url) ?: return url
+        if (!m.groupValues[1].substringAfter("://").startsWith("multimovies.", ignoreCase = true)) return url
+        val liveHost = URL_HOST_REGEX.find(mainUrl)?.value ?: return url
+        return liveHost + url.substring(m.range.last + 1)
+    }
+
+    /**
+     * Run [block] against the current [mainUrl]. When the result fails (null or
+     * [retryIf] returns true) or an exception escapes, force a fresh gateway
+     * resolve and retry once — so a rotated/parked domain self-heals without a
+     * plugin republish. Only runs the extra resolve on an actual failure, never
+     * on the happy path.
+     */
+    private suspend fun <T> withDomainRetry(
+        retryIf: (T) -> Boolean,
+        block: suspend () -> T,
+    ): T {
+        try {
+            val first = block()
+            if (!retryIf(first)) return first
+            mainUrl = MultimoviesDomainResolver.resolve(forceRefresh = true)
+            return block()
+        } catch (e: Exception) {
+            mainUrl = MultimoviesDomainResolver.resolve(forceRefresh = true)
+            return block()
+        }
+    }
+
     /**
      * Fetch [url] without the Cloudflare solver first: when solved cookies are
      * already valid (CloudStream persists the cookie jar across calls), this is
@@ -472,9 +283,12 @@ class MultimoviesProvider : MainAPI() {
         headers: Map<String, String> = commonHeaders,
     ): Document? {
         val challengeTimeoutS = 15L
+        // Rewrite a stale multimovies.* host to the current live domain first, so
+        // cached/home-page URLs keep fetching after a domain rotation.
+        val fetchUrl = liveUrl(url)
         // Fast path: rely on the persisted cookie jar; no WebView solve.
         try {
-            val doc = app.get(url, timeout = timeoutSeconds, headers = headers).document
+            val doc = app.get(fetchUrl, timeout = timeoutSeconds, headers = headers).document
             if (!isChallenge(doc)) return doc
         } catch (e: Exception) {
             // fall through to the challenge-solve path
@@ -486,20 +300,20 @@ class MultimoviesProvider : MainAPI() {
                 attempts = solverFactories().size,
                 fetch = { i ->
                     val factory = solverFactories()[i.coerceAtMost(solverFactories().size - 1)]
-                    app.get(url, timeout = challengeTimeoutS, headers = headers,
+                    app.get(fetchUrl, timeout = challengeTimeoutS, headers = headers,
                         interceptor = factory()).document
                 },
                 isBlocked = ::isChallenge,
                 onBlocked = { cfKiller = null },
-                failureMessage = { lastErr -> lastErr?.localizedMessage ?: "Failed to load $url" },
+                failureMessage = { lastErr -> lastErr?.localizedMessage ?: "Failed to load $fetchUrl" },
             )
         }
         return when {
             solved == null -> {
-                if (required) throw ErrorLoadingException("Timed out fetching $url") else null
+                if (required) throw ErrorLoadingException("Timed out fetching $fetchUrl") else null
             }
             isChallenge(solved) -> {
-                if (required) throw ErrorLoadingException("Cloudflare challenge unsolved for $url") else null
+                if (required) throw ErrorLoadingException("Cloudflare challenge unsolved for $fetchUrl") else null
             }
             else -> solved
         }
@@ -536,8 +350,8 @@ class MultimoviesProvider : MainAPI() {
     // to resolve each hit to its real page URL, never for metadata).
     // ------------------------------------------------------------------
 
-    override suspend fun search(query: String): List<SearchResponse>? {
-        SearchCache.get(query)?.let { return it }
+    override suspend fun search(query: String): List<SearchResponse>? = withDomainRetry(retryIf = { it == null }) {
+        SearchCache.get(query)?.let { return@withDomainRetry it }
 
         // One request to TMDB /search/multi (or SIMKL search when its client_id is
         // set) returns posters + ratings inline — no enrichment round-trips. The
@@ -553,7 +367,7 @@ class MultimoviesProvider : MainAPI() {
                 }.sortedByDescending { it.first }
                     .take(SEARCH_MAX_RESULTS)
                     .ifEmpty { null }
-            } ?: return null
+            } ?: return@withDomainRetry null
 
         // Remember (name, year) per hit so load() can slug-guess its MM page.
         ranked.forEach { (_, item) ->
@@ -573,8 +387,8 @@ class MultimoviesProvider : MainAPI() {
             }
         }
 
-        if (responses.isEmpty()) return null
-        return responses.also { SearchCache.put(query, it) }
+        if (responses.isEmpty()) return@withDomainRetry null
+        return@withDomainRetry responses.also { SearchCache.put(query, it) }
     }
 
     override suspend fun quickSearch(query: String): List<SearchResponse>? = search(query)
@@ -685,7 +499,7 @@ class MultimoviesProvider : MainAPI() {
     /** Extract (href, item title) from a Multimovies search-result element. */
     private fun Element.candidateHref(): Pair<String, String>? {
         val a = selectFirst("a[href], div.data a h2, div.poster a") ?: return null
-        val href = a.attr("href").takeIf { it.contains(mainUrl) } ?: return null
+        val href = a.attr("href").takeIf { isMultimoviesUrl(it) } ?: return null
         val itemTitle = selectFirst("img")?.attr("alt")
             ?: a.selectFirst("h2, div.data h3 a, .title")?.text()
             ?: a.text()?.trim()
@@ -733,7 +547,7 @@ class MultimoviesProvider : MainAPI() {
 
     private fun Element.toSearchResponse(): SearchResponse? {
         val a = selectFirst("a[href], div.data a h2, div.poster a") ?: return null
-        val href = a.attr("href").takeIf { it.contains(mainUrl) } ?: return null
+        val href = a.attr("href").takeIf { isMultimoviesUrl(it) } ?: return null
         val title = selectFirst("img")?.attr("alt")
             ?: a.selectFirst("h2, div.data h3 a, .title")?.text()
             ?: a.text()
@@ -767,21 +581,24 @@ class MultimoviesProvider : MainAPI() {
     override suspend fun getMainPage(
         page: Int,
         request: MainPageRequest
-    ): HomePageResponse? {
+    ): HomePageResponse? = withDomainRetry(retryIf = { it == null }) {
         val url = if (page > 1) "${request.data}page/$page/" else request.data
-        val doc = fetchDoc(url, timeoutSeconds = 12, required = false) ?: return null
+        val doc = fetchDoc(url, timeoutSeconds = 12, required = false) ?: return@withDomainRetry null
         val items = doc.select("article.item, div#archive-content div.item, div.items div.item").mapNotNull {
             it.toSearchResponse()
         }
         backfillPosters(items)
-        return newHomePageResponse(request.name, items)
+        newHomePageResponse(request.name, items)
     }
 
     // ------------------------------------------------------------------
     // Load (detail page)
     // ------------------------------------------------------------------
 
-    override suspend fun load(url: String): LoadResponse? {
+    override suspend fun load(url: String): LoadResponse? =
+        withDomainRetry(retryIf = { it == null }) { loadInternal(url) }
+
+    private suspend fun loadInternal(url: String): LoadResponse? {
         // Search results arrive as TMDB web URLs; main-page cards arrive as MM URLs.
         val tmdb = parseTmdbUrl(url)
         val cached = tmdb?.let { (id, type) -> tmdbSearchCache["$id|$type"] }
@@ -885,7 +702,7 @@ class MultimoviesProvider : MainAPI() {
                 // only); titles/descriptions/thumbnails/ratings come from TMDB.
                 val episodes = arrayListOf<Episode>()
                 val seasonLinks = doc.select("a[href*='/seasons/']")
-                    .mapNotNull { it.attr("href").takeIf { h -> h.contains(mainUrl) } }
+                    .mapNotNull { it.attr("href").takeIf { h -> isMultimoviesUrl(h) } }
                     .distinct()
                 val pages = if (seasonLinks.isEmpty()) listOf(realUrl) else seasonLinks
 
@@ -907,7 +724,7 @@ class MultimoviesProvider : MainAPI() {
                 seasonDocs.forEach { sDoc ->
                     if (sDoc == null) return@forEach
                     sDoc.select("ul.episodios li, div.eps div.ep, .episodios li").forEachIndexed { i, ep ->
-                        val epLink = ep.selectFirst("a[href]")?.attr("href")?.takeIf { it.contains(mainUrl) }
+                        val epLink = ep.selectFirst("a[href]")?.attr("href")?.takeIf { isMultimoviesUrl(it) }
                             ?: return@forEachIndexed
                         val epNum = Regex("(?i)(\\d+)x(\\d+)").find(epLink)?.groupValues?.getOrNull(2)?.toIntOrNull()
                             ?: Regex("(\\d+)").find(epLink)?.value?.toIntOrNull() ?: (i + 1)
@@ -1051,7 +868,7 @@ class MultimoviesProvider : MainAPI() {
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
-    ): Boolean {
+    ): Boolean = withDomainRetry(retryIf = { !it }) {
         var meta = SourceMetaCache.get(data)
 
         // Fast path 1: cached links emit instantly so playback starts right away
@@ -1061,7 +878,7 @@ class MultimoviesProvider : MainAPI() {
             LinkCache.get(meta.imdbId, meta.season, meta.episode)?.let { cached ->
                 if (cached.isNotEmpty()) {
                     cached.forEach { runCatching { callback(it) } }
-                    return true
+                    return@withDomainRetry true
                 }
             }
         }
@@ -1075,7 +892,7 @@ class MultimoviesProvider : MainAPI() {
         var embeds: List<ResolvedEmbed> = awaited.orEmpty()
 
         if (embeds.isEmpty()) {
-            val doc = cachedDocOrFetch(data) ?: return false
+            val doc = cachedDocOrFetch(data) ?: return@withDomainRetry false
             embeds = coroutineScope {
                 parsePlayerOptions(doc, data).map { (name, triple) ->
                     async {
@@ -1153,7 +970,7 @@ class MultimoviesProvider : MainAPI() {
             LinkCache.put(meta.imdbId, meta.season, meta.episode, deduped)
         }
 
-        return deduped.isNotEmpty()
+        return@withDomainRetry deduped.isNotEmpty()
     }
 
     /** Pull a single source, streaming found links to [callback] as they arrive and
@@ -1339,5 +1156,99 @@ class MultimoviesProvider : MainAPI() {
     private fun dedupeByHostQuality(links: List<ExtractorLink>): List<ExtractorLink> {
         val seen = HashSet<String>()
         return links.filter { l -> seen.add("${hostOf(l.url ?: "")}|${l.quality}") }
+    }
+}
+
+/**
+ * Self-healing live-domain resolver for the Multimovies Dooplay site.
+ *
+ * `multimovies.wtf` is a static gateway page that always links to the CURRENT
+ * live domain (rotated every few days: `.motorcycles` -> `.beer` -> ...). The
+ * provider's old hardcoded `mainUrl` silently pointed at the old domain after
+ * every rotation, requiring a manual republish.
+ *
+ * This object resolves the live domain from the gateway, caches it (6 h TTL)
+ * and only re-fetches when forced (a request failed) or the cache expires.
+ * Pure extraction ([extractLiveDomain]) is JVM-testable; [resolve] needs the
+ * CloudStream runtime (`app`).
+ */
+internal object MultimoviesDomainResolver {
+
+    /** Stable gateway URL that always announces the current live domain. */
+    internal const val LANDING_URL = "https://multimovies.wtf/"
+
+    /** Last-known-good domain; used only when the gateway itself is unreachable
+     *  and no cached value exists. */
+    internal const val SEED_DOMAIN = "https://multimovies.beer"
+
+    private const val CACHE_TTL_MS = 6 * 60 * 60 * 1000L
+    private const val GATEWAY_DEBOUNCE_MS = 60_000L
+    private const val FETCH_TIMEOUT_S = 8L
+
+    private val LIVE_DOMAIN_REGEX =
+        Regex("""^https://(?:www\.)?multimovies\.[a-z]{2,10}$""")
+
+    @Volatile
+    private var cached: String? = null
+
+    @Volatile
+    private var resolvedAt = 0L
+
+    @Volatile
+    private var lastFetchAt = 0L
+
+    private val mutex = Mutex()
+
+    /** Normalize a candidate href: strip trailing slash, drop www, lowercase.
+     *  Returns null when the href is not a bare multimovies live domain. */
+    internal fun normalize(href: String): String? {
+        val h = href.trim().trimEnd('/')
+        if (!LIVE_DOMAIN_REGEX.matches(h)) return null
+        val normalized = h.replace("https://www.", "https://")
+        if (normalized == LANDING_URL.trimEnd('/')) return null
+        return normalized
+    }
+
+    /** The most-repeated live-domain href in the gateway page's HTML, or null. */
+    internal fun extractLiveDomain(html: String): String? {
+        if (html.isBlank()) return null
+        return Jsoup.parse(html)
+            .select("a[href]")
+            .mapNotNull { normalize(it.attr("href")) }
+            .groupingBy { it }
+            .eachCount()
+            .maxByOrNull { it.value }
+            ?.key
+    }
+
+    /** The last known live domain (or the seed when never resolved) — no network. */
+    internal fun currentDomain(): String = cached ?: SEED_DOMAIN
+
+    /**
+     * Current live domain: cached value (6 h TTL) unless [forceRefresh] or the
+     * cache is stale. A failed gateway fetch falls back to the last cached value,
+     * then the seed, so the provider always gets a usable domain. Thread-safe.
+     */
+    suspend fun resolve(forceRefresh: Boolean = false): String = mutex.withLock {
+        val now = System.currentTimeMillis()
+        val fresh = !forceRefresh && cached != null && (now - resolvedAt) < CACHE_TTL_MS
+        if (fresh) return@withLock cached!!
+
+        if (forceRefresh && cached != null && (now - lastFetchAt) < GATEWAY_DEBOUNCE_MS) {
+            return@withLock cached!!
+        }
+
+        val live = runCatching {
+            extractLiveDomain(app.get(LANDING_URL, timeout = FETCH_TIMEOUT_S).text)
+        }.getOrNull()
+
+        lastFetchAt = System.currentTimeMillis()
+        if (live != null) {
+            cached = live
+            resolvedAt = lastFetchAt
+            live
+        } else {
+            cached ?: SEED_DOMAIN
+        }
     }
 }

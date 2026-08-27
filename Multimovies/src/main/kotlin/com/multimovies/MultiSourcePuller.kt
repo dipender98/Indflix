@@ -220,14 +220,14 @@ object MultiSourcePuller {
         if (isCineverseHost(url)) {
             // vibuxer.com / proxy.php signs only when it sees the originating
             // site as Referer and a matching Origin. The plugin's embed URL
-            // comes from the dooplayer player on multimovies.motorcycles, so
-            // that's the referer we advertise.
-            val ref = referer?.takeIf { it.isNotBlank() } ?: "https://multimovies.motorcycles/"
+            // comes from the dooplayer player on the live multimovies.* mirror,
+            // so that's the referer we advertise.
+            val ref = referer?.takeIf { it.isNotBlank() } ?: "${MultimoviesDomainResolver.currentDomain()}/"
             out["Referer"] = ref
             val origin = ref.substringBefore("/seasons/")
                 .substringBefore("/movies/")
                 .substringBefore("/tvshows/")
-                .takeIf { it.startsWith("http") } ?: "https://multimovies.motorcycles"
+                .takeIf { it.startsWith("http") } ?: MultimoviesDomainResolver.currentDomain()
             out["Origin"] = origin
         }
         return out
@@ -489,6 +489,54 @@ object MultiSourcePuller {
                     headers = headers,
                     extractorData = null,
                     type = type,
+                    audioTracks = emptyList(),
+                )
+            }
+        }
+
+        // VidEm (videm.xyz): signed-token multi-server HLS player. The embed page
+        // is server-rendered, so the dedicated extractor reproduces the
+        // embed -> sources -> play flow deterministically (no browser needed).
+        if (hostOf(src.url).contains("videm")) {
+            return VidemExtractor.extract(src).map { s ->
+                val label = linkLabel(
+                    "VidEm (${s.name})",
+                    isHindiHint(src.name, src.url, s.url),
+                )
+                ExtractorLink(
+                    source = label,
+                    name = label,
+                    url = s.url,
+                    referer = s.headers["Referer"] ?: src.url,
+                    quality = getQualityFromName(s.quality.ifEmpty { s.url }),
+                    headers = s.headers + src.headers,
+                    extractorData = null,
+                    type = if (s.isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO,
+                    audioTracks = emptyList(),
+                )
+            }
+        }
+
+        // 111Movies (api.shows.st): deterministic JSON API behind the vidlove
+        // player SPA. Emits source.url (adaptive HLS master playlist) + subs.
+        if (hostOf(src.url).contains("shows.st")) {
+            val subs = mutableListOf<SubtitleFile>()
+            val showLinks = ShowsExtractor.extract(src, onSubtitle = { subs.add(it) })
+            subs.forEach { onSubtitle(it) }
+            return showLinks.map { s ->
+                val label = linkLabel(
+                    "111Movies (${s.name})",
+                    isHindiHint(src.name, src.url, s.url),
+                )
+                ExtractorLink(
+                    source = label,
+                    name = label,
+                    url = s.url,
+                    referer = s.headers["Referer"] ?: src.url,
+                    quality = getQualityFromName(s.quality.ifEmpty { s.url }),
+                    headers = s.headers + src.headers,
+                    extractorData = null,
+                    type = if (s.isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO,
                     audioTracks = emptyList(),
                 )
             }

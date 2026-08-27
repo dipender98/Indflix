@@ -10,15 +10,17 @@ that responds.
 ```
 Multimovies/
   src/main/kotlin/com/multimovies/
-    MultimoviesProvider.kt   MainAPI impl: search, getMainPage, load, loadLinks
-    MultiSourcePuller.kt     parallel-pull engine, per-source timeout, sort
-    TmdbService.kt           TMDB search/detail/episodes + optional SIMKL
-    ScreenscapeExtractor.kt  screenscape.me crypto port (no WebView)
-    NxshaExtractor.kt        nxsha.space encrypted /api/servers+/api/sources
-    NxshaProtocol.kt         nxsha wire rules (crypto, ids, ordering) - testable
-    CryptoJs.kt              CryptoJS AES envelope crypto shared by extractors
-    GlobalSources.kt         id-based source registry + session caches
     MultimoviesPlugin.kt     plugin entrypoint
+    MultimoviesProvider.kt   MainAPI (search, mainPage, load, loadLinks) + live-domain resolver
+    SearchRanking.kt         pure search ranking, poster upgrade, retry helpers (JVM-testable)
+    MultiSourcePuller.kt     parallel-pull engine, per-source timeout, link identity
+    GlobalSources.kt         id-based source registry + session caches
+    TmdbService.kt           TMDB search/detail/episodes + optional SIMKL
+    HttpKit.kt               shared OkHttp client (get/getJson/post) for the extractors
+    CryptoJs.kt              CryptoJS AES envelope crypto shared by extractors
+    ScreenscapeExtractor.kt  screenscape.me crypto port (uses CryptoJs + HttpKit)
+    NxshaExtractor.kt        nxsha.space encrypted API + wire protocol (uses HttpKit)
+    ApiExtractors.kt         Shows (111Movies) + VidEm JSON-API extractors (uses HttpKit)
   icon.png                   plugin icon, served from the repo (iconUrl)
 
 OTTMirror/

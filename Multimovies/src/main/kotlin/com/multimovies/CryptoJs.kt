@@ -41,14 +41,21 @@ internal object CryptoJs {
         return keyIv.copyOfRange(0, keyLen) to keyIv.copyOfRange(keyLen, total)
     }
 
+    /** Lenient base64 decode matching Node's Buffer.from(s, "base64"): silently
+     *  drops non-base64 characters and pads partial trailing groups (no padding
+     *  required). Shared by the OpenSSL envelope decoder and Screenscape's
+     *  byte -> UTF-16 string path. */
+    fun base64DecodeLenient(s: String): ByteArray {
+        val b64Chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+        val valid = s.filter { it in b64Chars }
+        val padding = (4 - (valid.length % 4)) % 4
+        return Base64.getDecoder().decode(valid + "=".repeat(padding))
+    }
+
     /** Decrypt a base64 OpenSSL-Salted AES ciphertext; returns UTF-8 plaintext
      *  or null when the payload is malformed / undecryptable. */
     fun aesDecryptCryptoJs(cipherBase64: String, passphrase: String): String? {
-        val b64Chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-        val valid = cipherBase64.filter { it in b64Chars }
-        val padding = (4 - (valid.length % 4)) % 4
-        val padded = valid + "=".repeat(padding)
-        val all = runCatching { Base64.getDecoder().decode(padded) }.getOrNull() ?: return null
+        val all = runCatching { base64DecodeLenient(cipherBase64) }.getOrNull() ?: return null
         val (salt, cipher) = if (all.size >= 16 && String(all.copyOfRange(0, 8), StandardCharsets.ISO_8859_1) == "Salted__") {
             all.copyOfRange(8, 16) to all.copyOfRange(16, all.size)
         } else null to all

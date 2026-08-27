@@ -197,28 +197,47 @@ object GlobalSources {
             headers = mapOf("Referer" to "https://vsembed.ru/"),
         ),
         GlobalSource(
-            // Aug 2026: 111movies.com -> 111movies.net -> player.vidlove.cc is the
-            // final hop. Pointing at the live final host means the player page
-            // renders on the first request with no chained 301s.
+            // Aug 2026: 111Movies backend — the player.vidlove.cc SPA is JS-only,
+            // but its data API at api.shows.st is fully deterministic: the JSON
+            // response carries source.url (adaptive HLS master playlist) and
+            // subtitles. IMDB-keyed: /movie accepts an IMDB id directly, /tv
+            // requires a TMDB id (used only when already resolved during load()'s
+            // metadata fetch — no extra TMDB public-API call). Dedicated
+            // ShowsExtractor branch in MultiSourcePuller.
             name = "111Movies",
             idType = SourceId.IMDB,
             buildUrl = { id, s, e ->
-                if (s != null && e != null) "https://player.vidlove.cc/embed/tv/$id/$s/$e"
-                else "https://player.vidlove.cc/embed/movie/$id"
+                if (s != null && e != null) "https://api.shows.st/tv?id=$id&season=$s&episode=$e&mode=json"
+                else "https://api.shows.st/movie?id=$id&mode=json"
             },
             headers = mapOf("Referer" to "https://player.vidlove.cc/"),
         ),
         GlobalSource(
             // Aug 2026: Nxsha's own player API (nitro, MbPly, Citadel, StremFx,
-            // ...). TMDB-keyed; the dedicated NxshaExtractor branch in
-            // MultiSourcePuller resolves its encrypted /api/servers + /api/sources.
+            // ...). IMDB-keyed: NxshaExtractor resolves an IMDB id to TMDB through
+            // Nxsha's own fk.nxsha.xyz proxy (not the TMDB public API), then
+            // decrypts the encrypted /api/servers + /api/sources.
             name = "Nxsha",
-            idType = SourceId.TMDB,
+            idType = SourceId.IMDB,
             buildUrl = { id, s, e ->
                 if (s != null && e != null) "https://nxsha.space/embed/tv/$id/$s/$e"
                 else "https://nxsha.space/embed/movie/$id"
             },
             headers = mapOf("Referer" to "https://nxsha.space/"),
+        ),
+        GlobalSource(
+            // Aug 2026: VidEm (videm.xyz) is a fast, multi-server HLS player
+            // discovered via the vidapi.xyz aggregator. IMDB-keyed: its embed page
+            // normalizes the id internally, so an IMDB id works directly. The
+            // dedicated VidemExtractor branch in MultiSourcePuller resolves its
+            // signed-token /api.php sources + play endpoints without a browser.
+            name = "VidEm",
+            idType = SourceId.IMDB,
+            buildUrl = { id, s, e ->
+                if (s != null && e != null) "https://videm.xyz/embed/tv/$id/$s/$e"
+                else "https://videm.xyz/embed/movie/$id"
+            },
+            headers = mapOf("Referer" to "https://videm.xyz/"),
         ),
     )
 }

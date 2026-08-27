@@ -347,8 +347,9 @@ object TmdbService {
         return m?.value ?: value
     }
 
-    /** Extract a TMDB numeric id from the page (used for TMDB-id-based stream hosts
-     *  like vidlink.pro / multiembed.mov). Checks data-* attributes, JSON-LD
+    /** Extract a TMDB numeric id from the page (used when a main-page card tap
+     *  doesn't carry a TMDB search URL, so the id must be scraped from the
+     *  Multimovies detail page itself). Checks data-* attributes, JSON-LD
      *  sameAs/@id links and inline JS vars. Returns null when absent. */
     fun extractTmdbId(doc: Document): String? {
         // 1. Data attributes

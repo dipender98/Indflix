@@ -1,18 +1,11 @@
 package com.multimovies
 
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
-import java.io.ByteArrayOutputStream
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.*
-import java.util.concurrent.TimeUnit
-import javax.crypto.Cipher
 import javax.crypto.Mac
-import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 /**
@@ -63,36 +56,7 @@ object ScreenscapeExtractor {
         "Cache-Control" to "no-store",
     )
 
-    private val cookieJar = object : okhttp3.CookieJar {
-        private val cookies = mutableMapOf<String, List<okhttp3.Cookie>>()
-        override fun saveFromResponse(url: okhttp3.HttpUrl, list: List<okhttp3.Cookie>) {
-            cookies[url.host] = list
-        }
-        override fun loadForRequest(url: okhttp3.HttpUrl): List<okhttp3.Cookie> {
-            return cookies[url.host]?.filter { it.expiresAt > System.currentTimeMillis() } ?: emptyList()
-        }
-    }
-    private val httpClient: OkHttpClient = OkHttpClient.Builder()
-        .cookieJar(cookieJar)
-        .connectTimeout(12, TimeUnit.SECONDS)
-        .readTimeout(12, TimeUnit.SECONDS)
-        .followRedirects(true)
-        .followSslRedirects(true)
-        .build()
-
-    private fun httpGet(url: String, headers: Map<String, String> = emptyMap()): String? = runCatching {
-        val b = Request.Builder().url(url).get()
-        (sharedHeaders + headers).forEach { (k, v) -> b.header(k, v) }
-        httpClient.newCall(b.build()).execute().use { it.body?.string() }
-    }.getOrNull()
-
-    private fun httpPost(url: String, headers: Map<String, String> = emptyMap(), referer: String? = null): String? = runCatching {
-        val b = Request.Builder().url(url).post("".toRequestBody(null))
-        (sharedHeaders + headers).forEach { (k, v) -> b.header(k, v) }
-        b.header("Origin", "https://screenscape.me")
-        referer?.let { b.header("Referer", it) }
-        httpClient.newCall(b.build()).execute().use { it.body?.string() }
-    }.getOrNull()
+    // HTTP goes through the shared HttpKit client (per-host cookie jar + timeouts).
 
     // Secret constants (decoded from the bundle's browser Buffer polyfill via live decryptApiBody).
     // The 4-step decodeSecret (b64→hex→b64→hex) is NOT used because no standard Buffer polyfill
@@ -126,16 +90,11 @@ object ScreenscapeExtractor {
         return b64.replace("+", "-").replace("/", "_").replace(Regex("=+$"), "")
     }
 
-     /** standard base64 -> utf8 string, as used by `o`. Lenient: matches Node.js
+/** standard base64 -> utf8 string, as used by `o`. Lenient: matches Node.js
       * Buffer.from(s, "base64") which silently skips non-base64 characters and
-      * handles partial trailing groups (no padding required). */
-     private fun base64DecodeBytes(s: String): ByteArray {
-         val b64Chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-         val valid = s.filter { it in b64Chars }
-         val padding = (4 - (valid.length % 4)) % 4
-         val padded = valid + "=".repeat(padding)
-         return Base64.getDecoder().decode(padded)
-     }
+      * handles partial trailing groups (no padding required). Delegated to
+      * [CryptoJs.base64DecodeLenient]. */
+     private fun base64DecodeBytes(s: String): ByteArray = CryptoJs.base64DecodeLenient(s)
 
     /** CryptoJS `enc.Utf8.stringify` port: bytes -> UTF-16 string. Mirrors the bundle's
      * lossy decoder exactly (bytes < 0x80 -> 1 char; < 0x800 -> 2-byte pair; < 0x10000 ->
@@ -260,42 +219,7 @@ object ScreenscapeExtractor {
         // secondXor is base64(utf8bytes(openSslB64)); decode to bytes, then CryptoJS-Utf8 to recover the
         // OpenSSL base64 string that AES.decrypt expects (mirrors `h = o(n(b, s))`).
         val openSslB64 = cryptoJsUtf8String(base64DecodeBytes(secondXor))
-        return aesDecryptCryptoJs(openSslB64, pKey)
-    }
-
-    /** CryptoJS AES.decrypt(ciphertext, passphrase): OpenSSL-compatible (Salted__ prefix). */
-    private fun aesDecryptCryptoJs(cipherBase64: String, passphrase: String): String? {
-        val b64Chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-        val valid = cipherBase64.filter { it in b64Chars }
-        val padding = (4 - (valid.length % 4)) % 4
-        val padded = valid + "=".repeat(padding)
-        val all = runCatching { Base64.getDecoder().decode(padded) }.getOrNull() ?: return null
-        val (salt, cipher) = if (all.size >= 16 && String(all.copyOfRange(0, 8), StandardCharsets.ISO_8859_1) == "Salted__") {
-            all.copyOfRange(8, 16) to all.copyOfRange(16, all.size)
-        } else null to all
-        val (key, iv) = evpKdf(passphrase.toByteArray(StandardCharsets.UTF_8), salt, 32, 16)
-        return runCatching {
-            val c = Cipher.getInstance("AES/CBC/PKCS5Padding")
-            c.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
-            String(c.doFinal(cipher), StandardCharsets.UTF_8)
-        }.getOrNull()
-    }
-
-    private fun evpKdf(password: ByteArray, salt: ByteArray?, keyLen: Int, ivLen: Int): Pair<ByteArray, ByteArray> {
-        val md = MessageDigest.getInstance("MD5")
-        val total = keyLen + ivLen
-        val out = ByteArrayOutputStream()
-        var block = ByteArray(0)
-        while (out.size() < total) {
-            val toHash = ByteArrayOutputStream().apply {
-                write(block); write(password)
-                if (salt != null) write(salt)
-            }.toByteArray()
-            block = md.digest(toHash)
-            out.write(block)
-        }
-        val keyIv = out.toByteArray()
-        return keyIv.copyOfRange(0, keyLen) to keyIv.copyOfRange(keyLen, total)
+        return CryptoJs.aesDecryptCryptoJs(openSslB64, pKey)
     }
 
     // ---- tmdb id extraction from the embed page HTML ----
@@ -321,7 +245,7 @@ object ScreenscapeExtractor {
 
     suspend fun extract(src: MultiSourcePuller.Source, onSubtitle: (ScreenSubtitle) -> Unit): List<ScreenSource> {
         val embedUrl = src.url
-        val html = httpGet(embedUrl) ?: return emptyList()
+        val html = HttpKit.get(embedUrl, headers = sharedHeaders) ?: return emptyList()
         val tmdbId = extractTmdbId(html) ?: Regex("""[?&]tmdb=(\d{4,8})""").find(embedUrl)?.groupValues?.getOrNull(1)
             ?: return emptyList()
         val season = src.season ?: Regex("""(\d+)x(\d+)""").find(src.referer ?: embedUrl)
@@ -334,10 +258,11 @@ object ScreenscapeExtractor {
             (SecureRandom().nextInt(256)).toString(16).padStart(2, '0')
         }
         val route = createTokenRouteCode(e)
-        val bootText = httpPost(
+        val bootText = HttpKit.post(
             "$BASE_URL/api/$route",
-            headers = mapOf("x-screenscape-bootstrap" to e),
+            headers = sharedHeaders + mapOf("x-screenscape-bootstrap" to e),
             referer = embedUrl,
+            origin = BASE_URL,
         ) ?: return emptyList()
 
         val bootEnv = runCatching { JSONObject(bootText) }.getOrNull() ?: return emptyList()
@@ -357,9 +282,9 @@ object ScreenscapeExtractor {
         val q = createServerTmdbRequestId(tmdbId, season, episode, responseKey)
         val apiPath = "/api/$serverRoute/$hostSeg"
         val query = "q=$q"
-        val srvText = httpGet(
+        val srvText = HttpKit.get(
             "$BASE_URL$apiPath?$query",
-            headers = mapOf("Referer" to embedUrl, "x-api-token" to apiToken),
+            headers = sharedHeaders + mapOf("Referer" to embedUrl, "x-api-token" to apiToken),
         ) ?: return emptyList()
 
         val env = runCatching { JSONObject(srvText) }.getOrNull() ?: return emptyList()
