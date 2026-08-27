@@ -41,8 +41,12 @@ abstract class OTTMirrorProvider(
         }
     }
 
-    private fun posterUrl(id: String): String = "https://imgcdn.kim/${ott.artFolder}/v/$id.jpg"
-    private fun episodePosterUrl(id: String): String = "https://imgcdn.kim/${ott.artFolder}/v/150/$id.jpg"
+    // imgcdn.kim serves posters under the literal "poster" folder, not the OTT
+    // folder (nf/hs/pv/ds). Catalog-wide numeric IDs from the desktop search map
+    // to poster/v/<id>.jpg; OTT-specific alphanumeric IDs (e.g. Prime 0QH…) do
+    // not, so the server-provided poster field / TMDB poster is preferred.
+    private fun posterUrl(id: String): String = "https://imgcdn.kim/poster/v/$id.jpg"
+    private fun episodePosterUrl(id: String): String = "https://imgcdn.kim/poster/v/150/$id.jpg"
     private fun posterHeaders(): Map<String, String> = mapOf("Referer" to "${DomainRotator.current(Role.MOBILE) ?: mainUrl}/home")
 
     private fun encode(id: String, title: String, tmdbId: String? = null): String =
