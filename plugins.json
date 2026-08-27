@@ -9,7 +9,7 @@
             "Indflix"
         ],
         "description": "CloudStream provider that scrapes Multimovies and pulls sources in parallel with a per-source timeout.",
-        "fileSize": 74549,
+        "fileSize": 81242,
         "repositoryUrl": "https://github.com/dipender98/Indflix",
         "language": "hi",
         "tvTypes": [
@@ -21,7 +21,7 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/dipender98/Indflix/main/Multimovies/icon.png",
         "apiVersion": 1,
-        "fileHash": "sha256-ec7aa6aa24f85abd1988470de4050e697e16671f43e86a92749f403a62a31db9"
+        "fileHash": "sha256-a79decb4b91b36b6390bfc9c49c5f298c7108ae6d74d5f085cca1f680c3a2df0"
     },
     {
         "url": "https://raw.githubusercontent.com/dipender98/Indflix/builds/OTTMirror.cs3",
@@ -42,6 +42,6 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/dipender98/Indflix/main/OTTMirror/icon.png",
         "apiVersion": 1,
-        "fileHash": "sha256-cadd1c2465642e01d356622772968131a3b45a0c813e09324a6b5ec4c20c555c"
+        "fileHash": "sha256-0023cf98ee0bb58f549f0065d5f2053bb02d55812b0c48c37b828e1d4a1c54a2"
     }
 ]
