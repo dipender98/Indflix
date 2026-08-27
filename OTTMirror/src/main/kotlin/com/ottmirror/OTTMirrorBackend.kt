@@ -209,13 +209,32 @@ internal object OTTMirrorBackend {
     // Search / load
     // ------------------------------------------------------------------
 
+    // The mobile OTT endpoints (/mobile/{ott}/search.php) ignore the query on
+    // the base (Netflix/Disney+) path and always return empty for Hotstar, so
+    // the catalog-wide desktop endpoint is used first. The OTT-specific mobile
+    // endpoint is kept as a fallback (works for Prime).
     suspend fun search(ott: OttService, query: String): List<SearchHit> {
         if (query.isBlank()) return emptyList()
-        val cookie = verify()
         val host = DomainRotator.current(Role.MOBILE) ?: throw ErrorLoadingException("All NetMirror hosts dead")
         val h = hostOf(host)
         HostThrottler.throttle(h)
-        val url = "$host/mobile${ott.mobilePrefix}/search.php?s=${java.net.URLEncoder.encode(query, "UTF-8")}&t=${System.currentTimeMillis() / 1000}"
+        val encoded = java.net.URLEncoder.encode(query, "UTF-8")
+
+        val desktop = runCatching {
+            app.get(
+                "$host/search.php?s=$encoded",
+                headers = mobileHeaders("$host/home"),
+                timeout = 10,
+            )
+        }.getOrNull()
+        if (desktop != null && desktop.code in 200..299) {
+            HostThrottler.recordSuccess(h)
+            val hits = NetMirrorParsers.parseSearch(desktop.text)
+            if (hits.isNotEmpty()) return hits
+        }
+
+        val cookie = verify()
+        val url = "$host/mobile${ott.mobilePrefix}/search.php?s=$encoded&t=${System.currentTimeMillis() / 1000}"
         val resp = runCatching {
             app.get(
                 url,
