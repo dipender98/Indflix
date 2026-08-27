@@ -21,7 +21,7 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/dipender98/Indflix/main/Multimovies/icon.png",
         "apiVersion": 1,
-        "fileHash": "sha256-e2f15dc3864fc1c99810b340bcc596df47e1aa5a271f2c6576e1617752e0918a"
+        "fileHash": "sha256-ed17cecf28d905d5db160f0c76caaaa1572d48696bdc9c53d87e76e6f220e3f6"
     },
     {
         "url": "https://raw.githubusercontent.com/dipender98/Indflix/builds/OTTMirror.cs3",
@@ -33,7 +33,7 @@
             "Indflix"
         ],
         "description": "CloudStream OTT Mirror provider \u2014 Netflix, Hotstar, Prime Video, Disney+ via the NetMirror backend. TMDB metadata only. No scraping, no ads, open-source.",
-        "fileSize": 42374,
+        "fileSize": 42192,
         "repositoryUrl": "https://github.com/dipender98/Indflix",
         "language": "hi",
         "tvTypes": [
@@ -42,6 +42,6 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/dipender98/Indflix/main/OTTMirror/icon.png",
         "apiVersion": 1,
-        "fileHash": "sha256-733ecad2a4b633b0dd3f8536cf748fe779b8c7d081722b8d9869616a3520b156"
+        "fileHash": "sha256-292a978fbc99d6b76280a72bc04dbd3e399b4ad225c32cef3370a459382ce32d"
     }
 ]
