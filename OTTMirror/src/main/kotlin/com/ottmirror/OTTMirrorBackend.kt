@@ -209,16 +209,33 @@ internal object OTTMirrorBackend {
     // Search / load
     // ------------------------------------------------------------------
 
-    // The mobile OTT endpoints (/mobile/{ott}/search.php) ignore the query on
-    // the base (Netflix/Disney+) path and always return empty for Hotstar, so
-    // the catalog-wide desktop endpoint is used first. The OTT-specific mobile
-    // endpoint is kept as a fallback (works for Prime).
+    // Per-OTT mobile search is the primary: with a valid t_hash_t cookie each
+    // /mobile/{ott}/search.php returns OTT-scoped results in that OTT's own ID
+    // namespace (base numeric for nf/ds, alphanumeric for pv, distinct for hs).
+    // The catalog-wide desktop endpoint is only a last-resort fallback.
     suspend fun search(ott: OttService, query: String): List<SearchHit> {
         if (query.isBlank()) return emptyList()
         val host = DomainRotator.current(Role.MOBILE) ?: throw ErrorLoadingException("All NetMirror hosts dead")
         val h = hostOf(host)
         HostThrottler.throttle(h)
         val encoded = java.net.URLEncoder.encode(query, "UTF-8")
+
+        val cookie = verify()
+        val url = "$host/mobile${ott.mobilePrefix}/search.php?s=$encoded&t=${System.currentTimeMillis() / 1000}"
+        val resp = runCatching {
+            app.get(
+                url,
+                headers = mobileHeaders("$host/home"),
+                cookies = mapOf("t_hash_t" to cookie, "ott" to ott.ottCookie, "hd" to "on"),
+                referer = "$host/home",
+                timeout = 10,
+            )
+        }.getOrNull()
+        if (resp != null && resp.code in 200..299) {
+            HostThrottler.recordSuccess(h)
+            val hits = NetMirrorParsers.parseSearch(resp.text)
+            if (hits.isNotEmpty()) return hits
+        }
 
         val desktop = runCatching {
             app.get(
@@ -232,25 +249,7 @@ internal object OTTMirrorBackend {
             val hits = NetMirrorParsers.parseSearch(desktop.text)
             if (hits.isNotEmpty()) return hits
         }
-
-        val cookie = verify()
-        val url = "$host/mobile${ott.mobilePrefix}/search.php?s=$encoded&t=${System.currentTimeMillis() / 1000}"
-        val resp = runCatching {
-            app.get(
-                url,
-                headers = mobileHeaders("$host/home"),
-                cookies = mapOf("t_hash_t" to cookie, "ott" to ott.ottCookie, "hd" to "on"),
-                referer = "$host/home",
-                timeout = 10,
-            )
-        }.getOrNull() ?: return emptyList()
-        if (resp.code == 429) {
-            HostThrottler.recordBackoff(h)
-            DomainRotator.markFailed(Role.MOBILE, host)
-            throw ErrorLoadingException("NetMirror servers busy — retry in a minute")
-        }
-        if (resp.code in 200..299) HostThrottler.recordSuccess(h)
-        return NetMirrorParsers.parseSearch(resp.text)
+        return emptyList()
     }
 
     suspend fun loadPost(ott: OttService, id: String): NetMirrorPost? {
@@ -462,22 +461,24 @@ internal object OTTMirrorBackend {
         val cookie = verify()
         val host = DomainRotator.current(Role.MOBILE) ?: return false
         val h = hostOf(host)
+        // play.php lives on the net77 domain (net52.cc answers "Page Not Found")
+        val playHost = "https://net77.cc"
 
-        HostThrottler.throttle(h)
+        HostThrottler.throttle(playHost)
         val playResp = runCatching {
             app.post(
-                "$host/play.php",
-                headers = mobileHeaders("$host/home") + mapOf(
+                "$playHost/play.php",
+                headers = mobileHeaders("$playHost/home") + mapOf(
                     "Content-Type" to "application/x-www-form-urlencoded; charset=UTF-8",
-                    "Origin" to host,
+                    "Origin" to playHost,
                 ),
                 data = mapOf("id" to ld.id),
                 cookies = mapOf("t_hash_t" to cookie, "ott" to ott.ottCookie, "hd" to "on"),
-                referer = "$host/home",
+                referer = "$playHost/home",
                 timeout = 10,
             )
         }.getOrNull()
-        if (playResp != null && playResp.code == 429) { HostThrottler.recordBackoff(h); return false }
+        if (playResp != null && playResp.code == 429) { HostThrottler.recordBackoff(playHost); return false }
         val hToken = runCatching {
             JSONObject(playResp?.text ?: return false).optString("h").takeIf { it.isNotBlank() }
         }.getOrNull() ?: return false

@@ -128,7 +128,10 @@ abstract class OTTMirrorProvider(
 
     private suspend fun loadDetail(ld: OTTMirrorBackend.LoadData): LoadResponse {
         OTTMirrorBackend.warmUp()
-        val post = OTTMirrorBackend.loadPost(ott, ld.id)
+        // post.php does NOT echo the content id in its body, so the LoadResponse
+        // URL and episode seriesId must come from the id we already hold.
+        val contentId = ld.id
+        val post = OTTMirrorBackend.loadPost(ott, contentId)
             ?: throw ErrorLoadingException("Could not load ${ld.title} from NetMirror")
 
         val isMovie = post.episodes.isEmpty() || post.type.equals("movie", ignoreCase = true)
@@ -146,16 +149,16 @@ abstract class OTTMirrorProvider(
 
         val title = meta?.name ?: post.title
         val year = meta?.year ?: post.year
-        val poster = meta?.poster ?: post.poster ?: posterUrl(post.id)
+        val poster = meta?.poster ?: post.poster ?: posterUrl(contentId)
         val description = meta?.overview ?: post.description
         val genres = meta?.genres ?: post.genre?.split(",")?.map { it.trim() }?.filter { it.isNotEmpty() }
         val cast = meta?.cast
-        val rating = meta?.rating ?: post.rating?.removePrefix("IMDb ")?.toDoubleOrNull()
+        val rating = meta?.rating ?: parseRating(post.rating)
         val tmdbIdFinal = meta?.tmdbId ?: tmdbId
         val imdbId = meta?.imdbId ?: post.imdbId
 
         if (isMovie) {
-            return newMovieLoadResponse(title, encode(post.id, title, tmdbIdFinal?.toString()), TvType.Movie, posterUrl(post.id)) {
+            return newMovieLoadResponse(title, encode(contentId, title, tmdbIdFinal?.toString()), TvType.Movie, posterUrl(contentId)) {
                 this.posterUrl = poster
                 this.backgroundPosterUrl = meta?.backdrop
                 this.year = year?.toIntOrNull()
@@ -167,10 +170,10 @@ abstract class OTTMirrorProvider(
             }
         }
 
-        val episodes = buildEpisodes(post, title, tmdbIdFinal)
+        val episodes = buildEpisodes(post, contentId, title, tmdbIdFinal)
         enrichEpisodes(episodes, tmdbIdFinal)
 
-        return newTvSeriesLoadResponse(title, encode(post.id, title, tmdbIdFinal?.toString()), TvType.TvSeries, episodes) {
+        return newTvSeriesLoadResponse(title, encode(contentId, title, tmdbIdFinal?.toString()), TvType.TvSeries, episodes) {
             this.posterUrl = poster
             this.backgroundPosterUrl = meta?.backdrop
             this.year = year?.toIntOrNull()
@@ -182,7 +185,16 @@ abstract class OTTMirrorProvider(
         }
     }
 
-    private suspend fun buildEpisodes(post: NetMirrorPost, title: String, tmdbIdFinal: Int?): MutableList<Episode> {
+    // "IMDb 7.6" -> 7.6 ; "80% match" -> 8.0 ; "65% match" -> 6.5
+    private fun parseRating(raw: String?): Double? {
+        val s = raw?.trim() ?: return null
+        val imdb = s.removePrefix("IMDb ").trim().toDoubleOrNull()
+        if (imdb != null) return imdb
+        val pct = Regex("""(\d+(?:\.\d+)?)\s*%""").find(s)?.groupValues?.get(1)?.toDoubleOrNull()
+        return pct?.div(10.0)
+    }
+
+    private suspend fun buildEpisodes(post: NetMirrorPost, contentId: String, title: String, tmdbIdFinal: Int?): MutableList<Episode> {
         val episodes = mutableListOf<Episode>()
         post.episodes.forEach { e ->
             episodes += newEpisode(encode(e.id, title, tmdbIdFinal?.toString())) {
@@ -191,7 +203,7 @@ abstract class OTTMirrorProvider(
             }
         }
         if (post.nextPageShow && post.nextPageSeason != null) {
-            OTTMirrorBackend.getEpisodes(ott, post.id, post.nextPageSeason).forEach { e ->
+            OTTMirrorBackend.getEpisodes(ott, contentId, post.nextPageSeason).forEach { e ->
                 episodes += newEpisode(encode(e.id, title, tmdbIdFinal?.toString())) {
                     this.name = e.title; this.season = e.season; this.episode = e.episode
                     this.posterUrl = episodePosterUrl(e.id)
@@ -199,7 +211,7 @@ abstract class OTTMirrorProvider(
             }
         }
         post.seasons.dropLast(1).forEach { s ->
-            OTTMirrorBackend.getEpisodes(ott, post.id, s.id).forEach { e ->
+            OTTMirrorBackend.getEpisodes(ott, contentId, s.id).forEach { e ->
                 episodes += newEpisode(encode(e.id, title, tmdbIdFinal?.toString())) {
                     this.name = e.title; this.season = e.season; this.episode = e.episode
                     this.posterUrl = episodePosterUrl(e.id)
