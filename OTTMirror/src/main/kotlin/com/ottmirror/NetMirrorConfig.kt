@@ -67,6 +67,40 @@ internal object CookieBox {
     fun clear() { tHashT = ""; issuedHost = ""; expiresAt = 0L }
 }
 
+// Persistent t_hash_t (15 h TTL) so a restart never pays the verify round-trip
+// again, matching the reference repo's bypass()/SharedPreferences approach.
+internal object NetMirrorCookieStore {
+    private const val PREF_NAME = "OTTMirrorPrefs"
+    private const val KEY_COOKIE = "t_hash_t"
+    private const val KEY_HOST = "t_hash_t_host"
+    private const val KEY_TS = "t_hash_t_ts"
+    private const val TTL_MS = 15 * 60 * 60 * 1000L
+
+    @Volatile private var prefs: android.content.SharedPreferences? = null
+
+    fun init(context: android.content.Context) {
+        prefs = context.applicationContext.getSharedPreferences(PREF_NAME, android.content.Context.MODE_PRIVATE)
+    }
+
+    fun load(): Triple<String, String, Long>? {
+        val p = prefs ?: return null
+        val cookie = p.getString(KEY_COOKIE, null)?.takeIf { it.isNotBlank() } ?: return null
+        val host = p.getString(KEY_HOST, "") ?: ""
+        val ts = p.getLong(KEY_TS, 0L)
+        if (ts <= 0 || System.currentTimeMillis() - ts > TTL_MS) { clear(); return null }
+        return Triple(cookie, host, ts)
+    }
+
+    fun save(cookie: String, host: String) {
+        prefs?.edit()?.putString(KEY_COOKIE, cookie)?.putString(KEY_HOST, host)
+            ?.putLong(KEY_TS, System.currentTimeMillis())?.apply()
+    }
+
+    fun clear() {
+        prefs?.edit()?.remove(KEY_COOKIE)?.remove(KEY_HOST)?.remove(KEY_TS)?.apply()
+    }
+}
+
 internal fun decodeBase64(value: String): String = Base64Decode.decodeUtf8(value).orEmpty()
 
 internal val NEWTV_HEADERS = mapOf(

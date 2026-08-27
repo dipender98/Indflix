@@ -48,9 +48,12 @@ abstract class OTTMirrorProvider(
         OttService.HOTSTAR, OttService.DISNEY -> "https://imgcdn.kim/hs/v/$id.jpg"
         OttService.PRIME -> "https://imgcdn.kim/pv/341/$id.jpg"
     }
-    private fun episodePosterUrl(id: String): String = when (ott) {
+    // Main batch = episodes in the post.php payload (hsepimg/150/ for hs/dp);
+    // paged = episodes from getEpisodes (plain hsepimg/). Matches reference.
+    private fun episodePosterUrl(id: String, mainBatch: Boolean): String = when (ott) {
         OttService.NETFLIX -> "https://imgcdn.kim/poster/v/150/$id.jpg"
-        OttService.HOTSTAR, OttService.DISNEY -> "https://imgcdn.kim/hsepimg/$id.jpg"
+        OttService.HOTSTAR, OttService.DISNEY ->
+            if (mainBatch) "https://imgcdn.kim/hsepimg/150/$id.jpg" else "https://imgcdn.kim/hsepimg/$id.jpg"
         OttService.PRIME -> "https://img.nfmirrorcdn.top/pvepimg/$id.jpg"
     }
     private fun posterHeaders(): Map<String, String> = mapOf("Referer" to "${DomainRotator.current(Role.MOBILE) ?: mainUrl}/home")
@@ -91,7 +94,6 @@ abstract class OTTMirrorProvider(
     override suspend fun search(query: String): List<SearchResponse>? {
         SearchCache.get(ott, query)?.let { return it }
         val hits = runCatching {
-            OTTMirrorBackend.warmUp()
             OTTMirrorBackend.search(ott, query)
         }.getOrDefault(emptyList())
         if (hits.isEmpty()) return null
@@ -208,14 +210,14 @@ abstract class OTTMirrorProvider(
         post.episodes.forEach { e ->
             episodes += newEpisode(encode(e.id, title, tmdbIdFinal?.toString())) {
                 this.name = e.title; this.season = e.season; this.episode = e.episode
-                this.posterUrl = episodePosterUrl(e.id)
+                this.posterUrl = episodePosterUrl(e.id, mainBatch = true)
             }
         }
         if (post.nextPageShow && post.nextPageSeason != null) {
             OTTMirrorBackend.getEpisodes(ott, contentId, post.nextPageSeason).forEach { e ->
                 episodes += newEpisode(encode(e.id, title, tmdbIdFinal?.toString())) {
                     this.name = e.title; this.season = e.season; this.episode = e.episode
-                    this.posterUrl = episodePosterUrl(e.id)
+                    this.posterUrl = episodePosterUrl(e.id, mainBatch = false)
                 }
             }
         }
@@ -223,7 +225,7 @@ abstract class OTTMirrorProvider(
             OTTMirrorBackend.getEpisodes(ott, contentId, s.id).forEach { e ->
                 episodes += newEpisode(encode(e.id, title, tmdbIdFinal?.toString())) {
                     this.name = e.title; this.season = e.season; this.episode = e.episode
-                    this.posterUrl = episodePosterUrl(e.id)
+                    this.posterUrl = episodePosterUrl(e.id, mainBatch = false)
                 }
             }
         }

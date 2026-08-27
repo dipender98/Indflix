@@ -30,7 +30,7 @@ OTTMirror/
     OTTMirrorDisneyPlus.kt       MainAPI (Disney+, ott=dp, /mobile/hs/*)
     OTTMirrorProvider.kt         abstract base: home/search/load/loadLinks via backend
     OTTMirrorBackend.kt          NetMirror engine: verify, home, search, post, episodes, link flow (NewTV + native)
-    NetMirrorConfig.kt           per-OTT config + host lists + cookie/NewTvBase caches
+    NetMirrorConfig.kt           per-OTT config + host lists + cookie/NewTvBase caches + persisted cookie store
     Base64Decode.kt              pure-JVM base64 decoder (no android.jar dependency)
     Parsers.kt                   pure parsers for SearchData/PostData/EpisodesData/Playlist/NewTv
     HostThrottler.kt             per-host rate limiter + 429 exponential backoff + jitter
@@ -158,19 +158,26 @@ the forks lack:
   `NEWTV_DOMAINS`); on 429/5xx/timeout a host is pinned dead and the role
   advances. A failed NewTV base is cleared so the token probe re-runs instead of
   trusting a stale `tv.imgcdn.kim` for hours.
-- `CookieBox` — `t_hash_t` cached 15 min (not 15 h): the backend invalidates
-  server-side well before the forks' window, and a stale cookie is the classic
-  "no link found" trap. The cache also tracks which host issued it
+- `CookieBox` — `t_hash_t` cached 15 min in memory (not 15 h): the backend
+  invalidates server-side well before the forks' window, and a stale cookie is
+  the classic "no link found" trap. The cache also tracks which host issued it
   (`issuedHost`): after `DomainRotator` rotates to another mirror, `verify()`
   re-runs against the new host instead of reusing the old host's cookie.
+- `NetMirrorCookieStore` — same `t_hash_t` persisted to SharedPreferences with a
+  15 h TTL (reference repo's `bypass()` approach), so a restart never pays the
+  verify round-trip again. `verify()` checks in-memory first, then the persisted
+  value (host-matched), and only then re-verifies.
 - `warmUp()` — session health probe hits the current mobile host + NewTV base
-  once; dead hosts never burn the 15 s timeout during real work.
-- Search is fail-closed: only the OTT-scoped `/mobile/{ott}/search.php` endpoint
-  is used (never the unscoped desktop search), so results are always in the
-  correct OTT's ID namespace — empty is a correct answer, wrong-platform is not.
+  once; dead hosts never burn the 15 s timeout during real work. NOT called on
+  the search path (search must stay fast; it has its own verify + host rotation).
+- Search is fail-closed AND fast: only the OTT-scoped `/mobile/{ott}/search.php`
+  endpoint is used (never the unscoped desktop search), no `warmUp()`, no
+  `HostThrottler` spacing on the GET — matching the reference repo's single
+  round-trip. Empty is a correct answer, wrong-platform is not.
 - Posters are per-OTT CDN paths (`poster/v/`, `hs/v/`, `pv/341/` for search/home;
-  `hsepimg/`, `pvepimg/`, `poster/v/150/` for episodes), with TMDB silently
-  upgrading the poster/rating in the background.
+  `hsepimg/150/` for the post.php episode batch on hs/dp, `hsepimg/` for paged,
+  `pvepimg/`, `poster/v/150/`), with TMDB silently upgrading the poster/rating in
+  the background.
 - Distinct errors: a NewTV outage or a seen 429 surfaces
   "NetMirror servers busy — retry in a minute" (`ErrorLoadingException`) instead
   of a silent "no link found".

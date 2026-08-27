@@ -56,8 +56,16 @@ internal object OTTMirrorBackend {
     // ------------------------------------------------------------------
 
     suspend fun verify(): String {
+        // Fast path 1: in-memory cookie, fresh, still on the issuing host.
         CookieBox.tHashT.takeIf { CookieBox.fresh() && CookieBox.issuedHost == DomainRotator.current(Role.MOBILE) }
             ?.let { return it }
+        // Fast path 2: cookie persisted across restarts (15 h TTL), same host.
+        NetMirrorCookieStore.load()?.let { (cookie, host, _) ->
+            if (host == DomainRotator.current(Role.MOBILE)) {
+                CookieBox.put(cookie, host)
+                return cookie
+            }
+        }
         return withContext(Dispatchers.IO) {
             val maxTries = DomainRotator.liveCount(Role.MOBILE).coerceAtLeast(1)
             for (attempt in 1..maxTries) {
@@ -65,6 +73,7 @@ internal object OTTMirrorBackend {
                 val ok = tryVerifyHost(host)
                 if (ok != null) {
                     CookieBox.put(ok, host)
+                    NetMirrorCookieStore.save(ok, host)
                     HostThrottler.recordSuccess(host)
                     return@withContext ok
                 }
@@ -225,7 +234,6 @@ internal object OTTMirrorBackend {
             val cookie = verify()
             val host = DomainRotator.current(Role.MOBILE) ?: break
             val h = hostOf(host)
-            HostThrottler.throttle(h)
             val url = "$host/mobile${ott.mobilePrefix}/search.php?s=$encoded&t=${System.currentTimeMillis() / 1000}"
             val resp = runCatching {
                 app.get(

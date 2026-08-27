@@ -7,6 +7,7 @@ import com.lagradost.cloudstream3.plugins.Plugin
 @CloudstreamPlugin
 class OTTMirrorPlugin : Plugin() {
     override fun load(context: Context) {
+        NetMirrorCookieStore.init(context)
         registerMainAPI(OTTMirrorNetflix())
         registerMainAPI(OTTMirrorHotstar())
         registerMainAPI(OTTMirrorPrimeVideo())
