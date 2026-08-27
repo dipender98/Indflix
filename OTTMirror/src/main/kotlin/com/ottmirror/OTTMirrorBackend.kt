@@ -1,5 +1,6 @@
 package com.ottmirror
 
+import android.util.Log
 import com.lagradost.cloudstream3.ErrorLoadingException
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
@@ -235,6 +236,7 @@ internal object OTTMirrorBackend {
             val host = DomainRotator.current(Role.MOBILE) ?: break
             val h = hostOf(host)
             val url = "$host/mobile${ott.mobilePrefix}/search.php?s=$encoded&t=${System.currentTimeMillis() / 1000}"
+            Log.d("TEMP-OTTMIRROR", "search ott=${ott.id} query=$query host=$host path=/mobile${ott.mobilePrefix}/search.php ottCookie=${ott.ottCookie}")
             val resp = runCatching {
                 app.get(
                     url,
@@ -246,13 +248,17 @@ internal object OTTMirrorBackend {
             }.getOrNull()
 
             if (resp == null || isFailCode(resp.code)) {
+                Log.d("TEMP-OTTMIRROR", "search fail host=$host code=${resp?.code} -> rotate")
                 HostThrottler.recordBackoff(h)
                 DomainRotator.markFailed(Role.MOBILE, host)
                 continue
             }
             HostThrottler.recordSuccess(h)
-            return NetMirrorParsers.parseSearch(resp.text)
+            val hits = NetMirrorParsers.parseSearch(resp.text)
+            Log.d("TEMP-OTTMIRROR", "search ok ott=${ott.id} host=$host code=${resp.code} rawLen=${resp.text.length} hits=${hits.size}")
+            return hits
         }
+        Log.d("TEMP-OTTMIRROR", "search exhausted ott=${ott.id} -> ErrorLoadingException")
         throw ErrorLoadingException("NetMirror is unreachable right now — retry in a minute")
     }
 
