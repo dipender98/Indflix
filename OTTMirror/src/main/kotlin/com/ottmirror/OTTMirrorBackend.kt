@@ -7,10 +7,14 @@ import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.getQualityFromName
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -47,14 +51,13 @@ internal object OTTMirrorBackend {
         "Referer" to referer,
     )
 
-    // Headers the stream CDN expects on every .m3u8 / segment request. A bare
-    // Referer is enough for the first few segments, then the CDN rate-limits
-    // the player (429 "Too many requests"). The mobile app sends the full set.
     private fun streamHeaders(referer: String, cookie: String, ott: OttService): Map<String, String> = mapOf(
         "User-Agent" to MOBILE_UA,
         "Referer" to referer,
         "Origin" to referer.substringBefore("/home").ifBlank { referer },
         "Accept" to "*/*",
+        "Accept-Language" to "en-IN,en-US;q=0.9,en;q=0.8",
+        "X-Requested-With" to "XMLHttpRequest",
         "Cookie" to "t_hash_t=$cookie; ott=${ott.ottCookie}; hd=on",
     )
 
@@ -63,40 +66,81 @@ internal object OTTMirrorBackend {
     private fun isFailCode(code: Int): Boolean =
         code == 429 || code == 403 || code == 502 || code == 503 || code == 520 || code == 521 || code == 522
 
+    private fun limitedMessage(): String {
+        val wait = HostThrottler.cooldownSeconds()
+        return if (wait > 0) "NetMirror rate limit hit — auto-clears in ~${wait}s, try again then"
+        else "NetMirror servers busy — retry in a minute"
+    }
+
+
     // ------------------------------------------------------------------
-    // Cookie / verify (t_hash_t)
+    // Cookie / verify (t_hash_t) — singleflight: only one coroutine verifies
     // ------------------------------------------------------------------
 
+    private val verifyMutex = Mutex()
+    @Volatile private var inFlightVerify: kotlinx.coroutines.Deferred<String>? = null
+
     suspend fun verify(): String {
-        // Fast path 1: in-memory cookie, fresh, still on the issuing host.
-        CookieBox.tHashT.takeIf { CookieBox.fresh() && CookieBox.issuedHost == DomainRotator.current(Role.MOBILE) }
-            ?.let { return it }
-        // Fast path 2: cookie persisted across restarts (15 h TTL), same host.
+        // The cookie is backend-wide: any fresh copy is accepted regardless of
+        // which mirror currently serves us.
+        CookieBox.tHashT.takeIf { CookieBox.fresh() }?.let { return it }
         NetMirrorCookieStore.load()?.let { (cookie, host, _) ->
-            if (host == DomainRotator.current(Role.MOBILE)) {
-                CookieBox.put(cookie, host)
-                return cookie
-            }
+            CookieBox.put(cookie, host)
+            return cookie
         }
-        return withContext(Dispatchers.IO) {
-            val maxTries = DomainRotator.liveCount(Role.MOBILE).coerceAtLeast(1)
-            for (attempt in 1..maxTries) {
-                val host = DomainRotator.current(Role.MOBILE) ?: break
-                val ok = tryVerifyHost(host)
-                if (ok != null) {
-                    CookieBox.put(ok, host)
-                    NetMirrorCookieStore.save(ok, host)
-                    HostThrottler.recordSuccess(host)
-                    return@withContext ok
-                }
-                HostThrottler.recordBackoff(host)
-                DomainRotator.markFailed(Role.MOBILE, host)
+        val existing = inFlightVerify
+        if (existing != null && existing.isActive) {
+            return existing.await()
+        }
+        return verifyMutex.withLock {
+            inFlightVerify?.takeIf { it.isActive }?.let { return@withLock it.await() }
+            val deferred = kotlinx.coroutines.coroutineScope {
+                async(Dispatchers.IO) { doVerify() }
             }
-            throw ErrorLoadingException("NetMirror is unreachable right now (all hosts blocked) — retry in a minute")
+            inFlightVerify = deferred
+            deferred.await()
         }
     }
 
-    private suspend fun tryVerifyHost(host: String): String? {
+    private suspend fun doVerify(): String {
+        // Try each live mirror ONCE. A 429 means the IP is limited, not that
+        // the mirror is broken — wait the cooldown out and retry the same
+        // host instead of burning through the whole list with more requests.
+        val maxTries = DomainRotator.liveCount(Role.MOBILE).coerceAtLeast(1)
+        var retried429 = false
+        var attempt = 0
+        while (attempt < maxTries) {
+            attempt++
+            val host = DomainRotator.current(Role.MOBILE) ?: break
+            when (val result = tryVerifyHost(host)) {
+                is VerifyResult.Success -> {
+                    CookieBox.put(result.token, host)
+                    NetMirrorCookieStore.save(result.token, host)
+                    HostThrottler.recordSuccess()
+                    return result.token
+                }
+                is VerifyResult.Limited -> {
+                    if (!retried429) {
+                        retried429 = true
+                        HostThrottler.awaitCooldown()
+                        continue // same host, same attempt budget
+                    }
+                }
+                is VerifyResult.Dead -> DomainRotator.markFailed(Role.MOBILE, host)
+            }
+        }
+        val wait = HostThrottler.cooldownSeconds()
+        if (wait > 0) throw ErrorLoadingException("NetMirror rate-limited this connection — auto-clears in ~${wait}s, try again then")
+        throw ErrorLoadingException("NetMirror is unreachable right now (all hosts blocked) — retry in a minute")
+    }
+
+    private sealed interface VerifyResult {
+        data class Success(val token: String) : VerifyResult
+        data object Limited : VerifyResult
+        data object Dead : VerifyResult
+    }
+
+    private suspend fun tryVerifyHost(host: String): VerifyResult {
         // CNC Verse approach: POST /verify.php with redirects disabled, the
         // server answers 301 carrying Set-Cookie: t_hash_t=... on the redirect
         // response itself. Following the redirect (what app.post does) loses it.
@@ -107,9 +151,9 @@ internal object OTTMirrorBackend {
             .connectTimeout(10, TimeUnit.SECONDS)
             .readTimeout(10, TimeUnit.SECONDS)
             .build()
+        var sawNetworkError = false
         for (url in listOf("$host/verify.php", "$host/mobile/verify2.php")) {
-            val h = hostOf(url)
-            HostThrottler.throttle(h)
+            HostThrottler.gate()
             val req = Request.Builder()
                 .url(url)
                 .post(body.toRequestBody("application/x-www-form-urlencoded; charset=UTF-8".toMediaType()))
@@ -117,77 +161,57 @@ internal object OTTMirrorBackend {
                     (mobileHeaders("$host/verify2") + mapOf("Origin" to host)).forEach { (k, v) -> header(k, v) }
                 }
                 .build()
+            var saw429 = false
             val token = runCatching {
                 client.newCall(req).execute().use { resp ->
+                    if (resp.code == 429) {
+                        saw429 = true
+                        HostThrottler.recordLimited(resp.header("Retry-After"))
+                        return@use null
+                    }
+                    if (isFailCode(resp.code)) { saw429 = true; return@use null }
                     resp.headers.values("Set-Cookie").firstOrNull { it.startsWith("t_hash_t=") }
                         ?.substringAfter("t_hash_t=")?.substringBefore(";")
                 }
             }.getOrNull()
-            if (!token.isNullOrBlank()) return token
-            val bodyToken = app.post(
-                url,
-                headers = mobileHeaders("$host/verify2") + mapOf("Content-Type" to "application/x-www-form-urlencoded; charset=UTF-8"),
-                data = mapOf("g-recaptcha-response" to UUID.randomUUID().toString()),
-                timeout = 10,
-            ).text.let { html ->
-                val start = "data-addhash=\""
-                val idx = html.indexOf(start)
-                if (idx >= 0) html.substring(idx + start.length).substringBefore("\"").takeIf { it.isNotBlank() } else null
+            if (saw429) return VerifyResult.Limited
+            if (!token.isNullOrBlank()) return VerifyResult.Success(token)
+
+            HostThrottler.gate()
+            val posted = runCatching {
+                app.post(
+                    url,
+                    headers = mobileHeaders("$host/verify2") + mapOf("Content-Type" to "application/x-www-form-urlencoded; charset=UTF-8"),
+                    data = mapOf("g-recaptcha-response" to UUID.randomUUID().toString()),
+                    timeout = 10,
+                )
+            }.getOrElse {
+                sawNetworkError = true
+                return@getOrElse null
             }
-            if (bodyToken != null) return bodyToken
-        }
-        return null
-    }
-
-    // ------------------------------------------------------------------
-    // Health probe
-    // ------------------------------------------------------------------
-
-    @Volatile private var warmed = false
-
-    suspend fun warmUp() {
-        if (warmed) return
-        runCatching {
-            coroutineScope {
-                val mobile = async { probeMobile() }
-                val newtv = async { probeNewTv() }
-                mobile.await()
-                newtv.await()
+            if (posted == null) continue
+            if (posted.code == 429) {
+                HostThrottler.recordLimited(posted.headers["Retry-After"])
+                return VerifyResult.Limited
             }
+            if (isFailCode(posted.code)) return VerifyResult.Limited
+            val html = posted.text
+            val start = "data-addhash=\""
+            val idx = html.indexOf(start)
+            val bodyToken = if (idx >= 0) html.substring(idx + start.length).substringBefore("\"").takeIf { it.isNotBlank() } else null
+            if (bodyToken != null) return VerifyResult.Success(bodyToken)
         }
-        warmed = true
+        // No token and no 429: either the mirror is down or it changed shape.
+        // Network errors mean the mirror is dead; silent 200s without a token
+        // are treated the same so we move on.
+        return VerifyResult.Dead
     }
 
-    private suspend fun probeMobile() {
-        val host = DomainRotator.current(Role.MOBILE) ?: return
-        val h = hostOf(host)
-        HostThrottler.throttle(h)
-        val resp = runCatching {
-            app.get("$host/mobile/home?app=1", headers = mobileHeaders(host), timeout = 6)
-        }.getOrNull() ?: run {
-            DomainRotator.markFailed(Role.MOBILE, host)
-            return
-        }
-        if (isFailCode(resp.code)) {
-            HostThrottler.recordBackoff(host)
-            DomainRotator.markFailed(Role.MOBILE, host)
-        } else {
-            HostThrottler.recordSuccess(host)
-        }
-    }
 
-    private suspend fun probeNewTv() {
-        val base = runCatching { resolveNewTvBase(probe = true) }.getOrNull() ?: return
-        val h = hostOf(base)
-        HostThrottler.throttle(h)
-        val resp = runCatching { app.get("$base/newtv/player.php?id=warmup", headers = NEWTV_HEADERS, timeout = 6) }.getOrNull()
-        if (resp == null || isFailCode(resp.code)) {
-            HostThrottler.recordBackoff(h)
-            DomainRotator.markFailed(Role.NEWTV, base)
-        } else {
-            HostThrottler.recordSuccess(h)
-        }
-    }
+    // warmUp() was removed: it fired 2-3 extra requests ahead of every real
+    // one and was a primary contributor to the IP rate limit. Failures now
+    // surface in the real request path, which already rotates + waits.
+
 
     // ------------------------------------------------------------------
     // Home page
@@ -196,8 +220,7 @@ internal object OTTMirrorBackend {
     suspend fun getHomeRows(ott: OttService): List<Pair<String, List<String>>> {
         val cookie = verify()
         val host = DomainRotator.current(Role.MOBILE) ?: return emptyList()
-        val h = hostOf(host)
-        HostThrottler.throttle(h)
+        HostThrottler.gate()
         val resp = runCatching {
             app.get(
                 "$host/mobile/home?app=1",
@@ -208,12 +231,12 @@ internal object OTTMirrorBackend {
             )
         }.getOrNull() ?: return emptyList()
         if (resp.code == 429) {
-            HostThrottler.recordBackoff(h)
-            DomainRotator.markFailed(Role.MOBILE, host)
-            throw ErrorLoadingException("NetMirror servers busy — retry in a minute")
+            HostThrottler.recordLimited(resp.headers["Retry-After"])
+            throw ErrorLoadingException(limitedMessage())
         }
-        if (resp.code in 200..299) HostThrottler.recordSuccess(h)
+        if (resp.code in 200..299) HostThrottler.recordSuccess()
         return runCatching { parseHomeRows(resp.document) }.getOrDefault(emptyList())
+
     }
 
     fun parseHomeRows(doc: Document): List<Pair<String, List<String>>> {
@@ -242,12 +265,13 @@ internal object OTTMirrorBackend {
         val encoded = java.net.URLEncoder.encode(query, "UTF-8")
         val maxTries = DomainRotator.liveCount(Role.MOBILE).coerceAtLeast(1)
 
+        var retried429 = false
         for (attempt in 1..maxTries) {
             val cookie = verify()
             val host = DomainRotator.current(Role.MOBILE) ?: break
-            val h = hostOf(host)
             val url = "$host/mobile${ott.mobilePrefix}/search.php?s=$encoded&t=${System.currentTimeMillis() / 1000}"
             Log.d("TEMP-OTTMIRROR", "search ott=${ott.id} query=$query host=$host path=/mobile${ott.mobilePrefix}/search.php ottCookie=${ott.ottCookie}")
+            HostThrottler.gate()
             val resp = runCatching {
                 app.get(
                     url,
@@ -258,13 +282,22 @@ internal object OTTMirrorBackend {
                 )
             }.getOrNull()
 
+            if (resp?.code == 429) {
+                HostThrottler.recordLimited(resp.headers["Retry-After"])
+                if (!retried429) {
+                    retried429 = true
+                    HostThrottler.awaitCooldown()
+                    continue
+                }
+                throw ErrorLoadingException(limitedMessage())
+            }
             if (resp == null || isFailCode(resp.code)) {
                 Log.d("TEMP-OTTMIRROR", "search fail host=$host code=${resp?.code} -> rotate")
-                HostThrottler.recordBackoff(h)
                 DomainRotator.markFailed(Role.MOBILE, host)
                 continue
             }
-            HostThrottler.recordSuccess(h)
+            HostThrottler.recordSuccess()
+
             val hits = NetMirrorParsers.parseSearch(resp.text)
             Log.d("TEMP-OTTMIRROR", "search ok ott=${ott.id} host=$host code=${resp.code} rawLen=${resp.text.length} hits=${hits.size}")
             return hits
@@ -276,35 +309,42 @@ internal object OTTMirrorBackend {
     suspend fun loadPost(ott: OttService, id: String): NetMirrorPost? {
         val cookie = verify()
         val host = DomainRotator.current(Role.MOBILE) ?: return null
-        val h = hostOf(host)
-        HostThrottler.throttle(h)
-        val url = "$host/mobile${ott.mobilePrefix}/post.php?id=$id&t=${System.currentTimeMillis() / 1000}"
-        val resp = runCatching {
-            app.get(
-                url,
-                headers = mobileHeaders("$host/home"),
-                cookies = mapOf("t_hash_t" to cookie, "ott" to ott.ottCookie, "hd" to "on"),
-                referer = "$host/home",
-                timeout = 10,
-            )
-        }.getOrNull() ?: return null
-        if (resp.code == 429) {
-            HostThrottler.recordBackoff(h)
-            DomainRotator.markFailed(Role.MOBILE, host)
-            throw ErrorLoadingException("NetMirror servers busy — retry in a minute")
+        var retried429 = false
+        while (true) {
+            HostThrottler.gate()
+            val url = "$host/mobile${ott.mobilePrefix}/post.php?id=$id&t=${System.currentTimeMillis() / 1000}"
+            val resp = runCatching {
+                app.get(
+                    url,
+                    headers = mobileHeaders("$host/home"),
+                    cookies = mapOf("t_hash_t" to cookie, "ott" to ott.ottCookie, "hd" to "on"),
+                    referer = "$host/home",
+                    timeout = 10,
+                )
+            }.getOrNull() ?: return null
+            if (resp.code == 429) {
+                HostThrottler.recordLimited(resp.headers["Retry-After"])
+                if (!retried429) {
+                    retried429 = true
+                    HostThrottler.awaitCooldown()
+                    continue // same host — the limit is per-IP, rotation can't help
+                }
+                throw ErrorLoadingException(limitedMessage())
+            }
+            if (resp.code in 200..299) HostThrottler.recordSuccess()
+            return NetMirrorParsers.parsePost(resp.text)
         }
-        if (resp.code in 200..299) HostThrottler.recordSuccess(h)
-        return NetMirrorParsers.parsePost(resp.text)
     }
+
 
     suspend fun getEpisodes(ott: OttService, seriesId: String, seasonId: String): List<NetMirrorEpisode> {
         val cookie = verify()
         val host = DomainRotator.current(Role.MOBILE) ?: return emptyList()
-        val h = hostOf(host)
         val out = mutableListOf<NetMirrorEpisode>()
         var page = 1
+        var retried429 = false
         while (true) {
-            HostThrottler.throttle(h)
+            HostThrottler.gate()
             val url = "$host/mobile${ott.mobilePrefix}/episodes.php?s=$seasonId&series=$seriesId&t=${System.currentTimeMillis() / 1000}&page=$page"
             val resp = runCatching {
                 app.get(
@@ -315,7 +355,11 @@ internal object OTTMirrorBackend {
                     timeout = 10,
                 )
             }.getOrNull() ?: break
-            if (resp.code == 429) { HostThrottler.recordBackoff(h); break }
+            if (resp.code == 429) {
+                HostThrottler.recordLimited(resp.headers["Retry-After"])
+                if (!retried429) { retried429 = true; HostThrottler.awaitCooldown(); continue }
+                break
+            }
             if (resp.code !in 200..299) break
             val (eps, next) = NetMirrorParsers.parseEpisodes(resp.text)
             out.addAll(eps)
@@ -324,6 +368,7 @@ internal object OTTMirrorBackend {
         }
         return out
     }
+
 
     // ------------------------------------------------------------------
     // NewTV player API (primary stream source)
@@ -335,24 +380,41 @@ internal object OTTMirrorBackend {
         for (attempt in 1..maxTries) {
             val host = DomainRotator.current(Role.NEWTV) ?: break
             val h = hostOf(host)
-            HostThrottler.throttle(h)
+            HostThrottler.gate()
             val resp = runCatching {
                 app.get("$host/checknewtv.php", headers = NEWTV_HEADERS, timeout = 8)
             }.getOrNull()
+
+            var resolved: String? = null
             if (resp != null && resp.code in 200..299) {
                 val token = NetMirrorParsers.parseNewTvToken(resp.text)?.tokenHash?.takeIf { it.isNotBlank() }
                 if (token != null) {
                     val apiBase = Base64Decode.decodeUtf8(token)?.trimEnd('/')
-                    if (!apiBase.isNullOrBlank() && apiBase.startsWith("http")) {
-                        NewTvBase.set(apiBase)
-                        HostThrottler.recordSuccess(h)
-                        return apiBase
-                    }
+                    if (!apiBase.isNullOrBlank() && apiBase.startsWith("http")) resolved = apiBase
                 }
             }
-            if (resp != null && isFailCode(resp.code)) HostThrottler.recordBackoff(h)
-            DomainRotator.markFailed(Role.NEWTV, host)
+            if (resolved != null) {
+                NewTvBase.set(resolved)
+                HostThrottler.recordSuccess(h)
+                return resolved
+            }
+
+            if (resp == null) {
+                // Network error: this host is dead to us, advance to the next.
+                DomainRotator.markFailed(Role.NEWTV, host)
+            } else if (resp.code == 429) {
+                // IP-wide limit: no other NewTV domain will behave differently.
+                // Wait the cooldown out and retry the SAME host — never mark
+                // it dead, that would burn the whole domain list for nothing.
+                HostThrottler.recordLimited(resp.headers["Retry-After"])
+                HostThrottler.awaitCooldown()
+            } else {
+                // 5xx/403, or a 200 whose token doesn't parse (shape change).
+                // Both mean this host is unhealthy — advance.
+                DomainRotator.markFailed(Role.NEWTV, host)
+            }
         }
+
         if (probe) return ""
         throw ErrorLoadingException("NetMirror NewTV servers unreachable — retry in a minute")
     }
@@ -440,18 +502,32 @@ internal object OTTMirrorBackend {
         val newTvLinks = try {
             val apiBase = resolveNewTvBase()
             val h = hostOf(apiBase)
-            HostThrottler.throttle(h)
-            val resp = app.get(
-                "$apiBase/newtv/player.php?id=$contentId",
-                headers = NEWTV_HEADERS + mapOf("Ott" to ott.ottCookie),
-                timeout = 10,
-            )
+            var resp = run {
+                HostThrottler.gate()
+                app.get(
+                    "$apiBase/newtv/player.php?id=$contentId",
+                    headers = NEWTV_HEADERS + mapOf("Ott" to ott.ottCookie),
+                    timeout = 10,
+                )
+            }
+            if (resp.code == 429) {
+                // Wait out the limiter once — rotating to another NewTV domain
+                // hits the same IP limit and just burns mirrors.
+                HostThrottler.recordLimited(resp.headers["Retry-After"])
+                HostThrottler.awaitCooldown()
+                HostThrottler.gate()
+                resp = app.get(
+                    "$apiBase/newtv/player.php?id=$contentId",
+                    headers = NEWTV_HEADERS + mapOf("Ott" to ott.ottCookie),
+                    timeout = 10,
+                )
+            }
             if (resp.code == 429) {
                 saw429 = true
-                HostThrottler.recordBackoff(h)
-                DomainRotator.markFailed(Role.NEWTV, apiBase)
+                HostThrottler.recordLimited(resp.headers["Retry-After"])
                 emptyList()
             } else if (resp.code in 200..299) {
+
                 HostThrottler.recordSuccess(h)
                 val p = NetMirrorParsers.parseNewTvPlayer(resp.text)
                 p?.videoLink?.takeIf { it.isNotBlank() }?.let { vlink ->
@@ -475,7 +551,7 @@ internal object OTTMirrorBackend {
         if (nativeOk) return@withContext true
 
         newTvFailure?.let { throw it }
-        if (saw429) throw ErrorLoadingException("NetMirror servers busy — retry in a minute")
+        if (saw429) throw ErrorLoadingException(limitedMessage())
         false
     }
 
@@ -487,43 +563,57 @@ internal object OTTMirrorBackend {
         callback: (ExtractorLink) -> Unit,
     ): Boolean {
         val host = DomainRotator.current(Role.MOBILE) ?: return false
-        val h = hostOf(host)
-        // play.php lives on a mobile mirror, not net52.cc. Using the rotated
-        // host instead of a hardcoded mirror spreads play requests across the
-        // list, so one mirror can't absorb all the load and 429.
         val playHost = host
 
-        HostThrottler.throttle(playHost)
-        val playResp = runCatching {
-            app.post(
-                "$playHost/play.php",
-                headers = mobileHeaders("$playHost/home") + mapOf(
-                    "Content-Type" to "application/x-www-form-urlencoded; charset=UTF-8",
-                    "Origin" to playHost,
-                ),
-                data = mapOf("id" to ld.id),
-                cookies = mapOf("t_hash_t" to cookie, "ott" to ott.ottCookie, "hd" to "on"),
-                referer = "$playHost/home",
-                timeout = 10,
-            )
-        }.getOrNull()
-        if (playResp != null && playResp.code == 429) { HostThrottler.recordBackoff(playHost); return false }
+        suspend fun postPlay(): com.lagradost.nicehttp.NiceResponse? {
+            HostThrottler.gate()
+            return runCatching {
+
+                app.post(
+                    "$playHost/play.php",
+                    headers = mobileHeaders("$playHost/home") + mapOf(
+                        "Content-Type" to "application/x-www-form-urlencoded; charset=UTF-8",
+                        "Origin" to playHost,
+                    ),
+                    data = mapOf("id" to ld.id),
+                    cookies = mapOf("t_hash_t" to cookie, "ott" to ott.ottCookie, "hd" to "on"),
+                    referer = "$playHost/home",
+                    timeout = 10,
+                )
+            }.getOrNull()
+        }
+        var playResp = postPlay()
+        if (playResp?.code == 429) {
+            HostThrottler.recordLimited(playResp.headers["Retry-After"])
+            HostThrottler.awaitCooldown()
+            playResp = postPlay()
+        }
+        if (playResp == null || playResp.code == 429) return false
         val hToken = runCatching {
-            JSONObject(playResp?.text ?: return false).optString("h").takeIf { it.isNotBlank() }
+            JSONObject(playResp.text).optString("h").takeIf { it.isNotBlank() }
         }.getOrNull() ?: return false
 
-        HostThrottler.throttle(h)
         val playlistUrl = "$host/mobile${ott.mobilePrefix}/playlist.php?id=${ld.id}&t=${java.net.URLEncoder.encode(ld.title, "UTF-8")}&tm=${System.currentTimeMillis() / 1000}&h=${java.net.URLEncoder.encode(hToken, "UTF-8")}"
-        val playlistResp = runCatching {
-            app.get(
-                playlistUrl,
-                headers = mobileHeaders("$host/home"),
-                cookies = mapOf("t_hash_t" to cookie, "ott" to ott.ottCookie, "hd" to "on"),
-                referer = "$host/home",
-                timeout = 10,
-            )
-        }.getOrNull() ?: return false
-        if (playlistResp.code == 429) { HostThrottler.recordBackoff(h); return false }
+        suspend fun getPlaylist() = run {
+            HostThrottler.gate()
+            runCatching {
+                app.get(
+                    playlistUrl,
+                    headers = mobileHeaders("$host/home"),
+                    cookies = mapOf("t_hash_t" to cookie, "ott" to ott.ottCookie, "hd" to "on"),
+                    referer = "$host/home",
+                    timeout = 10,
+                )
+            }.getOrNull()
+        }
+        var playlistResp = getPlaylist() ?: return false
+        if (playlistResp.code == 429) {
+            HostThrottler.recordLimited(playlistResp.headers["Retry-After"])
+            HostThrottler.awaitCooldown()
+            playlistResp = getPlaylist() ?: return false
+        }
+        if (playlistResp.code == 429) return false
+
 
         val playlist = NetMirrorParsers.parsePlaylist(playlistResp.text) ?: return false
         val sources = playlist.sources.orEmpty().filter { !it.file.isBlank() }

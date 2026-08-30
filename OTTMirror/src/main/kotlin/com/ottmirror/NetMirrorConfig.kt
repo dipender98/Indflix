@@ -54,6 +54,10 @@ internal object NewTvBase {
 }
 
 internal object CookieBox {
+    // t_hash_t is issued by the NetMirror backend itself, not by a specific
+    // mirror domain — the same cookie works on every mirror. Treating it as
+    // host-bound forced a full re-verify (a request burst) after every
+    // rotation, which is what tripped the IP rate limiter.
     @Volatile var tHashT: String = ""
         private set
     @Volatile var issuedHost: String = ""
@@ -61,11 +65,12 @@ internal object CookieBox {
     @Volatile var expiresAt: Long = 0L
     fun put(value: String, host: String) {
         tHashT = value; issuedHost = host
-        expiresAt = System.currentTimeMillis() + 15 * 60 * 1000L
+        expiresAt = System.currentTimeMillis() + 60 * 60 * 1000L
     }
     fun fresh(): Boolean = tHashT.isNotBlank() && System.currentTimeMillis() < expiresAt
     fun clear() { tHashT = ""; issuedHost = ""; expiresAt = 0L }
 }
+
 
 // Persistent t_hash_t (15 h TTL) so a restart never pays the verify round-trip
 // again, matching the reference repo's bypass()/SharedPreferences approach.

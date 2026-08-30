@@ -8,23 +8,45 @@ enum class Role(val label: String) {
 }
 
 object DomainRotator {
+    private const val DEAD_HOST_RECOVERY_MS = 5 * 60 * 1000L
+
     private class RoleState(hosts: List<String>) {
         val hosts = hosts
         var currentIndex = 0
-        val dead = HashSet<String>()
+        val dead = ConcurrentHashMap<String, Long>()
 
         fun current(): String? {
+            recoverStale()
             for (offset in 0 until hosts.size) {
                 val idx = (currentIndex + offset) % hosts.size
                 val h = hosts[idx]
-                if (!dead.contains(h)) return h
+                if (!dead.containsKey(h)) return h
             }
             return null
         }
 
         fun advance() { currentIndex = (currentIndex + 1) % hosts.size }
-        fun markDead(host: String) { dead.add(host) }
-        fun liveCount(): Int = hosts.count { it !in dead }
+
+        fun markDead(host: String) {
+            dead[host] = System.currentTimeMillis()
+        }
+
+        fun liveCount(): Int {
+            recoverStale()
+            return hosts.count { !dead.containsKey(it) }
+        }
+
+        private fun recoverStale() {
+            val now = System.currentTimeMillis()
+            val iter = dead.entries.iterator()
+            while (iter.hasNext()) {
+                val (host, diedAt) = iter.next()
+                if (now - diedAt > DEAD_HOST_RECOVERY_MS) {
+                    iter.remove()
+                    HostThrottler.recordSuccess(host)
+                }
+            }
+        }
     }
 
     private val states = ConcurrentHashMap<Role, RoleState>()

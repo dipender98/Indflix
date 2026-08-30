@@ -68,7 +68,6 @@ abstract class OTTMirrorProvider(
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         if (page > 1) return null
         return runCatching {
-            OTTMirrorBackend.warmUp()
             val rows = OTTMirrorBackend.getHomeRows(ott)
             if (rows.isEmpty()) return null
             val lists = rows.map { (name, ids) ->
@@ -138,7 +137,6 @@ abstract class OTTMirrorProvider(
     }
 
     private suspend fun loadDetail(ld: OTTMirrorBackend.LoadData): LoadResponse {
-        OTTMirrorBackend.warmUp()
         // post.php does NOT echo the content id in its body, so the LoadResponse
         // URL and episode seriesId must come from the id we already hold.
         val contentId = ld.id
@@ -260,7 +258,6 @@ abstract class OTTMirrorProvider(
     ): Boolean {
         val ld = OTTMirrorBackend.decodeLoadData(data) ?: return false
         return runCatching {
-            OTTMirrorBackend.warmUp()
             OTTMirrorBackend.loadLinks(ott, data, subtitleCallback, callback)
         }.getOrDefault(false)
     }

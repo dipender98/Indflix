@@ -3,44 +3,94 @@ package com.ottmirror
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import java.util.concurrent.ConcurrentHashMap
+import kotlin.math.max
 import kotlin.random.Random
 
+/**
+ * Global request gate for the NetMirror backend.
+ *
+ * The backend rate-limits by client IP + session, NOT by domain — so the old
+ * per-host throttling + host rotation strategy only made things worse (every
+ * 429 burned another mirror while the underlying IP ban kept ticking). This
+ * gate replaces that with:
+ *
+ *  1. One global minimum spacing between ANY two requests to the backend.
+ *  2. A server-driven cooldown: on 429 we honor `Retry-After` (falling back
+ *     to exponential backoff) and EVERY caller waits it out on the same host
+ *     instead of rotating and re-firing.
+ */
 object HostThrottler {
-    const val BASE_INTERVAL_MS = 1500L
-    const val MAX_BACKOFF_MS = 60_000L
+    const val MIN_GAP_MS = 1200L
+    private const val MAX_BACKOFF_MS = 60_000L
 
-    fun nextInterval(current: Long): Long =
-        (if (current <= 0) 2000L else current * 2).coerceAtMost(MAX_BACKOFF_MS)
-
-    private data class State(var intervalMs: Long = BASE_INTERVAL_MS, var lastRequestMs: Long = 0L)
-    private val states = ConcurrentHashMap<String, State>()
     private val mutex = Mutex()
+    private var lastRequestMs = 0L
 
-    suspend fun throttle(host: String): Long {
+    @Volatile private var cooldownUntilMs = 0L
+    @Volatile private var lastBackoffMs = 0L
+
+    /** Suspend until both the global spacing and any active cooldown elapse. */
+    suspend fun gate() {
         mutex.withLock {
-            val s = states.getOrPut(host) { State() }
             val now = System.currentTimeMillis()
-            val wait = s.intervalMs - (now - s.lastRequestMs)
-            if (wait > 0) {
-                val jittered = (wait * (1.0 + (Random.nextDouble() - 0.5) * 0.4)).toLong().coerceAtLeast(0L)
-                delay(jittered)
-                s.lastRequestMs = System.currentTimeMillis()
-                return jittered
-            }
-            s.lastRequestMs = now
-            return 0L
+            val wait = max(cooldownUntilMs - now, MIN_GAP_MS - (now - lastRequestMs))
+            if (wait > 0) delay(wait + Random.nextLong(0, 300))
+            lastRequestMs = System.currentTimeMillis()
         }
     }
 
-    fun recordBackoff(host: String) {
-        states.compute(host) { _, s -> (s ?: State()).also { it.intervalMs = nextInterval(s?.intervalMs ?: 0L) } }
+    /** Wait out whatever cooldown is currently active (used before a retry). */
+    suspend fun awaitCooldown() {
+        val wait = cooldownUntilMs - System.currentTimeMillis()
+        if (wait > 0) delay(wait + Random.nextLong(200, 600))
     }
 
-    fun recordSuccess(host: String) {
-        states.compute(host) { _, s -> (s ?: State()).also { it.intervalMs = BASE_INTERVAL_MS } }
+    fun cooldownSeconds(): Int =
+        ((cooldownUntilMs - System.currentTimeMillis()) / 1000L).toInt().coerceAtLeast(0)
+
+    fun isCoolingDown(): Boolean = System.currentTimeMillis() < cooldownUntilMs
+
+    /**
+     * Record a 429. Honors the server's Retry-After when present, otherwise
+     * doubles the previous penalty (5s -> 10s -> 20s ... capped at 60s).
+     */
+    fun recordLimited(retryAfterHeader: String? = null) {
+        val serverMs = parseRetryAfterSeconds(retryAfterHeader) * 1000L
+        val base = when {
+            serverMs > 0 -> serverMs
+            lastBackoffMs <= 0 -> 5_000L
+            else -> (lastBackoffMs * 2).coerceAtMost(MAX_BACKOFF_MS)
+        }
+        lastBackoffMs = base
+        cooldownUntilMs = System.currentTimeMillis() + base
     }
 
-    fun currentInterval(host: String): Long = states[host]?.intervalMs ?: BASE_INTERVAL_MS
-    fun reset() { states.clear() }
+    /** Any 2xx clears the backoff ladder so a healthy session stays fast. */
+    fun recordSuccess(host: String = "") {
+        lastBackoffMs = 0L
+        cooldownUntilMs = 0L
+    }
+
+    // Kept for DomainRotator's stale-host recovery hook; hosts no longer carry
+    // individual throttle state since the limiter is server-wide.
+    fun recordBackoff(host: String = "") { /* superseded by recordLimited */ }
+
+    fun reset() {
+        lastRequestMs = 0L
+        cooldownUntilMs = 0L
+        lastBackoffMs = 0L
+    }
+
+    /** Parse a Retry-After header value (delta-seconds or HTTP date). */
+    fun parseRetryAfterSeconds(value: String?): Int {
+        val ra = value?.trim() ?: return 0
+        ra.toIntOrNull()?.let { return it.coerceIn(1, 120) }
+        return try {
+            val serverTime = java.text.SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss z", java.util.Locale.US)
+                .parse(ra)?.time ?: return 0
+            (((serverTime - System.currentTimeMillis()) / 1000).toInt()).coerceIn(1, 120)
+        } catch (_: Exception) {
+            0
+        }
+    }
 }
