@@ -23,9 +23,23 @@ import java.util.concurrent.TimeUnit
 
 internal object OTTMirrorBackend {
 
+    // CNCVerse-exact mobile request profile (verbatim from the working
+    // reference): full WebView client-hint + Sec-Fetch set. The backend's
+    // anti-abuse scores requests against its own WebView app fingerprint —
+    // the stripped header set we sent before reads as a bot.
     private fun mobileHeaders(referer: String): Map<String, String> = mapOf(
         "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language" to "en-IN,en-US;q=0.9,en;q=0.8",
+        "Cache-Control" to "max-age=0",
+        "Connection" to "keep-alive",
+        "sec-ch-ua" to "\"Not(A:Brand\";v=\"8\", \"Chromium\";v=\"144\", \"Android WebView\";v=\"144\"",
+        "sec-ch-ua-mobile" to "?0",
+        "sec-ch-ua-platform" to "\"Android\"",
+        "Sec-Fetch-Dest" to "document",
+        "Sec-Fetch-Mode" to "navigate",
+        "Sec-Fetch-Site" to "same-origin",
+        "Sec-Fetch-User" to "?1",
+        "Upgrade-Insecure-Requests" to "1",
         "User-Agent" to MOBILE_UA,
         "X-Requested-With" to "XMLHttpRequest",
         "Referer" to referer,
@@ -159,10 +173,11 @@ internal object OTTMirrorBackend {
     }
 
     private suspend fun tryVerifyHost(host: String): VerifyResult {
-        // CNC Verse approach: POST /verify.php with redirects disabled — the
-        // server answers 301 carrying Set-Cookie: t_hash_t=... on the redirect
-        // response itself. Exactly ONE request per host (the old two-URL,
-        // two-method fallback quadrupled the verify cost per host).
+        // CNCVerse-exact verify (verbatim from the working reference):
+        // POST /verify.php with redirects disabled, DESKTOP Chrome UA,
+        // net22.cc Origin/Referer decoys (net22/verify2 is never actually
+        // fetched). The server answers 301 carrying Set-Cookie: t_hash_t=...
+        // on the redirect response itself. Exactly ONE request per host.
         val body = "g-recaptcha-response=${UUID.randomUUID()}"
         val client = OkHttpClient.Builder()
             .followRedirects(false)
@@ -173,9 +188,26 @@ internal object OTTMirrorBackend {
         HostThrottler.gate()
         val req = Request.Builder()
             .url("$host/verify.php")
-            .post(body.toRequestBody("application/x-www-form-urlencoded; charset=UTF-8".toMediaType()))
+            .post(body.toRequestBody("application/x-www-form-urlencoded".toMediaType()))
             .apply {
-                (mobileHeaders("$host/verify2") + mapOf("Origin" to host)).forEach { (k, v) -> header(k, v) }
+                mapOf(
+                    "Origin" to "https://net22.cc",
+                    "Referer" to "https://net22.cc/verify2",
+                    "Content-Type" to "application/x-www-form-urlencoded",
+                    "User-Agent" to DESKTOP_VERIFY_UA,
+                    "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                    "Accept-Language" to "en-IN,en-US;q=0.9,en;q=0.8",
+                    "Cache-Control" to "max-age=0",
+                    "Connection" to "keep-alive",
+                    "sec-ch-ua" to "\"Chromium\";v=\"147\", \"Not(A:Brand\";v=\"24\"",
+                    "sec-ch-ua-mobile" to "?0",
+                    "sec-ch-ua-platform" to "\"Windows\"",
+                    "Sec-Fetch-Dest" to "document",
+                    "Sec-Fetch-Mode" to "navigate",
+                    "Sec-Fetch-Site" to "cross-site",
+                    "Sec-Fetch-User" to "?1",
+                    "Upgrade-Insecure-Requests" to "1",
+                ).forEach { (k, v) -> header(k, v) }
             }
             .build()
         val (code, setCookie, respBody) = runCatching {
@@ -428,9 +460,11 @@ internal object OTTMirrorBackend {
     suspend fun resolveNewTvBase(probe: Boolean = false): String {
         if (NewTvBase.value.isBlank()) NewTvBase.warm()
         NewTvBase.value.takeIf { it.isNotBlank() }?.let { return it }
-        // Cap the domain sweep: from a limited IP every host answers the same
-        // anti-abuse body, and walking all 24 domains only feeds the limiter.
-        val maxTries = 3
+        // Cap the domain sweep well below the full 24-host list (the
+        // reference walks all of them) but wide enough to survive several
+        // dead mirrors; NewTvBase is cached in-memory + persisted 24 h, so
+        // this walk is rare.
+        val maxTries = 8
         var limitedAttempts = 0
         for (attempt in 1..maxTries) {
             val host = DomainRotator.current(Role.NEWTV) ?: break
@@ -490,6 +524,13 @@ internal object OTTMirrorBackend {
         OttService.HOTSTAR -> "Hotstar"
         OttService.PRIME -> "Prime Video"
         OttService.DISNEY -> "Disney+"
+    }
+
+    // CNCVerse quirk: the NewTV player is addressed with Ott: hs for BOTH
+    // Hotstar and Disney+ (dp/studio cookies are browse-only concerns).
+    private fun newTvOttHeader(ott: OttService): String = when (ott) {
+        OttService.DISNEY -> "hs"
+        else -> ott.ottCookie
     }
 
     private fun emit(
@@ -580,23 +621,31 @@ internal object OTTMirrorBackend {
         }
 
         // ------------------------------------------------------------------
-        // Path 2 — NewTV player (CNCVerse-proven fallback flow).
+        // Path 2 — NewTV player (CNCVerse-proven playback flow).
         //
-        // The reference extension that actually works (NivinCNC/CNCVerse)
-        // does playback EXACTLY like this: player.php with the Ott + empty
-        // Usertoken headers, then emit video_link as-is with referer =
-        // response.referer. It never fetches or validates the master at link
-        // time — the player fetches it, and the hd=on cookie we attach to
-        // every stream link (streamHeaders) is what makes the CDN serve real
-        // rendition keys. A headerless probe of the master shows a dead
-        // "?in=unknown" template, but that template is an artifact of
-        // requesting without hd=on, not the real response.
+        // The reference extension works with exactly this shape: player.php
+        // carrying the NewTV base headers + Ott (+ Usertoken:""), where the
+        // session cookie reaches the server through the shared cookie jar.
+        // We attach t_hash_t explicitly (our verify uses a separate raw
+        // client, so our jar is empty). The server then answers status:"ok"
+        // with a REAL video_link; the headerless template we saw while
+        // probing (status "otp", literal "?in=unknown" variants, the same
+        // file id 220884 for every title) is the unauthenticated placeholder.
+        // CNCVerse requires status:"ok" — match that strictly and fall
+        // through to embed-tmdb otherwise.
         // ------------------------------------------------------------------
         var newTvFailure: Throwable? = null
         var newTvOk = false
         try {
             val apiBase = resolveNewTvBase()
             val playerUrl = "$apiBase/newtv/player.php?id=$contentId"
+            // Session context for the player API. No extra request: the
+            // cookie comes from the already-warm CookieBox (15 h TTL).
+            val cookie = runCatching { verify() }.getOrDefault("")
+            val playerCookie = buildString {
+                if (cookie.isNotBlank()) append("t_hash_t=$cookie; ")
+                append("hd=on")
+            }
             var limitedAttempts = 0
             var attempts = 0
             while (attempts++ < 4) {
@@ -605,8 +654,9 @@ internal object OTTMirrorBackend {
                     app.get(
                         playerUrl,
                         headers = NEWTV_HEADERS + mapOf(
-                            "Ott" to ott.ottCookie,
+                            "Ott" to newTvOttHeader(ott),
                             "Usertoken" to "",
+                            "Cookie" to playerCookie,
                         ),
                         timeout = 10,
                     )
@@ -616,12 +666,9 @@ internal object OTTMirrorBackend {
                     NetMirrorGuard.Verdict.OK -> {
                         val p = NetMirrorParsers.parseNewTvPlayer(resp.text)
                         val vlink = p?.videoLink?.takeIf { it.isNotBlank() }
-                        // Accept any response that carries a real video_link
-                        // and is not an explicit failure. Do NOT require
-                        // status=="ok": player.php answers "otp" (one-time
-                        // play) on some titles with a perfectly valid link,
-                        // and the hd=on cookie we attach fixes the master.
-                        if (vlink != null && p?.status != "n") {
+                        // Strictly CNCVerse: only status:"ok" carries a real
+                        // master; everything else is the placeholder template.
+                        if (p?.status == "ok" && vlink != null) {
                             val ref = p.referer ?: apiBase
                             emit(ott, vlink, ref, getQualityFromName(vlink), cookie = "", subtitleCallback, callback)
                             LinkCache.put(contentId, collect(ott, listOf(vlink), ref, ""))

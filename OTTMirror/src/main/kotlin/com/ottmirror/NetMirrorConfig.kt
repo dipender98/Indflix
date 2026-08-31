@@ -202,4 +202,14 @@ internal val NEWTV_HEADERS = mapOf(
     "Accept" to "application/json, text/plain, */*",
 )
 
-internal val MOBILE_UA = "Mozilla/5.0 (Linux; Android 12; RMX2117 Build/SP1A.210812.016; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/147.0.7727.55 Mobile Safari/537.36 /OS.Gatu v3.0"
+// CNCVerse-exact mobile WebView profile (Pixel 5 / Chrome 144). The full
+// sec-ch-ua + Sec-Fetch-* set matters: the backend's anti-abuse is tuned for
+// its own WebView app, and a request missing those headers reads as a bot —
+// which is exactly how the per-IP limiter ends up policing us harder than
+// the reference extension.
+internal val MOBILE_UA = "Mozilla/5.0 (Linux; Android 13; Pixel 5 Build/TQ3A.230901.001; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/144.0.7559.132 Safari/537.36 /OS.Gatu v3.0"
+
+// CNCVerse verifies with a DESKTOP Chrome UA and net22.cc Origin/Referer
+// decoys (net22/verify2 is never actually requested — they are what the
+// real site's verify page would send).
+internal const val DESKTOP_VERIFY_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
