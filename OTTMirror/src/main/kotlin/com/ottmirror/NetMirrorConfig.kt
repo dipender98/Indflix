@@ -104,14 +104,15 @@ internal object CookieBox {
     // host-bound forced a full re-verify (a request burst) after every
     // rotation, which is what tripped the IP rate limiter.
     //
-    // Live probing (Aug 2026) shows the SERVER side of the session lives
-    // only ~4-5 minutes from issue: a cookie verified at T worked at T+210s
-    // and answered {"status":"n","error":"Invalid User"} at T+290s. The old
-    // 60-minute TTL served a dead cookie on virtually every request, which
-    // is the actual root cause of the "Too many request in short.."-family
-    // failures. 3 minutes stays safely under the observed death window; the
-    // re-verify is one request, collapsed by verify()'s singleflight.
-    private const val SESSION_TTL_MS = 3 * 60 * 1000L
+    // CNCVerse-proven trust window: the reference extension reuses t_hash_t
+    // for 15 h and never re-verifies on a timer. Our earlier 3-min TTL (based
+    // on a 4-5 min server-death probe, later shown wrong because the probe was
+    // made from a limited IP) forced a verify.php POST every few minutes of
+    // browsing — that's the main self-inflicted feed into the per-IP limiter.
+    // 15 h keeps verify() effectively once per session. SESSION_DEAD detection
+    // (Invalid User body) remains as the recovery net for genuine server-side
+    // expiry.
+    private const val SESSION_TTL_MS = 15L * 60 * 60 * 1000  // 15 h
     @Volatile var tHashT: String = ""
         private set
     @Volatile var issuedHost: String = ""

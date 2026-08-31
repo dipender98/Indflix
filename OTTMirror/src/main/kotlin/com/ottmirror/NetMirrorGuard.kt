@@ -59,17 +59,18 @@ internal object NetMirrorGuard {
             (body.contains("status") || body.contains("error"))
 
     /**
-     * Standard reaction to a limit event: record the cooldown (server never
-     * sends Retry-After, so the 5s -> 60s ladder applies) and wait it out.
-     * Returns true when the caller should retry. [attempt] is the number of
-     * limit events already handled in this call (1-based); after the second
-     * wait the caller gives up instead of feeding the limiter.
+     * Reaction to a limit event. Records the cooldown and returns FALSE —
+     * fail fast, exactly like the CNCVerse reference, which never waits out
+     * the limiter. On a shared/CGNAT IP the bucket is drained by other users
+     * and the server never sends Retry-After, so waiting 15-90 s then
+     * re-firing the same request only (a) stalls the user and (b) feeds the
+     * very limiter we are trying to escape. The actionable
+     * [OTTMirrorBackend.limitedMessage] tells the user to retry in ~N s; a
+     * later tap starts from a fresh budget.
      */
     suspend fun onLimited(attempt: Int): Boolean {
         HostThrottler.recordLimited(null)
-        if (attempt >= 2) return false
-        HostThrottler.awaitCooldown()
-        return true
+        return false
     }
 
     /** Session died: drop both caches so the next verify() re-issues. */
