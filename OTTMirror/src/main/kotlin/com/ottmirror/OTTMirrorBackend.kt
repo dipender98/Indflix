@@ -513,38 +513,6 @@ internal object OTTMirrorBackend {
         )
     }
 
-    /**
-     * Fetch the NewTV master playlist ONCE and judge whether it is actually
-     * playable. Live probing (Aug 2026) proved the sessionless player.php
-     * answers with a template master whose video variants carry the literal
-     * key "?in=unknown::ni" (they 404) and whose audio group URI has an empty
-     * host — emitting it blind is exactly the "no link" bug. Returns:
-     *  true  -> master looks playable, emit the link.
-     *  false -> LIMITED or dead template, fall through to the next path.
-     *  null  -> network failure, unknown; fall through.
-     * imgcdn is a different backend from the net7x limiter, so a limit verdict
-     * here does NOT feed the shared cooldown ladder.
-     */
-    private suspend fun newTvMasterAlive(masterUrl: String, referer: String): Boolean? {
-        HostThrottler.gate()
-        val resp = runCatching {
-            app.get(
-                masterUrl,
-                headers = NEWTV_HEADERS + mapOf(
-                    "Referer" to referer,
-                    // The HLS CDN requires the hd=on marker on .m3u8 requests
-                    // (CNCVerse injects it via getVideoInterceptor).
-                    "Cookie" to "hd=on",
-                ),
-                timeout = 10,
-            )
-        }.getOrNull() ?: return null
-        return when (NetMirrorGuard.classify(resp.code, resp.text)) {
-            NetMirrorGuard.Verdict.OK -> !NetMirrorParsers.newTvMasterIsDead(resp.text)
-            else -> false
-        }
-    }
-
     // Cache entries must carry the SAME referer/headers as the live links, or
     // a replayed stream would be served with the wrong hotlink context. The
     // referer is the player page (…/home), never the stream URL itself.
@@ -580,9 +548,72 @@ internal object OTTMirrorBackend {
         var sawLimited = false
 
         // ------------------------------------------------------------------
-        // Path 1 — embed-tmdb (sessionless, TMDB-keyed, different backend).
-        // The only path that cannot hit the net7x "Too many request in short.."
-        // limiter. One GET, direct signed MP4, no session, no adaptive storm.
+        // Path 1 — NewTV player (CNCVerse-proven primary flow).
+        //
+        // The reference extension that actually works (NivinCNC/CNCVerse)
+        // does playback EXACTLY like this: player.php with the Ott + empty
+        // Usertoken headers, require status:"ok", then emit video_link as-is
+        // with referer = response.referer. It never fetches or validates the
+        // master at link time — the player fetches it, and the hd=on cookie
+        // we attach to every stream link (streamHeaders) is what makes the
+        // CDN serve real rendition keys. A headerless probe of the master
+        // shows a dead "?in=unknown" template, but that template is an
+        // artifact of requesting without hd=on, not the real response.
+        // ------------------------------------------------------------------
+        var newTvFailure: Throwable? = null
+        var newTvOk = false
+        try {
+            val apiBase = resolveNewTvBase()
+            val playerUrl = "$apiBase/newtv/player.php?id=$contentId"
+            var limitedAttempts = 0
+            var attempts = 0
+            while (attempts++ < 4) {
+                HostThrottler.gate()
+                val resp = runCatching {
+                    app.get(
+                        playerUrl,
+                        headers = NEWTV_HEADERS + mapOf(
+                            "Ott" to ott.ottCookie,
+                            "Usertoken" to "",
+                        ),
+                        timeout = 10,
+                    )
+                }.getOrNull() ?: break
+
+                when (NetMirrorGuard.classify(resp.code, resp.text)) {
+                    NetMirrorGuard.Verdict.OK -> {
+                        val p = NetMirrorParsers.parseNewTvPlayer(resp.text)
+                        val vlink = p?.videoLink?.takeIf { it.isNotBlank() }
+                        // Accept any response that carries a real video_link
+                        // and is not an explicit failure. Do NOT require
+                        // status=="ok": player.php answers "otp" (one-time
+                        // play) on some titles with a perfectly valid link,
+                        // and the hd=on cookie we attach fixes the master.
+                        if (vlink != null && p?.status != "n") {
+                            val ref = p.referer ?: apiBase
+                            emit(ott, vlink, ref, getQualityFromName(vlink), cookie = "", subtitleCallback, callback)
+                            LinkCache.put(contentId, collect(ott, listOf(vlink), ref, ""))
+                            newTvOk = true
+                        }
+                        break
+                    }
+                    NetMirrorGuard.Verdict.LIMITED -> {
+                        sawLimited = true
+                        limitedAttempts++
+                        if (!NetMirrorGuard.onLimited(limitedAttempts)) break
+                    }
+                    // player.php needs no session; anything else final.
+                    else -> break
+                }
+            }
+        } catch (e: Exception) {
+            newTvFailure = e
+        }
+        if (newTvOk) return@withContext true
+
+        // ------------------------------------------------------------------
+        // Path 2 — embed-tmdb (sessionless, TMDB-keyed, different backend).
+        // Bonus sessionless fallback when the NewTV player has no stream.
         // ------------------------------------------------------------------
         val embed = ld.tmdbId?.let { tmdbId ->
             runCatching { EmbedTmdb.resolve(tmdbId, ld.season, ld.episode) }.getOrNull()
@@ -605,73 +636,6 @@ internal object OTTMirrorBackend {
                 runCatching { subtitleCallback(SubtitleFile(c.name.ifBlank { c.lang.ifBlank { "subs" } }, c.url)) }
             }
             LinkCache.put(contentId, listOf(link))
-            return@withContext true
-        }
-
-        // ------------------------------------------------------------------
-        // Path 2 — NewTV player (imgcdn backend, sessionless but the master
-        // must be VALIDATED: the sessionless template carries ?in=unknown
-        // variants that 404. Validated = single fetch, then emit.
-        // ------------------------------------------------------------------
-        var newTvFailure: Throwable? = null
-        var validatedNewTv: Pair<String, String>? = null
-        try {
-            val apiBase = resolveNewTvBase()
-            val playerUrl = "$apiBase/newtv/player.php?id=$contentId"
-            var parsedLink: String? = null
-            var parsedReferer: String? = null
-            var limitedAttempts = 0
-            var attempts = 0
-            while (attempts++ < 4) {
-                HostThrottler.gate()
-                val resp = runCatching {
-                    app.get(
-                        playerUrl,
-                        // CNCVerse-exact headers: Ott + empty Usertoken. The
-                        // empty Usertoken header is what makes player.php answer
-                        // status:"ok" with a real stream instead of the dead
-                        // "otp" template.
-                        headers = NEWTV_HEADERS + mapOf(
-                            "Ott" to ott.ottCookie,
-                            "Usertoken" to "",
-                        ),
-                        timeout = 10,
-                    )
-                }.getOrNull() ?: break
-
-                when (NetMirrorGuard.classify(resp.code, resp.text)) {
-                    NetMirrorGuard.Verdict.OK -> {
-                        val p = NetMirrorParsers.parseNewTvPlayer(resp.text)
-                        parsedLink = p?.videoLink?.takeIf { it.isNotBlank() }
-                        parsedReferer = p?.referer
-                        break
-                    }
-                    NetMirrorGuard.Verdict.LIMITED -> {
-                        sawLimited = true
-                        limitedAttempts++
-                        if (!NetMirrorGuard.onLimited(limitedAttempts)) break
-                    }
-                    // player.php needs no session; anything else final.
-                    else -> break
-                }
-            }
-
-            val vlink = parsedLink
-            if (vlink != null) {
-                val ref = parsedReferer ?: apiBase
-                when (newTvMasterAlive(vlink, ref)) {
-                    true -> validatedNewTv = vlink to ref
-                    false, null -> { /* dead template or unknown — fall through */ }
-                }
-            }
-        } catch (e: Exception) {
-            newTvFailure = e
-        }
-
-        if (validatedNewTv != null) {
-            val (vlink, ref) = validatedNewTv
-            emit(ott, vlink, ref, getQualityFromName(vlink), cookie = "", subtitleCallback, callback)
-            LinkCache.put(contentId, collect(ott, listOf(vlink), ref, ""))
             return@withContext true
         }
 
