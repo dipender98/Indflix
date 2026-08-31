@@ -32,10 +32,11 @@ OTTMirror/
     OTTMirrorDisneyPlus.kt       MainAPI (Disney+, ott=dp, /mobile/hs/*)
     OTTMirrorProvider.kt         abstract base: home/search/load/loadLinks via backend
     OTTMirrorBackend.kt          NetMirror engine: verify, home, search, post, episodes, link flow (NewTV + native)
-    NetMirrorConfig.kt           per-OTT config + host lists + cookie/NewTvBase caches + persisted cookie store
+    NetMirrorGuard.kt            response classifier (200-body errors, not HTTP 429) + recovery helpers
+    NetMirrorConfig.kt           per-OTT config + host lists + cookie/NewTvBase caches + response caches + persisted cookie store
     Base64Decode.kt              pure-JVM base64 decoder (no android.jar dependency)
     Parsers.kt                   pure parsers for SearchData/PostData/EpisodesData/Playlist/NewTv
-    HostThrottler.kt             per-host rate limiter + 429 exponential backoff + jitter
+    HostThrottler.kt             global request gate (1200 ms spacing) + 5 s?60 s cooldown ladder
     DomainRotator.kt             host-list rotation + failure marking + stale-cache invalidation
     LinkCache.kt                 fast replay cache (5 min TTL, keyed by content id)
     TmdbMeta.kt                  TMDB metadata ONLY (detail enrichment + poster rating, no stream resolution)
@@ -151,38 +152,56 @@ resolve stream links. Keep it that way — no net27 embed-tmdb fallback.
 
 `OTTMirrorBackend` re-implements the NetMirror flow (verify ? home ? search ?
 post ? episodes ? NewTV player ? native play.php/playlist.php) with the layers
-the forks lack:
+the forks lack. The core lesson from live probing (Aug 2026): the backend
+**almost never answers HTTP 429** — rate-limit and session errors hide behind
+**HTTP 200 bodies** (`{"status":"n","error":"Invalid User"}`, anti-abuse text
+like `Too many request in short..`). Handling only the status code is why the
+forks and the first fix failed:
 
-- `HostThrottler` — per-host rate limiter (1 s base) + 429 exponential backoff
-  (2 s ? 4 s ? … ? 60 s cap, reset on success) + ±20% jitter. Not the forks'
-  single 1.2 s global spacer.
-- `DomainRotator` — ordered host lists per role (`VERIFY_HOSTS`, base64
-  `NEWTV_DOMAINS`); on 429/5xx/timeout a host is pinned dead and the role
-  advances. A failed NewTV base is cleared so the token probe re-runs instead of
-  trusting a stale `tv.imgcdn.kim` for hours.
-- `CookieBox` — `t_hash_t` cached 15 min in memory (not 15 h): the backend
-  invalidates server-side well before the forks' window, and a stale cookie is
-  the classic "no link found" trap. The cache also tracks which host issued it
-  (`issuedHost`): after `DomainRotator` rotates to another mirror, `verify()`
-  re-runs against the new host instead of reusing the old host's cookie.
-- `NetMirrorCookieStore` — same `t_hash_t` persisted to SharedPreferences with a
-  15 h TTL (reference repo's `bypass()` approach), so a restart never pays the
-  verify round-trip again. `verify()` checks in-memory first, then the persisted
-  value (host-matched), and only then re-verifies.
-- `warmUp()` — session health probe hits the current mobile host + NewTV base
-  once; dead hosts never burn the 15 s timeout during real work. NOT called on
-  the search path (search must stay fast; it has its own verify + host rotation).
+- `NetMirrorGuard` — classifies every response body, not just the status code:
+  `OK / LIMITED / SESSION_DEAD / DEAD`. `LIMITED` matches anti-abuse text
+  ("too many request…", case-insensitive, ?8 KB bodies); `SESSION_DEAD` matches
+  `status:"n"` + `error:"Invalid User"`. Every request path routes its response
+  through `classify()`.
+- Session TTL reality: the server kills `t_hash_t` **~4-5 minutes** after issue
+  (probed: fresh cookie OK at T+210s, `Invalid User` at T+290s). `CookieBox`
+  therefore caches for **3 minutes** — the old 60-min/15-h TTLs served a dead
+  cookie on virtually every request, which is the real root cause of the
+  "Too many request"-family failures. On `SESSION_DEAD` the backend drops the
+  cookie, re-verifies once (singleflight), and repeats the request.
+- `verify()` — one raw POST to `/verify.php` with redirects disabled (the 301
+  carries `Set-Cookie: t_hash_t=`), at most 3 hosts, singleflight so concurrent
+  callers share one verify. The old two-URL × two-method × five-host storm
+  (up to 20 requests on every cookie expiry) fed the very limiter it was
+  escaping. `NetMirrorCookieStore` is now only a bootstrap hint used when the
+  verify infrastructure itself is unreachable.
+- `HostThrottler` — global gate (1200 ms min spacing) + a 5 s ? 60 s cooldown
+  ladder. The server never sends `Retry-After`, so `recordLimited()` doubles
+  the penalty on consecutive hits and any genuinely-OK response resets it.
+  `onLimited(attempt)` waits out the cooldown once per call site, then gives up
+  rather than feeding the limiter.
+- `DomainRotator` — hosts carry a dead-since timestamp with 5-min recovery. A
+  `LIMITED` verdict never marks a host dead (the limit is per client IP, not per
+  mirror); only network errors / 5xx / genuinely-broken shapes do.
+- `resolveNewTvBase()` — capped at **3** NewTV domains (not all 24): from a
+  limited IP every domain answers the same anti-abuse body, and walking the list
+  just burns requests. `NewTvBase` stays cached in-memory once resolved.
+- `NetMirrorResponseCache` (10 min) — absorbs UI-driven repeat calls for the
+  same post.php / episodes.php payload so browsing never re-asks the limiter for
+  data it already served.
 - Search is fail-closed AND fast: only the OTT-scoped `/mobile/{ott}/search.php`
-  endpoint is used (never the unscoped desktop search), no `warmUp()`, no
-  `HostThrottler` spacing on the GET — matching the reference repo's single
-  round-trip. Empty is a correct answer, wrong-platform is not.
+  endpoint is used (never the unscoped desktop search). A dead cookie silently
+  degrades to the server's "Top Searches" fallback, which is detected and
+  answered with a re-verify + one retry so scoped quality holds. Empty is a
+  correct answer, wrong-platform is not.
 - Posters are per-OTT CDN paths (`poster/v/`, `hs/v/`, `pv/341/` for search/home;
   `hsepimg/150/` for the post.php episode batch on hs/dp, `hsepimg/` for paged,
   `pvepimg/`, `poster/v/150/`), with TMDB silently upgrading the poster/rating in
   the background.
-- Distinct errors: a NewTV outage or a seen 429 surfaces
-  "NetMirror servers busy — retry in a minute" (`ErrorLoadingException`) instead
-  of a silent "no link found".
+- Distinct errors: a saturated IP surfaces `limitedMessage()` — "NetMirror rate
+  limit hit — auto-clears in ~Ns" (`ErrorLoadingException`) — instead of a silent
+  "no link found". `OTTMirrorProvider` rethrows it from `load()`/`loadLinks()`
+  and surfaces `rateLimited()` on home/search rather than returning empty.
 - Stable link identity: every emitted link has `source == name ==` the OTT name
   (`Netflix` / `Hotstar` / `Prime Video` / `Disney+`) — no quality/CDN/runtime
   parts, so player priority saves stay stable.

@@ -1,5 +1,7 @@
 package com.ottmirror
 
+import java.util.concurrent.ConcurrentHashMap
+
 enum class OttService(
     val id: String,
     val ottCookie: String,
@@ -58,6 +60,15 @@ internal object CookieBox {
     // mirror domain — the same cookie works on every mirror. Treating it as
     // host-bound forced a full re-verify (a request burst) after every
     // rotation, which is what tripped the IP rate limiter.
+    //
+    // Live probing (Aug 2026) shows the SERVER side of the session lives
+    // only ~4-5 minutes from issue: a cookie verified at T worked at T+210s
+    // and answered {"status":"n","error":"Invalid User"} at T+290s. The old
+    // 60-minute TTL served a dead cookie on virtually every request, which
+    // is the actual root cause of the "Too many request in short.."-family
+    // failures. 3 minutes stays safely under the observed death window; the
+    // re-verify is one request, collapsed by verify()'s singleflight.
+    private const val SESSION_TTL_MS = 3 * 60 * 1000L
     @Volatile var tHashT: String = ""
         private set
     @Volatile var issuedHost: String = ""
@@ -65,15 +76,19 @@ internal object CookieBox {
     @Volatile var expiresAt: Long = 0L
     fun put(value: String, host: String) {
         tHashT = value; issuedHost = host
-        expiresAt = System.currentTimeMillis() + 60 * 60 * 1000L
+        expiresAt = System.currentTimeMillis() + SESSION_TTL_MS
     }
     fun fresh(): Boolean = tHashT.isNotBlank() && System.currentTimeMillis() < expiresAt
     fun clear() { tHashT = ""; issuedHost = ""; expiresAt = 0L }
 }
 
 
-// Persistent t_hash_t (15 h TTL) so a restart never pays the verify round-trip
-// again, matching the reference repo's bypass()/SharedPreferences approach.
+// Persistent t_hash_t, kept ONLY as a bootstrapping hint: the server kills
+// its side of the session in ~4-5 minutes, so a persisted cookie is almost
+// always dead on arrival. verify() therefore re-verifies proactively and
+// falls back to this store just once — when the verify infrastructure
+// itself is unreachable — rather than pretending the cookie is still valid.
+// Callers detect the server's "Invalid User" body and re-verify.
 internal object NetMirrorCookieStore {
     private const val PREF_NAME = "OTTMirrorPrefs"
     private const val KEY_COOKIE = "t_hash_t"
@@ -107,6 +122,32 @@ internal object NetMirrorCookieStore {
 }
 
 internal fun decodeBase64(value: String): String = Base64Decode.decodeUtf8(value).orEmpty()
+
+/**
+ * Short-lived response caches. Each entry absorbs UI-driven repeat calls
+ * (detail refresh, back-and-forth between seasons) that would otherwise
+ * hit the per-IP limiter for data it already served seconds ago.
+ */
+internal object NetMirrorResponseCache {
+    private const val TTL_MS = 10 * 60 * 1000L
+    private const val MAX_SIZE = 64
+    private data class Entry(val value: Any, val expiresAt: Long)
+    private val map = ConcurrentHashMap<String, Entry>()
+
+    @Suppress("UNCHECKED_CAST")
+    fun <T : Any> get(key: String): T? {
+        if (key.isBlank()) return null
+        val e = map[key] ?: return null
+        if (System.currentTimeMillis() > e.expiresAt) { map.remove(key); return null }
+        return e.value as? T
+    }
+
+    fun put(key: String, value: Any) {
+        if (key.isBlank()) return
+        if (map.size >= MAX_SIZE) map.entries.minByOrNull { it.value.expiresAt }?.key?.let { map.remove(it) }
+        map[key] = Entry(value, System.currentTimeMillis() + TTL_MS)
+    }
+}
 
 internal val NEWTV_HEADERS = mapOf(
     "Cache-Control" to "no-cache, no-store, must-revalidate",

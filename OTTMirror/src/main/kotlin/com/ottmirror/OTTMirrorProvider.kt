@@ -67,23 +67,25 @@ abstract class OTTMirrorProvider(
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         if (page > 1) return null
-        return runCatching {
-            val rows = OTTMirrorBackend.getHomeRows(ott)
-            if (rows.isEmpty()) return null
-            val lists = rows.map { (name, ids) ->
-                HomePageList(
-                    name,
-                    ids.map { id ->
-                        newTvSeriesSearchResponse("", encode(id, ""), TvType.TvSeries) {
-                            this.posterUrl = posterUrl(id)
-                            this.posterHeaders = posterHeaders()
-                        }
-                    },
-                    isHorizontalImages = false,
-                )
-            }
-            newHomePageResponse(lists, false)
-        }.getOrNull()
+        val rows = runCatching { OTTMirrorBackend.getHomeRows(ott) }.getOrNull()
+        if (rows.isNullOrEmpty()) {
+            // A silent null reads as "empty home"; a saturated IP deserves the truth.
+            if (OTTMirrorBackend.rateLimited()) throw ErrorLoadingException(OTTMirrorBackend.limitedMessage())
+            return null
+        }
+        val lists = rows.map { (name, ids) ->
+            HomePageList(
+                name,
+                ids.map { id ->
+                    newTvSeriesSearchResponse("", encode(id, ""), TvType.TvSeries) {
+                        this.posterUrl = posterUrl(id)
+                        this.posterHeaders = posterHeaders()
+                    }
+                },
+                isHorizontalImages = false,
+            )
+        }
+        return newHomePageResponse(lists, false)
     }
 
     // ------------------------------------------------------------------
@@ -95,7 +97,10 @@ abstract class OTTMirrorProvider(
         val hits = runCatching {
             OTTMirrorBackend.search(ott, query)
         }.getOrDefault(emptyList())
-        if (hits.isEmpty()) return null
+        if (hits.isEmpty()) {
+            if (OTTMirrorBackend.rateLimited()) throw ErrorLoadingException(OTTMirrorBackend.limitedMessage())
+            return null
+        }
 
         val results = hits.take(SEARCH_MAX_RESULTS).map { hit ->
             val isMovie = hit.type?.equals("movie", ignoreCase = true) == true
@@ -133,7 +138,14 @@ abstract class OTTMirrorProvider(
 
     override suspend fun load(url: String): LoadResponse? {
         val ld = OTTMirrorBackend.decodeLoadData(url) ?: return null
-        return runCatching { loadDetail(ld) }.getOrNull()
+        return try {
+            loadDetail(ld)
+        } catch (e: ErrorLoadingException) {
+            // Rate-limit and reachability messages must reach the user.
+            throw e
+        } catch (e: Exception) {
+            null
+        }
     }
 
     private suspend fun loadDetail(ld: OTTMirrorBackend.LoadData): LoadResponse {
@@ -141,7 +153,8 @@ abstract class OTTMirrorProvider(
         // URL and episode seriesId must come from the id we already hold.
         val contentId = ld.id
         val post = OTTMirrorBackend.loadPost(ott, contentId)
-            ?: throw ErrorLoadingException("Could not load ${ld.title} from NetMirror")
+            ?: if (OTTMirrorBackend.rateLimited()) throw ErrorLoadingException(OTTMirrorBackend.limitedMessage())
+            else throw ErrorLoadingException("Could not load ${ld.title} from NetMirror")
 
         val isMovie = post.episodes.isEmpty() || post.type.equals("movie", ignoreCase = true)
         val tmdbId = post.tmdbId?.toIntOrNull()
@@ -257,9 +270,15 @@ abstract class OTTMirrorProvider(
         callback: (ExtractorLink) -> Unit,
     ): Boolean {
         val ld = OTTMirrorBackend.decodeLoadData(data) ?: return false
-        return runCatching {
+        return try {
             OTTMirrorBackend.loadLinks(ott, data, subtitleCallback, callback)
-        }.getOrDefault(false)
+        } catch (e: ErrorLoadingException) {
+            // Surfacing "rate limited — auto-clears in ~Xs" beats a silent
+            // "no links found" while the shared IP limiter is saturated.
+            throw e
+        } catch (e: Exception) {
+            false
+        }
     }
 
     companion object {
