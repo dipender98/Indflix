@@ -66,8 +66,11 @@ internal object OTTMirrorBackend {
 
     fun limitedMessage(): String {
         val wait = HostThrottler.cooldownSeconds()
-        return if (wait > 0) "NetMirror rate limit hit — auto-clears in ~${wait}s, try again then"
-        else "NetMirror servers busy — retry in a minute"
+        return if (wait > 0) {
+            "NetMirror limit hit (shared IP/VPN) — switch to mobile data or retry in ~${wait}s"
+        } else {
+            "NetMirror servers busy (shared IP/VPN) — switch network or retry in a minute"
+        }
     }
 
     /** True while the limiter cooldown is active — providers surface it instead of silent emptiness. */
@@ -528,13 +531,24 @@ internal object OTTMirrorBackend {
      * player opens a single stream instead of concurrent connections for every
      * adaptive quality — the structural STOP-abuse trigger inside the player.
      * Best-effort: any failure returns the original master URL unchanged.
+     * Skips the fetch entirely when already in cooldown to avoid adding an
+     * extra request on a saturated IP.
      */
     private suspend fun collapseToSingleRendition(masterUrl: String, referer: String): String {
+        if (HostThrottler.isCoolingDown()) return masterUrl
         HostThrottler.gate()
         val resp = runCatching {
             app.get(masterUrl, headers = NEWTV_HEADERS + mapOf("Referer" to referer), timeout = 10)
         }.getOrNull()
-        if (resp == null || NetMirrorGuard.classify(resp.code, resp.text) != NetMirrorGuard.Verdict.OK) return masterUrl
+        if (resp == null) return masterUrl
+        when (NetMirrorGuard.classify(resp.code, resp.text)) {
+            NetMirrorGuard.Verdict.LIMITED -> {
+                HostThrottler.recordLimited(null)
+                return masterUrl
+            }
+            NetMirrorGuard.Verdict.OK -> {}
+            else -> return masterUrl
+        }
         return NetMirrorParsers.pickSingleVariant(masterUrl, resp.text) ?: masterUrl
     }
 
@@ -624,8 +638,11 @@ internal object OTTMirrorBackend {
             // Collapse the master playlist to ONE rendition first so the
             // player opens a single stream instead of concurrent connections
             // for every adaptive quality (the structural STOP-abuse trigger).
+            // When the IP is already in cooldown or this flow already saw a
+            // limit event, emit the master URL as-is — one more fetch on a
+            // hot bucket can tip it and buys nothing on a cold replay.
             val collapsed = newTvLinks.map { (vlink, ref) ->
-                collapseToSingleRendition(vlink, ref) to ref
+                (if (sawLimited || HostThrottler.isCoolingDown()) vlink else collapseToSingleRendition(vlink, ref)) to ref
             }
             collapsed.forEach { (vlink, ref) ->
                 emit(ott, vlink, ref, getQualityFromName(vlink), cookie, subtitleCallback, callback)
