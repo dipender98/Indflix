@@ -184,16 +184,19 @@ internal object OTTMirrorBackend {
             }
         }.getOrElse { return VerifyResult.Dead }
 
+        // The 301 that carries Set-Cookie IS the success signal — read it
+        // before classification, since a 3xx would otherwise be judged DEAD.
+        val token = setCookie.takeIf { it.isNotBlank() }
+        if (token != null) return VerifyResult.Success(token)
+
+        // No cookie: the response is a real failure — distinguish an IP-wide
+        // limit (wait + retry same host) from a dead host (advance).
         return when (NetMirrorGuard.classify(code, respBody)) {
             NetMirrorGuard.Verdict.LIMITED -> {
                 HostThrottler.recordLimited(null)
                 VerifyResult.Limited
             }
-            NetMirrorGuard.Verdict.DEAD -> VerifyResult.Dead
-            else -> {
-                val token = setCookie.takeIf { it.isNotBlank() }
-                if (token != null) VerifyResult.Success(token) else VerifyResult.Dead
-            }
+            else -> VerifyResult.Dead
         }
     }
 
