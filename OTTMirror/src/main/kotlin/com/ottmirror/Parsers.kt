@@ -179,4 +179,49 @@ object NetMirrorParsers {
             null
         }
     }
+
+    /**
+     * Collapse a master HLS playlist to ONE rendition URL.
+     *
+     * Returns the absolute URL of the server-default variant (or the lowest
+     * bandwidth when none is marked) so the player opens a single stream
+     * instead of fetching every adaptive rendition concurrently. Returns null
+     * when the input is already a media playlist, or on any parse failure —
+     * the caller then uses the original URL unchanged.
+     */
+    fun pickSingleVariant(masterUrl: String, raw: String?): String? {
+        if (raw.isNullOrBlank() || !raw.startsWith("#EXTM3U")) return null
+        val lines = raw.split('\n')
+        if (lines.none { it.startsWith("#EXT-X-STREAM-INF") }) return null
+
+        var defaultUrl: String? = null
+        var defaultBw = Long.MAX_VALUE
+        var lowUrl: String? = null
+        var lowBw = Long.MAX_VALUE
+        var pendingBw: Long? = null
+        var pendingDefault = false
+
+        for (line in lines) {
+            val t = line.trim()
+            when {
+                t.startsWith("#EXT-X-STREAM-INF") -> {
+                    pendingBw = Regex("BANDWIDTH=(\\d+)").find(t)?.groupValues?.get(1)?.toLongOrNull()
+                    pendingDefault = t.contains("DEFAULT=YES", ignoreCase = true)
+                }
+                t.isNotBlank() && !t.startsWith("#") && pendingBw != null -> {
+                    val abs = if (t.startsWith("http", ignoreCase = true)) t
+                    else masterUrl.substringBeforeLast('/', "") + "/" + t
+                    val bw = pendingBw
+                    if (pendingDefault && bw < defaultBw) {
+                        defaultBw = bw; defaultUrl = abs
+                    }
+                    if (bw < lowBw) {
+                        lowBw = bw; lowUrl = abs
+                    }
+                    pendingBw = null; pendingDefault = false
+                }
+            }
+        }
+        return defaultUrl ?: lowUrl
+    }
 }

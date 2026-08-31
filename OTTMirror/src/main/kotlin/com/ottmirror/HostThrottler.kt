@@ -21,7 +21,11 @@ import kotlin.random.Random
  */
 object HostThrottler {
     const val MIN_GAP_MS = 1200L
-    private const val MAX_BACKOFF_MS = 60_000L
+    // On a saturated shared IP the first retry at 5 s almost never clears, so
+    // the ladder starts at a floor that has a real chance: 15 s -> 30 s ->
+    // 60 s -> 90 s cap.
+    private const val MIN_BACKOFF_MS = 15_000L
+    private const val MAX_BACKOFF_MS = 90_000L
 
     private val mutex = Mutex()
     private var lastRequestMs = 0L
@@ -52,13 +56,13 @@ object HostThrottler {
 
     /**
      * Record a 429. Honors the server's Retry-After when present, otherwise
-     * doubles the previous penalty (5s -> 10s -> 20s ... capped at 60s).
+     * doubles the previous penalty (15s -> 30s -> 60s ... capped at 90s).
      */
     fun recordLimited(retryAfterHeader: String? = null) {
         val serverMs = parseRetryAfterSeconds(retryAfterHeader) * 1000L
         val base = when {
             serverMs > 0 -> serverMs
-            lastBackoffMs <= 0 -> 5_000L
+            lastBackoffMs <= 0 -> MIN_BACKOFF_MS
             else -> (lastBackoffMs * 2).coerceAtMost(MAX_BACKOFF_MS)
         }
         lastBackoffMs = base

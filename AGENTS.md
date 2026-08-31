@@ -175,11 +175,11 @@ forks and the first fix failed:
   (up to 20 requests on every cookie expiry) fed the very limiter it was
   escaping. `NetMirrorCookieStore` is now only a bootstrap hint used when the
   verify infrastructure itself is unreachable.
-- `HostThrottler` — global gate (1200 ms min spacing) + a 5 s ? 60 s cooldown
-  ladder. The server never sends `Retry-After`, so `recordLimited()` doubles
-  the penalty on consecutive hits and any genuinely-OK response resets it.
-  `onLimited(attempt)` waits out the cooldown once per call site, then gives up
-  rather than feeding the limiter.
+- `HostThrottler` — global gate (1200 ms min spacing) + a 15 s ? 60 s cooldown
+  ladder (90 s cap). The server never sends `Retry-After`, so `recordLimited()`
+  doubles the penalty on consecutive hits and any genuinely-OK response resets
+  it. `onLimited(attempt)` waits out the cooldown once per call site, then gives
+  up rather than feeding the limiter.
 - `DomainRotator` — hosts carry a dead-since timestamp with 5-min recovery. A
   `LIMITED` verdict never marks a host dead (the limit is per client IP, not per
   mirror); only network errors / 5xx / genuinely-broken shapes do.
@@ -205,8 +205,19 @@ forks and the first fix failed:
 - Stable link identity: every emitted link has `source == name ==` the OTT name
   (`Netflix` / `Hotstar` / `Prime Video` / `Disney+`) — no quality/CDN/runtime
   parts, so player priority saves stay stable.
-- `LinkCache` (5 min, keyed by the content id `loadLinks()` receives) for
-  instant replay.
+- `LinkCache` (30 min, keyed by the content id `loadLinks()` receives) — the
+  resolved m3u8 URLs stay playable well beyond 5 min (the CDN serves them with
+  no session), so the longer TTL means more zero-traffic replays.
+- **Single-rendition emission**: the NewTV master m3u8 (which advertises 3+ adaptive
+  variants + an audio group) is fetched at loadLinks time and collapsed to **one**
+  rendition (the server-default quality, typically 720p) via `pickSingleVariant()`.
+  The native `playlist.php` sources are also emitted as a single stream (the
+  default or highest-quality entry). This prevents ExoPlayer from opening
+  concurrent connections for every adaptive quality — the single biggest
+  structural trigger of the CDN anti-abuse overlay.
+- **Stream referer**: every `ExtractorLink` carries `referer = $host/home` (the
+  player page), never the m3u8 URL. The old `collect()` path set `referer = u`
+  (the stream URL itself), which some CDNs reject as an invalid hotlink context.
 
 Everything is session-scoped in-memory, matching the CNC Verse family. When the
 backend rotates domains or adds a `t_hash_t` variant, update

@@ -523,12 +523,30 @@ internal object OTTMirrorBackend {
         )
     }
 
-    private fun collect(ott: OttService, urls: List<String>, cookie: String): List<ExtractorLink> {
+    /**
+     * Fetch the master playlist and collapse it to ONE rendition URL so the
+     * player opens a single stream instead of concurrent connections for every
+     * adaptive quality — the structural STOP-abuse trigger inside the player.
+     * Best-effort: any failure returns the original master URL unchanged.
+     */
+    private suspend fun collapseToSingleRendition(masterUrl: String, referer: String): String {
+        HostThrottler.gate()
+        val resp = runCatching {
+            app.get(masterUrl, headers = NEWTV_HEADERS + mapOf("Referer" to referer), timeout = 10)
+        }.getOrNull()
+        if (resp == null || NetMirrorGuard.classify(resp.code, resp.text) != NetMirrorGuard.Verdict.OK) return masterUrl
+        return NetMirrorParsers.pickSingleVariant(masterUrl, resp.text) ?: masterUrl
+    }
+
+    // Cache entries must carry the SAME referer/headers as the live links, or
+    // a replayed stream would be served with the wrong hotlink context. The
+    // referer is the player page (…/home), never the stream URL itself.
+    private fun collect(ott: OttService, urls: List<String>, referer: String, cookie: String): List<ExtractorLink> {
         val label = ottLabel(ott)
         return urls.distinct().map { u ->
             ExtractorLink(
-                source = label, name = label, url = u, referer = u,
-                quality = getQualityFromName(u), headers = streamHeaders(u, cookie, ott),
+                source = label, name = label, url = u, referer = referer,
+                quality = getQualityFromName(u), headers = streamHeaders(referer, cookie, ott),
                 extractorData = null,
                 type = if (u.contains(".m3u8", ignoreCase = true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO,
                 audioTracks = emptyList(),
@@ -603,10 +621,16 @@ internal object OTTMirrorBackend {
         }
 
         if (newTvLinks.isNotEmpty()) {
-            newTvLinks.forEach { (vlink, ref) ->
+            // Collapse the master playlist to ONE rendition first so the
+            // player opens a single stream instead of concurrent connections
+            // for every adaptive quality (the structural STOP-abuse trigger).
+            val collapsed = newTvLinks.map { (vlink, ref) ->
+                collapseToSingleRendition(vlink, ref) to ref
+            }
+            collapsed.forEach { (vlink, ref) ->
                 emit(ott, vlink, ref, getQualityFromName(vlink), cookie, subtitleCallback, callback)
             }
-            LinkCache.put(contentId, collect(ott, newTvLinks.map { it.first }, cookie))
+            LinkCache.put(contentId, collect(ott, collapsed.map { it.first }, collapsed.first().second, cookie))
             return@withContext true
         }
 
@@ -718,13 +742,15 @@ internal object OTTMirrorBackend {
         if (sources.isEmpty()) return false
 
         val referer = "$host/home"
-        val emittedUrls = sources.mapNotNull { s ->
-            val streamUrl = if (s.file.startsWith("http", ignoreCase = true)) s.file else "$host${s.file}"
-            emit(ott, streamUrl, referer, qualityFromLabel(s.label), cookie, subtitleCallback, callback, tracks = playlist?.tracks.orEmpty())
-            streamUrl
-        }
-        if (emittedUrls.isEmpty()) return false
-        LinkCache.put(ld.id, collect(ott, emittedUrls, cookie))
+        // Emit ONE source (the server-default, else the best quality) instead
+        // of every variant: one stream = far fewer concurrent player requests,
+        // which is what trips the CDN anti-abuse page on a shared IP.
+        val chosen = sources.firstOrNull { it.default.equals("true", ignoreCase = true) || it.default == "1" }
+            ?: sources.maxByOrNull { qualityFromLabel(it.label) }
+            ?: sources.first()
+        val streamUrl = if (chosen.file.startsWith("http", ignoreCase = true)) chosen.file else "$host${chosen.file}"
+        emit(ott, streamUrl, referer, qualityFromLabel(chosen.label), cookie, subtitleCallback, callback, tracks = playlist?.tracks.orEmpty())
+        LinkCache.put(ld.id, collect(ott, listOf(streamUrl), referer, cookie))
         return true
     }
 
