@@ -58,8 +58,8 @@ abstract class OTTMirrorProvider(
     }
     private fun posterHeaders(): Map<String, String> = mapOf("Referer" to "${DomainRotator.current(Role.MOBILE) ?: mainUrl}/home")
 
-    private fun encode(id: String, title: String, tmdbId: String? = null): String =
-        OTTMirrorBackend.encodeLoadData(OTTMirrorBackend.LoadData(id, title, tmdbId))
+    private fun encode(id: String, title: String, tmdbId: String? = null, season: Int? = null, episode: Int? = null): String =
+        encodeLoadData(LoadData(id, title, tmdbId, season, episode))
 
     // ------------------------------------------------------------------
     // Home page
@@ -137,7 +137,7 @@ abstract class OTTMirrorProvider(
     // ------------------------------------------------------------------
 
     override suspend fun load(url: String): LoadResponse? {
-        val ld = OTTMirrorBackend.decodeLoadData(url) ?: return null
+        val ld = decodeLoadData(url) ?: return null
         return try {
             loadDetail(ld)
         } catch (e: ErrorLoadingException) {
@@ -148,7 +148,7 @@ abstract class OTTMirrorProvider(
         }
     }
 
-    private suspend fun loadDetail(ld: OTTMirrorBackend.LoadData): LoadResponse {
+    private suspend fun loadDetail(ld: LoadData): LoadResponse {
         // post.php does NOT echo the content id in its body, so the LoadResponse
         // URL and episode seriesId must come from the id we already hold.
         val contentId = ld.id
@@ -216,26 +216,36 @@ abstract class OTTMirrorProvider(
         return pct?.div(10.0)
     }
 
+    // "Season 2" / "S2" -> 2; used when a paged episode JSON omits its own
+    // season number. Only a confident match counts — a wrong guess would make
+    // embed-tmdb resolve the wrong episode, which is worse than falling
+    // through to the episode-id-keyed paths.
+    private fun seasonNumberFromLabel(label: String?): Int? =
+        Regex("(?:season|s)\\s*(\\d+)", RegexOption.IGNORE_CASE)
+            .find(label ?: "")?.groupValues?.get(1)?.toIntOrNull()
+
     private suspend fun buildEpisodes(post: NetMirrorPost, contentId: String, title: String, tmdbIdFinal: Int?): MutableList<Episode> {
         val episodes = mutableListOf<Episode>()
         post.episodes.forEach { e ->
-            episodes += newEpisode(encode(e.id, title, tmdbIdFinal?.toString())) {
+            episodes += newEpisode(encode(e.id, title, tmdbIdFinal?.toString(), e.season, e.episode)) {
                 this.name = e.title; this.season = e.season; this.episode = e.episode
                 this.posterUrl = episodePosterUrl(e.id, mainBatch = true)
             }
         }
         if (post.nextPageShow && post.nextPageSeason != null) {
+            val seasonOfPage = post.seasons.lastOrNull()?.let { seasonNumberFromLabel(it.label) }
             OTTMirrorBackend.getEpisodes(ott, contentId, post.nextPageSeason).forEach { e ->
-                episodes += newEpisode(encode(e.id, title, tmdbIdFinal?.toString())) {
-                    this.name = e.title; this.season = e.season; this.episode = e.episode
+                episodes += newEpisode(encode(e.id, title, tmdbIdFinal?.toString(), e.season ?: seasonOfPage, e.episode)) {
+                    this.name = e.title; this.season = e.season ?: seasonOfPage; this.episode = e.episode
                     this.posterUrl = episodePosterUrl(e.id, mainBatch = false)
                 }
             }
         }
         post.seasons.dropLast(1).forEach { s ->
+            val sNum = seasonNumberFromLabel(s.label)
             OTTMirrorBackend.getEpisodes(ott, contentId, s.id).forEach { e ->
-                episodes += newEpisode(encode(e.id, title, tmdbIdFinal?.toString())) {
-                    this.name = e.title; this.season = e.season; this.episode = e.episode
+                episodes += newEpisode(encode(e.id, title, tmdbIdFinal?.toString(), e.season ?: sNum, e.episode)) {
+                    this.name = e.title; this.season = e.season ?: sNum; this.episode = e.episode
                     this.posterUrl = episodePosterUrl(e.id, mainBatch = false)
                 }
             }
@@ -269,7 +279,7 @@ abstract class OTTMirrorProvider(
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
     ): Boolean {
-        val ld = OTTMirrorBackend.decodeLoadData(data) ?: return false
+        val ld = decodeLoadData(data) ?: return false
         return try {
             OTTMirrorBackend.loadLinks(ott, data, subtitleCallback, callback)
         } catch (e: ErrorLoadingException) {

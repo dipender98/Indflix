@@ -1,0 +1,194 @@
+package com.ottmirror
+
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
+
+class NetMirrorParsersEmbedTest {
+
+    // Real embed-tmdb shape (live-probed 2026-08-31, Jackpot! movie).
+    private val movieOk = """
+        {"ok":true,"tmdbId":1094138,"title":"Jackpot!","year":"2024","imdb":"tt26940324",
+         "type":"movie","exp":1788215061,"sig":"cfcb","mode":"proxy",
+         "mp4":"https://bcdnxw.hakunaymatata.com/resource/c87.mp4?sign=5c01&t=1788185753",
+         "resolution":"720",
+         "streams":[
+           {"url":"https://bcdnxw.hakunaymatata.com/bt/c20f.mp4?sign=3aed&t=1","resolution":360,"size":316322803},
+           {"url":"https://bcdnxw.hakunaymatata.com/resource/2466.mp4?sign=bf20&t=1","resolution":480,"size":395440405},
+           {"url":"https://bcdnxw.hakunaymatata.com/resource/c873.mp4?sign=5c01&t=1","resolution":720,"size":837811275}],
+         "direct":false,"cdn":"bcdnxw.hakunaymatata.com","source":"primary","match":"exact",
+         "captions":[
+           {"lang":"hi","name":"हिन्दी","url":"/api/proxy/video?url=https%3A%2F%2Fcacdn.hakunaymatata.com%2Fmsubt%2Fhi.srt"},
+           {"lang":"en","name":"English","url":"https://cacdn.hakunaymatata.com/subtitle/en.srt?Policy=x"}],
+         "fallbackHls":"/api/loffe/tt26940324"}
+    """.trimIndent()
+
+    @Test
+    fun parseEmbedTmdb_movie_withStreamsAndCaptions() {
+        val r = NetMirrorParsers.parseEmbedTmdb(movieOk)!!
+        assertFalse(r.noSource)
+        assertEquals("movie", r.type)
+        assertEquals(3, r.streams.size)
+        assertEquals(720, r.streams.maxOf { it.resolution })
+        // Relative caption absolutized to net27.cc; absolute caption untouched.
+        assertEquals(2, r.captions.size)
+        assertTrue(r.captions[0].url.startsWith("https://net27.cc/api/proxy/video"))
+        assertTrue(r.captions[1].url.startsWith("https://cacdn.hakunaymatata.com/"))
+    }
+
+    @Test
+    fun pickEmbedStream_prefersHighestUnder1080_thenLargerSize() {
+        val r = NetMirrorParsers.parseEmbedTmdb(movieOk)!!
+        assertEquals(720, NetMirrorParsers.pickEmbedStream(r.streams)!!.resolution)
+
+        val with1080 = r.streams + EmbedTmdbStream("https://x/1080.mp4", 1080, 100L)
+        assertEquals(1080, NetMirrorParsers.pickEmbedStream(with1080)!!.resolution)
+
+        // Same resolution twice -> larger size wins.
+        val tie = listOf(
+            EmbedTmdbStream("https://x/a.mp4", 720, 100L),
+            EmbedTmdbStream("https://x/b.mp4", 720, 900L),
+        )
+        assertEquals("https://x/b.mp4", NetMirrorParsers.pickEmbedStream(tie)!!.url)
+    }
+
+    @Test
+    fun pickEmbedStream_rejectsZeroAndOver1080() {
+        val streams = listOf(
+            EmbedTmdbStream("https://x/0.mp4", 0, null),
+            EmbedTmdbStream("https://x/2160.mp4", 2160, null),
+            EmbedTmdbStream("https://x/480.mp4", 480, null),
+        )
+        assertEquals(480, NetMirrorParsers.pickEmbedStream(streams)!!.resolution)
+        assertNull(NetMirrorParsers.pickEmbedStream(emptyList()))
+    }
+
+    @Test
+    fun parseEmbedTmdb_noSource_isCleanNegative() {
+        val raw = """
+            {"ok":true,"tmdbId":106148,"title":"A Flat","year":"2010","imdb":"tt0988655",
+             "type":"movie","currentSeason":1,"currentEpisode":1,"exp":1788215942,"sig":"8476",
+             "mode":"none","noSource":true,
+             "error":"We couldn't find this title on NetMirror yet. Try a different one."}
+        """.trimIndent()
+        val r = NetMirrorParsers.parseEmbedTmdb(raw)!!
+        assertTrue(r.noSource)
+        assertTrue(r.streams.isEmpty())
+    }
+
+    @Test
+    fun parseEmbedTmdb_tv_episodeShape() {
+        val raw = """
+            {"ok":true,"tmdbId":94605,"title":"Arcane","type":"tv","currentSeason":1,"currentEpisode":1,
+             "mode":"proxy","mp4":"https://bcdnxw.hakunaymatata.com/resource/73ba.mp4?sign=c254&t=1",
+             "resolution":"720",
+             "streams":[{"url":"https://bcdnxw.hakunaymatata.com/resource/1a12.mp4?sign=e013&t=1","resolution":1080,"size":420495514}],
+             "fallbackHls":"/api/loffe/tt11126994"}
+        """.trimIndent()
+        val r = NetMirrorParsers.parseEmbedTmdb(raw)!!
+        assertEquals("tv", r.type)
+        assertEquals(1080, NetMirrorParsers.pickEmbedStream(r.streams)!!.resolution)
+    }
+
+    @Test
+    fun parseEmbedTmdb_mp4OnlyFallback() {
+        val raw = """{"ok":true,"type":"movie","mp4":"https://cdn/x.mp4?sign=1","resolution":"480"}"""
+        val r = NetMirrorParsers.parseEmbedTmdb(raw)!!
+        assertEquals(1, r.streams.size)
+        assertEquals(480, r.streams[0].resolution)
+    }
+
+    @Test
+    fun parseEmbedTmdb_garbageAndNotOk() {
+        assertNull(NetMirrorParsers.parseEmbedTmdb(null))
+        assertNull(NetMirrorParsers.parseEmbedTmdb(""))
+        assertNull(NetMirrorParsers.parseEmbedTmdb("not json"))
+        assertNull(NetMirrorParsers.parseEmbedTmdb("""{"ok":false}"""))
+        // Limited body must not parse as a result.
+        assertNull(NetMirrorParsers.parseEmbedTmdb("Too many request in short.."))
+    }
+
+    // ------------------------------------------------------------------
+    // NewTV master validation
+    // ------------------------------------------------------------------
+
+    // Verbatim sessionless player.php master (probed pv/106148 + nf/934152):
+    // identical dead template for every id — "in=unknown::ni" variants 404,
+    // audio group URI has an empty host.
+    private val deadMaster = """
+        #EXTM3U
+        #EXT-X-VERSION:3
+        #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac",LANGUAGE="und",NAME="[1] Unknown",DEFAULT=NO,URI="https:///files/106148/a/0/0.m3u8"
+        #EXT-X-STREAM-INF:BANDWIDTH=1000000,AUDIO="aac",RESOLUTION=1920x1080,CLOSED-CAPTIONS=NONE
+        https://s21.freecdn4.top/files/220884/1080p/1080p.m3u8?in=unknown::ni
+        #EXT-X-STREAM-INF:BANDWIDTH=600000,AUDIO="aac",DEFAULT=YES,RESOLUTION=1280x720,CLOSED-CAPTIONS=NONE
+        https://s21.freecdn4.top/files/220884/720p/720p.m3u8?in=unknown::ni
+    """.trimIndent()
+
+    // A master with a real resource key (the Flutter clone's hardcoded key
+    // shape) and a host-bearing audio URI.
+    private val liveMaster = """
+        #EXTM3U
+        #EXT-X-VERSION:3
+        #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac",LANGUAGE="und",NAME="[1] Unknown",DEFAULT=NO,URI="https://s21.freecdn4.top/files/106148/a/0/0.m3u8"
+        #EXT-X-STREAM-INF:BANDWIDTH=600000,AUDIO="aac",DEFAULT=YES,RESOLUTION=1280x720,CLOSED-CAPTIONS=NONE
+        https://s21.freecdn4.top/files/220884/720p/720p.m3u8?in=59a05b117809dbe6e0879acb3cac14c3::cb742acc402bbeeeaffbbb5ce48cb86e::1734859034::ni
+    """.trimIndent()
+
+    @Test
+    fun newTvMasterIsDead_detectsUnknownKeyAndEmptyHost() {
+        assertTrue(NetMirrorParsers.newTvMasterIsDead(deadMaster))
+    }
+
+    @Test
+    fun newTvMasterIsDead_acceptsRealKeyedMaster() {
+        assertFalse(NetMirrorParsers.newTvMasterIsDead(liveMaster))
+    }
+
+    @Test
+    fun newTvMasterIsDead_rejectsBlankAndNonPlaylist() {
+        assertTrue(NetMirrorParsers.newTvMasterIsDead(null))
+        assertTrue(NetMirrorParsers.newTvMasterIsDead(""))
+        assertTrue(NetMirrorParsers.newTvMasterIsDead("<html>error</html>"))
+        assertTrue(NetMirrorParsers.newTvMasterIsDead("Too many request in short.."))
+    }
+}
+
+class LoadDataCodecTest {
+
+    @Test
+    fun roundTrip_full() {
+        val d = LoadData("160649", "Jackpot!", "1094138", 2, 7)
+        val decoded = decodeLoadData(encodeLoadData(d))!!
+        assertEquals("160649", decoded.id)
+        assertEquals("Jackpot!", decoded.title)
+        assertEquals("1094138", decoded.tmdbId)
+        assertEquals(2, decoded.season)
+        assertEquals(7, decoded.episode)
+    }
+
+    @Test
+    fun roundTrip_movie_noSeasonEpisode() {
+        val d = LoadData("160649", "Jackpot!", "1094138")
+        val decoded = decodeLoadData(encodeLoadData(d))!!
+        assertNull(decoded.season)
+        assertNull(decoded.episode)
+    }
+
+    @Test
+    fun roundTrip_legacyPayload_withoutTmdb() {
+        // Old cached payloads / home-page taps carry only id+title.
+        val decoded = decodeLoadData("""{"id":"123","title":"X"}""")!!
+        assertEquals("123", decoded.id)
+        assertNull(decoded.tmdbId)
+    }
+
+    @Test
+    fun invalidInputs() {
+        assertNull(decodeLoadData("not json"))
+        assertNull(decodeLoadData("""{"title":"x"}"""))
+        assertNull(decodeLoadData(""))
+    }
+}

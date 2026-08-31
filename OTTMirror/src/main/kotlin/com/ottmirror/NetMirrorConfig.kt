@@ -21,6 +21,15 @@ internal val VERIFY_HOSTS = listOf(
     "https://netmirror.gg",
 )
 
+// net27.cc hosts the sessionless /api/embed-tmdb/{tmdbId} stream API (CNC
+// Verse PR #24 fallback, live-probed Aug 2026): zero cookies, zero verify,
+// direct signed MP4s. Single host — there is no known mirror for it.
+internal val EMBED_HOSTS = listOf("https://net27.cc")
+
+// Required Referer for embed-tmdb / net27 stream CDN contexts (CNC Verse
+// commits 0435501 + PR #24: the CDN 429s a net7x referer on these links).
+internal const val EMBED_REFERER = "https://videodownloader.site/"
+
 internal val NEWTV_DOMAINS = listOf(
     "aHR0cHM6Ly9tb2JpbGVkZXRlY3RzLmNvbQ==",
     "aHR0cHM6Ly9tb2JpbGVkZXRlY3QuYXBw",
@@ -51,8 +60,42 @@ internal val NEWTV_DOMAINS = listOf(
 internal object NewTvBase {
     @Volatile var value: String = ""
         private set
-    fun set(base: String) { value = base.trimEnd('/') }
+    fun set(base: String) { value = base.trimEnd('/'); NewTvBaseStore.save(base) }
     fun clear() { value = "" }
+    /** Seed from persisted storage (24 h TTL) at first use after app start. */
+    fun warm() {
+        if (value.isNotBlank()) return
+        NewTvBaseStore.load()?.let { value = it.trimEnd('/') }
+    }
+}
+
+/**
+ * Persisted resolved NewTV API base (the base64 token_hash from
+ * checknewtv.php). CNC Verse persists it 24 h; that saves the probe request
+ * after every app restart on an IP that may already be limited.
+ */
+internal object NewTvBaseStore {
+    private const val KEY_BASE = "newtv_base"
+    private const val KEY_TS = "newtv_base_ts"
+    private const val TTL_MS = 24 * 60 * 60 * 1000L
+
+    @Volatile private var prefs: android.content.SharedPreferences? = null
+
+    fun init(context: android.content.Context) {
+        prefs = context.applicationContext.getSharedPreferences("OTTMirrorPrefs", android.content.Context.MODE_PRIVATE)
+    }
+
+    fun load(): String? {
+        val p = prefs ?: return null
+        val base = p.getString(KEY_BASE, null)?.takeIf { it.isNotBlank() } ?: return null
+        val ts = p.getLong(KEY_TS, 0L)
+        if (ts <= 0 || System.currentTimeMillis() - ts > TTL_MS) return null
+        return base
+    }
+
+    fun save(base: String) {
+        prefs?.edit()?.putString(KEY_BASE, base.trimEnd('/'))?.putLong(KEY_TS, System.currentTimeMillis())?.apply()
+    }
 }
 
 internal object CookieBox {

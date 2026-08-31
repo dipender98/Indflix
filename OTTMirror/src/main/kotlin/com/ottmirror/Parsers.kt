@@ -8,6 +8,41 @@ internal fun str(obj: JSONObject, key: String): String? {
     return if (v.isBlank()) null else v
 }
 
+/**
+ * The opaque string CloudStream passes between load() and loadLinks(). Pure
+ * JVM codec (no CloudStream deps) so it is unit-testable and stable across
+ * payload versions — old payloads without tmdbId/season/episode still decode.
+ */
+data class LoadData(
+    val id: String,
+    val title: String,
+    val tmdbId: String? = null,
+    val season: Int? = null,
+    val episode: Int? = null,
+)
+
+fun encodeLoadData(d: LoadData): String = JSONObject()
+    .put("id", d.id)
+    .put("title", d.title)
+    .apply { d.tmdbId?.let { put("tmdbId", it) } }
+    .apply { d.season?.let { put("season", it) } }
+    .apply { d.episode?.let { put("episode", it) } }
+    .toString()
+
+fun decodeLoadData(data: String): LoadData? = try {
+    val m = JSONObject(data)
+    val id = m.optString("id").takeIf { it.isNotBlank() } ?: return null
+    LoadData(
+        id,
+        m.optString("title"),
+        m.optString("tmdbId").takeIf { it.isNotBlank() },
+        m.optInt("season", 0).takeIf { it > 0 },
+        m.optInt("episode", 0).takeIf { it > 0 },
+    )
+} catch (e: Exception) {
+    null
+}
+
 data class SearchHit(val id: String, val title: String, val type: String?)
 
 data class NetMirrorEpisode(
@@ -57,6 +92,17 @@ data class PlaylistResponse(
 data class NewTvTokenResponse(val tokenHash: String?)
 
 data class NewTvPlayerResponse(val status: String?, val videoLink: String?, val referer: String?)
+
+data class EmbedTmdbStream(val url: String, val resolution: Int, val size: Long?)
+
+data class EmbedTmdbCaption(val lang: String, val name: String, val url: String)
+
+data class EmbedTmdbResult(
+    val noSource: Boolean,
+    val type: String?,
+    val streams: List<EmbedTmdbStream>,
+    val captions: List<EmbedTmdbCaption>,
+)
 
 object NetMirrorParsers {
 
@@ -223,5 +269,77 @@ object NetMirrorParsers {
             }
         }
         return defaultUrl ?: lowUrl
+    }
+
+    // ------------------------------------------------------------------
+    // net27.cc/api/embed-tmdb — sessionless TMDB-keyed stream API
+    // ------------------------------------------------------------------
+
+    /**
+     * Parse the embed-tmdb JSON. Live shape (probed Aug 2026):
+     * {"ok":true,"tmdbId":..,"type":"movie|tv","mode":"proxy","mp4":"<best>",
+     *  "resolution":"720","streams":[{"url":..,"resolution":720,"size":..}],
+     *  "captions":[{"lang":"hi","name":"हिन्दी","url":"/api/proxy/video?url=.."}],
+     *  "fallbackHls":"/api/loffe/tt..","exp":..,"sig":..}
+     * Uncovered titles answer {"ok":true,"noSource":true,"mode":"none",
+     *  "error":"We couldn't find this title on NetMirror yet. .."}.
+     */
+    fun parseEmbedTmdb(raw: String?): EmbedTmdbResult? {
+        if (raw.isNullOrBlank()) return null
+        return try {
+            val m = JSONObject(raw)
+            if (!m.optBoolean("ok", false)) return null
+            val noSource = m.optBoolean("noSource", false)
+            val streams = mutableListOf<EmbedTmdbStream>()
+            m.optJSONArray("streams")?.let { arr ->
+                (0 until arr.length()).forEach { i ->
+                    val s = arr.optJSONObject(i) ?: return@forEach
+                    val url = str(s, "url") ?: return@forEach
+                    streams += EmbedTmdbStream(url, s.optInt("resolution", 0), s.optLong("size", 0L).takeIf { it > 0 })
+                }
+            }
+            if (streams.isEmpty()) {
+                // Some responses only carry the top-level "mp4" + "resolution".
+                val mp4 = str(m, "mp4")
+                if (mp4 != null) {
+                    streams += EmbedTmdbStream(mp4, m.optString("resolution").toIntOrNull() ?: 0, null)
+                }
+            }
+            val captions = mutableListOf<EmbedTmdbCaption>()
+            m.optJSONArray("captions")?.let { arr ->
+                (0 until arr.length()).forEach { i ->
+                    val c = arr.optJSONObject(i) ?: return@forEach
+                    val url = str(c, "url") ?: return@forEach
+                    val abs = when {
+                        url.startsWith("http", ignoreCase = true) -> url
+                        url.startsWith("/") -> "https://net27.cc$url"
+                        else -> return@forEach
+                    }
+                    captions += EmbedTmdbCaption(str(c, "lang") ?: "", str(c, "name") ?: "", abs)
+                }
+            }
+            EmbedTmdbResult(noSource, str(m, "type"), streams, captions)
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /** Highest resolution up to 1080, tie-broken by file size. */
+    fun pickEmbedStream(streams: List<EmbedTmdbStream>): EmbedTmdbStream? =
+        streams.filter { it.resolution in 1..1080 }
+            .maxWithOrNull(compareBy({ it.resolution }, { it.size ?: 0L }))
+
+    /**
+     * True when a fetched NewTV master playlist is the dead sessionless
+     * template: video variants carry the literal "in=unknown" key (probed:
+     * they 404) and/or the audio group URI has an empty host
+     * ("https:///files/.."). Never emit such a master — fall through instead.
+     */
+    fun newTvMasterIsDead(raw: String?): Boolean {
+        if (raw.isNullOrBlank()) return true
+        if (!raw.startsWith("#EXTM3U")) return true
+        if (raw.contains("in=unknown", ignoreCase = true)) return true
+        if (raw.contains("URI=\"https:///")) return true
+        return false
     }
 }
