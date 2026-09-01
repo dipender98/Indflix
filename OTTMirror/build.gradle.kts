@@ -3,7 +3,7 @@ import java.util.Properties
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
-version = 1
+version = 2
 
 plugins {
     id("com.lagradost.cloudstream3.gradle")
@@ -42,6 +42,13 @@ val androidJar = providers.provider {
         ?: throw GradleException("Android SDK directory not found")
     val compileSdk = androidExtension.compileSdk ?: throw GradleException("compileSdk not set")
     File(sdkDir, "platforms/android-$compileSdk/android.jar")
+}
+
+tasks.withType<Test>().configureEach {
+    // Forward the live-probe gate: LiveBackendProbeTest runs only when
+    // -Dottmirror.live=true is passed (a -D on the gradle command line does
+    // not reach the forked test JVM otherwise).
+    systemProperty("ottmirror.live", System.getProperty("ottmirror.live") ?: "false")
 }
 
 tasks.register("shrinkCs3") {

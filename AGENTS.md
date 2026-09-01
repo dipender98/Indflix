@@ -211,37 +211,51 @@ forks and the first fix failed:
 - `LinkCache` (60 min, keyed by the content id `loadLinks()` receives) — the
   resolved m3u8 URLs stay playable well beyond 5 min (the CDN serves them with
   no session), so the longer TTL means more zero-traffic replays.
-- **Master-URL emission on the NewTV path**: the master m3u8 (which advertises
-  3+ adaptive variants + an audio group) is fetched once via `probeMaster`,
-  validated by `NetMirrorParsers.newTvMasterIsDead` (a dead `in=unknown`
-  template falls back to the raw `vlink`), and the **master URL itself is
-  emitted as one `ExtractorLink`** with `audioTracks` attached. Per-variant
-  media-playlist URLs were tried and reverted: CloudStream's player shows the
-  audio-track selector only when Media3 exposes more than one audio track
-  group, and `#EXT-X-MEDIA:TYPE=AUDIO` (with `LANGUAGE`/`NAME`) lives only in
-  the master — a variant URL makes Media3 discover a single muxed audio track
-  and the audio picker disappears. The master URL lets Media3 natively expose
-  both the labeled audio groups AND the adaptive video variants, so one link
-  gives the user both the quality and audio selectors. The native
-  `playlist.php` sources stay as a single stream (the default or highest-
-  quality entry); embed-tmdb streams ? 1080p are emitted as separate
-  `ExtractorLink`s (MP4 — no audio-group problem) so the embed path keeps a
-  real quality picker.
-- **Audio-track switching**: each `#EXT-X-MEDIA:TYPE=AUDIO` entry from the
-  NewTV master is built with `newAudioFile(uri) { headers = streamHeaders(...) }`
-  so the audio media playlist request carries the same Referer/Origin/Cookie
-  as the parent video. Without the headers, the CDN hotlink check 403s the
-  audio media playlist and the player silently falls back to the default
-  audio track.
+- **Dual emission — embed + NewTV master**: `loadLinks()` resolves the
+  embed-tmdb MP4s AND the NewTV master concurrently (no more embed
+  short-circuit). The embed MP4s are the playable-for-everyone quality
+  tiers; the NewTV master is the ONLY source carrying real multi-audio
+  renditions (`#EXT-X-MEDIA:TYPE=AUDIO`, e.g. "1. English" + "2. Hindi" on
+  dual-audio titles like Breaking Bad / GoT). The master link itself is
+  emitted when embed missed (only path) **or** when
+  `shouldEmitNewTvMaster` says it adds value: the default video variant
+  answers on this device (per-device pre-flight GET — a dead `in=unknown`
+  template 404s) AND the master carries ?2 audio renditions. Per-variant
+  media-playlist URLs were tried and reverted: `#EXT-X-MEDIA` lives only
+  in the master, so a variant URL makes Media3 discover a single muxed
+  audio track and the audio picker disappears. The native `playlist.php`
+  sources stay as a single stream (the default or highest-quality entry).
+- **Audio-track delivery**: the master's audio renditions are extracted
+  from `#EXT-X-MEDIA:TYPE=AUDIO` **always** — deadness of the video
+  variants does NOT imply deadness of the audio (the Aug 2026 probe log
+  shows a dead-variant master carrying both a live "1. English" and
+  "2. Hindi" group; audio lives on `…/files/<id>/a/N/N.m3u8`, a separate
+  URL space from the gated variants). Each rendition is built with
+  `newAudioFile(uri) { headers = streamHeaders(...) }` and attached to
+  BOTH the master link and the embed MP4 links — CS3's
+  `getAudioSources`/`MergingMediaSource` merges them for ANY link type,
+  so MP4 playback gets the same audio picker. Every audio URL is
+  pre-flighted (concurrent GET, 200 + `#EXTM3U`) before attaching: a dead
+  merged child fails the WHOLE playback, so unverified URLs are never
+  attached. Verified lists are cached 10 min under `audio|` … via the
+  probe cache `master|<ott>|<contentId>`. Known trade-off: merged audio
+  on MP4 links labels as "Audio" (no language field on `AudioFile`); the
+  master link shows proper English/Hindi labels via native parsing.
 - **`player.php` response cache**: raw `newtv/player.php` bodies are cached
   for 10 min in `NetMirrorResponseCache` under `player|<ott>|<contentId>`.
-  Combined with the 60-min `LinkCache` and a per-contentId `master|<ott>|<id>`
-  cache for the probe result, repeat taps replay with zero net7x traffic.
-- **No `LIMITED` cascade**: when the NewTV path sees a `LIMITED` verdict, the
-  backend sets `sawLimited = true` and **never falls through** to the native
-  Path 3 — that flow would only fire 2-3 more net7x requests
+  Combined with the 60-min `LinkCache` and the per-contentId master probe
+  cache, repeat taps replay with zero net7x traffic.
+- **No `LIMITED` cascade**: a LIMITED verdict on `player.php` never falls
+  through to the native Path 3 when links were already emitted (a working
+  embed result must not error). The `limitedMessage()` is thrown only when
+  NOTHING was playable — that flow would only fire 2-3 more net7x requests
   (`verify()` + `play.php` + `playlist.php`) into an already-saturated
-  shared-IP bucket. The `limitedMessage()` is thrown immediately.
+  shared-IP bucket.
+- **Plugin `version` must be bumped** (`OTTMirror/build.gradle.kts`) on
+  every user-facing change: CloudStream's updater compares the version in
+  plugins.json against the installed plugin and skips identical versions —
+  a rebuilt .cs3 with the same `version = 1` never reached devices, which
+  masked several shipped fixes.
 - **Stream referer**: every `ExtractorLink` carries `referer = $host/home` (the
   player page), never the m3u8 URL. The old `collect()` path set `referer = u`
   (the stream URL itself), which some CDNs reject as an invalid hotlink context.

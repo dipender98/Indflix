@@ -267,6 +267,80 @@ class NetMirrorParsersEmbedTest {
         assertEquals(1, variants.size)
         assertEquals(360, variants[0].second)
     }
+
+    // ------------------------------------------------------------------
+    // Multi-audio delivery (the dual-audio fix)
+    // ------------------------------------------------------------------
+
+    // Verbatim live master from the Aug 2026 probe log (The Batman,
+    // id=81500601): the VIDEO variants carry the dead in=unknown template,
+    // yet the AUDIO renditions are host-bearing and structurally alive —
+    // audio lives on a separate URL space (…/files/<id>/a/N/N.m3u8) than the
+    // gated variants. This is the exact shape that forced always-extract-
+    // audio + per-URL pre-flight instead of trusting the master deadness.
+    private val dualAudioDeadVariantsMaster = """
+        #EXTM3U
+        #EXT-X-VERSION:3
+        #EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English",DEFAULT=YES,AUTOSELECT=YES,FORCED=NO,LANGUAGE="en",URI="https://subscdn.top/subs/81500601/en.m3u8"
+        #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac",LANGUAGE="eng",NAME="1. English",DEFAULT=YES,URI="https://s21.freecdn4.top/files/81500601/a/0/0.m3u8"
+        #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac",LANGUAGE="hin",NAME="2. Hindi",DEFAULT=NO,URI="https://s21.freecdn4.top/files/81500601/a/1/1.m3u8"
+        #EXT-X-STREAM-INF:BANDWIDTH=1000000,AUDIO="aac",RESOLUTION=1920x1080,SUBTITLES="subs",CLOSED-CAPTIONS=NONE
+        https://s21.freecdn4.top/files/220884/1080p/1080p.m3u8?in=unknown::ni
+        #EXT-X-STREAM-INF:BANDWIDTH=600000,AUDIO="aac",DEFAULT=YES,RESOLUTION=1280x720,SUBTITLES="subs",CLOSED-CAPTIONS=NONE
+        https://s21.freecdn4.top/files/220884/720p/720p.m3u8?in=unknown::ni
+        #EXT-X-STREAM-INF:BANDWIDTH=400000,AUDIO="aac",RESOLUTION=854x480,SUBTITLES="subs",CLOSED-CAPTIONS=NONE
+        https://s21.freecdn4.top/files/220884/480p/480p.m3u8?in=unknown::ni
+    """.trimIndent()
+
+    @Test
+    fun parseMasterAudioTracks_extractsDubsEvenWhenVariantsAreDead() {
+        // The old probeMaster bailed on newTvMasterIsDead BEFORE extracting
+        // audio — losing the eng/hin renditions on exactly the masters that
+        // carry them. Extraction itself must be deadness-independent; the
+        // per-URL liveness pre-flight is what drops truly dead ones.
+        assertTrue(NetMirrorParsers.newTvMasterIsDead(dualAudioDeadVariantsMaster))
+        val audio = NetMirrorParsers.parseMasterAudioTracks(dualAudioDeadVariantsMaster)
+        assertEquals(2, audio.size)
+        assertEquals("eng", audio[0].first)
+        assertEquals("1. English", audio[0].second)
+        assertEquals("https://s21.freecdn4.top/files/81500601/a/0/0.m3u8", audio[0].third)
+        assertEquals("hin", audio[1].first)
+        assertEquals("2. Hindi", audio[1].second)
+        assertEquals("https://s21.freecdn4.top/files/81500601/a/1/1.m3u8", audio[1].third)
+    }
+
+    @Test
+    fun parseMasterAudioTracks_skipsSubtitleEntriesAndBrokenUris() {
+        // SUBTITLES entries must not leak into the audio list; empty-host
+        // URIs (the dead template artifact) are dropped by the parser.
+        val audio = NetMirrorParsers.parseMasterAudioTracks(dualAudioDeadVariantsMaster)
+        assertTrue(audio.none { it.third.contains("subscdn") })
+        val deadOnly = NetMirrorParsers.parseMasterAudioTracks(deadMaster)
+        // deadMaster's audio URI has an empty host — kept by the parser
+        // (non-blank) but guaranteed to fail the network pre-flight.
+        assertEquals(1, deadOnly.size)
+        assertTrue(deadOnly[0].third.startsWith("https:///"))
+    }
+
+    @Test
+    fun shouldEmitNewTvMaster_embedMissAlwaysEmits() {
+        // Without embed coverage the master is the only path — emit it
+        // regardless of liveness pre-flight (raw-vlink behavior preserved).
+        assertTrue(NetMirrorParsers.shouldEmitNewTvMaster(embedFound = false, audioTrackCount = 0, variantAlive = false))
+        assertTrue(NetMirrorParsers.shouldEmitNewTvMaster(embedFound = false, audioTrackCount = 2, variantAlive = true))
+    }
+
+    @Test
+    fun shouldEmitNewTvMaster_embedCoveredNeedsLiveVariantAndDubs() {
+        // With embed coverage the master only adds value when it is playable
+        // on this device AND carries a genuine dub track (>= 2 renditions).
+        assertTrue(NetMirrorParsers.shouldEmitNewTvMaster(embedFound = true, audioTrackCount = 2, variantAlive = true))
+        assertFalse(NetMirrorParsers.shouldEmitNewTvMaster(embedFound = true, audioTrackCount = 1, variantAlive = true))
+        assertFalse(NetMirrorParsers.shouldEmitNewTvMaster(embedFound = true, audioTrackCount = 0, variantAlive = true))
+        // Dead variant template would produce a non-playing entry next to
+        // working MP4s — never add it.
+        assertFalse(NetMirrorParsers.shouldEmitNewTvMaster(embedFound = true, audioTrackCount = 2, variantAlive = false))
+    }
 }
 
 class LoadDataCodecTest {

@@ -461,4 +461,18 @@ object NetMirrorParsers {
             Triple(lang, name, uri)
         }
     }
+
+    /**
+     * Decide whether to emit the NewTV master link in addition to the
+     * embed-tmdb MP4 links. The master is the ONLY source carrying real
+     * audio renditions (#EXT-X-MEDIA:TYPE=AUDIO with LANGUAGE/NAME), so:
+     *  - no embed coverage → always emit it (it is the only playable path);
+     *  - embed covered → emit it only when it adds value the MP4s cannot:
+     *    the default video variant actually answers on this device
+     *    (variantAlive — a dead in=unknown template 404s) AND the master
+     *    carries at least two audio renditions (a genuine dub track).
+     * Pure — unit-testable.
+     */
+    fun shouldEmitNewTvMaster(embedFound: Boolean, audioTrackCount: Int, variantAlive: Boolean): Boolean =
+        !embedFound || (variantAlive && audioTrackCount >= 2)
 }
