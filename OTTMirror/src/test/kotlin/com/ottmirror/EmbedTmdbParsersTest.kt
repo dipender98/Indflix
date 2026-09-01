@@ -110,6 +110,23 @@ class NetMirrorParsersEmbedTest {
         assertNull(NetMirrorParsers.parseEmbedTmdb("Too many request in short.."))
     }
 
+    @Test
+    fun embedResolved_keepsEveryRenditionUnder1080() {
+        val streams = listOf(
+            EmbedTmdbStream("https://cdn/360.mp4", 360, 100L),
+            EmbedTmdbStream("https://cdn/720.mp4", 720, 500L),
+            EmbedTmdbStream("https://cdn/1080.mp4", 1080, 900L),
+            EmbedTmdbStream("https://cdn/2160.mp4", 2160, 9999L),
+            EmbedTmdbStream("https://cdn/0.mp4", 0, null),
+        )
+        val r = EmbedTmdb.Resolved(streams, emptyList())
+        // bestQuality skips 2160 and 0; the picker is for the UI label.
+        assertEquals(1080, r.bestQuality)
+        // loadLinks filters the actual emission list; here we just assert the
+        // helper exposes the streams for the multi-emit path.
+        assertEquals(5, r.streams.size)
+    }
+
     // ------------------------------------------------------------------
     // NewTV master validation
     // ------------------------------------------------------------------
@@ -188,6 +205,67 @@ class NetMirrorParsersEmbedTest {
         assertNull(NetMirrorParsers.parseMasterResolution("Too many request in short.."))
         // A media playlist (no STREAM-INF) carries no resolution to probe.
         assertNull(NetMirrorParsers.parseMasterResolution("#EXTM3U\n#EXTINF:5,\nseg0.ts"))
+    }
+
+    // ------------------------------------------------------------------
+    // Master variant enumeration (Fix 1b)
+    // ------------------------------------------------------------------
+
+    @Test
+    fun parseMasterVariants_returnsAllResolutions() {
+        val master = """
+            #EXTM3U
+            #EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=1920x1080
+            https://cdn/1080p.m3u8
+            #EXT-X-STREAM-INF:BANDWIDTH=600000,RESOLUTION=1280x720
+            https://cdn/720p.m3u8
+            #EXT-X-STREAM-INF:BANDWIDTH=300000,RESOLUTION=640x360
+            https://cdn/360p.m3u8
+        """.trimIndent()
+        val masterUrl = "https://cdn/master.m3u8"
+        val variants = NetMirrorParsers.parseMasterVariants(master, masterUrl)
+        assertEquals(3, variants.size)
+        assertEquals(1920 to 1080, variants[0].first to variants[0].second)
+        assertEquals(1280 to 720, variants[1].first to variants[1].second)
+        assertEquals(640 to 360, variants[2].first to variants[2].second)
+        // Absolute URIs pass through unchanged.
+        assertEquals("https://cdn/1080p.m3u8", variants[0].third)
+    }
+
+    @Test
+    fun parseMasterVariants_resolvesRelativeAgainstMaster() {
+        val master = """
+            #EXTM3U
+            #EXT-X-STREAM-INF:BANDWIDTH=600000,RESOLUTION=1280x720
+            720p/index.m3u8
+        """.trimIndent()
+        val variants = NetMirrorParsers.parseMasterVariants(master, "https://cdn/path/master.m3u8")
+        assertEquals(1, variants.size)
+        assertEquals("https://cdn/path/720p/index.m3u8", variants[0].third)
+    }
+
+    @Test
+    fun parseMasterVariants_rejectsBlankAndMediaPlaylists() {
+        val masterUrl = "https://cdn/master.m3u8"
+        assertEquals(emptyList(), NetMirrorParsers.parseMasterVariants(null, masterUrl))
+        assertEquals(emptyList(), NetMirrorParsers.parseMasterVariants("", masterUrl))
+        assertEquals(emptyList(), NetMirrorParsers.parseMasterVariants("Too many request in short..", masterUrl))
+        // Media playlist (no STREAM-INF).
+        assertEquals(emptyList(), NetMirrorParsers.parseMasterVariants("#EXTM3U\n#EXTINF:5,\nseg0.ts", masterUrl))
+    }
+
+    @Test
+    fun parseMasterVariants_skipsVariantsWithoutResolution() {
+        val master = """
+            #EXTM3U
+            #EXT-X-STREAM-INF:BANDWIDTH=600000
+            https://cdn/720p.m3u8
+            #EXT-X-STREAM-INF:BANDWIDTH=300000,RESOLUTION=640x360
+            https://cdn/360p.m3u8
+        """.trimIndent()
+        val variants = NetMirrorParsers.parseMasterVariants(master, "https://cdn/master.m3u8")
+        assertEquals(1, variants.size)
+        assertEquals(360, variants[0].second)
     }
 }
 

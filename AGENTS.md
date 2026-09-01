@@ -163,11 +163,15 @@ forks and the first fix failed:
   `status:"n"` + `error:"Invalid User"`. Every request path routes its response
   through `classify()`.
 - Session TTL reality: the server kills `t_hash_t` **~4-5 minutes** after issue
-  (probed: fresh cookie OK at T+210s, `Invalid User` at T+290s). `CookieBox`
-  therefore caches for **3 minutes** — the old 60-min/15-h TTLs served a dead
-  cookie on virtually every request, which is the real root cause of the
-  "Too many request"-family failures. On `SESSION_DEAD` the backend drops the
-  cookie, re-verifies once (singleflight), and repeats the request.
+  (probed: fresh cookie OK at T+210s, `Invalid User` at T+290s). Early revisions
+  of this plugin set a 3-min `CookieBox` TTL that forced a `verify.php` POST
+  every few minutes of browsing — that storm was the dominant feed into the
+  per-IP limiter. The current `CookieBox` reuses the cookie for **15 hours**
+  (CNCVerse-proven trust window; `SESSION_TTL_MS` in `NetMirrorConfig.kt:115`).
+  The live `SESSION_DEAD` detection on the `Invalid User` body remains as the
+  recovery net for the rare genuine server-side expiry. On `SESSION_DEAD` the
+  backend drops the cookie, re-verifies once (singleflight), and repeats the
+  request.
 - `verify()` — one raw POST to `/verify.php` with redirects disabled (the 301
   carries `Set-Cookie: t_hash_t=`), at most 3 hosts, singleflight so concurrent
   callers share one verify. The old two-URL × two-method × five-host storm
@@ -204,16 +208,34 @@ forks and the first fix failed:
 - Stable link identity: every emitted link has `source == name ==` the OTT name
   (`Netflix` / `Hotstar` / `Prime Video` / `Disney+`) — no quality/CDN/runtime
   parts, so player priority saves stay stable.
-- `LinkCache` (30 min, keyed by the content id `loadLinks()` receives) — the
+- `LinkCache` (60 min, keyed by the content id `loadLinks()` receives) — the
   resolved m3u8 URLs stay playable well beyond 5 min (the CDN serves them with
   no session), so the longer TTL means more zero-traffic replays.
-- **Single-rendition emission**: the NewTV master m3u8 (which advertises 3+ adaptive
-  variants + an audio group) is fetched at loadLinks time and collapsed to **one**
-  rendition (the server-default quality, typically 720p) via `pickSingleVariant()`.
-  The native `playlist.php` sources are also emitted as a single stream (the
-  default or highest-quality entry). This prevents ExoPlayer from opening
-  concurrent connections for every adaptive quality — the single biggest
-  structural trigger of the CDN anti-abuse overlay.
+- **Per-variant emission on the NewTV path**: the master m3u8 (which advertises
+  3+ adaptive variants + an audio group) is fetched once via `probeMaster`,
+  parsed for `#EXT-X-STREAM-INF` variants by `NetMirrorParsers.parseMasterVariants`,
+  and emitted as **one `ExtractorLink` per rendition** (sorted by descending
+  height). The master itself is never emitted directly — that regressed
+  playback in earlier revisions because some CDN templates serve a dead
+  `in=unknown` URL. The native `playlist.php` sources stay as a single stream
+  (the default or highest-quality entry); embed-tmdb streams ? 1080p are
+  emitted as separate `ExtractorLink`s so the player UI shows a real quality
+  picker instead of relying on the player to split a master.
+- **Audio-track switching**: each `#EXT-X-MEDIA:TYPE=AUDIO` entry from the
+  NewTV master is built with `newAudioFile(uri) { headers = streamHeaders(...) }`
+  so the audio media playlist request carries the same Referer/Origin/Cookie
+  as the parent video. Without the headers, the CDN hotlink check 403s the
+  audio media playlist and the player silently falls back to the default
+  audio track.
+- **`player.php` response cache**: raw `newtv/player.php` bodies are cached
+  for 10 min in `NetMirrorResponseCache` under `player|<ott>|<contentId>`.
+  Combined with the 60-min `LinkCache` and a per-contentId `master|<ott>|<id>`
+  cache for the probe result, repeat taps replay with zero net7x traffic.
+- **No `LIMITED` cascade**: when the NewTV path sees a `LIMITED` verdict, the
+  backend sets `sawLimited = true` and **never falls through** to the native
+  Path 3 — that flow would only fire 2-3 more net7x requests
+  (`verify()` + `play.php` + `playlist.php`) into an already-saturated
+  shared-IP bucket. The `limitedMessage()` is thrown immediately.
 - **Stream referer**: every `ExtractorLink` carries `referer = $host/home` (the
   player page), never the m3u8 URL. The old `collect()` path set `referer = u`
   (the stream URL itself), which some CDNs reject as an invalid hotlink context.

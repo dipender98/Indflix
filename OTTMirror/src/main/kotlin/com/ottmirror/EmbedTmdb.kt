@@ -21,7 +21,13 @@ import com.lagradost.cloudstream3.app
  */
 internal object EmbedTmdb {
 
-    data class Resolved(val url: String, val quality: Int, val subs: List<EmbedTmdbCaption>)
+    data class Resolved(
+        val streams: List<EmbedTmdbStream>,
+        val subs: List<EmbedTmdbCaption>,
+    ) {
+        val bestQuality: Int get() = streams.filter { it.resolution in 1..1080 }
+            .maxOfOrNull { it.resolution } ?: 0
+    }
 
     private const val NEG_TTL_MS = 30 * 60 * 1000L   // noSource — don't re-ask per episode tap
     private const val POS_TTL_MS = 10 * 60 * 1000L   // raw result — absorb player refreshes
@@ -95,7 +101,12 @@ internal object EmbedTmdb {
     }
 
     private fun toResolved(parsed: EmbedTmdbResult): Resolved? {
-        val best = NetMirrorParsers.pickEmbedStream(parsed.streams) ?: return null
-        return Resolved(best.url, best.resolution, parsed.captions)
+        // Keep every rendition ≤ 1080p — the player gets a real quality
+        // picker (one ExtractorLink per stream) and skips 2160p which the
+        // hakunaymatata CDN almost never serves anyway. Order is preserved
+        // (server-issued); the caller sorts for display.
+        val streams = parsed.streams.filter { it.resolution in 1..1080 }
+        if (streams.isEmpty()) return null
+        return Resolved(streams, parsed.captions)
     }
 }

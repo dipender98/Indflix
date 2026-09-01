@@ -284,6 +284,46 @@ object NetMirrorParsers {
     }
 
     /**
+     * Enumerate every variant in a master HLS playlist, resolving each
+     * relative URI against the master URL. Returns (width, height, url) for
+     * each `#EXT-X-STREAM-INF` line that carries a RESOLUTION, or null when
+     * the playlist is not a master or has no resolution-tagged variants.
+     * The caller emits one ExtractorLink per entry so the player shows a
+     * real quality picker instead of relying on adaptive-HLS splits.
+     */
+    fun parseMasterVariants(raw: String?, masterUrl: String): List<Triple<Int, Int, String>> {
+        if (raw.isNullOrBlank() || !raw.startsWith("#EXTM3U")) return emptyList()
+        val lines = raw.split('\n')
+        if (lines.none { it.startsWith("#EXT-X-STREAM-INF") }) return emptyList()
+
+        val base = masterUrl.substringBeforeLast('/', "")
+        val out = mutableListOf<Triple<Int, Int, String>>()
+        var pending: String? = null
+        for (line in lines) {
+            val t = line.trim()
+            when {
+                t.startsWith("#EXT-X-STREAM-INF") -> pending = t
+                pending != null && t.isNotBlank() && !t.startsWith("#") -> {
+                    val res = Regex("""RESOLUTION=(\d+)x(\d+)""", RegexOption.IGNORE_CASE)
+                        .find(pending)?.groupValues
+                    if (res != null) {
+                        val w = res[1].toIntOrNull()
+                        val h = res[2].toIntOrNull()
+                        if (w != null && h != null) {
+                            val abs = if (t.startsWith("http", ignoreCase = true)) t
+                            else if (base.isNotEmpty()) "$base/$t" else t
+                            out += Triple(w, h, abs)
+                        }
+                    }
+                    pending = null
+                }
+                t.startsWith("#EXT-X-STREAM-INF") -> Unit
+            }
+        }
+        return out
+    }
+
+    /**
      * Read the RESOLUTION=WxH attribute of the variant the player would
      * default to (the DEFAULT=YES variant, else the lowest-bandwidth one),
      * from a master HLS playlist. Returns (width, height) or null when the
