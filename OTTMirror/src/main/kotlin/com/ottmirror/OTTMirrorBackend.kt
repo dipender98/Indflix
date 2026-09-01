@@ -641,27 +641,34 @@ internal object OTTMirrorBackend {
             val newTv = newTvFetch?.player
 
             // NewTV master probe: audio extraction + variant liveness, cached.
+            // The pre-flighted audio count feeds the shouldEmitNewTvMaster
+            // decision ONLY — audio URLs are deliberately NOT attached as
+            // AudioFile children: CS3 merges them via MergingMediaSource and a
+            // single dead child fails the whole playback with a 3003
+            // container-parse error (regression seen on every title). The
+            // master link exposes the audio picker natively via
+            // #EXT-X-MEDIA:TYPE=AUDIO; the MP4 links use muxed audio.
             val masterProbe = newTv?.let { probeNewTvMaster(it.vlink, it.referer, ott, contentId) }
-            val verifiedAudio = masterProbe?.audioTracks.orEmpty()
+            val verifiedAudioCount = masterProbe?.audioTracks?.size ?: 0
 
             val allLinks = mutableListOf<ExtractorLink>()
 
-            // Embed MP4 quality tiers, each carrying the verified NewTV audio
-            // renditions so MP4 playback gets the same audio picker.
+            // Embed MP4 quality tiers (muxed audio — plays safely for everyone).
             val embedLinks = embed?.streams
                 ?.filter { it.resolution in 1..1080 }
                 ?.sortedByDescending { it.resolution }
-                ?.map { s -> emit(ott, s.url, EMBED_REFERER, s.resolution, cookie = "", audioTracks = verifiedAudio) }
+                ?.map { s -> emit(ott, s.url, EMBED_REFERER, s.resolution, cookie = "") }
                 .orEmpty()
             allLinks += embedLinks
 
             // Master link: always when embed missed (only path), else only
             // when it is genuinely playable on this device AND carries the
-            // multi-audio value the MP4s cannot.
+            // multi-audio value the MP4s cannot. The master URL lets Media3
+            // natively expose the labeled audio groups — no merge needed.
             if (newTv != null) {
                 val emitMaster = NetMirrorParsers.shouldEmitNewTvMaster(
                     embedFound = embedLinks.isNotEmpty(),
-                    audioTrackCount = verifiedAudio.size,
+                    audioTrackCount = verifiedAudioCount,
                     variantAlive = masterProbe?.variantAlive == true,
                 )
                 if (emitMaster) {
@@ -671,7 +678,6 @@ internal object OTTMirrorBackend {
                         referer = newTv.referer,
                         quality = masterProbe?.defaultHeight ?: getQualityFromName(newTv.vlink),
                         cookie = "",
-                        audioTracks = verifiedAudio,
                     )
                 }
             }
