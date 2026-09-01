@@ -283,6 +283,52 @@ object NetMirrorParsers {
         return defaultUrl ?: lowUrl
     }
 
+    /**
+     * Read the RESOLUTION=WxH attribute of the variant the player would
+     * default to (the DEFAULT=YES variant, else the lowest-bandwidth one),
+     * from a master HLS playlist. Returns (width, height) or null when the
+     * playlist is not a master or carries no RESOLUTION on the chosen line.
+     * The caller uses the height (e.g. 1080) as the ExtractorLink quality so
+     * the UI shows the real resolution instead of a URL-guessed one.
+     */
+    fun parseMasterResolution(raw: String?): Pair<Int, Int>? {
+        if (raw.isNullOrBlank() || !raw.startsWith("#EXTM3U")) return null
+        val lines = raw.split('\n')
+        if (lines.none { it.startsWith("#EXT-X-STREAM-INF") }) return null
+
+        var defaultRes: Pair<Int, Int>? = null
+        var defaultBw = Long.MAX_VALUE
+        var lowRes: Pair<Int, Int>? = null
+        var lowBw = Long.MAX_VALUE
+        var pending: String? = null
+
+        for (line in lines) {
+            val t = line.trim()
+            if (t.startsWith("#EXT-X-STREAM-INF")) {
+                pending = t
+            } else if (pending != null && t.isNotBlank() && !t.startsWith("#")) {
+                val res = Regex("""RESOLUTION=(\d+)x(\d+)""", RegexOption.IGNORE_CASE)
+                    .find(pending)?.groupValues
+                val pair = res?.let {
+                    val w = it[1].toIntOrNull() ?: return@let null
+                    val h = it[2].toIntOrNull() ?: return@let null
+                    w to h
+                }
+                if (pair != null) {
+                    val bw = Regex("""BANDWIDTH=(\d+)""").find(pending)?.groupValues?.get(1)?.toLongOrNull() ?: Long.MAX_VALUE
+                    if (pending.contains("DEFAULT=YES", ignoreCase = true) && bw < defaultBw) {
+                        defaultBw = bw; defaultRes = pair
+                    }
+                    if (bw < lowBw) {
+                        lowBw = bw; lowRes = pair
+                    }
+                }
+                pending = null
+            }
+        }
+        return defaultRes ?: lowRes
+    }
+
     // ------------------------------------------------------------------
     // net27.cc/api/embed-tmdb — sessionless TMDB-keyed stream API
     // ------------------------------------------------------------------

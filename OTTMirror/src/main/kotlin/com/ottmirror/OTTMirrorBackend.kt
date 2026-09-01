@@ -1,9 +1,11 @@
 package com.ottmirror
 
 import android.util.Log
+import com.lagradost.cloudstream3.AudioFile
 import com.lagradost.cloudstream3.ErrorLoadingException
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
+import com.lagradost.cloudstream3.newAudioFile
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.getQualityFromName
@@ -486,6 +488,7 @@ internal object OTTMirrorBackend {
         cookie: String,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
+        audioTracks: List<AudioFile> = emptyList(),
     ) {
         val label = ottLabel(ott)
         val type = if (url.contains(".m3u8", ignoreCase = true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
@@ -495,7 +498,7 @@ internal object OTTMirrorBackend {
                 source = label, name = label, url = url,
                 referer = ref, quality = quality,
                 headers = streamHeaders(ref, cookie, ott),
-                extractorData = null, type = type, audioTracks = emptyList(),
+                extractorData = null, type = type, audioTracks = audioTracks,
             )
         )
     }
@@ -503,7 +506,7 @@ internal object OTTMirrorBackend {
     // Cache entries must carry the SAME referer/headers as the live links, or
     // a replayed stream would be served with the wrong hotlink context. The
     // referer is the player page (…/home), never the stream URL itself.
-    private fun collect(ott: OttService, urls: List<String>, referer: String, cookie: String): List<ExtractorLink> {
+    private fun collect(ott: OttService, urls: List<String>, referer: String, cookie: String, audioTracks: List<AudioFile> = emptyList()): List<ExtractorLink> {
         val label = ottLabel(ott)
         return urls.distinct().map { u ->
             ExtractorLink(
@@ -511,8 +514,35 @@ internal object OTTMirrorBackend {
                 quality = getQualityFromName(u), headers = streamHeaders(referer, cookie, ott),
                 extractorData = null,
                 type = if (u.contains(".m3u8", ignoreCase = true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO,
-                audioTracks = emptyList(),
+                audioTracks = audioTracks,
             )
+        }
+    }
+
+    // Probe the HLS master the player would receive and extract (a) the audio
+    // track groups (#EXT-X-MEDIA:TYPE=AUDIO) as AudioFile entries so the
+    // player's track selector can switch languages, and (b) the default
+    // variant's height so the UI shows the real resolution. This is metadata
+    // ONLY — the emitted URL is never replaced by the probe (the earlier
+    // master-collapse fetch regressed playback because the CDN serves a dead
+    // in=unknown template to some IPs). Any failure returns empty/null and the
+    // caller falls back to the current single-link behavior.
+    private suspend fun probeMaster(url: String, referer: String, ott: OttService): Pair<List<AudioFile>, Int?> {
+        if (!url.contains(".m3u8", ignoreCase = true)) return emptyList<AudioFile>() to null
+        return try {
+            HostThrottler.gate()
+            val resp = runCatching {
+                app.get(url, headers = streamHeaders(referer, "", ott), timeout = 10)
+            }.getOrNull() ?: return emptyList<AudioFile>() to null
+            val body = resp.text
+            if (NetMirrorParsers.newTvMasterIsDead(body)) return emptyList<AudioFile>() to null
+            val tracks = mutableListOf<AudioFile>()
+            for ((_, _, uri) in NetMirrorParsers.parseMasterAudioTracks(body)) {
+                tracks += newAudioFile(uri)
+            }
+            tracks to NetMirrorParsers.parseMasterResolution(body)?.second
+        } catch (e: Exception) {
+            emptyList<AudioFile>() to null
         }
     }
 
@@ -601,8 +631,10 @@ var sawLimited = false
                         // what the reference flow does.
                         if (vlink != null && p?.status != "n") {
                             val ref = p.referer ?: apiBase
-                            emit(ott, vlink, ref, getQualityFromName(vlink), cookie = "", subtitleCallback, callback)
-                            LinkCache.put(contentId, collect(ott, listOf(vlink), ref, ""))
+                            val (audioTracks, height) = probeMaster(vlink, ref, ott)
+                            val quality = height ?: getQualityFromName(vlink)
+                            emit(ott, vlink, ref, quality, cookie = "", subtitleCallback, callback, audioTracks = audioTracks)
+                            LinkCache.put(contentId, collect(ott, listOf(vlink), ref, "", audioTracks))
                             newTvOk = true
                         }
                         break

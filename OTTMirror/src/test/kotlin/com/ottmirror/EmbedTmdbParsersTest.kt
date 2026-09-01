@@ -154,6 +154,41 @@ class NetMirrorParsersEmbedTest {
         assertTrue(NetMirrorParsers.newTvMasterIsDead("<html>error</html>"))
         assertTrue(NetMirrorParsers.newTvMasterIsDead("Too many request in short.."))
     }
+
+    // ------------------------------------------------------------------
+    // Master resolution probe
+    // ------------------------------------------------------------------
+
+    @Test
+    fun parseMasterResolution_usesDefaultVariant() {
+        // deadMaster has a non-default 1920x1080 variant and a DEFAULT=YES
+        // 1280x720 one — the default must win, matching what the player picks.
+        assertEquals(1280 to 720, NetMirrorParsers.parseMasterResolution(deadMaster))
+    }
+
+    @Test
+    fun parseMasterResolution_singleOrNoDefaultFallsBackToLowestBandwidth() {
+        assertEquals(1280 to 720, NetMirrorParsers.parseMasterResolution(liveMaster))
+
+        // No DEFAULT=YES anywhere: lowest bandwidth variant wins (720p).
+        val noDefault = """
+            #EXTM3U
+            #EXT-X-STREAM-INF:BANDWIDTH=3000000,RESOLUTION=1920x1080
+            https://cdn/1080p.m3u8
+            #EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=1280x720
+            https://cdn/720p.m3u8
+        """.trimIndent()
+        assertEquals(1280 to 720, NetMirrorParsers.parseMasterResolution(noDefault))
+    }
+
+    @Test
+    fun parseMasterResolution_rejectsBlankAndMediaPlaylists() {
+        assertNull(NetMirrorParsers.parseMasterResolution(null))
+        assertNull(NetMirrorParsers.parseMasterResolution(""))
+        assertNull(NetMirrorParsers.parseMasterResolution("Too many request in short.."))
+        // A media playlist (no STREAM-INF) carries no resolution to probe.
+        assertNull(NetMirrorParsers.parseMasterResolution("#EXTM3U\n#EXTINF:5,\nseg0.ts"))
+    }
 }
 
 class LoadDataCodecTest {

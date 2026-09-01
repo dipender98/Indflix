@@ -181,7 +181,8 @@ abstract class OTTMirrorProvider(
         val imdbId = meta?.imdbId ?: post.imdbId
 
         if (isMovie) {
-            return newMovieLoadResponse(title, encode(contentId, title, tmdbIdFinal?.toString()), TvType.Movie, posterUrl(contentId)) {
+            val data = encode(contentId, title, tmdbIdFinal?.toString())
+            return newMovieLoadResponse(title, data, TvType.Movie, data) {
                 this.posterUrl = poster
                 this.backgroundPosterUrl = meta?.backdrop
                 this.year = year?.toIntOrNull()
