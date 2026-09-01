@@ -510,13 +510,14 @@ internal object OTTMirrorBackend {
     //  - audio tracks (#EXT-X-MEDIA:TYPE=AUDIO) as AudioFile entries, each
     //    carrying the stream headers so the CDN accepts the audio media
     //    playlist request when the player switches tracks;
-    //  - the list of variant streams (width, height, url) so the caller can
-    //    emit one ExtractorLink per rendition (real quality picker, instead
-    //    of relying on the player to split a master URL);
-    //  - the default variant's height, kept for callers that still want a
-    //    single quality tag.
-    // Any failure returns empty lists and the caller falls back to a
-    // single-link emission.
+    //  - the list of variant streams (width, height, url). Used to detect a
+    //    LIVE master (variants non-empty) and to pick the quality tag; the
+    //    master URL itself is what gets emitted (Media3 discovers audio
+    //    groups + adaptive variants natively from a master, which a
+    //    per-variant media-playlist URL cannot);
+    //  - the default variant's height, used as the ExtractorLink quality.
+    // Any failure (including a dead in=unknown template) returns empty lists
+    // and the caller emits the raw vlink unchanged.
     private suspend fun probeMaster(url: String, referer: String, ott: OttService): MasterProbe {
         if (!url.contains(".m3u8", ignoreCase = true)) return MasterProbe.EMPTY
         return try {
@@ -671,6 +672,18 @@ var sawLimited = false
      * Parse a NewTV player.php body and emit the appropriate ExtractorLinks.
      * Shared by the live-fetch and response-cache replay paths so a cache
      * hit goes through the same emission logic.
+     *
+     * The master m3u8 is emitted AS-IS (not expanded into per-variant media-
+     * playlist links): CloudStream's player surfaces the audio-track selector
+     * only when Media3 exposes more than one audio track group
+     * (PlayerFragment: audioTracksHolder visible when currentAudioTracks>1).
+     * #EXT-X-MEDIA:TYPE=AUDIO (with LANGUAGE/NAME) lives only in the master
+     * playlist, so emitting a variant media-playlist URL makes Media3 discover
+     * a single muxed audio track and the audio picker disappears. The master
+     * URL lets Media3 natively expose both the labeled audio groups AND the
+     * adaptive video variants — one link gives the user both selectors.
+     * A dead in=unknown template is gated by probeMaster and falls back to
+     * the raw vlink.
      */
     private suspend fun handleNewTvPlayerResponse(
         ott: OttService,
@@ -692,16 +705,21 @@ var sawLimited = false
                 NetMirrorResponseCache.put("master|${ott.id}|$contentId", it)
             }
         }
-        val audio = probe.audioTracks
-        val emitted = if (probe.variants.isNotEmpty()) {
-            probe.variants
-                .sortedByDescending { it.second }
-                .map { (_, h, u) -> emit(ott, u, ref, h, cookie = "", audioTracks = audio) }
-        } else {
-            listOf(emit(ott, vlink, ref, probe.defaultHeight ?: getQualityFromName(vlink), cookie = "", audioTracks = audio))
-        }
-        emitted.forEach { runCatching { callback(it) } }
-        LinkCache.put(contentId, emitted)
+        // Emit the master URL itself. The audioTracks list (extracted from the
+        // master's #EXT-X-MEDIA groups, each carrying stream headers) is
+        // attached as supplementary metadata; Media3 discovers the native audio
+        // groups from the master regardless. The quality tag comes from the
+        // default variant's height (the raw vlink has no resolution in its URL).
+        val link = emit(
+            ott,
+            url = vlink,
+            referer = ref,
+            quality = probe.defaultHeight ?: getQualityFromName(vlink),
+            cookie = "",
+            audioTracks = probe.audioTracks,
+        )
+        runCatching { callback(link) }
+        LinkCache.put(contentId, listOf(link))
     }
 
     private suspend fun nativePlaylistFlow(

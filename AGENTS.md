@@ -211,16 +211,22 @@ forks and the first fix failed:
 - `LinkCache` (60 min, keyed by the content id `loadLinks()` receives) — the
   resolved m3u8 URLs stay playable well beyond 5 min (the CDN serves them with
   no session), so the longer TTL means more zero-traffic replays.
-- **Per-variant emission on the NewTV path**: the master m3u8 (which advertises
+- **Master-URL emission on the NewTV path**: the master m3u8 (which advertises
   3+ adaptive variants + an audio group) is fetched once via `probeMaster`,
-  parsed for `#EXT-X-STREAM-INF` variants by `NetMirrorParsers.parseMasterVariants`,
-  and emitted as **one `ExtractorLink` per rendition** (sorted by descending
-  height). The master itself is never emitted directly — that regressed
-  playback in earlier revisions because some CDN templates serve a dead
-  `in=unknown` URL. The native `playlist.php` sources stay as a single stream
-  (the default or highest-quality entry); embed-tmdb streams ? 1080p are
-  emitted as separate `ExtractorLink`s so the player UI shows a real quality
-  picker instead of relying on the player to split a master.
+  validated by `NetMirrorParsers.newTvMasterIsDead` (a dead `in=unknown`
+  template falls back to the raw `vlink`), and the **master URL itself is
+  emitted as one `ExtractorLink`** with `audioTracks` attached. Per-variant
+  media-playlist URLs were tried and reverted: CloudStream's player shows the
+  audio-track selector only when Media3 exposes more than one audio track
+  group, and `#EXT-X-MEDIA:TYPE=AUDIO` (with `LANGUAGE`/`NAME`) lives only in
+  the master — a variant URL makes Media3 discover a single muxed audio track
+  and the audio picker disappears. The master URL lets Media3 natively expose
+  both the labeled audio groups AND the adaptive video variants, so one link
+  gives the user both the quality and audio selectors. The native
+  `playlist.php` sources stay as a single stream (the default or highest-
+  quality entry); embed-tmdb streams ? 1080p are emitted as separate
+  `ExtractorLink`s (MP4 — no audio-group problem) so the embed path keeps a
+  real quality picker.
 - **Audio-track switching**: each `#EXT-X-MEDIA:TYPE=AUDIO` entry from the
   NewTV master is built with `newAudioFile(uri) { headers = streamHeaders(...) }`
   so the audio media playlist request carries the same Referer/Origin/Cookie
