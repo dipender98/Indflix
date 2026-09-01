@@ -244,10 +244,8 @@ internal object OTTMirrorBackend {
     suspend fun getHomeRows(ott: OttService): List<Pair<String, List<String>>> {
         NetMirrorResponseCache.get<List<Pair<String, List<String>>>>("home|${ott.id}")?.let { return it }
         val cookie = verify()
-        var sessionRetried = false
-        var limitedAttempts = 0
         var attempts = 0
-        while (attempts++ < 5) {
+        while (attempts++ < 3) {
             val host = DomainRotator.current(Role.MOBILE) ?: return emptyList()
             HostThrottler.gate()
             val resp = runCatching {
@@ -267,16 +265,14 @@ internal object OTTMirrorBackend {
                     return rows
                 }
                 NetMirrorGuard.Verdict.LIMITED -> {
-                    limitedAttempts++
-                    if (!NetMirrorGuard.onLimited(limitedAttempts)) throw ErrorLoadingException(limitedMessage())
+                    // Fail fast — no retry storm on a saturated shared IP.
+                    throw ErrorLoadingException(limitedMessage())
                 }
                 NetMirrorGuard.Verdict.SESSION_DEAD -> {
-                    // /mobile/home works without a session, but if the server
-                    // says otherwise the cookie is dead — refresh it once.
-                    if (sessionRetried) return emptyList()
-                    sessionRetried = true
-                    NetMirrorGuard.invalidateSession()
-                    verify()
+                    // /mobile/home works without a session; a dead-cookie
+                    // body is just a transient server state — reuse the same
+                    // cookie (CNCVerse blind-reuses its 15 h cookie).
+                    if (attempts >= 3) return emptyList()
                 }
                 NetMirrorGuard.Verdict.DEAD -> DomainRotator.markFailed(Role.MOBILE, host)
             }
@@ -309,10 +305,8 @@ internal object OTTMirrorBackend {
     suspend fun search(ott: OttService, query: String): List<SearchHit> {
         if (query.isBlank()) return emptyList()
         val encoded = java.net.URLEncoder.encode(query, "UTF-8")
-        var sessionRetried = false
-        var limitedAttempts = 0
         var attempts = 0
-        while (attempts++ < 5) {
+        while (attempts++ < 3) {
             val cookie = verify()
             val host = DomainRotator.current(Role.MOBILE) ?: break
             val url = "$host/mobile${ott.mobilePrefix}/search.php?s=$encoded&t=${System.currentTimeMillis() / 1000}"
@@ -331,25 +325,17 @@ internal object OTTMirrorBackend {
                 NetMirrorGuard.Verdict.OK -> {
                     HostThrottler.recordSuccess()
                     val hits = NetMirrorParsers.parseSearch(resp.text)
-                    if (hits.isEmpty() && resp.text.contains("Top Searches") && !sessionRetried) {
-                        // Scoped search degraded to the global fallback — the
-                        // session is dead even though the response "worked".
-                        sessionRetried = true
-                        NetMirrorGuard.invalidateSession()
-                        continue
-                    }
+                    // CNCVerse blind-reuses the cookie: if the server returns
+                    // "Top Searches" instead of scoped results, it's a
+                    // transient server-side state — just return what we got.
                     return hits
                 }
                 NetMirrorGuard.Verdict.LIMITED -> {
-                    limitedAttempts++
-                    if (!NetMirrorGuard.onLimited(limitedAttempts)) throw ErrorLoadingException(limitedMessage())
+                    // Fail fast — no cooldown wait on a shared saturated IP.
+                    throw ErrorLoadingException(limitedMessage())
                 }
-                NetMirrorGuard.Verdict.SESSION_DEAD -> {
-                    if (sessionRetried) break
-                    sessionRetried = true
-                    NetMirrorGuard.invalidateSession()
-                }
-                NetMirrorGuard.Verdict.DEAD -> DomainRotator.markFailed(Role.MOBILE, host)
+                // Dead cookie or dead host — try the next mirror.
+                else -> DomainRotator.markFailed(Role.MOBILE, host)
             }
         }
         throw ErrorLoadingException(
@@ -360,10 +346,8 @@ internal object OTTMirrorBackend {
 
     suspend fun loadPost(ott: OttService, id: String): NetMirrorPost? {
         NetMirrorResponseCache.get<NetMirrorPost>("post|${ott.id}|$id")?.let { return it }
-        var sessionRetried = false
-        var limitedAttempts = 0
         var attempts = 0
-        while (attempts++ < 6) {
+        while (attempts++ < 3) {
             val cookie = verify()
             val host = DomainRotator.current(Role.MOBILE) ?: return null
             HostThrottler.gate()
@@ -385,19 +369,12 @@ internal object OTTMirrorBackend {
                     if (post != null) NetMirrorResponseCache.put("post|${ott.id}|$id", post)
                     return post
                 }
-                NetMirrorGuard.Verdict.SESSION_DEAD -> {
-                    // The normal case on a warm cache: the session aged out
-                    // (server TTL ~4-5 min). Re-verify once and repeat the
-                    // request with a live cookie instead of failing.
-                    if (sessionRetried) return null
-                    sessionRetried = true
-                    NetMirrorGuard.invalidateSession()
-                }
                 NetMirrorGuard.Verdict.LIMITED -> {
-                    limitedAttempts++
-                    if (!NetMirrorGuard.onLimited(limitedAttempts)) throw ErrorLoadingException(limitedMessage())
+                    // Fail fast — no retry or cooldown on a shared saturated IP.
+                    throw ErrorLoadingException(limitedMessage())
                 }
-                NetMirrorGuard.Verdict.DEAD -> DomainRotator.markFailed(Role.MOBILE, host)
+                // Dead cookie or dead host — try the next mirror.
+                else -> DomainRotator.markFailed(Role.MOBILE, host)
             }
         }
         return null
@@ -460,18 +437,17 @@ internal object OTTMirrorBackend {
     suspend fun resolveNewTvBase(probe: Boolean = false): String {
         if (NewTvBase.value.isBlank()) NewTvBase.warm()
         NewTvBase.value.takeIf { it.isNotBlank() }?.let { return it }
-        // Cap the domain sweep well below the full 24-host list (the
-        // reference walks all of them) but wide enough to survive several
-        // dead mirrors; NewTvBase is cached in-memory + persisted 24 h, so
-        // this walk is rare.
-        val maxTries = 8
-        var limitedAttempts = 0
-        for (attempt in 1..maxTries) {
-            val host = DomainRotator.current(Role.NEWTV) ?: break
-            val h = hostOf(host)
+        // CNCVerse-exact walk: iterate ALL 24 domains in list order until one
+        // answers checknewtv.php. This infra (mobidetect domains) is separate
+        // from the net7x per-IP limiter — live probes show checknewtv.php
+        // answers fine even while net7x is limited — so the old capped walk
+        // only made resolution fail on dead mirrors. The result is cached
+        // in-memory + persisted 24 h, so this walk is rare.
+        for (host in NEWTV_DOMAINS) {
+            val h = decodeBase64(host).trimEnd('/')
             HostThrottler.gate()
             val resp = runCatching {
-                app.get("$host/checknewtv.php", headers = NEWTV_HEADERS, timeout = 8)
+                app.get("$h/checknewtv.php", headers = NEWTV_HEADERS, timeout = 8)
             }.getOrNull()
 
             var resolved: String? = null
@@ -484,27 +460,7 @@ internal object OTTMirrorBackend {
             }
             if (resolved != null) {
                 NewTvBase.set(resolved)
-                HostThrottler.recordSuccess(h)
                 return resolved
-            }
-
-            if (resp == null) {
-                // Network error: this host is dead to us, advance to the next.
-                DomainRotator.markFailed(Role.NEWTV, host)
-            } else {
-                when (NetMirrorGuard.classify(resp.code, resp.text)) {
-                    NetMirrorGuard.Verdict.LIMITED -> {
-                        // IP-wide limit: no other NewTV domain will behave
-                        // differently. Wait it out and retry the SAME host —
-                        // never mark it dead, that would burn the domain list.
-                        limitedAttempts++
-                        if (!NetMirrorGuard.onLimited(limitedAttempts)) {
-                            if (probe) return ""
-                            throw ErrorLoadingException(limitedMessage())
-                        }
-                    }
-                    else -> DomainRotator.markFailed(Role.NEWTV, host)
-                }
             }
         }
 
@@ -586,22 +542,20 @@ internal object OTTMirrorBackend {
                 return@withContext true
             }
         }
-
-        var sawLimited = false
+var sawLimited = false
 
         // ------------------------------------------------------------------
-        // Path 1 — embed-tmdb (sessionless, TMDB-keyed, different backend).
-        // A single progressive MP4: fastest start, up to 1080p, Hindi +
-        // regional captions, and ONE connection — no multi-variant HLS, which
-        // is the structural trigger of the "Too many request" CDN overlay.
-        // Zero net7x traffic, zero verify.
+        // Path 1 — embed-tmdb (sessionless, TMDB-keyed, net27 backend).
+        // PRIMARY: the only playback path verified working end-to-end in
+        // live probes — direct signed MP4 (fast start, up to 1080p) with
+        // Hindi + regional captions, ONE connection (no multi-variant HLS
+        // connection storm that triggers the CDN overlay), zero net7x
+        // traffic, zero session. If the title is covered it just works.
         // ------------------------------------------------------------------
         val embed = ld.tmdbId?.let { tmdbId ->
             runCatching { EmbedTmdb.resolve(tmdbId, ld.season, ld.episode) }.getOrNull()
         }
         if (embed != null) {
-            // Sessionless MP4 CDN: the videodownloader.site referer is the
-            // hotlink context the net27 CDN expects; no t_hash_t cookie.
             val link = ExtractorLink(
                 source = ottLabel(ott), name = ottLabel(ott), url = embed.url,
                 referer = EMBED_REFERER, quality = embed.quality,
@@ -611,8 +565,6 @@ internal object OTTMirrorBackend {
                 audioTracks = emptyList(),
             )
             runCatching { callback(link) }
-            // Captions come absolute (https://net27.cc/...); emit() only knows
-            // native playlist tracks, so forward them here.
             embed.subs.forEach { c ->
                 runCatching { subtitleCallback(SubtitleFile(c.name.ifBlank { c.lang.ifBlank { "subs" } }, c.url)) }
             }
@@ -621,31 +573,14 @@ internal object OTTMirrorBackend {
         }
 
         // ------------------------------------------------------------------
-        // Path 2 — NewTV player (CNCVerse-proven playback flow).
-        //
-        // The reference extension works with exactly this shape: player.php
-        // carrying the NewTV base headers + Ott (+ Usertoken:""), where the
-        // session cookie reaches the server through the shared cookie jar.
-        // We attach t_hash_t explicitly (our verify uses a separate raw
-        // client, so our jar is empty). The server then answers status:"ok"
-        // with a REAL video_link; the headerless template we saw while
-        // probing (status "otp", literal "?in=unknown" variants, the same
-        // file id 220884 for every title) is the unauthenticated placeholder.
-        // CNCVerse requires status:"ok" — match that strictly and fall
-        // through to embed-tmdb otherwise.
+        // Path 2 — NewTV player (CNCVerse-exact, Hindi audio). Fallback for
+        // titles the embed API does not cover.
         // ------------------------------------------------------------------
         var newTvFailure: Throwable? = null
         var newTvOk = false
         try {
             val apiBase = resolveNewTvBase()
             val playerUrl = "$apiBase/newtv/player.php?id=$contentId"
-            // Session context for the player API. No extra request: the
-            // cookie comes from the already-warm CookieBox (15 h TTL).
-            val cookie = runCatching { verify() }.getOrDefault("")
-            val playerCookie = buildString {
-                if (cookie.isNotBlank()) append("t_hash_t=$cookie; ")
-                append("hd=on")
-            }
             var limitedAttempts = 0
             var attempts = 0
             while (attempts++ < 4) {
@@ -653,10 +588,12 @@ internal object OTTMirrorBackend {
                 val resp = runCatching {
                     app.get(
                         playerUrl,
+                        // CNCVerse-exact: NewTV headers + Ott (hs for Disney)
+                        // + empty Usertoken. NO Cookie header — the reference
+                        // sends none to the player API.
                         headers = NEWTV_HEADERS + mapOf(
                             "Ott" to newTvOttHeader(ott),
                             "Usertoken" to "",
-                            "Cookie" to playerCookie,
                         ),
                         timeout = 10,
                     )
@@ -666,8 +603,8 @@ internal object OTTMirrorBackend {
                     NetMirrorGuard.Verdict.OK -> {
                         val p = NetMirrorParsers.parseNewTvPlayer(resp.text)
                         val vlink = p?.videoLink?.takeIf { it.isNotBlank() }
-                        // Strictly CNCVerse: only status:"ok" carries a real
-                        // master; everything else is the placeholder template.
+                        // CNCVerse-exact: only status:"ok" carries a real
+                        // master on a real device.
                         if (p?.status == "ok" && vlink != null) {
                             val ref = p.referer ?: apiBase
                             emit(ott, vlink, ref, getQualityFromName(vlink), cookie = "", subtitleCallback, callback)
@@ -691,12 +628,7 @@ internal object OTTMirrorBackend {
         if (newTvOk) return@withContext true
 
         // ------------------------------------------------------------------
-        // Terminal — no net7x playback fallback (CNCVerse-exact). The native
-        // play.php/playlist.php path touches the per-IP limiter and was the
-        // source of "Too many request in short.." at playback time; the
-        // reference extension has no such fallback and relies solely on the
-        // sessionless NewTV/embed flows above. If both missed, report failure
-        // honestly instead of feeding the limiter.
+        // Terminal — no net7x playback fallback.
         // ------------------------------------------------------------------
         newTvFailure?.let { throw it }
         if (sawLimited) throw ErrorLoadingException(limitedMessage())
