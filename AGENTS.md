@@ -30,7 +30,7 @@ OTTMirror/
     OTTMirrorPrimeVideo.kt       MainAPI (Prime Video, ott=pv, /mobile/pv/*)
     OTTMirrorDisneyPlus.kt       MainAPI (Disney+, ott=dp, /mobile/hs/*)
     OTTMirrorProvider.kt         abstract base: home/search/load/loadLinks via backend
-    OTTMirrorBackend.kt          NetMirror engine: verify, home, search, post, episodes, link flow (NewTV + native)
+    OTTMirrorBackend.kt          NetMirror engine: verify, home, search, post, episodes, link flow (NewTV)
     NetMirrorGuard.kt            response classifier (200-body errors, not HTTP 429) + recovery helpers
     NetMirrorConfig.kt           per-OTT config + host lists + cookie/NewTvBase caches + response caches + persisted cookie store
     Base64Decode.kt              pure-JVM base64 decoder (no android.jar dependency)
@@ -150,8 +150,8 @@ resolve stream links. Keep it that way — no net27 embed-tmdb fallback.
 ### Reliability (the whole point)
 
 `OTTMirrorBackend` re-implements the NetMirror flow (verify ? home ? search ?
-post ? episodes ? NewTV player ? native play.php/playlist.php) with the layers
-the forks lack. The core lesson from live probing (Aug 2026): the backend
+post ? episodes ? NewTV player) with the layers the forks lack. The core
+lesson from live probing (Aug 2026): the backend
 **almost never answers HTTP 429** — rate-limit and session errors hide behind
 **HTTP 200 bodies** (`{"status":"n","error":"Invalid User"}`, anti-abuse text
 like `Too many request in short..`). Handling only the status code is why the
@@ -241,16 +241,21 @@ forks and the first fix failed:
   probe cache `master|<ott>|<contentId>`. Known trade-off: merged audio
   on MP4 links labels as "Audio" (no language field on `AudioFile`); the
   master link shows proper English/Hindi labels via native parsing.
+- **Playback is 100% sessionless (Sep 2026)**: `loadLinks()` touches ONLY
+  embed-tmdb (net27) + NewTV player/master/audio (imgcdn/freecdn) — never the
+  net7x per-IP limiter. The old native net7x play fallback (`verify()` +
+  `play.php` + `playlist.php`) was REMOVED: it was the only code path that
+  could produce "Too many request in short.." at play time. A title both
+  sessionless paths miss now answers a clean "No link found" instead of
+  risking a rate-limit storm. net7x remains only for browsing (home/search/
+  post/episodes), all response-cached.
 - **`player.php` response cache**: raw `newtv/player.php` bodies are cached
   for 10 min in `NetMirrorResponseCache` under `player|<ott>|<contentId>`.
   Combined with the 60-min `LinkCache` and the per-contentId master probe
   cache, repeat taps replay with zero net7x traffic.
-- **No `LIMITED` cascade**: a LIMITED verdict on `player.php` never falls
-  through to the native Path 3 when links were already emitted (a working
-  embed result must not error). The `limitedMessage()` is thrown only when
-  NOTHING was playable — that flow would only fire 2-3 more net7x requests
-  (`verify()` + `play.php` + `playlist.php`) into an already-saturated
-  shared-IP bucket.
+- **No LIMITED error at play**: a LIMITED verdict on `player.php` exhausts
+  its retry ladder and returns null — the embed links (if any) still play;
+  `loadLinks()` never throws `limitedMessage()`.
 - **Plugin `version` must be bumped** (`OTTMirror/build.gradle.kts`) on
   every user-facing change: CloudStream's updater compares the version in
   plugins.json against the installed plugin and skips identical versions —

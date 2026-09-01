@@ -606,10 +606,14 @@ internal object OTTMirrorBackend {
                 return@withContext true
             }
         }
-        var sawLimited = false
         var emittedCount = 0
         // ------------------------------------------------------------------
-        // Path 1 + Path 2 — resolve BOTH in parallel.
+        // Path 1 + Path 2 — resolve BOTH in parallel. The play path is 100%
+        // sessionless: only embed-tmdb (net27) and NewTV (imgcdn) are used,
+        // neither of which has the net7x per-IP limiter behind "Too many
+        // request in short..". The old native net7x fallback (verify →
+        // play.php → playlist.php) was REMOVED — an uncovered title now
+        // answers "No link found" instead of ever risking a rate-limit error.
         //
         // Path 1 embed-tmdb (sessionless, TMDB-keyed, net27): signed MP4 per
         // quality tier, fast start, zero net7x traffic. Muxed audio only —
@@ -620,9 +624,8 @@ internal object OTTMirrorBackend {
         // + "2. Hindi" on dual-audio titles). It used to be a fallback only
         // for embed misses, which meant embed-covered dual-audio titles
         // (Breaking Bad, GoT…) never got an audio picker. It is now always
-        // probed; its verified audio renditions ride on the embed MP4 links,
-        // and the master link itself is added when it is actually playable
-        // (live default variant) and adds audio value (≥2 renditions).
+        // probed; the master link itself is added when it is actually
+        // playable (live default variant) and adds audio value (≥2 renditions).
         // ------------------------------------------------------------------
         coroutineScope {
             val embedDeferred = async {
@@ -636,9 +639,7 @@ internal object OTTMirrorBackend {
 
             val embed = embedDeferred.await()
             if (embed == null) Log.d("OTTMirror", "embed-tmdb MISS for id=$contentId (tmdbId=${ld.tmdbId})")
-            val newTvFetch = newTvDeferred.await()
-            if (newTvFetch?.limited == true) sawLimited = true
-            val newTv = newTvFetch?.player
+            val newTv = newTvDeferred.await()
 
             // NewTV master probe: audio extraction + variant liveness, cached.
             // The pre-flighted audio count feeds the shouldEmitNewTvMaster
@@ -692,38 +693,24 @@ internal object OTTMirrorBackend {
             }
         }
 
-        if (emittedCount == 0) {
-            // Nothing playable. Path 3 — native play.php/playlist.php (net7x,
-            // session-bound), last resort. NEVER run when the NewTV path
-            // already saw a LIMITED verdict — the native flow would only fire
-            // 2-3 more net7x requests into an already-saturated shared-IP
-            // bucket. Surface the limit message instead.
-            if (sawLimited) throw ErrorLoadingException(limitedMessage())
-            val cookie = runCatching { verify() }.getOrDefault("")
-            val nativeOk = if (cookie.isNotBlank()) {
-                runCatching { nativePlaylistFlow(ott, contentId, ld.title, cookie, subtitleCallback, callback) }.getOrDefault(false)
-            } else false
-            if (nativeOk) return@withContext true
-            if (sawLimited) throw ErrorLoadingException(limitedMessage())
-            return@withContext false
-        }
-        true
+        // Nothing playable from either sessionless path → clean "No link
+        // found". The native net7x flow (verify + play.php + playlist.php)
+        // is deliberately NOT attempted — it is the only backend with the
+        // per-IP limiter, and a rate-limit error at play is worse than a
+        // silent miss.
+        emittedCount > 0
     }
 
     private data class NewTvPlayer(val vlink: String, val referer: String)
 
-    /** player.php fetch outcome: the resolved player (nullable) + whether
-     * the per-IP limiter answered at any point (drives the no-cascade rule). */
-    private data class NewTvFetch(val player: NewTvPlayer?, val limited: Boolean)
-
     /**
      * Fetch (or replay from the 10-min cache) the NewTV player.php body and
      * return the master URL + referer, or null when the title is not
-     * covered / the answer is unusable. [NewTvFetch.limited] is set whenever
-     * a LIMITED verdict was seen, so loadLinks can refuse to cascade into
-     * the native net7x flow afterwards.
+     * covered / the answer is unusable / the retry ladder gave up. Never
+     * throws — loadLinks treats null as "NewTV adds nothing" and falls back
+     * to whatever embed produced (or a clean "No link found").
      */
-    private suspend fun fetchNewTvPlayerBody(ott: OttService, contentId: String): NewTvFetch {
+    private suspend fun fetchNewTvPlayerBody(ott: OttService, contentId: String): NewTvPlayer? {
         val apiBase = resolveNewTvBase()
         val playerUrl = "$apiBase/newtv/player.php?id=$contentId"
         // player.php answers are stable for the lifetime of the 60-min
@@ -731,10 +718,9 @@ internal object OTTMirrorBackend {
         // body 10 min so a refresh-after-network-blip doesn't fan out another
         // newtv/player.php request into a draining IP bucket.
         var attempts = 0
-        var limited = false
         while (attempts++ < 4) {
             val cached = NetMirrorResponseCache.get<String>("player|${ott.id}|$contentId")
-            if (cached != null) return NewTvFetch(newTvPlayerFromBody(cached, apiBase), limited)
+            if (cached != null) return newTvPlayerFromBody(cached, apiBase)
             HostThrottler.gate()
             val resp = runCatching {
                 app.get(
@@ -745,22 +731,21 @@ internal object OTTMirrorBackend {
                     ),
                     timeout = 10,
                 )
-            }.getOrNull() ?: return NewTvFetch(null, limited)
+            }.getOrNull() ?: return null
 
             when (NetMirrorGuard.classify(resp.code, resp.text)) {
                 NetMirrorGuard.Verdict.OK -> {
                     NetMirrorResponseCache.put("player|${ott.id}|$contentId", resp.text)
-                    return NewTvFetch(newTvPlayerFromBody(resp.text, apiBase), limited)
+                    return newTvPlayerFromBody(resp.text, apiBase)
                 }
                 NetMirrorGuard.Verdict.LIMITED -> {
-                    limited = true
-                    if (!NetMirrorGuard.onLimited(attempts)) return NewTvFetch(null, limited)
+                    if (!NetMirrorGuard.onLimited(attempts)) return null
                 }
                 // player.php needs no session; anything else final.
-                else -> return NewTvFetch(null, limited)
+                else -> return null
             }
         }
-        return NewTvFetch(null, limited)
+        return null
     }
 
     private fun newTvPlayerFromBody(body: String, apiBase: String): NewTvPlayer? {
@@ -768,125 +753,5 @@ internal object OTTMirrorBackend {
         val vlink = p?.videoLink?.takeIf { it.isNotBlank() } ?: return null
         if (p?.status == "n") return null
         return NewTvPlayer(vlink, p.referer ?: apiBase)
-    }
-
-    private suspend fun nativePlaylistFlow(
-        ott: OttService,
-        id: String,
-        title: String,
-        cookie: String,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit,
-    ): Boolean {
-        val host = DomainRotator.current(Role.MOBILE) ?: return false
-        Log.d("OTTMirror", "native flow host=$host id=$id")
-        val playHost = host
-
-        suspend fun postPlay(): com.lagradost.nicehttp.NiceResponse? {
-            HostThrottler.gate()
-            return runCatching {
-                app.post(
-                    "$playHost/play.php",
-                    headers = mobileHeaders("$playHost/home") + mapOf(
-                        "Content-Type" to "application/x-www-form-urlencoded; charset=UTF-8",
-                        "Origin" to playHost,
-                    ),
-                    data = mapOf("id" to id),
-                    cookies = mobileCookies(ott, cookie),
-                    referer = "$playHost/home",
-                    timeout = 10,
-                )
-            }.getOrNull()
-        }
-
-        var hToken: String? = null
-        var sessionRetried = false
-        var limitedAttempts = 0
-        var attempts = 0
-        while (attempts++ < 4) {
-            val playResp = postPlay() ?: return false
-            when (NetMirrorGuard.classify(playResp.code, playResp.text)) {
-                NetMirrorGuard.Verdict.OK -> {
-                    HostThrottler.recordSuccess()
-                    hToken = runCatching {
-                        org.json.JSONObject(playResp.text).optString("h").takeIf { it.isNotBlank() }
-                    }.getOrNull()
-                    break
-                }
-                NetMirrorGuard.Verdict.LIMITED -> {
-                    limitedAttempts++
-                    if (!NetMirrorGuard.onLimited(limitedAttempts)) return false
-                }
-                NetMirrorGuard.Verdict.SESSION_DEAD -> {
-                    if (sessionRetried) return false
-                    sessionRetried = true
-                    NetMirrorGuard.invalidateSession()
-                    verify()
-                }
-                NetMirrorGuard.Verdict.DEAD -> return false
-            }
-        }
-        val h = hToken ?: return false
-
-        val playlistUrl = "$host/mobile${ott.mobilePrefix}/playlist.php?id=$id&t=${java.net.URLEncoder.encode(title, "UTF-8")}&tm=${System.currentTimeMillis() / 1000}&h=${java.net.URLEncoder.encode(h, "UTF-8")}"
-        suspend fun getPlaylist() = run {
-            HostThrottler.gate()
-            runCatching {
-                app.get(
-                    playlistUrl,
-                    headers = mobileHeaders("$host/home"),
-                    cookies = mobileCookies(ott, cookie),
-                    referer = "$host/home",
-                    timeout = 10,
-                )
-            }.getOrNull()
-        }
-
-        var playlist: PlaylistResponse? = null
-        sessionRetried = false
-        limitedAttempts = 0
-        attempts = 0
-        while (attempts++ < 4) {
-            val playlistResp = getPlaylist() ?: return false
-            when (NetMirrorGuard.classify(playlistResp.code, playlistResp.text)) {
-                NetMirrorGuard.Verdict.OK -> {
-                    HostThrottler.recordSuccess()
-                    playlist = NetMirrorParsers.parsePlaylist(playlistResp.text)
-                    break
-                }
-                NetMirrorGuard.Verdict.LIMITED -> {
-                    limitedAttempts++
-                    if (!NetMirrorGuard.onLimited(limitedAttempts)) return false
-                }
-                NetMirrorGuard.Verdict.SESSION_DEAD -> {
-                    if (sessionRetried) return false
-                    sessionRetried = true
-                    NetMirrorGuard.invalidateSession()
-                    verify()
-                }
-                NetMirrorGuard.Verdict.DEAD -> return false
-            }
-        }
-
-        val sources = playlist?.sources.orEmpty().filter { !it.file.isBlank() }
-        if (sources.isEmpty()) return false
-
-        val referer = "$host/home"
-        val chosen = sources.firstOrNull { it.default.equals("true", ignoreCase = true) || it.default == "1" }
-            ?: sources.maxByOrNull { qualityFromLabel(it.label) }
-            ?: sources.first()
-        val streamUrl = if (chosen.file.startsWith("http", ignoreCase = true)) chosen.file else "$host${chosen.file}"
-        val link = emit(ott, streamUrl, referer, qualityFromLabel(chosen.label), cookie)
-        runCatching { callback(link) }
-        LinkCache.put(id, listOf(link))
-        return true
-    }
-
-    private fun qualityFromLabel(label: String): Int = when {
-        label.contains("1080", true) || label.contains("Full HD", true) -> 1080
-        label.contains("720", true) || label.contains("Mid HD", true) -> 720
-        label.contains("480", true) || label.contains("Low HD", true) -> 480
-        label.contains("360", true) -> 360
-        else -> getQualityFromName(label)
     }
 }
