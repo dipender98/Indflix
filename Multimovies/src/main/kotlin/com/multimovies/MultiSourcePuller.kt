@@ -62,10 +62,9 @@ internal object SourceSpeedTracker {
  *      A single slow/dead source can never block the others.
  *   4. Returns the successfully extracted links, sorted by measured speed.
  *
- * Per source it runs a unified extraction pipeline:
- *     a. dedicated host extractor (screenscape.me crypto)
- *     b. CloudStream's extractor registry (loadExtractor)
- *     c. a generic m3u8/mp4 sniff of the player page
+* Per source it runs a unified extraction pipeline:
+     *     a. CloudStream's extractor registry (loadExtractor)
+     *     b. a generic m3u8/mp4 sniff of the player page
  *
  * This is intentionally decoupled from the provider so the strategy can be
  * tuned (timeouts, priority weights, concurrency limits) in one place.
@@ -430,39 +429,10 @@ object MultiSourcePuller {
     ): List<ExtractorLink> {
         // Trailers/YouTube embeds are not streams — never surface them as sources.
         if (isYouTubeHost(src.url)) return emptyList()
-        // screenscape.me: JS-rendered player, but its API is deterministic client-side
-        // crypto (HMAC-signed routes + CryptoJS-AES responses). Route to the dedicated
-        // extractor which reproduces that flow (no browser needed).
-        if (hostOf(src.url).contains("screenscape")) {
-            val subs = mutableListOf<SubtitleFile>()
-            val screenLinks = ScreenscapeExtractor.extract(src) { subs.add(SubtitleFile(it.lang, it.url)) }
-            subs.forEach { onSubtitle(it) }
-            return screenLinks.map { s ->
-                val source = s.name
-                val type = if (s.url.contains(".m3u8", ignoreCase = true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                val headers = buildMap {
-                    put("Referer", s.headers["Referer"] ?: src.url)
-                    putAll(src.headers)
-                    putAll(s.headers)
-                }
-                ExtractorLink(
-                    source = source,
-                    name = s.name,
-                    url = s.url,
-                    referer = s.headers["Referer"] ?: src.url,
-                    quality = getQualityFromName(s.quality.ifEmpty { s.url }),
-                    headers = headers,
-                    extractorData = null,
-                    type = type,
-                    audioTracks = emptyList(),
-                )
-            }
-        }
 
         // Nxsha: the web player resolves servers/sources through same-origin
         // CryptoJS-AES envelopes (no stream URL in any HTML), so it needs the
-        // dedicated extractor too. Ordered after screenscape so
-        // nxsha.screenscape.me keeps hitting the screenscape extractor.
+        // dedicated extractor too.
         if (hostOf(src.url).contains("nxsha")) {
             val subs = mutableListOf<SubtitleFile>()
             val nxLinks = NxshaExtractor.extract(src) { subs.add(SubtitleFile(it.lang, it.url)) }

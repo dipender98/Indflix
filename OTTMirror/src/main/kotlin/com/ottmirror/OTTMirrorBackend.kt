@@ -1,5 +1,6 @@
 package com.ottmirror
 
+import android.util.Log
 import com.lagradost.cloudstream3.ErrorLoadingException
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
@@ -523,6 +524,7 @@ internal object OTTMirrorBackend {
     ): Boolean = withContext(Dispatchers.IO) {
         val ld = decodeLoadData(data) ?: return@withContext false
         val contentId = ld.id
+        Log.d("OTTMirror", "loadLinks ott=${ott.id} id=$contentId title=${ld.title} tmdbId=${ld.tmdbId} s=${ld.season} e=${ld.episode}")
 
         LinkCache.get(contentId)?.let { cached ->
             if (cached.isNotEmpty()) {
@@ -543,6 +545,7 @@ var sawLimited = false
         val embed = ld.tmdbId?.let { tmdbId ->
             runCatching { EmbedTmdb.resolve(tmdbId, ld.season, ld.episode) }.getOrNull()
         }
+        if (embed == null) Log.d("OTTMirror", "embed-tmdb MISS for id=$contentId (tmdbId=${ld.tmdbId})")
         if (embed != null) {
             val link = ExtractorLink(
                 source = ottLabel(ott), name = ottLabel(ott), url = embed.url,
@@ -588,6 +591,7 @@ var sawLimited = false
                     NetMirrorGuard.Verdict.OK -> {
                         val p = NetMirrorParsers.parseNewTvPlayer(resp.text)
                         val vlink = p?.videoLink?.takeIf { it.isNotBlank() }
+                        Log.d("OTTMirror", "player.php status=${p?.status} vlink=${vlink != null}")
                         // ORIGINAL WORKING BEHAVIOR: accept any non-"n" status
                         // with a real video_link ("ok" and "otp" both play on
                         // residential/mobile IPs). The strict status=="ok"
@@ -646,6 +650,7 @@ var sawLimited = false
         callback: (ExtractorLink) -> Unit,
     ): Boolean {
         val host = DomainRotator.current(Role.MOBILE) ?: return false
+        Log.d("OTTMirror", "native flow host=$host id=$id")
         val playHost = host
 
         suspend fun postPlay(): com.lagradost.nicehttp.NiceResponse? {

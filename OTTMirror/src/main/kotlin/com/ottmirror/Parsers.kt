@@ -354,4 +354,25 @@ object NetMirrorParsers {
         if (raw.contains("URI=\"https:///")) return true
         return false
     }
+
+    /**
+     * Extract HLS audio group entries from a master playlist. Each
+     * #EXT-X-MEDIA:TYPE=AUDIO line carries the language, name, and absolute
+     * URI. The probe confirmed Hindi appears as:
+     *   LANGUAGE="hin",NAME="9. Hindi",URI="https://s24.freecdn3.top/..."
+     * Returns a list of (language, name, uri) tuples. The URI is already
+     * absolute (the server fills in the CDN host).
+     */
+    fun parseMasterAudioTracks(raw: String?): List<Triple<String, String, String>> {
+        if (raw.isNullOrBlank()) return emptyList()
+        return raw.lines().mapNotNull { line ->
+            val trimmed = line.trim()
+            if (!trimmed.startsWith("#EXT-X-MEDIA:TYPE=AUDIO")) return@mapNotNull null
+            val lang = Regex("""LANGUAGE="([^"]*)"""").find(trimmed)?.groupValues?.get(1) ?: return@mapNotNull null
+            val name = Regex("""NAME="([^"]*)"""").find(trimmed)?.groupValues?.get(1) ?: return@mapNotNull null
+            val uri = Regex("""URI="([^"]*)"""").find(trimmed)?.groupValues?.get(1) ?: return@mapNotNull null
+            if (uri.isBlank()) return@mapNotNull null
+            Triple(lang, name, uri)
+        }
+    }
 }

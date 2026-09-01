@@ -334,6 +334,104 @@ class LiveBackendProbeTest {
             }
         }
 
+        // ---------------------------------------------------------------
+        // 8. MOVIE path — search a movie, trace post -> embed -> NewTV
+        // ---------------------------------------------------------------
+        section("8. MOVIE path trace (the 'no link in movies' bug)")
+        val movieQuery = java.net.URLEncoder.encode("The Batman", "UTF-8")
+        val (msCode, msBody, _) = get(
+            "https://net52.cc/mobile/search.php?s=$movieQuery&t=${System.currentTimeMillis() / 1000}",
+            mobileProbeHeaders("https://net52.cc/home") + mapOf("Cookie" to cookie),
+        )
+        log("search HTTP $msCode  body=${msBody.take(200)}")
+        val movieHits = NetMirrorParsers.parseSearch(msBody)
+        val movie = movieHits.firstOrNull()
+        log("movie hits=${movieHits.size}  picked=${movie?.title} id=${movie?.id}")
+
+        if (movie != null) {
+            val (mpCode, mpBody, _) = get(
+                "https://net52.cc/mobile/post.php?id=${movie.id}&t=${System.currentTimeMillis() / 1000}",
+                mobileProbeHeaders("https://net52.cc/home") + mapOf("Cookie" to cookie),
+            )
+            log("movie post HTTP $mpCode  body=${mpBody.take(200)}")
+            val mPost = NetMirrorParsers.parsePost(mpBody)
+            if (mPost != null) {
+                log("movie post: tmdb_id=${mPost.tmdbId} imdb=${mPost.imdbId} episodes=${mPost.episodes.size} type=${mPost.type}")
+                val mtmdb = mPost.tmdbId ?: run {
+                    // Inline TMDB title-search fallback (JVM-safe, no TmdbMeta)
+                    val tsCode2 = try {
+                        val q = java.net.URLEncoder.encode(mPost.title, "UTF-8")
+                        val (c, b, _) = get(
+                            "https://api.themoviedb.org/3/search/multi?api_key=e6333b32409e02a4a6eba6fb7ff866bb&query=$q&language=en-US&include_adult=false&page=1",
+                            mapOf("Accept" to "application/json"),
+                        )
+                        val arr = org.json.JSONObject(b).optJSONArray("results") ?: org.json.JSONArray()
+                        (0 until arr.length()).firstNotNullOfOrNull { i ->
+                            val m = arr.optJSONObject(i) ?: return@firstNotNullOfOrNull null
+                            if (m.optString("title").equals(mPost.title, true) || m.optString("name").equals(mPost.title, true))
+                                m.optInt("id") to m.optString("media_type")
+                            else null
+                        }
+                    } catch (e: Exception) { null }
+                    log("title-search fallback -> ${tsCode2?.first} ${tsCode2?.second}")
+                    tsCode2?.first
+                }
+                if (mtmdb != null) {
+                    section("8b. embed-tmdb movie (tmdb=$mtmdb)")
+                    val (eCode, eBody, _) = get(
+                        "https://net27.cc/api/embed-tmdb/$mtmdb?type=movie",
+                        mapOf("User-Agent" to MOBILE_UA, "Accept" to "application/json, text/plain, */*", "Referer" to EMBED_REFERER),
+                    )
+                    log("HTTP $eCode  body=${eBody.take(200)}")
+                    val embed = NetMirrorParsers.parseEmbedTmdb(eBody)
+                    val best = embed?.let { NetMirrorParsers.pickEmbedStream(it.streams) }
+                    log("embed noSource=${embed?.noSource} streams=${embed?.streams?.size} best=${best?.resolution}p")
+                    if (best != null) log(">>> MOVIE EMBED OK url=${best.url.take(100)}")
+                    else log(">>> MOVIE embed-tmdb has NO source (noSource=true) — need NewTV")
+                } else {
+                    log(">>> no tmdbId resolvable for movie — embed skipped")
+                }
+
+                section("8c. NewTV player for movie (id=${movie.id})")
+                val (mvCode, mvBody, _) = get(
+                    "https://tv.imgcdn.kim/newtv/player.php?id=${movie.id}",
+                    NEWTV_HEADERS + mapOf("Ott" to "nf", "Usertoken" to ""),
+                )
+                log("HTTP $mvCode  body=${mvBody.take(300)}")
+                val mv = NetMirrorParsers.parseNewTvPlayer(mvBody)
+                val mvlink = mv?.videoLink?.takeIf { it.isNotBlank() }
+                log("movie player status=${mv?.status}  videoLink=${mvlink}")
+                if (mv?.status == "n" || mvlink == null) log(">>> MOVIE NewTV FAILED (status=${mv?.status})")
+                else {
+                    val (mvmCode, mvmBody, _) = get(
+                        mvlink,
+                        NEWTV_HEADERS + mapOf("Referer" to (mv?.referer ?: "https://tv.imgcdn.kim"), "Cookie" to "hd=on"),
+                    )
+                    log("movie master HTTP $mvmCode len=${mvmBody.length} isDead=${NetMirrorParsers.newTvMasterIsDead(mvmBody)}")
+                    log(mvmBody.lines().filter { it.contains("STREAM-INF") || it.contains("files/") }.take(6).joinToString("\n"))
+                    if (!NetMirrorParsers.newTvMasterIsDead(mvmBody)) log(">>> MOVIE NewTV master ALIVE")
+                    else log(">>> MOVIE NewTV master DEAD (in=unknown) — both paths fail = NO LINK")
+                }
+            } else {
+                log("movie post parse failed")
+            }
+        } else {
+            log("no movie found in search results")
+        }
+
+        // ---------------------------------------------------------------
+        // 9. Hindi audio in series master — count audio tracks
+        // ---------------------------------------------------------------
+        section("9. Hindi audio check on a series episode master")
+        val (auCode, auBody, _) = get(
+            "https://tv.imgcdn.kim/newtv/hls/nf/$playbackId.m3u8",
+            NEWTV_HEADERS + mapOf("Referer" to "https://net52.cc/home", "Cookie" to "hd=on"),
+        )
+        log("series master HTTP $auCode len=${auBody.length}")
+        val audioLines = auBody.lines().filter { it.startsWith("#EXT-X-MEDIA:TYPE=AUDIO") }
+        log("audio tracks: ${audioLines.size}")
+        audioLines.take(6).forEach { log("  $it") }
+
         println("\n===== PROBE COMPLETE =====")
     }
 
