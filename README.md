@@ -22,7 +22,7 @@ player gets the first one that answers. Server order is static
 (`SOURCE_PRIORITY` in `MultimoviesProvider.kt`), then measured latency, then
 Hindi-audio preference. A source that doesn't respond in 15 s is skipped.
 
-- dooplayer servers from the site: Cineverse, screenscape.me, GDMIRROR, Nxsha, nhdapi
+- dooplayer servers from the site: Cineverse, GDMIRROR, Nxsha, nhdapi
 - global IMDB-keyed embeds: 2embed.cc, VidSrc, 111Movies
 
 ## Search
@@ -56,7 +56,6 @@ Multimovies/
     TmdbService.kt           TMDB metadata (+ optional SIMKL)
     HttpKit.kt               shared HTTP client (get/getJson/post) for extractors
     CryptoJs.kt              shared CryptoJS-AES envelope helpers
-    ScreenscapeExtractor.kt  screenscape.me crypto, no WebView
     NxshaExtractor.kt        nxsha.space encrypted API + wire rules
     ApiExtractors.kt         Shows (111Movies) + VidEm JSON-API extractors
   icon.png                      plugin icon served from the repo

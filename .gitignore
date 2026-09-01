@@ -18,7 +18,5 @@ local.properties
 /tmp_chunks/
 /.kotlin/
 /gradle_out.txt
-/screenscape_report.txt
-/sscap*.txt
 
 

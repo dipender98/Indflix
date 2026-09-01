@@ -177,21 +177,31 @@ object MultiSourcePuller {
      *  Origin (it was handed out by the Multimovies dooplayer player) or it
      *  won't sign the playlist. Used by [headersFor] so every Cineverse call
      *  - admin-ajax wrap, unwrap, and the final proxy fetch - carries the
-     *  required pair. */
+     *  required pair. The set is a best-effort list; [isCineverseHost] also
+     *  matches any URL carrying `serve_m3u8` so a CDN host rotation can't
+     *  silently drop the required headers. */
     private val cineverseCdnHosts = setOf(
         "vibuxer.com",
         "www.vibuxer.com",
         "modiplay.com",
         "www.modiplay.com",
+        "cinemodiy.com",
+        "cinehive.com",
+        "play.cineverse.com",
+        "cdn.cineverse.com",
     )
 
     private fun hostOf(url: String): String =
         url.substringAfter("://").substringBefore("/").lowercase()
 
-    /** True when the URL belongs to the Cineverse modiplay/vibuxer CDN. */
+    /** True when the URL belongs to the Cineverse modiplay/vibuxer CDN, or is a
+     *  `serve_m3u8=1` proxy relay (the signature of the Cineverse flow) on any
+     *  host. The URL-wide marker check makes header injection survive CDN host
+     *  rotation. */
     internal fun isCineverseHost(url: String): Boolean =
         cineverseCdnHosts.contains(hostOf(url)) ||
-            hostOf(url).let { h -> cineverseCdnHosts.any { h == it || h.endsWith(".$it") } }
+            hostOf(url).let { h -> cineverseCdnHosts.any { h == it || h.endsWith(".$it") } } ||
+            url.contains("serve_m3u8", ignoreCase = true)
 
     /** Deterministic identity for an emitted link: `<Server>[ Hindi]`.
      *  Every ExtractorLink must carry this exact string in BOTH `source` and
@@ -216,7 +226,7 @@ object MultiSourcePuller {
         out.putAll(sharedHeaders)
         out.putAll(extra)
         if (!referer.isNullOrBlank()) out["Referer"] = referer
-        if (isCineverseHost(url)) {
+        if (isCineverseHost(url) || url.contains("serve_m3u8", ignoreCase = true)) {
             // vibuxer.com / proxy.php signs only when it sees the originating
             // site as Referer and a matching Origin. The plugin's embed URL
             // comes from the dooplayer player on the live multimovies.* mirror,

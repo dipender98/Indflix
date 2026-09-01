@@ -80,12 +80,11 @@ internal fun parseRating(item: Element): Double? {
 /** Server names as they appear on the Multimovies "Video Sources" list, plus the
  *  direct global sources, ordered by speed/reliability (fastest/most reliable
  *  first). Verified Aug 2026: live diagnostic confirmed Cineverse (current CDN
- *  vibuxer.com, serve_m3u8=1 proxy), screenscape.me, nxsha (.cc/.space) and
- *  nhdapi respond; the legacy modiplay.com / gdmirror.com / nxsha.com back-ends
- *  are all dead. Cineverse is the verified fast + Hindi source; screenscape.me
- *  is the site's lan=hindi source.
+ *  vibuxer.com, serve_m3u8=1 proxy), nxsha (.cc/.space) and nhdapi respond;
+ *  the legacy modiplay.com / gdmirror.com / nxsha.com back-ends are all dead.
+ *  Cineverse is the verified fast + Hindi source.
  *
- *  Nxsha (index 2) expands internally into its own server fleet resolved by
+ *  Nxsha (index 1) expands internally into its own server fleet resolved by
  *  [NxshaExtractor] through nxsha.space's encrypted /api/servers+/api/sources:
  *  Nitro (fastest), MbPly, MhPly, Citadel, AwsPly, StremFx, VidHindi(4K embed),
  *  CastVid, Lolly, Prvibd, Stvvid, Ophm, AsiaLug, TunWatch, Gbru. Nitro-first
@@ -102,7 +101,6 @@ internal fun parseRating(item: Element): Double? {
  *  add it back here if it ever comes back to life. */
 internal val SOURCE_PRIORITY: List<String> = listOf(
     "Cineverse",
-    "screenscape.me",
     "nxsha",
     "nhdapi",
     "2embed",

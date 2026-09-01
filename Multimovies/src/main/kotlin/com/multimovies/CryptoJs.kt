@@ -15,9 +15,7 @@ import javax.crypto.spec.SecretKeySpec
  * string passphrase). Used by extractors whose web players ship that exact
  * client-side crypto.
  *
- * Copied from ScreenscapeExtractor's private ports so ScreenscapeExtractor.kt
- * stays untouched; new extractors (Nxsha) build on this object instead. The
- * encrypt side mirrors what CryptoJS does internally: random 8-byte salt,
+ * The encrypt side mirrors what CryptoJS does internally: random 8-byte salt,
  * EVP_BytesToKey(MD5) key+iv derivation, AES-256-CBC/PKCS5, output =
  * base64("Salted__" + salt + ciphertext).
  */
@@ -43,8 +41,7 @@ internal object CryptoJs {
 
     /** Lenient base64 decode matching Node's Buffer.from(s, "base64"): silently
      *  drops non-base64 characters and pads partial trailing groups (no padding
-     *  required). Shared by the OpenSSL envelope decoder and Screenscape's
-     *  byte -> UTF-16 string path. */
+     *  required). Used by the OpenSSL envelope decoder. */
     fun base64DecodeLenient(s: String): ByteArray {
         val b64Chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
         val valid = s.filter { it in b64Chars }

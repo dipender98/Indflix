@@ -10,14 +10,14 @@ import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
 /**
- * One shared OkHttp stack for the id-based extractors (Screenscape, Nxsha,
- * Shows, VidEm). Each previously built its own client and re-implemented
+ * One shared OkHttp stack for the id-based extractors (Nxsha, Shows, VidEm).
+ * Each previously built its own client and re-implemented
  * httpGet/httpGetJson/httpPost — this object kills the duplication.
  *
- * The client carries a per-host cookie jar (Screenscape's bootstrap flow
- * relies on cookies). Callers pass their full header set (including UA) as
- * [headers]; the client's own connect/read timeouts are a high hard cap
- * (12 s), while [budgetMs] wraps each call in `withTimeoutOrNull`.
+ * The client carries a per-host cookie jar. Callers pass their full header set
+ * (including UA) as [headers]; the client's own connect/read timeouts are a
+ * high hard cap (12 s), while [budgetMs] wraps each call in
+ * `withTimeoutOrNull`.
  */
 internal object HttpKit {
 

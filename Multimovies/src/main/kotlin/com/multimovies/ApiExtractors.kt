@@ -60,18 +60,15 @@ object ShowsExtractor {
         src: MultiSourcePuller.Source,
         onSubtitle: (SubtitleFile) -> Unit = {},
     ): List<ShowsSource> = withContext(Dispatchers.IO) {
-        // api.shows.st accepts an IMDB id for /movie but requires a TMDB id for
-        // /tv. Prefer the IMDB id (always available via load()) for movies; for TV
-        // use the TMDB id already resolved during load()'s metadata fetch — no
-        // extra TMDB public-API call is made here.
-        val isTv = src.season != null
+        // api.shows.st now resolves a stream for BOTH /movie and /tv only from a
+        // TMDB id (probed Aug 2026: /movie?id=tt0133093 returns "source":null,
+        // /movie?id=603 returns a playable master). Prefer the TMDB id already
+        // resolved during load()'s metadata fetch; fall back to the IMDB id only
+        // when no TMDB id is cached — no extra TMDB public-API call is made here.
         val tmdbId = src.tmdbId?.takeIf { it.matches(Regex("""\d{2,10}""")) }
         val imdbId = src.imdbId?.takeIf { it.startsWith("tt") }
-        val id = if (isTv) {
-            tmdbId ?: return@withContext emptyList()
-        } else {
-            imdbId ?: tmdbId ?: return@withContext emptyList()
-        }
+        val id = tmdbId ?: imdbId ?: return@withContext emptyList()
+        val isTv = src.season != null
         val type = if (isTv) "tv" else "movie"
         val url = if (type == "tv") {
             "$API_BASE/tv?id=$id&season=${src.season}&episode=${src.episode}&mode=json"

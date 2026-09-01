@@ -373,7 +373,7 @@ internal data class NxshaServer(
  * Pure Nxsha wire-protocol logic: envelope crypto, id parsing, server rules.
  *
  * Kept free of CloudStream imports (and isolated from [NxshaExtractor]) so it
- * runs on the plain JVM unit-test classpath — same pattern as the screenscape
+ * runs on the plain JVM unit-test classpath — same pattern as the CryptoJs
  * result types. See [NxshaExtractor]'s doc for the endpoint flow.
  */
 internal object NxshaProtocol {

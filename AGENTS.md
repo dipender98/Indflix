@@ -18,7 +18,6 @@ Multimovies/
     TmdbService.kt           TMDB search/detail/episodes + optional SIMKL
     HttpKit.kt               shared OkHttp client (get/getJson/post) for the extractors
     CryptoJs.kt              CryptoJS AES envelope crypto shared by extractors
-    ScreenscapeExtractor.kt  screenscape.me crypto port (uses CryptoJs + HttpKit)
     NxshaExtractor.kt        nxsha.space encrypted API + wire protocol (uses HttpKit)
     ApiExtractors.kt         Shows (111Movies) + VidEm JSON-API extractors (uses HttpKit)
   icon.png                   plugin icon, served from the repo (iconUrl)
@@ -71,7 +70,7 @@ All knobs live in `MultimoviesProvider.kt`:
    within the same priority bucket.
 5. Final link sort: `priority ? learned latency ? embed latency ? Hindi ? HLS`.
 
-Per source it tries, in order: a dedicated host extractor (screenscape) ?
+Per source it tries, in order: a dedicated host extractor (nxsha, videm, shows.st) ?
 `loadExtractor` (the CloudStream registry) ? a generic m3u8/mp4 sniff of the
 player page. YouTube/trailer embeds are filtered out.
 
