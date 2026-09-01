@@ -2,6 +2,7 @@ package com.ottmirror
 
 import org.json.JSONArray
 import org.json.JSONObject
+import org.jsoup.nodes.Document
 
 internal fun str(obj: JSONObject, key: String): String? {
     val v: String = obj.optString(key)
@@ -74,6 +75,21 @@ data class NetMirrorPost(
     val nextPageSeason: String?,
 )
 
+data class PlaylistSource(
+    val file: String,
+    val label: String,
+    val type: String,
+    val default: String? = null,
+)
+
+data class PlaylistTrack(val kind: String, val file: String, val label: String)
+
+data class PlaylistResponse(
+    val title: String?,
+    val sources: List<PlaylistSource>?,
+    val tracks: List<PlaylistTrack>?,
+)
+
 data class NewTvTokenResponse(val tokenHash: String?)
 
 data class NewTvPlayerResponse(val status: String?, val videoLink: String?, val referer: String?)
@@ -90,6 +106,17 @@ data class EmbedTmdbResult(
 )
 
 object NetMirrorParsers {
+
+    fun parseHomeRows(doc: Document): List<Pair<String, List<String>>> {
+        val rows = doc.select(".tray-container, #top10")
+        return rows.mapNotNull { tray ->
+            val name = tray.selectFirst("h2, span")?.text()?.trim() ?: return@mapNotNull null
+            val ids = tray.select("article, .top10-post").mapNotNull {
+                it.selectFirst("a")?.attr("data-post") ?: it.attr("data-post")
+            }.filter { it.isNotBlank() }
+            if (ids.isEmpty()) null else name to ids
+        }.filter { it.second.isNotEmpty() }
+    }
 
     fun parseSearch(raw: String?): List<SearchHit> {
         if (raw.isNullOrBlank()) return emptyList()
@@ -161,6 +188,34 @@ object NetMirrorParsers {
             list to (m.optInt("nextPageShow", 0) == 1)
         } catch (e: Exception) {
             emptyList<NetMirrorEpisode>() to false
+        }
+    }
+
+    fun parsePlaylist(raw: String?): PlaylistResponse? {
+        if (raw.isNullOrBlank()) return null
+        return try {
+            val trimmed = raw.trim()
+            val m = if (trimmed.startsWith("[")) {
+                JSONArray(trimmed).optJSONObject(0)
+            } else JSONObject(trimmed)
+            if (m == null) return null
+            val sources = m.optJSONArray("sources")?.let { arr ->
+                (0 until arr.length()).mapNotNull { i ->
+                    val s = arr.optJSONObject(i) ?: return@mapNotNull null
+                    val file = str(s, "file") ?: return@mapNotNull null
+                    PlaylistSource(file, str(s, "label") ?: "", str(s, "type") ?: "", str(s, "default"))
+                }
+            }
+            val tracks = m.optJSONArray("tracks")?.let { arr ->
+                (0 until arr.length()).mapNotNull { i ->
+                    val t = arr.optJSONObject(i) ?: return@mapNotNull null
+                    val file = str(t, "file") ?: return@mapNotNull null
+                    PlaylistTrack(str(t, "kind") ?: "", file, str(t, "label") ?: "")
+                }
+            }
+            PlaylistResponse(str(m, "title"), sources, tracks)
+        } catch (e: Exception) {
+            null
         }
     }
 

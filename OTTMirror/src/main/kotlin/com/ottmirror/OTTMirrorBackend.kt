@@ -17,7 +17,6 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.MediaType.Companion.toMediaType
-import org.jsoup.nodes.Document
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 
@@ -260,7 +259,7 @@ internal object OTTMirrorBackend {
             when (NetMirrorGuard.classify(resp.code, resp.text)) {
                 NetMirrorGuard.Verdict.OK -> {
                     HostThrottler.recordSuccess()
-                    val rows = runCatching { parseHomeRows(resp.document) }.getOrDefault(emptyList())
+                    val rows = runCatching { NetMirrorParsers.parseHomeRows(resp.document) }.getOrDefault(emptyList())
                     if (rows.isNotEmpty()) NetMirrorResponseCache.put("home|${ott.id}", rows)
                     return rows
                 }
@@ -278,17 +277,6 @@ internal object OTTMirrorBackend {
             }
         }
         return emptyList()
-    }
-
-    fun parseHomeRows(doc: Document): List<Pair<String, List<String>>> {
-        val rows = doc.select(".tray-container, #top10")
-        return rows.mapNotNull { tray ->
-            val name = tray.selectFirst("h2, span")?.text()?.trim() ?: return@mapNotNull null
-            val ids = tray.select("article, .top10-post").mapNotNull {
-                it.selectFirst("a")?.attr("data-post") ?: it.attr("data-post")
-            }.filter { it.isNotBlank() }
-            if (ids.isEmpty()) null else name to ids
-        }.filter { it.second.isNotEmpty() }
     }
 
     // ------------------------------------------------------------------
@@ -581,6 +569,13 @@ var sawLimited = false
         try {
             val apiBase = resolveNewTvBase()
             val playerUrl = "$apiBase/newtv/player.php?id=$contentId"
+            // Session cookie on the player request: CNCVerse's shared cookie
+            // jar sends t_hash_t+hd=on implicitly; we attach it explicitly.
+            val playerCookie = buildString {
+                val cookie = runCatching { verify() }.getOrDefault("")
+                if (cookie.isNotBlank()) append("t_hash_t=$cookie; ")
+                append("hd=on")
+            }
             var limitedAttempts = 0
             var attempts = 0
             while (attempts++ < 4) {
@@ -588,12 +583,10 @@ var sawLimited = false
                 val resp = runCatching {
                     app.get(
                         playerUrl,
-                        // CNCVerse-exact: NewTV headers + Ott (hs for Disney)
-                        // + empty Usertoken. NO Cookie header — the reference
-                        // sends none to the player API.
                         headers = NEWTV_HEADERS + mapOf(
                             "Ott" to newTvOttHeader(ott),
                             "Usertoken" to "",
+                            "Cookie" to playerCookie,
                         ),
                         timeout = 10,
                     )
@@ -628,10 +621,140 @@ var sawLimited = false
         if (newTvOk) return@withContext true
 
         // ------------------------------------------------------------------
-        // Terminal — no net7x playback fallback.
+        // Path 3 — native play.php/playlist.php (net7x, session-bound). Last
+        // resort when both sessionless paths miss. Restored because live
+        // probes confirm NewTV/embed cover most but not all titles; the
+        // native flow historically worked for movies on real devices.
+        // ------------------------------------------------------------------
+        val cookie = runCatching { verify() }.getOrDefault("")
+        val nativeOk = if (cookie.isNotBlank()) {
+            runCatching { nativePlaylistFlow(ott, contentId, ld.title, cookie, subtitleCallback, callback) }.getOrDefault(false)
+        } else false
+        if (nativeOk) return@withContext true
+
+        // ------------------------------------------------------------------
+        // Terminal
         // ------------------------------------------------------------------
         newTvFailure?.let { throw it }
         if (sawLimited) throw ErrorLoadingException(limitedMessage())
         false
+    }
+
+    private suspend fun nativePlaylistFlow(
+        ott: OttService,
+        id: String,
+        title: String,
+        cookie: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit,
+    ): Boolean {
+        val host = DomainRotator.current(Role.MOBILE) ?: return false
+        val playHost = host
+
+        suspend fun postPlay(): com.lagradost.nicehttp.NiceResponse? {
+            HostThrottler.gate()
+            return runCatching {
+                app.post(
+                    "$playHost/play.php",
+                    headers = mobileHeaders("$playHost/home") + mapOf(
+                        "Content-Type" to "application/x-www-form-urlencoded; charset=UTF-8",
+                        "Origin" to playHost,
+                    ),
+                    data = mapOf("id" to id),
+                    cookies = mobileCookies(ott, cookie),
+                    referer = "$playHost/home",
+                    timeout = 10,
+                )
+            }.getOrNull()
+        }
+
+        var hToken: String? = null
+        var sessionRetried = false
+        var limitedAttempts = 0
+        var attempts = 0
+        while (attempts++ < 4) {
+            val playResp = postPlay() ?: return false
+            when (NetMirrorGuard.classify(playResp.code, playResp.text)) {
+                NetMirrorGuard.Verdict.OK -> {
+                    HostThrottler.recordSuccess()
+                    hToken = runCatching {
+                        org.json.JSONObject(playResp.text).optString("h").takeIf { it.isNotBlank() }
+                    }.getOrNull()
+                    break
+                }
+                NetMirrorGuard.Verdict.LIMITED -> {
+                    limitedAttempts++
+                    if (!NetMirrorGuard.onLimited(limitedAttempts)) return false
+                }
+                NetMirrorGuard.Verdict.SESSION_DEAD -> {
+                    if (sessionRetried) return false
+                    sessionRetried = true
+                    NetMirrorGuard.invalidateSession()
+                    verify()
+                }
+                NetMirrorGuard.Verdict.DEAD -> return false
+            }
+        }
+        val h = hToken ?: return false
+
+        val playlistUrl = "$host/mobile${ott.mobilePrefix}/playlist.php?id=$id&t=${java.net.URLEncoder.encode(title, "UTF-8")}&tm=${System.currentTimeMillis() / 1000}&h=${java.net.URLEncoder.encode(h, "UTF-8")}"
+        suspend fun getPlaylist() = run {
+            HostThrottler.gate()
+            runCatching {
+                app.get(
+                    playlistUrl,
+                    headers = mobileHeaders("$host/home"),
+                    cookies = mobileCookies(ott, cookie),
+                    referer = "$host/home",
+                    timeout = 10,
+                )
+            }.getOrNull()
+        }
+
+        var playlist: PlaylistResponse? = null
+        sessionRetried = false
+        limitedAttempts = 0
+        attempts = 0
+        while (attempts++ < 4) {
+            val playlistResp = getPlaylist() ?: return false
+            when (NetMirrorGuard.classify(playlistResp.code, playlistResp.text)) {
+                NetMirrorGuard.Verdict.OK -> {
+                    HostThrottler.recordSuccess()
+                    playlist = NetMirrorParsers.parsePlaylist(playlistResp.text)
+                    break
+                }
+                NetMirrorGuard.Verdict.LIMITED -> {
+                    limitedAttempts++
+                    if (!NetMirrorGuard.onLimited(limitedAttempts)) return false
+                }
+                NetMirrorGuard.Verdict.SESSION_DEAD -> {
+                    if (sessionRetried) return false
+                    sessionRetried = true
+                    NetMirrorGuard.invalidateSession()
+                    verify()
+                }
+                NetMirrorGuard.Verdict.DEAD -> return false
+            }
+        }
+
+        val sources = playlist?.sources.orEmpty().filter { !it.file.isBlank() }
+        if (sources.isEmpty()) return false
+
+        val referer = "$host/home"
+        val chosen = sources.firstOrNull { it.default.equals("true", ignoreCase = true) || it.default == "1" }
+            ?: sources.maxByOrNull { qualityFromLabel(it.label) }
+            ?: sources.first()
+        val streamUrl = if (chosen.file.startsWith("http", ignoreCase = true)) chosen.file else "$host${chosen.file}"
+        emit(ott, streamUrl, referer, qualityFromLabel(chosen.label), cookie, subtitleCallback, callback)
+        LinkCache.put(id, collect(ott, listOf(streamUrl), referer, cookie))
+        return true
+    }
+
+    private fun qualityFromLabel(label: String): Int = when {
+        label.contains("1080", true) || label.contains("Full HD", true) -> 1080
+        label.contains("720", true) || label.contains("Mid HD", true) -> 720
+        label.contains("480", true) || label.contains("Low HD", true) -> 480
+        label.contains("360", true) -> 360
+        else -> getQualityFromName(label)
     }
 }
