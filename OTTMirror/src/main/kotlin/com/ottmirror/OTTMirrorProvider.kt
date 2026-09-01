@@ -164,6 +164,7 @@ abstract class OTTMirrorProvider(
                 withTimeoutOrNull(5000L) {
                     tmdbId?.let { TmdbMeta.fetchMeta(it, if (isMovie) "movie" else "tv") }
                         ?: post.imdbId?.let { imdb -> TmdbMeta.findByImdb(imdb)?.let { (id, t) -> TmdbMeta.fetchMeta(id, t) } }
+                        ?: TmdbMeta.searchByTitle(post.title)?.let { (id, t) -> TmdbMeta.fetchMeta(id, t) }
                 }
             }
             job.await()

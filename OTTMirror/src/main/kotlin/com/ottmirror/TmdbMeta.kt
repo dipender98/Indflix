@@ -43,6 +43,7 @@ internal object TmdbMeta {
 
     private val detailCache = ConcurrentHashMap<String, Detail>()
     private val imdbFindCache = ConcurrentHashMap<String, Pair<Int, String>>()
+    private val titleSearchCache = ConcurrentHashMap<String, Pair<Int, String>>()
     private val posterRatingCache = ConcurrentHashMap<String, PosterInfo>()
 
     suspend fun fetchMeta(tmdbId: Int, type: String): Detail? {
@@ -71,6 +72,37 @@ internal object TmdbMeta {
             }
         }.getOrNull()
         if (result != null) imdbFindCache[imdbId] = result
+        return result
+    }
+
+    /**
+     * TMDB /search/multi fallback used when post.php carries no tmdb_id and
+     * no imdb_id (common on home-row titles — live probe: tmdb_id=null for
+     * The Mentalist/Vikings/The Good Doctor). Gives embed-tmdb a TMDB key so
+     * the sessionless MP4 path actually runs for those titles.
+     */
+    suspend fun searchByTitle(title: String): Pair<Int, String>? {
+        if (title.isBlank()) return null
+        val key = "t|${title.lowercase().trim()}"
+        titleSearchCache[key]?.let { return it }
+        val encoded = URLEncoder.encode(title.trim(), "UTF-8")
+        val result = runCatching {
+            val root = JSONObject(
+                app.get(
+                    "$TMDB_API/search/multi?api_key=$TMDB_API_KEY&query=$encoded&language=en-US&include_adult=false&page=1",
+                    timeout = 5,
+                ).text
+            )
+            val arr = root.optJSONArray("results") ?: return@runCatching null
+            (0 until arr.length()).firstNotNullOfOrNull { i ->
+                val m = arr.optJSONObject(i) ?: return@firstNotNullOfOrNull null
+                val name = m.optString("title").ifBlank { m.optString("name") }
+                if (!name.equals(title.trim(), ignoreCase = true)) return@firstNotNullOfOrNull null
+                val type = m.optString("media_type").takeIf { it == "movie" || it == "tv" } ?: return@firstNotNullOfOrNull null
+                m.optInt("id", -1).takeIf { it > 0 }?.let { it to type }
+            }
+        }.getOrNull()
+        if (result != null) titleSearchCache[key] = result
         return result
     }
 

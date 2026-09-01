@@ -60,19 +60,18 @@ class LiveBackendProbeTest {
         log("\n===== $title =====")
     }
 
+    private val logFile = java.io.File("E:/Project/Indflix/OTTMirror/build/ottmirror_probe.log")
+
     private fun log(line: String) {
         println(line)
         try {
-            java.io.File(System.getProperty("java.io.tmpdir"), "ottmirror_probe.log")
-                .appendText(line + "\n")
+            logFile.appendText(line + "\n")
         } catch (_: Exception) {}
     }
 
     @Test
     fun probePlaybackFlow() {
-        try {
-            java.io.File(System.getProperty("java.io.tmpdir"), "ottmirror_probe.log").writeText("")
-        } catch (_: Exception) {}
+        try { logFile.writeText("") } catch (_: Exception) {}
         log("===== LIVE BACKEND PROBE (Aug 2026) =====")
 
         // ---------------------------------------------------------------
@@ -172,36 +171,54 @@ class LiveBackendProbeTest {
 
         // ---------------------------------------------------------------
         // 3c. native play.php + playlist.php (the flow I removed — does it work?)
+        //     Test on ALL mobile hosts since play.php may not live on net52.cc.
         // ---------------------------------------------------------------
-        section("3c. native play.php POST (id=$playbackId)")
-        val (playCode, playBody, _) = post(
-            "https://net52.cc/play.php",
-            mobileProbeHeaders("https://net52.cc/home") + mapOf(
-                "Content-Type" to "application/x-www-form-urlencoded; charset=UTF-8",
-                "Origin" to "https://net52.cc",
-                "Cookie" to cookie,
-            ),
-            "id=$playbackId",
-        )
-        log("HTTP $playCode  body=${playBody.take(200)}")
-        if (NetMirrorGuard.isLimitedBody(playBody)) { log(">>> NATIVE PLAY RATE-LIMITED"); return }
-        val hToken = runCatching { org.json.JSONObject(playBody).optString("h").takeIf { it.isNotBlank() } }.getOrNull()
-        log("play h-token=${hToken?.take(12)}...")
-        if (hToken != null) {
-            section("3d. native playlist.php (h-token)")
-            val playlistUrl = "https://net52.cc/mobile/playlist.php?id=$playbackId&t=${java.net.URLEncoder.encode(post.title, "UTF-8")}&tm=${System.currentTimeMillis() / 1000}&h=${java.net.URLEncoder.encode(hToken, "UTF-8")}"
-            val (plUrlCode, plUrlBody, _) = get(
-                playlistUrl,
-                mobileProbeHeaders("https://net52.cc/home") + mapOf("Cookie" to cookie),
+        for (probeHost in listOf("https://net52.cc", "https://net77.cc", "https://net22.cc", "https://net27.cc", "https://netmirror.gg")) {
+            section("3c. native play.php POST on $probeHost (id=$playbackId)")
+            val (playCode, playBody, _) = post(
+                "$probeHost/play.php",
+                mobileProbeHeaders("$probeHost/home") + mapOf(
+                    "Content-Type" to "application/x-www-form-urlencoded; charset=UTF-8",
+                    "Origin" to probeHost,
+                    "Cookie" to cookie,
+                ),
+                "id=$playbackId",
             )
-            log("HTTP $plUrlCode  len=${plUrlBody.length}  body=${plUrlBody.take(300)}")
-            val pl = NetMirrorParsers.parsePlaylist(plUrlBody)
-            if (pl != null) {
-                val sources = pl.sources.orEmpty().filter { it.file.isNotBlank() }
-                log("native playlist sources=${sources.size}  first=${sources.firstOrNull()?.file?.take(120)}")
-                if (sources.isNotEmpty()) log(">>> NATIVE PLAYLIST OK — the flow that works for movies")
+            log("HTTP $playCode  body=${playBody.take(120)}")
+            if (NetMirrorGuard.isLimitedBody(playBody)) { log("    RATE-LIMITED"); continue }
+            val hToken = runCatching { org.json.JSONObject(playBody).optString("h").takeIf { it.isNotBlank() } }.getOrNull()
+            log("    h-token=${hToken?.take(12)}...")
+            if (hToken != null) {
+                // The h token IS an "in=" resource key. Test it on the NewTV
+                // master URL — this may be the fix for the dead template!
+                val masterWithKey = "https://tv.imgcdn.kim/newtv/hls/nf/$playbackId.m3u8?in=$hToken"
+                section("3c2. NewTV master WITH the play.php in-key")
+                val (mkCode, mkBody, _) = get(
+                    masterWithKey,
+                    NEWTV_HEADERS + mapOf("Referer" to "$probeHost/home", "Cookie" to "hd=on"),
+                )
+                log("HTTP $mkCode  len=${mkBody.length}  isDead=${NetMirrorParsers.newTvMasterIsDead(mkBody)}")
+                log("=== FULL MASTER ===")
+                log(mkBody.lines().joinToString("\n"))
+                if (!NetMirrorParsers.newTvMasterIsDead(mkBody)) log(">>> MASTER ALIVE WITH IN-KEY — the fix!!")
+
+                val playlistUrl = "$probeHost/mobile/playlist.php?id=$playbackId&t=${java.net.URLEncoder.encode(post.title, "UTF-8")}&tm=${System.currentTimeMillis() / 1000}&h=${java.net.URLEncoder.encode(hToken, "UTF-8")}"
+                val (plUrlCode, plUrlBody, _) = get(
+                    playlistUrl,
+                    mobileProbeHeaders("$probeHost/home") + mapOf("Cookie" to cookie),
+                )
+                log("    playlist HTTP $plUrlCode  len=${plUrlBody.length}  body=${plUrlBody.take(200)}")
+                val pl = NetMirrorParsers.parsePlaylist(plUrlBody)
+                if (pl != null) {
+                    val sources = pl.sources.orEmpty().filter { it.file.isNotBlank() }
+                    log("    sources=${sources.size}  first=${sources.firstOrNull()?.file?.take(120)}")
+                    if (sources.isNotEmpty()) log(">>> NATIVE OK on $probeHost — first=${sources.first().file.take(140)}")
+                } else {
+                    log("    playlist parse failed: ${plUrlBody.take(200)}")
+                }
+                break
             } else {
-                log(">>> native playlist parse failed: ${plUrlBody.take(200)}")
+                log("    play.php ${playCode}: no h-token (${playBody.take(80)})")
             }
         }
 

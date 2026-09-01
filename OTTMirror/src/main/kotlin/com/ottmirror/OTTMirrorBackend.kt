@@ -569,13 +569,6 @@ var sawLimited = false
         try {
             val apiBase = resolveNewTvBase()
             val playerUrl = "$apiBase/newtv/player.php?id=$contentId"
-            // Session cookie on the player request: CNCVerse's shared cookie
-            // jar sends t_hash_t+hd=on implicitly; we attach it explicitly.
-            val playerCookie = buildString {
-                val cookie = runCatching { verify() }.getOrDefault("")
-                if (cookie.isNotBlank()) append("t_hash_t=$cookie; ")
-                append("hd=on")
-            }
             var limitedAttempts = 0
             var attempts = 0
             while (attempts++ < 4) {
@@ -586,7 +579,6 @@ var sawLimited = false
                         headers = NEWTV_HEADERS + mapOf(
                             "Ott" to newTvOttHeader(ott),
                             "Usertoken" to "",
-                            "Cookie" to playerCookie,
                         ),
                         timeout = 10,
                     )
@@ -596,9 +588,14 @@ var sawLimited = false
                     NetMirrorGuard.Verdict.OK -> {
                         val p = NetMirrorParsers.parseNewTvPlayer(resp.text)
                         val vlink = p?.videoLink?.takeIf { it.isNotBlank() }
-                        // CNCVerse-exact: only status:"ok" carries a real
-                        // master on a real device.
-                        if (p?.status == "ok" && vlink != null) {
+                        // ORIGINAL WORKING BEHAVIOR: accept any non-"n" status
+                        // with a real video_link ("ok" and "otp" both play on
+                        // residential/mobile IPs). The strict status=="ok"
+                        // check and the master-collapse fetch regressed
+                        // playback — the CDN serves a dead in=unknown
+                        // template to some IPs, and emitting the raw link is
+                        // what the reference flow does.
+                        if (vlink != null && p?.status != "n") {
                             val ref = p.referer ?: apiBase
                             emit(ott, vlink, ref, getQualityFromName(vlink), cookie = "", subtitleCallback, callback)
                             LinkCache.put(contentId, collect(ott, listOf(vlink), ref, ""))
