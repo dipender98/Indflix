@@ -301,7 +301,7 @@ class LiveBackendProbeTest {
             vlink,
             newtvHeaders(player?.referer ?: apiBase),
         )
-        log("master HTTP $mCode  len=${mBody.length}  isDead=${NetMirrorParsers.newTvMasterIsDead(mBody)}")
+        log("master HTTP $mCode  len=${mBody.length}  playable=${NetMirrorParsers.newTvMasterPlayable(mBody)}")
         if (!mBody.startsWith("#EXTM3U")) { log("Not a valid playlist — aborting"); return }
 
         val audioTracks = NetMirrorParsers.parseMasterAudioTracks(mBody)
@@ -310,7 +310,9 @@ class LiveBackendProbeTest {
             log("  [$i] lang=$lang name=$name uri=${uri.take(100)}")
         }
 
-        // 6. Variant liveness (pre-flight default variant)
+        // 6. Variant liveness (pre-flight default variant) — DIAGNOSTIC ONLY:
+        // the plugin no longer gates on this (the CDN validates per client
+        // context; a 404 from this probe does not mean the device will 404).
         val defaultVariantUrl = NetMirrorParsers.pickSingleVariant(vlink, mBody)
         log("default variant URL: ${defaultVariantUrl?.take(100)}")
         val variantAlive = if (defaultVariantUrl != null) {
@@ -323,7 +325,7 @@ class LiveBackendProbeTest {
             false
         }
 
-        // 7. Audio pre-flight (GET each audio playlist)
+        // 7. Audio pre-flight (GET each audio playlist) — diagnostic only.
         val audioPreFlight = audioTracks.map { (lang, name, uri) ->
             val (aCode, aBody, _) = get(uri, newtvHeaders(player?.referer ?: apiBase))
             val alive = aCode in 200..299 && aBody.startsWith("#EXTM3U")
@@ -334,29 +336,19 @@ class LiveBackendProbeTest {
             log("  audio pre-flight: lang=$lang name=$name alive=$alive")
         }
 
-        // 8. Decision
-        val embedFound = tmdbId != null  // embed-tmdb was attempted (may still be noSource=true)
-        val shouldEmit = NetMirrorParsers.shouldEmitNewTvMaster(
-            embedFound = embedFound,
-            audioTrackCount = liveAudioCount,
-            variantAlive = variantAlive,
-        )
+        // 8. Decision — the plugin emits the master verbatim when the
+        // structural gate passes (variants + host-bearing audio); the player
+        // fetches everything in its own context.
+        val playable = NetMirrorParsers.newTvMasterPlayable(mBody)
         log("=== DECISION ===")
-        log("embedFound=$embedFound  audioTracks.live=$liveAudioCount  variantAlive=$variantAlive")
-        log("shouldEmitNewTvMaster=$shouldEmit")
-        if (shouldEmit) {
-            log(">> User will see: embed MP4s + master link with labeled audio groups")
-        } else if (embedFound) {
-            log(">> User will see: embed MP4s only (master not added — no audio value or variant dead)")
+        log("audioTracks.declared=${audioTracks.size}  audioTracks.live(from this context)=$liveAudioCount  variantAlive=$variantAlive")
+        log("newTvMasterPlayable=$playable")
+        if (playable) {
+            log(">> Master link emitted verbatim (in=unknown ships through; the")
+            log(">> player fetches master -> variants -> audio in its own context)")
+            log(">> Audio picker: native from the master's EXT-X-MEDIA groups (${audioTracks.size} tracks)")
         } else {
-            log(">> User will see: master only (no embed coverage)")
-        }
-        // Audio picker available:
-        if (liveAudioCount >= 1 && embedFound) {
-            log(">> Audio picker will appear on MP4 links (merged AudioFiles) with $liveAudioCount track(s)")
-        }
-        if (variantAlive && audioTracks.size >= 2) {
-            log(">> Audio picker on master link with labeled groups (${audioTracks.size} tracks)")
+            log(">> Broken stub — no master link; title falls back to embed or 'No link found'")
         }
         log("")
     }

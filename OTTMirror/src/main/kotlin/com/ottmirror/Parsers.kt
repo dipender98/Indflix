@@ -428,20 +428,6 @@ object NetMirrorParsers {
             .maxWithOrNull(compareBy({ it.resolution }, { it.size ?: 0L }))
 
     /**
-     * True when a fetched NewTV master playlist is the dead sessionless
-     * template: video variants carry the literal "in=unknown" key (probed:
-     * they 404) and/or the audio group URI has an empty host
-     * ("https:///files/.."). Never emit such a master — fall through instead.
-     */
-    fun newTvMasterIsDead(raw: String?): Boolean {
-        if (raw.isNullOrBlank()) return true
-        if (!raw.startsWith("#EXTM3U")) return true
-        if (raw.contains("in=unknown", ignoreCase = true)) return true
-        if (raw.contains("URI=\"https:///")) return true
-        return false
-    }
-
-    /**
      * Extract HLS audio group entries from a master playlist. Each
      * #EXT-X-MEDIA:TYPE=AUDIO line carries the language, name, and absolute
      * URI. The probe confirmed Hindi appears as:
@@ -463,43 +449,31 @@ object NetMirrorParsers {
     }
 
     /**
-     * Decide whether to emit the NewTV master link in addition to the
-     * embed-tmdb MP4 links.
+     * Master-level playability check (pure — unit-testable).
      *
-     * `variantAlive` is a SEGMENT-LEVEL check (playlist + first segment both
-     * answer) and is required in EVERY case: a dead in=unknown master can
-     * never play, and emitting it as the only source produced an endless
-     * loading spinner plus CS3 crashes (Sep 2026 report).
+     * A NewTV master is playable when it declares video variants
+     * (#EXT-X-STREAM-INF) AND every audio rendition URI is structurally
+     * sound (has a host). Masters failing this are the broken stubs the
+     * backend serves to unrecognised contexts (collection/season ids,
+     * datacenter IPs): an audio-only skeleton whose audio URI is literally
+     * "https:///files/.." — Media3 hits that empty-host URI during prepare
+     * and throws the "unexpected runtime error" (1004) / burns into the
+     * 1003 loader timeout. Never emit such a master.
      *
-     *  - embed covered → the master must ALSO carry ≥2 audio renditions to
-     *    add value the muxed MP4s cannot (real dub switching);
-     *  - embed missed → the master is the only possible source; play it when
-     *    it is provably alive, mono or not.
-     * Pure — unit-testable.
+     * NOTE: `in=unknown::ni` variant keys and the shared `files/220884`
+     * placeholder path are NOT defects — every working reference
+     * implementation (Sushan64/NetMirror-Extension, Spyou/Zangetsu,
+     * SaurabhKaperwan/CSX, m2k3a/mangayomi) emits the master verbatim and
+     * relies on the app-fingerprint header set (GatuNewTV UA + Referer +
+     * Cookie: hd=on + Usertoken) for the CDN's lazy per-context validation.
      */
-    fun shouldEmitNewTvMaster(embedFound: Boolean, audioTrackCount: Int, variantAlive: Boolean): Boolean =
-        variantAlive && (!embedFound || audioTrackCount >= 2)
-
-    /**
-     * Return the FIRST media segment URI of an HLS media playlist, absolute
-     * (resolved against [baseUrl]), or null when the body is not a media
-     * playlist or carries no segment line. Used by the segment-level
-     * liveness probe: an in=unknown variant playlist can answer 200 +
-     * #EXTM3U while every segment inside 404s — only a segment check
-     * proves the variant is actually playable.
-     */
-    fun parseFirstSegmentUrl(playlistBody: String?, baseUrl: String): String? {
-        if (playlistBody.isNullOrBlank() || !playlistBody.startsWith("#EXTM3U")) return null
-        val base = baseUrl.substringBeforeLast('/', "")
-        for (line in playlistBody.lines()) {
-            val t = line.trim()
-            if (t.isBlank() || t.startsWith("#")) continue
-            return when {
-                t.startsWith("http", ignoreCase = true) -> t
-                base.isNotEmpty() -> "$base/$t"
-                else -> t
-            }
-        }
-        return null
+    fun newTvMasterPlayable(raw: String?): Boolean {
+        if (raw.isNullOrBlank() || !raw.startsWith("#EXTM3U")) return false
+        if (!raw.contains("#EXT-X-STREAM-INF")) return false
+        return parseMasterAudioTracks(raw).all { uriHasHost(it.third) }
     }
+
+    /** "https:///files/x" -> false; "https://s24.freecdn3.top/files/x" -> true. */
+    private fun uriHasHost(uri: String): Boolean =
+        uri.substringAfter("://", "").substringBefore('/').isNotBlank()
 }

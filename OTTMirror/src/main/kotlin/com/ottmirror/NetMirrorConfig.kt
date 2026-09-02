@@ -214,9 +214,18 @@ internal val NEWTV_HEADERS = mapOf(
     "Pragma" to "no-cache",
     "Expires" to "0",
     "X-Requested-With" to "NetmirrorNewTV v1.0",
-    "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:136.0) Gecko/20100101 Firefox/136.0 /OS.GatuNewTV v1.0",
+    "User-Agent" to NEWTV_UA,
     "Accept" to "application/json, text/plain, */*",
 )
+
+// The NewTV app fingerprint: the trailing "/OS.GatuNewTV v1.0" is what the
+// API and the HLS CDN (imgcdn/freecdn) validate on EVERY request — player.php
+// AND playback (master + variant playlists + segments). Playback with the
+// generic mobile UA gets the degraded/unrecognized context (broken audio
+// stubs, gated variants); with this UA the reference implementations stream
+// the master verbatim (Sushan64/NetMirror-Extension newTvBaseHeaders,
+// Spyou/Zangetsu NEWTV_UA, SaurabhKaperwan/CSX, m2k3a/mangayomi).
+internal const val NEWTV_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:136.0) Gecko/20100101 Firefox/136.0 /OS.GatuNewTV v1.0"
 
 // CNCVerse-exact mobile WebView profile (Pixel 5 / Chrome 144). The full
 // sec-ch-ua + Sec-Fetch-* set matters: the backend's anti-abuse is tuned for

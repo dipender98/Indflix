@@ -217,34 +217,45 @@ forks and the first fix failed:
   tiers; the NewTV master is the ONLY source carrying real multi-audio
   renditions (`#EXT-X-MEDIA:TYPE=AUDIO`, e.g. "1. English" + "2. Hindi" on
   dual-audio titles like Breaking Bad / GoT). The master link is emitted
-  ONLY when `shouldEmitNewTvMaster` proves it playable on this device: a
-  **segment-level** liveness check (`probeVariantAlive` — the default
-  variant's PLAYLIST must answer 200 + `#EXTM3U` AND its first segment must
-  return bytes to a Range GET; an `in=unknown` template passes the playlist
-  check but fails at segment level, which caused an endless loading spinner
-  plus CS3 crashes on Sep 2026) — plus ?2 audio renditions when embed also
-  covered the title. On embed-miss a dead master now yields a clean "No
-  link found" instead of an unplayable source. Per-variant media-playlist
-  URLs were tried and reverted: `#EXT-X-MEDIA` lives only in the master, so
-  a variant URL makes Media3 discover a single muxed audio track and the
-  audio picker disappears.
-- **Dead-template gate (error 1003 fix)**: `probeNewTvMaster` re-enforces
-  `newTvMasterIsDead` (in=unknown variants / empty-host `https:///` audio
-  URIs) right after the master fetch — the dead sessionless template was
-  previously emitted (its variant playlists answer 200 on some IPs and its
-  segments passed the Range probe), and the player's loaders burned on 404
-  segments until the 1003 timeout. A dead template now costs ONE request
-  and yields "No link found".
-- **Probe ordering fail-fast + audio-burst gating**: `probeNewTvMaster`
-  runs variant liveness BEFORE the audio pre-flight and pre-flights audio
-  ONLY when the verified count can change the emission decision (embed
-  covered AND ?2 declared renditions) — for embed-miss titles the decision
-  short-circuits on `variantAlive`, so the audio burst is skipped entirely.
-  The pre-flight is capped at 3 concurrent (`Semaphore(3)`): the CS3
-  player's own default (non-chunkless) HLS prepare already fetches EVERY
-  declared audio playlist at playback start (Breaking Bad = 10 audio + 1
-  variant ? 11 requests before the first frame — CS3-internal, plugin
-  cannot change), so the plugin must not double that burst.
+  VERBATIM (in=unknown keys and the shared `files/220884` placeholder path
+  ship through untouched) and gated ONLY by `NetMirrorParsers.newTvMasterPlayable`:
+  the master must declare `#EXT-X-STREAM-INF` video variants and every
+  audio rendition URI must carry a host (rejects the broken `https:///`
+  audio-only stubs the backend serves to unrecognised contexts — those
+  caused the "unexpected runtime error" (1004) / 1003 loader timeout at
+  prepare). Per-variant media-playlist URLs and AudioFile children were
+  tried and reverted: `#EXT-X-MEDIA` lives only in the master (a variant
+  URL kills the audio picker) and a merged child failure fails the whole
+  playback (3003 on every title).
+- **Verbatim master + per-context CDN validation (the reference
+  architecture, Sep 2026)**: four working implementations of this backend
+  (Sushan64/NetMirror-Extension, Spyou/Zangetsu, SaurabhKaperwan/CSX,
+  m2k3a/mangayomi) all emit the master URL as-is and let the CDN validate
+  lazily per client context — an `in=unknown` key or a `files/220884`
+  placeholder path is NOT a defect, and a datacenter-IP 404 of a variant
+  URL does NOT mean the player's device will 404. All per-variant/audio
+  network probes (`verifyAudioUrls`, `probeVariantAlive`, `probeUrlAlive`,
+  segment Range-GETs) were REMOVED from the plugin: they were built on the
+  wrong premise, gated masters that actually play (producing "No link
+  found" on NewTV-only titles), and added a request burst right before the
+  player's own ~11-request HLS prepare. `probeNewTvMaster` is now ONE
+  master fetch + the pure structural check, cached 10 min under
+  `master|<ott>|<contentId>`.
+- **App-faithful playback headers — the actual dual-audio unlock**: the
+  master link's `ExtractorLink.headers` are the NewTV app fingerprint
+  (`newTvStreamHeaders`): `User-Agent: … /OS.GatuNewTV v1.0` (`NEWTV_UA` in
+  `NetMirrorConfig.kt`), `Referer` = the player.php response referer,
+  `Cookie: ott=<ott>; hd=on` (variants 404 without hd=on — Zangetsu),
+  `X-Requested-With: NetmirrorNewTV v1.0`, and `Usertoken`. The player
+  applies link headers to master + variants + segments, so its HLS loader
+  inherits the privileged app context — that is what makes the CDN serve
+  the full multi-audio master.
+- **otp.php usertoken**: `GET {newtvBase}/newtv/otp.php` with header
+  `otp: 111111` (dummy) + `Ott` ? response field `usertoken`, cached 55 min
+  per ott in `NewTvUserToken`. This is the privileged-mode marker behind
+  player.php's `status:"otp"`. Attached to player.php and playback headers;
+  a failure degrades to an empty Usertoken and the flow continues (nf works
+  with an empty token — Sushan64 precedent).
 - **`loadLinks` hard deadline (30 s)**: the whole resolve+probe section runs
   under `withTimeoutOrNull(30_000)` — `resolveNewTvBase` can otherwise walk
   24 dead domains × 8 s and the spinner could run for minutes. On timeout
@@ -256,18 +267,6 @@ forks and the first fix failed:
   CS3 player (crash vector). `HostThrottler.gate()` also computes its wait
   under the mutex but sleeps OUTSIDE it — holding the lock during a 90 s
   cooldown delay serialized every caller behind one giant stall.
-- **Audio-track delivery**: the master's audio renditions are extracted
-  from `#EXT-X-MEDIA:TYPE=AUDIO` for the `shouldEmitNewTvMaster` decision
-  (the count gates dub availability) — deadness of the video variants does
-  NOT imply deadness of the audio (the Aug 2026 probe log shows a
-  dead-variant master carrying both a live "1. English" and "2. Hindi"
-  group; audio lives on `…/files/<id>/a/N/N.m3u8`, a separate URL space
-  from the gated variants). Audio URLs are pre-flighted (concurrent GET,
-  200 + `#EXTM3U`) for the count, but are NOT attached as `AudioFile`
-  children: CS3 merges them via `MergingMediaSource` and a single dead
-  child failed the whole playback with a 3003 container-parse error on
-  every title (Sep 2026). The master link exposes the audio picker
-  natively via its `#EXT-X-MEDIA` groups instead.
 - **Playback is 100% sessionless (Sep 2026)**: `loadLinks()` touches ONLY
   embed-tmdb (net27) + NewTV player/master/audio (imgcdn/freecdn) — never the
   net7x per-IP limiter. The old native net7x play fallback (`verify()` +

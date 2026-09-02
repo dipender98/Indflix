@@ -155,21 +155,24 @@ class NetMirrorParsersEmbedTest {
     """.trimIndent()
 
     @Test
-    fun newTvMasterIsDead_detectsUnknownKeyAndEmptyHost() {
-        assertTrue(NetMirrorParsers.newTvMasterIsDead(deadMaster))
+    fun newTvMasterPlayable_acceptsKeyedMaster_rejectsStub() {
+        // The old newTvMasterIsDead() wrongly gated in=unknown masters that
+        // the player actually plays (CDN validates per client context). The
+        // replacement structural gate accepts keyed/in=unknown-variant
+        // masters as long as variants + host-bearing audio exist.
+        assertTrue(NetMirrorParsers.newTvMasterPlayable(liveMaster))
+        // deadMaster carries the empty-host audio URI — the broken stub
+        // shape (collection-id / unrecognised-context response) is rejected
+        // by the structural gate, NOT by the in=unknown key.
+        assertFalse(NetMirrorParsers.newTvMasterPlayable(deadMaster))
     }
 
     @Test
-    fun newTvMasterIsDead_acceptsRealKeyedMaster() {
-        assertFalse(NetMirrorParsers.newTvMasterIsDead(liveMaster))
-    }
-
-    @Test
-    fun newTvMasterIsDead_rejectsBlankAndNonPlaylist() {
-        assertTrue(NetMirrorParsers.newTvMasterIsDead(null))
-        assertTrue(NetMirrorParsers.newTvMasterIsDead(""))
-        assertTrue(NetMirrorParsers.newTvMasterIsDead("<html>error</html>"))
-        assertTrue(NetMirrorParsers.newTvMasterIsDead("Too many request in short.."))
+    fun newTvMasterPlayable_rejectsBlankAndNonPlaylist() {
+        assertFalse(NetMirrorParsers.newTvMasterPlayable(null))
+        assertFalse(NetMirrorParsers.newTvMasterPlayable(""))
+        assertFalse(NetMirrorParsers.newTvMasterPlayable("<html>error</html>"))
+        assertFalse(NetMirrorParsers.newTvMasterPlayable("Too many request in short.."))
     }
 
     // ------------------------------------------------------------------
@@ -294,11 +297,12 @@ class NetMirrorParsersEmbedTest {
 
     @Test
     fun parseMasterAudioTracks_extractsDubsEvenWhenVariantsAreDead() {
-        // The old probeMaster bailed on newTvMasterIsDead BEFORE extracting
+        // The old probeMaster bailed on dead-variant masters BEFORE extracting
         // audio — losing the eng/hin renditions on exactly the masters that
-        // carry them. Extraction itself must be deadness-independent; the
-        // per-URL liveness pre-flight is what drops truly dead ones.
-        assertTrue(NetMirrorParsers.newTvMasterIsDead(dualAudioDeadVariantsMaster))
+        // carry them. Extraction must be deadness-independent; the master is
+        // emitted verbatim and the player fetches audio in its own context.
+        // Both masters here carry host-bearing dubs, so both are playable.
+        assertTrue(NetMirrorParsers.newTvMasterPlayable(dualAudioDeadVariantsMaster))
         val audio = NetMirrorParsers.parseMasterAudioTracks(dualAudioDeadVariantsMaster)
         assertEquals(2, audio.size)
         assertEquals("eng", audio[0].first)
@@ -311,85 +315,90 @@ class NetMirrorParsersEmbedTest {
 
     @Test
     fun parseMasterAudioTracks_skipsSubtitleEntriesAndBrokenUris() {
-        // SUBTITLES entries must not leak into the audio list; empty-host
-        // URIs (the dead template artifact) are dropped by the parser.
+        // SUBTITLES entries must not leak into the audio list; the empty-host
+        // URI (dead template artifact) is what makes newTvMasterPlayable
+        // reject the stub — the parser keeps it (non-blank) so the gate can
+        // see it.
         val audio = NetMirrorParsers.parseMasterAudioTracks(dualAudioDeadVariantsMaster)
         assertTrue(audio.none { it.third.contains("subscdn") })
         val deadOnly = NetMirrorParsers.parseMasterAudioTracks(deadMaster)
-        // deadMaster's audio URI has an empty host — kept by the parser
-        // (non-blank) but guaranteed to fail the network pre-flight.
         assertEquals(1, deadOnly.size)
         assertTrue(deadOnly[0].third.startsWith("https:///"))
     }
 
-    @Test
-    fun shouldEmitNewTvMaster_embedMissRequiresLiveVariant() {
-        // A dead master can NEVER play — emitting it as the only source
-        // produced an endless loading spinner plus CS3 crashes (Sep 2026).
-        // The segment-validated variantAlive is required in EVERY case now.
-        assertFalse(NetMirrorParsers.shouldEmitNewTvMaster(embedFound = false, audioTrackCount = 0, variantAlive = false))
-        assertFalse(NetMirrorParsers.shouldEmitNewTvMaster(embedFound = false, audioTrackCount = 2, variantAlive = false))
-        assertTrue(NetMirrorParsers.shouldEmitNewTvMaster(embedFound = false, audioTrackCount = 0, variantAlive = true))
-        assertTrue(NetMirrorParsers.shouldEmitNewTvMaster(embedFound = false, audioTrackCount = 2, variantAlive = true))
-    }
-
-    @Test
-    fun shouldEmitNewTvMaster_embedCoveredNeedsLiveVariantAndDubs() {
-        // With embed coverage the master only adds value when it is playable
-        // on this device AND carries a genuine dub track (>= 2 renditions).
-        assertTrue(NetMirrorParsers.shouldEmitNewTvMaster(embedFound = true, audioTrackCount = 2, variantAlive = true))
-        assertFalse(NetMirrorParsers.shouldEmitNewTvMaster(embedFound = true, audioTrackCount = 1, variantAlive = true))
-        assertFalse(NetMirrorParsers.shouldEmitNewTvMaster(embedFound = true, audioTrackCount = 0, variantAlive = true))
-        // Dead variant template would produce a non-playing entry next to
-        // working MP4s — never add it.
-        assertFalse(NetMirrorParsers.shouldEmitNewTvMaster(embedFound = true, audioTrackCount = 2, variantAlive = false))
-    }
-
     // ------------------------------------------------------------------
-    // parseFirstSegmentUrl (segment-level liveness probe)
+    // newTvMasterPlayable (the reference-architecture master gate)
     // ------------------------------------------------------------------
 
+    // Verbatim live master (Breaking Bad, nf/70236412): 10 host-bearing audio
+    // renditions + in=unknown variants — the exact shape the user confirmed
+    // PLAYING with the audio picker. The in=unknown key is NOT a defect:
+    // every reference implementation emits it verbatim and the CDN validates
+    // per client context (GatuNewTV UA + hd=on + Usertoken).
+    private val dualAudioMaster = """
+        #EXTM3U
+        #EXT-X-VERSION:3
+        #EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English",DEFAULT=YES,LANGUAGE="en",URI="https://subscdn.top/subs/70236412/en.m3u8"
+        #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac",LANGUAGE="eng",NAME="2. English",DEFAULT=YES,URI="https://s24.freecdn3.top/files/70236412/a/1/1.m3u8"
+        #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac",LANGUAGE="hin",NAME="9. Hindi",DEFAULT=NO,URI="https://s24.freecdn3.top/files/70236412/a/8/8.m3u8"
+        #EXT-X-STREAM-INF:BANDWIDTH=1000000,AUDIO="aac",RESOLUTION=1920x1080,SUBTITLES="subs"
+        https://s21.freecdn4.top/files/220884/1080p/1080p.m3u8?in=unknown::ni
+        #EXT-X-STREAM-INF:BANDWIDTH=600000,AUDIO="aac",DEFAULT=YES,RESOLUTION=1280x720,SUBTITLES="subs"
+        https://s21.freecdn4.top/files/220884/720p/720p.m3u8?in=unknown::ni
+    """.trimIndent()
+
+    // The broken stub served to unrecognised contexts: no STREAM-INF and an
+    // empty-host audio URI ("https:///files/..") — Media3 throws the
+    // unexpected-runtime-error (1004) / burns into 1003 at prepare.
+    private val brokenStubMaster = """
+        #EXTM3U
+        #EXT-X-VERSION:3
+        #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac",LANGUAGE="und",NAME="[1] Unknown",DEFAULT=NO,URI="https:///files/70236412/a/0/0.m3u8"
+    """.trimIndent()
+
     @Test
-    fun parseFirstSegmentUrl_returnsFirstSegmentAbsolute() {
-        val playlist = """
-            #EXTM3U
-            #EXT-X-VERSION:3
-            #EXT-X-TARGETDURATION:6
-            #EXTINF:6.0,
-            seg0.ts
-            #EXTINF:6.0,
-            seg1.ts
-        """.trimIndent()
-        assertEquals(
-            "https://cdn/files/220884/720p/seg0.ts",
-            NetMirrorParsers.parseFirstSegmentUrl(playlist, "https://cdn/files/220884/720p/720p.m3u8"),
-        )
+    fun newTvMasterPlayable_acceptsVerbatimMasterWithInUnknown() {
+        // The critical regression guard: in=unknown variants + host-bearing
+        // audio = the playable dual-audio master. Never gate this.
+        assertTrue(NetMirrorParsers.newTvMasterPlayable(dualAudioMaster))
     }
 
     @Test
-    fun parseFirstSegmentUrl_absoluteSegmentPassesThrough() {
-        val playlist = """
+    fun newTvMasterPlayable_acceptsMonoMasterWithHostBearingAudio() {
+        val mono = """
             #EXTM3U
-            #EXTINF:6.0,
-            https://other-cdn/seg0.ts
+            #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac",LANGUAGE="eng",NAME="1. English",DEFAULT=YES,URI="https://s21.freecdn4.top/files/81500601/a/0/0.m3u8"
+            #EXT-X-STREAM-INF:BANDWIDTH=600000,AUDIO="aac",DEFAULT=YES,RESOLUTION=1280x720
+            https://s21.freecdn4.top/files/220884/720p/720p.m3u8?in=unknown::ni
         """.trimIndent()
-        assertEquals(
-            "https://other-cdn/seg0.ts",
-            NetMirrorParsers.parseFirstSegmentUrl(playlist, "https://cdn/master/720p.m3u8"),
-        )
+        assertTrue(NetMirrorParsers.newTvMasterPlayable(mono))
     }
 
     @Test
-    fun parseFirstSegmentUrl_rejectsBlankNonPlaylistAndSegmentlessBodies() {
-        assertNull(NetMirrorParsers.parseFirstSegmentUrl(null, "https://cdn/master.m3u8"))
-        assertNull(NetMirrorParsers.parseFirstSegmentUrl("", "https://cdn/master.m3u8"))
-        // HTML error page / limiter body — not a playlist.
-        assertNull(NetMirrorParsers.parseFirstSegmentUrl("<html>404</html>", "https://cdn/master.m3u8"))
-        assertNull(NetMirrorParsers.parseFirstSegmentUrl("Too many request in short..", "https://cdn/master.m3u8"))
-        // A master playlist has variant lines (also non-# but those are
-        // variant URIs) — first non-# line IS returned for a media playlist;
-        // a genuinely segment-less media playlist (only tags) returns null.
-        assertNull(NetMirrorParsers.parseFirstSegmentUrl("#EXTM3U\n#EXT-X-VERSION:3", "https://cdn/master.m3u8"))
+    fun newTvMasterPlayable_rejectsBrokenStub() {
+        // No #EXT-X-STREAM-INF (audio-only skeleton) + empty-host audio URI.
+        assertFalse(NetMirrorParsers.newTvMasterPlayable(brokenStubMaster))
+    }
+
+    @Test
+    fun newTvMasterPlayable_rejectsHostlessAudioEvenWithVariants() {
+        val hostlessAudio = """
+            #EXTM3U
+            #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac",LANGUAGE="und",NAME="[1] Unknown",DEFAULT=NO,URI="https:///files/70236412/a/0/0.m3u8"
+            #EXT-X-STREAM-INF:BANDWIDTH=600000,AUDIO="aac",DEFAULT=YES,RESOLUTION=1280x720
+            https://s21.freecdn4.top/files/220884/720p/720p.m3u8?in=unknown::ni
+        """.trimIndent()
+        assertFalse(NetMirrorParsers.newTvMasterPlayable(hostlessAudio))
+    }
+
+    @Test
+    fun newTvMasterPlayable_rejectsGarbageAndVariantlessBodies() {
+        assertFalse(NetMirrorParsers.newTvMasterPlayable(null))
+        assertFalse(NetMirrorParsers.newTvMasterPlayable(""))
+        assertFalse(NetMirrorParsers.newTvMasterPlayable("<html>404</html>"))
+        assertFalse(NetMirrorParsers.newTvMasterPlayable("Too many request in short.."))
+        // No #EXT-X-STREAM-INF = audio-only skeleton, never playable as video.
+        assertFalse(NetMirrorParsers.newTvMasterPlayable("#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aac\",LANGUAGE=\"eng\",NAME=\"1. English\",URI=\"https://s24.freecdn3.top/files/1/a/0/0.m3u8\""))
     }
 }
 
