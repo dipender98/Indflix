@@ -228,6 +228,23 @@ forks and the first fix failed:
   URLs were tried and reverted: `#EXT-X-MEDIA` lives only in the master, so
   a variant URL makes Media3 discover a single muxed audio track and the
   audio picker disappears.
+- **Dead-template gate (error 1003 fix)**: `probeNewTvMaster` re-enforces
+  `newTvMasterIsDead` (in=unknown variants / empty-host `https:///` audio
+  URIs) right after the master fetch — the dead sessionless template was
+  previously emitted (its variant playlists answer 200 on some IPs and its
+  segments passed the Range probe), and the player's loaders burned on 404
+  segments until the 1003 timeout. A dead template now costs ONE request
+  and yields "No link found".
+- **Probe ordering fail-fast + audio-burst gating**: `probeNewTvMaster`
+  runs variant liveness BEFORE the audio pre-flight and pre-flights audio
+  ONLY when the verified count can change the emission decision (embed
+  covered AND ?2 declared renditions) — for embed-miss titles the decision
+  short-circuits on `variantAlive`, so the audio burst is skipped entirely.
+  The pre-flight is capped at 3 concurrent (`Semaphore(3)`): the CS3
+  player's own default (non-chunkless) HLS prepare already fetches EVERY
+  declared audio playlist at playback start (Breaking Bad = 10 audio + 1
+  variant ? 11 requests before the first frame — CS3-internal, plugin
+  cannot change), so the plugin must not double that burst.
 - **`loadLinks` hard deadline (30 s)**: the whole resolve+probe section runs
   under `withTimeoutOrNull(30_000)` — `resolveNewTvBase` can otherwise walk
   24 dead domains × 8 s and the spinner could run for minutes. On timeout

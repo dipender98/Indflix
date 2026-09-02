@@ -16,7 +16,9 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
@@ -509,22 +511,20 @@ internal object OTTMirrorBackend {
         )
     }
 
-    // Probe the HLS master the player would receive. Returns:
-    //  - audio tracks (#EXT-X-MEDIA:TYPE=AUDIO) as AudioFile entries, each
-    //    pre-flighted (see verifyAudioUrls) and carrying the stream headers
-    //    so the CDN accepts the audio media playlist request when the player
-    //    switches tracks. Extracted BEFORE any deadness gate: the audio
-    //    renditions live on a different URL space than the video variants
-    //    (…/files/<id>/a/N/N.m3u8 vs the in=unknown-gated variants) and are
-    //    regularly alive even when the variant template is dead — the Aug
-    //    2026 probe log shows a master with dead variants carrying BOTH a
-    //    live "1. English" and "2. Hindi" audio group;
-    //  - the list of variant streams (width, height, url) + the default
-    //    variant's height (used as the ExtractorLink quality);
-    //  - variantAlive: whether the default variant actually answers on THIS
-    //    device (a dead in=unknown template 404s; a real signed template
-    //    returns 200 + #EXTM3U). Decides whether the master link is worth
-    //    adding on top of working embed links.
+    // Probe the HLS master the player would receive. Fail-fast ordering keeps
+    // the request count minimal:
+    //  1. master playlist fetch,
+    //  2. newTvMasterIsDead gate — an in=unknown template is refused IMMEDIATELY
+    //     (error 1003 regression: the dead master was previously emitted, the
+    //     player's loaders burned on 404 segments until the timeout),
+    //  3. segment-validated variant liveness (2 GETs),
+    //  4. audio pre-flight ONLY when the verified count can change the
+    //     shouldEmitNewTvMaster decision (embed covered AND >=2 declared) —
+    //     for embed-miss titles the decision short-circuits on variantAlive,
+    //     so the audio burst would be pure waste. Capped at 3 concurrent
+    //     (semaphore) because the CS3 player's own default (non-chunkless)
+    //     HLS prepare already fetches EVERY declared audio playlist at
+    //     playback start — the plugin must not double that burst.
     // Results are cached 10 min under master|<ott>|<contentId> so repeat
     // taps replay without re-fetching the master or re-pre-flighting.
     private suspend fun probeNewTvMaster(
@@ -532,6 +532,7 @@ internal object OTTMirrorBackend {
         referer: String,
         ott: OttService,
         contentId: String,
+        embedFound: Boolean,
     ): MasterProbe {
         if (!url.contains(".m3u8", ignoreCase = true)) return MasterProbe.EMPTY
         NetMirrorResponseCache.get<MasterProbe>("master|${ott.id}|$contentId")?.let { return it }
@@ -541,16 +542,19 @@ internal object OTTMirrorBackend {
                 app.get(url, headers = streamHeaders(referer, "", ott), timeout = 10)
             } ?: return MasterProbe.EMPTY
             val body = resp.text
-            if (!body.startsWith("#EXTM3U")) return MasterProbe.EMPTY
+            if (NetMirrorParsers.newTvMasterIsDead(body)) return MasterProbe.EMPTY
             val hdrs = streamHeaders(referer, "", ott)
-            val liveAudio = verifyAudioUrls(
-                NetMirrorParsers.parseMasterAudioTracks(body).map { it.third },
-                hdrs,
-            ).map { uri -> newAudioFile(uri) { headers = hdrs } }
             val variants = NetMirrorParsers.parseMasterVariants(body, url)
             val defaultHeight = NetMirrorParsers.parseMasterResolution(body)?.second
             val defaultUrl = NetMirrorParsers.pickSingleVariant(url, body)
             val variantAlive = defaultUrl?.let { probeVariantAlive(it, hdrs) } == true
+            val rawAudioUrls = NetMirrorParsers.parseMasterAudioTracks(body).map { it.third }
+            val liveAudio = if (embedFound && rawAudioUrls.size >= 2 && variantAlive) {
+                verifyAudioUrls(rawAudioUrls, hdrs)
+                    .map { uri -> newAudioFile(uri) { headers = hdrs } }
+            } else {
+                emptyList()
+            }
             val probe = MasterProbe(liveAudio, variants, defaultHeight, variantAlive)
             if (liveAudio.isNotEmpty() || variants.isNotEmpty() || defaultHeight != null) {
                 NetMirrorResponseCache.put("master|${ott.id}|$contentId", probe)
@@ -574,16 +578,21 @@ internal object OTTMirrorBackend {
         }
     }
 
-    // The player merges each AudioFile as a child of MergingMediaSource — a
-    // dead child fails the WHOLE playback, not just the audio track. Pre-flight
-    // every audio playlist and keep only live ones (200 + a real playlist
-    // body). These are CDN URLs, not the net7x limiter, so they run
-    // concurrently without HostThrottler spacing.
+    // Pre-flight audio playlists (200 + a real playlist body) for the >=2
+    // dubs gate. These are CDN URLs, not the net7x limiter, but the CDN
+    // itself throttles — and the CS3 player's own prepare fetches EVERY
+    // declared audio playlist anyway, so the probe must not add a 10-wide
+    // burst on top. Capped at 3 concurrent via semaphore (wave 1 proves the
+    // >=2 gate; later waves only refine the count).
+    private val audioProbeSemaphore = Semaphore(3)
+
     private suspend fun verifyAudioUrls(urls: List<String>, headers: Map<String, String>): List<String> =
         coroutineScope {
             urls.distinct().map { uri ->
                 async {
-                    if (probeUrlAlive(uri, headers)) uri else null
+                    audioProbeSemaphore.withPermit {
+                        if (probeUrlAlive(uri, headers)) uri else null
+                    }
                 }
             }.awaitAll().filterNotNull()
         }
@@ -656,25 +665,29 @@ internal object OTTMirrorBackend {
                 if (embed == null) Log.d("OTTMirror", "embed-tmdb MISS for id=$contentId (tmdbId=${ld.tmdbId})")
                 val newTv = newTvDeferred.await()
 
-                // NewTV master probe: audio extraction + SEGMENT-validated
-                // variant liveness, cached. The pre-flighted audio count
-                // feeds the shouldEmitNewTvMaster decision ONLY — audio URLs
-                // are deliberately NOT attached as AudioFile children: CS3
-                // merges them via MergingMediaSource and a single dead child
-                // fails the whole playback with a 3003 container-parse error.
-                // The master link exposes the audio picker natively via
-                // #EXT-X-MEDIA:TYPE=AUDIO; the MP4 links use muxed audio.
-                val masterProbe = newTv?.let { probeNewTvMaster(it.vlink, it.referer, ott, contentId) }
-                val verifiedAudioCount = masterProbe?.audioTracks?.size ?: 0
-
-                val allLinks = mutableListOf<ExtractorLink>()
-
-                // Embed MP4 quality tiers (muxed audio — plays safely for everyone).
+                // Embed MP4 quality tiers (muxed audio — plays safely for
+                // everyone). Built BEFORE the master probe: the probe uses
+                // embedFound to decide whether the audio pre-flight can
+                // change the emission decision (see probeNewTvMaster).
                 val embedLinks = embed?.streams
                     ?.filter { it.resolution in 1..1080 }
                     ?.sortedByDescending { it.resolution }
                     ?.map { s -> emit(ott, s.url, EMBED_REFERER, s.resolution, cookie = "") }
                     .orEmpty()
+
+                // NewTV master probe: dead-template gate + SEGMENT-validated
+                // variant liveness + gated audio count, cached. The
+                // pre-flighted audio count feeds the shouldEmitNewTvMaster
+                // decision ONLY — audio URLs are deliberately NOT attached
+                // as AudioFile children: CS3 merges them via
+                // MergingMediaSource and a single dead child fails the whole
+                // playback with a 3003 container-parse error. The master
+                // link exposes the audio picker natively via
+                // #EXT-X-MEDIA:TYPE=AUDIO; the MP4 links use muxed audio.
+                val masterProbe = newTv?.let { probeNewTvMaster(it.vlink, it.referer, ott, contentId, embedLinks.isNotEmpty()) }
+                val verifiedAudioCount = masterProbe?.audioTracks?.size ?: 0
+
+                val allLinks = mutableListOf<ExtractorLink>()
                 allLinks += embedLinks
 
                 // Master link: only when the segment-validated probe proves
