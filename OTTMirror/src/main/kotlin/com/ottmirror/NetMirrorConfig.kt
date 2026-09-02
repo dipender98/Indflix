@@ -168,6 +168,22 @@ internal object NetMirrorCookieStore {
 internal fun decodeBase64(value: String): String = Base64Decode.decodeUtf8(value).orEmpty()
 
 /**
+ * runCatching for suspend calls that MUST respect cancellation:
+ * kotlinx.coroutines.CancellationException extends IllegalStateException, so
+ * runCatching swallows it — a cancelled player load then kept running and
+ * invoked callbacks into a torn-down CS3 player (the Sep 2026 "keeps loading
+ * then crashes" report). Rethrow cancellation; null on any other failure.
+ */
+internal suspend fun <T> softCatch(block: suspend () -> T): T? =
+    try {
+        block()
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        null
+    }
+
+/**
  * Short-lived response caches. Each entry absorbs UI-driven repeat calls
  * (detail refresh, back-and-forth between seasons) that would otherwise
  * hit the per-IP limiter for data it already served seconds ago.

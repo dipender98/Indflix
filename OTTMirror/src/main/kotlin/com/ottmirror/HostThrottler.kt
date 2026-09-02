@@ -33,13 +33,27 @@ object HostThrottler {
     @Volatile private var cooldownUntilMs = 0L
     @Volatile private var lastBackoffMs = 0L
 
-    /** Suspend until both the global spacing and any active cooldown elapse. */
+    /**
+     * Suspend until both the global spacing and any active cooldown elapse.
+     * The wait is computed under the mutex but slept OUTSIDE it: holding the
+     * lock during a 90 s cooldown delay serialized every caller behind one
+     * giant stall (the "keeps loading" report). Each caller now delays
+     * independently and re-checks before firing.
+     */
     suspend fun gate() {
-        mutex.withLock {
-            val now = System.currentTimeMillis()
-            val wait = max(cooldownUntilMs - now, MIN_GAP_MS - (now - lastRequestMs))
-            if (wait > 0) delay(wait + Random.nextLong(0, 300))
-            lastRequestMs = System.currentTimeMillis()
+        while (true) {
+            val wait = mutex.withLock {
+                val now = System.currentTimeMillis()
+                val w = max(cooldownUntilMs - now, MIN_GAP_MS - (now - lastRequestMs))
+                if (w <= 0) {
+                    lastRequestMs = System.currentTimeMillis()
+                    0L
+                } else {
+                    w
+                }
+            }
+            if (wait <= 0L) return
+            delay(wait + Random.nextLong(0, 300))
         }
     }
 

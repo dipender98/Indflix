@@ -464,15 +464,42 @@ object NetMirrorParsers {
 
     /**
      * Decide whether to emit the NewTV master link in addition to the
-     * embed-tmdb MP4 links. The master is the ONLY source carrying real
-     * audio renditions (#EXT-X-MEDIA:TYPE=AUDIO with LANGUAGE/NAME), so:
-     *  - no embed coverage → always emit it (it is the only playable path);
-     *  - embed covered → emit it only when it adds value the MP4s cannot:
-     *    the default video variant actually answers on this device
-     *    (variantAlive — a dead in=unknown template 404s) AND the master
-     *    carries at least two audio renditions (a genuine dub track).
+     * embed-tmdb MP4 links.
+     *
+     * `variantAlive` is a SEGMENT-LEVEL check (playlist + first segment both
+     * answer) and is required in EVERY case: a dead in=unknown master can
+     * never play, and emitting it as the only source produced an endless
+     * loading spinner plus CS3 crashes (Sep 2026 report).
+     *
+     *  - embed covered → the master must ALSO carry ≥2 audio renditions to
+     *    add value the muxed MP4s cannot (real dub switching);
+     *  - embed missed → the master is the only possible source; play it when
+     *    it is provably alive, mono or not.
      * Pure — unit-testable.
      */
     fun shouldEmitNewTvMaster(embedFound: Boolean, audioTrackCount: Int, variantAlive: Boolean): Boolean =
-        !embedFound || (variantAlive && audioTrackCount >= 2)
+        variantAlive && (!embedFound || audioTrackCount >= 2)
+
+    /**
+     * Return the FIRST media segment URI of an HLS media playlist, absolute
+     * (resolved against [baseUrl]), or null when the body is not a media
+     * playlist or carries no segment line. Used by the segment-level
+     * liveness probe: an in=unknown variant playlist can answer 200 +
+     * #EXTM3U while every segment inside 404s — only a segment check
+     * proves the variant is actually playable.
+     */
+    fun parseFirstSegmentUrl(playlistBody: String?, baseUrl: String): String? {
+        if (playlistBody.isNullOrBlank() || !playlistBody.startsWith("#EXTM3U")) return null
+        val base = baseUrl.substringBeforeLast('/', "")
+        for (line in playlistBody.lines()) {
+            val t = line.trim()
+            if (t.isBlank() || t.startsWith("#")) continue
+            return when {
+                t.startsWith("http", ignoreCase = true) -> t
+                base.isNotEmpty() -> "$base/$t"
+                else -> t
+            }
+        }
+        return null
+    }
 }

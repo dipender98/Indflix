@@ -80,8 +80,7 @@ internal object EmbedTmdb {
         }
 
         HostThrottler.gate()
-        val resp = runCatching { app.get(url, headers = embedHeaders(), timeout = 10) }.getOrNull()
-            ?: return null
+        val resp = softCatch { app.get(url, headers = embedHeaders(), timeout = 10) } ?: return null
         // Classify for insurance: if net27 ever sprouts the same anti-abuse
         // body we must not parse it as JSON. Deliberately NOT recorded on the
         // net7x cooldown ladder — this is a different backend.

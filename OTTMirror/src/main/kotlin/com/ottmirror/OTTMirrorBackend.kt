@@ -9,6 +9,7 @@ import com.lagradost.cloudstream3.newAudioFile
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.getQualityFromName
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -17,6 +18,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -535,9 +537,9 @@ internal object OTTMirrorBackend {
         NetMirrorResponseCache.get<MasterProbe>("master|${ott.id}|$contentId")?.let { return it }
         return try {
             HostThrottler.gate()
-            val resp = runCatching {
+            val resp = softCatch {
                 app.get(url, headers = streamHeaders(referer, "", ott), timeout = 10)
-            }.getOrNull() ?: return MasterProbe.EMPTY
+            } ?: return MasterProbe.EMPTY
             val body = resp.text
             if (!body.startsWith("#EXTM3U")) return MasterProbe.EMPTY
             val hdrs = streamHeaders(referer, "", ott)
@@ -548,12 +550,14 @@ internal object OTTMirrorBackend {
             val variants = NetMirrorParsers.parseMasterVariants(body, url)
             val defaultHeight = NetMirrorParsers.parseMasterResolution(body)?.second
             val defaultUrl = NetMirrorParsers.pickSingleVariant(url, body)
-            val variantAlive = defaultUrl?.let { probeUrlAlive(it, hdrs) } == true
+            val variantAlive = defaultUrl?.let { probeVariantAlive(it, hdrs) } == true
             val probe = MasterProbe(liveAudio, variants, defaultHeight, variantAlive)
             if (liveAudio.isNotEmpty() || variants.isNotEmpty() || defaultHeight != null) {
                 NetMirrorResponseCache.put("master|${ott.id}|$contentId", probe)
             }
             probe
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             MasterProbe.EMPTY
         }
@@ -585,10 +589,34 @@ internal object OTTMirrorBackend {
         }
 
     private suspend fun probeUrlAlive(url: String, headers: Map<String, String>): Boolean =
-        runCatching {
+        softCatch {
             val resp = app.get(url, headers = headers, timeout = 8)
             resp.code in 200..299 && resp.text.startsWith("#EXTM3U")
-        }.getOrDefault(false)
+        } ?: false
+
+    /**
+     * SEGMENT-LEVEL liveness check for a video variant. A dead in=unknown
+     * variant PLAYLIST can still answer 200 + #EXTM3U (proven by live
+     * probes) while every segment inside 404s — checking only the playlist
+     * produced a false-positive variantAlive, an endless loading spinner,
+     * and CS3 crashes. Require BOTH: the playlist parses AND its first
+     * segment returns bytes (Range GET keeps the transfer small).
+     */
+    private suspend fun probeVariantAlive(variantUrl: String, headers: Map<String, String>): Boolean {
+        val resp = softCatch {
+            app.get(variantUrl, headers = headers, timeout = 8)
+        } ?: return false
+        if (resp.code !in 200..299 || !resp.text.startsWith("#EXTM3U")) return false
+        val segmentUrl = NetMirrorParsers.parseFirstSegmentUrl(resp.text, variantUrl) ?: return false
+        val segment = softCatch {
+            app.get(
+                segmentUrl,
+                headers = headers + mapOf("Range" to "bytes=0-1023"),
+                timeout = 8,
+            )
+        } ?: return false
+        return segment.code in 200..299
+    }
 
     suspend fun loadLinks(
         ott: OttService,
@@ -606,92 +634,81 @@ internal object OTTMirrorBackend {
                 return@withContext true
             }
         }
-        var emittedCount = 0
         // ------------------------------------------------------------------
-        // Path 1 + Path 2 — resolve BOTH in parallel. The play path is 100%
-        // sessionless: only embed-tmdb (net27) and NewTV (imgcdn) are used,
-        // neither of which has the net7x per-IP limiter behind "Too many
-        // request in short..". The old native net7x fallback (verify →
-        // play.php → playlist.php) was REMOVED — an uncovered title now
-        // answers "No link found" instead of ever risking a rate-limit error.
-        //
-        // Path 1 embed-tmdb (sessionless, TMDB-keyed, net27): signed MP4 per
-        // quality tier, fast start, zero net7x traffic. Muxed audio only —
-        // never carries a second language.
-        //
-        // Path 2 NewTV player (CNCVerse-exact): the ONLY source with real
-        // multi-audio renditions (#EXT-X-MEDIA:TYPE=AUDIO, e.g. "1. English"
-        // + "2. Hindi" on dual-audio titles). It used to be a fallback only
-        // for embed misses, which meant embed-covered dual-audio titles
-        // (Breaking Bad, GoT…) never got an audio picker. It is now always
-        // probed; the master link itself is added when it is actually
-        // playable (live default variant) and adds audio value (≥2 renditions).
+        // Hard 30 s deadline: resolveNewTvBase can walk 24 dead domains and
+        // every request carries a timeout — without a bound the load spinner
+        // could run for minutes before CS3's own timeout fires (the "keeps
+        // loading then crashes" report). On timeout the player gets a clean
+        // "No link found".
         // ------------------------------------------------------------------
-        coroutineScope {
-            val embedDeferred = async {
-                ld.tmdbId?.let { tmdbId ->
-                    runCatching { EmbedTmdb.resolve(tmdbId, ld.season, ld.episode) }.getOrNull()
+        val emittedCount = withTimeoutOrNull(30_000L) {
+            coroutineScope {
+                val embedDeferred = async {
+                    ld.tmdbId?.let { tmdbId ->
+                        softCatch { EmbedTmdb.resolve(tmdbId, ld.season, ld.episode) }
+                    }
                 }
-            }
-            val newTvDeferred = async {
-                runCatching { fetchNewTvPlayerBody(ott, contentId) }.getOrNull()
-            }
+                val newTvDeferred = async {
+                    softCatch { fetchNewTvPlayerBody(ott, contentId) }
+                }
 
-            val embed = embedDeferred.await()
-            if (embed == null) Log.d("OTTMirror", "embed-tmdb MISS for id=$contentId (tmdbId=${ld.tmdbId})")
-            val newTv = newTvDeferred.await()
+                val embed = embedDeferred.await()
+                if (embed == null) Log.d("OTTMirror", "embed-tmdb MISS for id=$contentId (tmdbId=${ld.tmdbId})")
+                val newTv = newTvDeferred.await()
 
-            // NewTV master probe: audio extraction + variant liveness, cached.
-            // The pre-flighted audio count feeds the shouldEmitNewTvMaster
-            // decision ONLY — audio URLs are deliberately NOT attached as
-            // AudioFile children: CS3 merges them via MergingMediaSource and a
-            // single dead child fails the whole playback with a 3003
-            // container-parse error (regression seen on every title). The
-            // master link exposes the audio picker natively via
-            // #EXT-X-MEDIA:TYPE=AUDIO; the MP4 links use muxed audio.
-            val masterProbe = newTv?.let { probeNewTvMaster(it.vlink, it.referer, ott, contentId) }
-            val verifiedAudioCount = masterProbe?.audioTracks?.size ?: 0
+                // NewTV master probe: audio extraction + SEGMENT-validated
+                // variant liveness, cached. The pre-flighted audio count
+                // feeds the shouldEmitNewTvMaster decision ONLY — audio URLs
+                // are deliberately NOT attached as AudioFile children: CS3
+                // merges them via MergingMediaSource and a single dead child
+                // fails the whole playback with a 3003 container-parse error.
+                // The master link exposes the audio picker natively via
+                // #EXT-X-MEDIA:TYPE=AUDIO; the MP4 links use muxed audio.
+                val masterProbe = newTv?.let { probeNewTvMaster(it.vlink, it.referer, ott, contentId) }
+                val verifiedAudioCount = masterProbe?.audioTracks?.size ?: 0
 
-            val allLinks = mutableListOf<ExtractorLink>()
+                val allLinks = mutableListOf<ExtractorLink>()
 
-            // Embed MP4 quality tiers (muxed audio — plays safely for everyone).
-            val embedLinks = embed?.streams
-                ?.filter { it.resolution in 1..1080 }
-                ?.sortedByDescending { it.resolution }
-                ?.map { s -> emit(ott, s.url, EMBED_REFERER, s.resolution, cookie = "") }
-                .orEmpty()
-            allLinks += embedLinks
+                // Embed MP4 quality tiers (muxed audio — plays safely for everyone).
+                val embedLinks = embed?.streams
+                    ?.filter { it.resolution in 1..1080 }
+                    ?.sortedByDescending { it.resolution }
+                    ?.map { s -> emit(ott, s.url, EMBED_REFERER, s.resolution, cookie = "") }
+                    .orEmpty()
+                allLinks += embedLinks
 
-            // Master link: always when embed missed (only path), else only
-            // when it is genuinely playable on this device AND carries the
-            // multi-audio value the MP4s cannot. The master URL lets Media3
-            // natively expose the labeled audio groups — no merge needed.
-            if (newTv != null) {
-                val emitMaster = NetMirrorParsers.shouldEmitNewTvMaster(
-                    embedFound = embedLinks.isNotEmpty(),
-                    audioTrackCount = verifiedAudioCount,
-                    variantAlive = masterProbe?.variantAlive == true,
-                )
-                if (emitMaster) {
-                    allLinks += emit(
-                        ott,
-                        url = newTv.vlink,
-                        referer = newTv.referer,
-                        quality = masterProbe?.defaultHeight ?: getQualityFromName(newTv.vlink),
-                        cookie = "",
+                // Master link: only when the segment-validated probe proves
+                // it playable on this device, AND it carries the multi-audio
+                // value the MP4s cannot (or embed missed entirely). The
+                // master URL lets Media3 natively expose the labeled audio
+                // groups — no merge needed.
+                if (newTv != null) {
+                    val emitMaster = NetMirrorParsers.shouldEmitNewTvMaster(
+                        embedFound = embedLinks.isNotEmpty(),
+                        audioTrackCount = verifiedAudioCount,
+                        variantAlive = masterProbe?.variantAlive == true,
                     )
+                    if (emitMaster) {
+                        allLinks += emit(
+                            ott,
+                            url = newTv.vlink,
+                            referer = newTv.referer,
+                            quality = masterProbe?.defaultHeight ?: getQualityFromName(newTv.vlink),
+                            cookie = "",
+                        )
+                    }
                 }
-            }
 
-            if (allLinks.isNotEmpty()) {
-                allLinks.forEach { runCatching { callback(it) } }
-                embed?.subs?.forEach { c ->
-                    runCatching { subtitleCallback(SubtitleFile(c.name.ifBlank { c.lang.ifBlank { "subs" } }, c.url)) }
+                if (allLinks.isNotEmpty()) {
+                    allLinks.forEach { runCatching { callback(it) } }
+                    embed?.subs?.forEach { c ->
+                        runCatching { subtitleCallback(SubtitleFile(c.name.ifBlank { c.lang.ifBlank { "subs" } }, c.url)) }
+                    }
+                    LinkCache.put(contentId, allLinks.toList())
                 }
-                LinkCache.put(contentId, allLinks.toList())
-                emittedCount = allLinks.size
+                allLinks.size
             }
-        }
+        } ?: 0
 
         // Nothing playable from either sessionless path → clean "No link
         // found". The native net7x flow (verify + play.php + playlist.php)
@@ -722,7 +739,7 @@ internal object OTTMirrorBackend {
             val cached = NetMirrorResponseCache.get<String>("player|${ott.id}|$contentId")
             if (cached != null) return newTvPlayerFromBody(cached, apiBase)
             HostThrottler.gate()
-            val resp = runCatching {
+            val resp = softCatch {
                 app.get(
                     playerUrl,
                     headers = NEWTV_HEADERS + mapOf(
@@ -731,7 +748,7 @@ internal object OTTMirrorBackend {
                     ),
                     timeout = 10,
                 )
-            }.getOrNull() ?: return null
+            } ?: return null
 
             when (NetMirrorGuard.classify(resp.code, resp.text)) {
                 NetMirrorGuard.Verdict.OK -> {

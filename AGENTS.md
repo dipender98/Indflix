@@ -216,31 +216,41 @@ forks and the first fix failed:
   short-circuit). The embed MP4s are the playable-for-everyone quality
   tiers; the NewTV master is the ONLY source carrying real multi-audio
   renditions (`#EXT-X-MEDIA:TYPE=AUDIO`, e.g. "1. English" + "2. Hindi" on
-  dual-audio titles like Breaking Bad / GoT). The master link itself is
-  emitted when embed missed (only path) **or** when
-  `shouldEmitNewTvMaster` says it adds value: the default video variant
-  answers on this device (per-device pre-flight GET — a dead `in=unknown`
-  template 404s) AND the master carries ?2 audio renditions. Per-variant
-  media-playlist URLs were tried and reverted: `#EXT-X-MEDIA` lives only
-  in the master, so a variant URL makes Media3 discover a single muxed
-  audio track and the audio picker disappears. The native `playlist.php`
-  sources stay as a single stream (the default or highest-quality entry).
+  dual-audio titles like Breaking Bad / GoT). The master link is emitted
+  ONLY when `shouldEmitNewTvMaster` proves it playable on this device: a
+  **segment-level** liveness check (`probeVariantAlive` — the default
+  variant's PLAYLIST must answer 200 + `#EXTM3U` AND its first segment must
+  return bytes to a Range GET; an `in=unknown` template passes the playlist
+  check but fails at segment level, which caused an endless loading spinner
+  plus CS3 crashes on Sep 2026) — plus ?2 audio renditions when embed also
+  covered the title. On embed-miss a dead master now yields a clean "No
+  link found" instead of an unplayable source. Per-variant media-playlist
+  URLs were tried and reverted: `#EXT-X-MEDIA` lives only in the master, so
+  a variant URL makes Media3 discover a single muxed audio track and the
+  audio picker disappears.
+- **`loadLinks` hard deadline (30 s)**: the whole resolve+probe section runs
+  under `withTimeoutOrNull(30_000)` — `resolveNewTvBase` can otherwise walk
+  24 dead domains × 8 s and the spinner could run for minutes. On timeout
+  the player gets a clean "No link found".
+- **Cancellation hygiene**: every suspend network call on the play path uses
+  `softCatch` (top-level in `NetMirrorConfig.kt`) which RETHROWS
+  `CancellationException` — plain `runCatching` swallowed it, so cancelled
+  player loads kept running and called `callback(link)` into a torn-down
+  CS3 player (crash vector). `HostThrottler.gate()` also computes its wait
+  under the mutex but sleeps OUTSIDE it — holding the lock during a 90 s
+  cooldown delay serialized every caller behind one giant stall.
 - **Audio-track delivery**: the master's audio renditions are extracted
-  from `#EXT-X-MEDIA:TYPE=AUDIO` **always** — deadness of the video
-  variants does NOT imply deadness of the audio (the Aug 2026 probe log
-  shows a dead-variant master carrying both a live "1. English" and
-  "2. Hindi" group; audio lives on `…/files/<id>/a/N/N.m3u8`, a separate
-  URL space from the gated variants). Each rendition is built with
-  `newAudioFile(uri) { headers = streamHeaders(...) }` and attached to
-  BOTH the master link and the embed MP4 links — CS3's
-  `getAudioSources`/`MergingMediaSource` merges them for ANY link type,
-  so MP4 playback gets the same audio picker. Every audio URL is
-  pre-flighted (concurrent GET, 200 + `#EXTM3U`) before attaching: a dead
-  merged child fails the WHOLE playback, so unverified URLs are never
-  attached. Verified lists are cached 10 min under `audio|` … via the
-  probe cache `master|<ott>|<contentId>`. Known trade-off: merged audio
-  on MP4 links labels as "Audio" (no language field on `AudioFile`); the
-  master link shows proper English/Hindi labels via native parsing.
+  from `#EXT-X-MEDIA:TYPE=AUDIO` for the `shouldEmitNewTvMaster` decision
+  (the count gates dub availability) — deadness of the video variants does
+  NOT imply deadness of the audio (the Aug 2026 probe log shows a
+  dead-variant master carrying both a live "1. English" and "2. Hindi"
+  group; audio lives on `…/files/<id>/a/N/N.m3u8`, a separate URL space
+  from the gated variants). Audio URLs are pre-flighted (concurrent GET,
+  200 + `#EXTM3U`) for the count, but are NOT attached as `AudioFile`
+  children: CS3 merges them via `MergingMediaSource` and a single dead
+  child failed the whole playback with a 3003 container-parse error on
+  every title (Sep 2026). The master link exposes the audio picker
+  natively via its `#EXT-X-MEDIA` groups instead.
 - **Playback is 100% sessionless (Sep 2026)**: `loadLinks()` touches ONLY
   embed-tmdb (net27) + NewTV player/master/audio (imgcdn/freecdn) — never the
   net7x per-IP limiter. The old native net7x play fallback (`verify()` +

@@ -323,10 +323,13 @@ class NetMirrorParsersEmbedTest {
     }
 
     @Test
-    fun shouldEmitNewTvMaster_embedMissAlwaysEmits() {
-        // Without embed coverage the master is the only path — emit it
-        // regardless of liveness pre-flight (raw-vlink behavior preserved).
-        assertTrue(NetMirrorParsers.shouldEmitNewTvMaster(embedFound = false, audioTrackCount = 0, variantAlive = false))
+    fun shouldEmitNewTvMaster_embedMissRequiresLiveVariant() {
+        // A dead master can NEVER play — emitting it as the only source
+        // produced an endless loading spinner plus CS3 crashes (Sep 2026).
+        // The segment-validated variantAlive is required in EVERY case now.
+        assertFalse(NetMirrorParsers.shouldEmitNewTvMaster(embedFound = false, audioTrackCount = 0, variantAlive = false))
+        assertFalse(NetMirrorParsers.shouldEmitNewTvMaster(embedFound = false, audioTrackCount = 2, variantAlive = false))
+        assertTrue(NetMirrorParsers.shouldEmitNewTvMaster(embedFound = false, audioTrackCount = 0, variantAlive = true))
         assertTrue(NetMirrorParsers.shouldEmitNewTvMaster(embedFound = false, audioTrackCount = 2, variantAlive = true))
     }
 
@@ -340,6 +343,53 @@ class NetMirrorParsersEmbedTest {
         // Dead variant template would produce a non-playing entry next to
         // working MP4s — never add it.
         assertFalse(NetMirrorParsers.shouldEmitNewTvMaster(embedFound = true, audioTrackCount = 2, variantAlive = false))
+    }
+
+    // ------------------------------------------------------------------
+    // parseFirstSegmentUrl (segment-level liveness probe)
+    // ------------------------------------------------------------------
+
+    @Test
+    fun parseFirstSegmentUrl_returnsFirstSegmentAbsolute() {
+        val playlist = """
+            #EXTM3U
+            #EXT-X-VERSION:3
+            #EXT-X-TARGETDURATION:6
+            #EXTINF:6.0,
+            seg0.ts
+            #EXTINF:6.0,
+            seg1.ts
+        """.trimIndent()
+        assertEquals(
+            "https://cdn/files/220884/720p/seg0.ts",
+            NetMirrorParsers.parseFirstSegmentUrl(playlist, "https://cdn/files/220884/720p/720p.m3u8"),
+        )
+    }
+
+    @Test
+    fun parseFirstSegmentUrl_absoluteSegmentPassesThrough() {
+        val playlist = """
+            #EXTM3U
+            #EXTINF:6.0,
+            https://other-cdn/seg0.ts
+        """.trimIndent()
+        assertEquals(
+            "https://other-cdn/seg0.ts",
+            NetMirrorParsers.parseFirstSegmentUrl(playlist, "https://cdn/master/720p.m3u8"),
+        )
+    }
+
+    @Test
+    fun parseFirstSegmentUrl_rejectsBlankNonPlaylistAndSegmentlessBodies() {
+        assertNull(NetMirrorParsers.parseFirstSegmentUrl(null, "https://cdn/master.m3u8"))
+        assertNull(NetMirrorParsers.parseFirstSegmentUrl("", "https://cdn/master.m3u8"))
+        // HTML error page / limiter body — not a playlist.
+        assertNull(NetMirrorParsers.parseFirstSegmentUrl("<html>404</html>", "https://cdn/master.m3u8"))
+        assertNull(NetMirrorParsers.parseFirstSegmentUrl("Too many request in short..", "https://cdn/master.m3u8"))
+        // A master playlist has variant lines (also non-# but those are
+        // variant URIs) — first non-# line IS returned for a media playlist;
+        // a genuinely segment-less media playlist (only tags) returns null.
+        assertNull(NetMirrorParsers.parseFirstSegmentUrl("#EXTM3U\n#EXT-X-VERSION:3", "https://cdn/master.m3u8"))
     }
 }
 
