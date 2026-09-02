@@ -179,6 +179,8 @@ internal suspend fun <T> softCatch(block: suspend () -> T): T? =
         block()
     } catch (e: kotlinx.coroutines.CancellationException) {
         throw e
+    } catch (e: com.lagradost.cloudstream3.ErrorLoadingException) {
+        throw e
     } catch (e: Exception) {
         null
     }

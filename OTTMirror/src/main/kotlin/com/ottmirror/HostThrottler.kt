@@ -20,7 +20,7 @@ import kotlin.random.Random
  *     instead of rotating and re-firing.
  */
 object HostThrottler {
-    const val MIN_GAP_MS = 1200L
+    const val MIN_GAP_MS = 2500L
     // On a saturated shared IP the first retry at 5 s almost never clears, so
     // the ladder starts at a floor that has a real chance: 15 s -> 30 s ->
     // 60 s -> 90 s cap.

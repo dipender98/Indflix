@@ -22,9 +22,11 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.MediaType.Companion.toMediaType
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 internal object OTTMirrorBackend {
+    private val linkLocks = ConcurrentHashMap<String, Mutex>()
 
     // CNCVerse-exact mobile request profile (verbatim from the working
     // reference): full WebView client-hint + Sec-Fetch set. The backend's
@@ -95,7 +97,7 @@ internal object OTTMirrorBackend {
     // ------------------------------------------------------------------
 
     private val verifyMutex = Mutex()
-    @Volatile private var inFlightVerify: kotlinx.coroutines.Deferred<String>? = null
+    @Volatile private var inFlightVerify: Deferred<String>? = null
 
     suspend fun verify(): String {
         CookieBox.tHashT.takeIf { CookieBox.fresh() }?.let { return it }
@@ -131,6 +133,8 @@ internal object OTTMirrorBackend {
                     return@withLock cookie
                 }
                 throw e
+            } finally {
+                if (inFlightVerify === deferred) inFlightVerify = null
             }
         }
     }
@@ -140,7 +144,6 @@ internal object OTTMirrorBackend {
         // the IP is limited — wait the cooldown out and retry the SAME host;
         // never burn the mirror list feeding an already-saturated limiter.
         val maxHosts = 3
-        var retriedLimited = false
         var hostsTried = 0
         while (hostsTried < maxHosts) {
             val host = DomainRotator.current(Role.MOBILE) ?: break
@@ -152,12 +155,7 @@ internal object OTTMirrorBackend {
                     return result.token
                 }
                 is VerifyResult.Limited -> {
-                    if (!retriedLimited) {
-                        retriedLimited = true
-                        HostThrottler.awaitCooldown()
-                        continue // same host, same budget slot
-                    }
-                    DomainRotator.markFailed(Role.MOBILE, host)
+                    throw ErrorLoadingException(limitedMessage())
                 }
                 is VerifyResult.Dead -> DomainRotator.markFailed(Role.MOBILE, host)
             }
@@ -417,8 +415,8 @@ internal object OTTMirrorBackend {
                     cookie = verify()
                 }
                 NetMirrorGuard.Verdict.LIMITED -> {
-                    limitedAttempts++
-                    if (!NetMirrorGuard.onLimited(limitedAttempts)) break
+                    NetMirrorGuard.onLimited(1)
+                    throw ErrorLoadingException(limitedMessage())
                 }
                 NetMirrorGuard.Verdict.DEAD -> break
             }
@@ -433,33 +431,59 @@ internal object OTTMirrorBackend {
     // NewTV player API (primary stream source)
     // ------------------------------------------------------------------
 
+    private val newTvBaseMutex = Mutex()
+    @Volatile private var inFlightNewTvBase: Deferred<String>? = null
+
     suspend fun resolveNewTvBase(probe: Boolean = false): String {
         if (NewTvBase.value.isBlank()) NewTvBase.warm()
         NewTvBase.value.takeIf { it.isNotBlank() }?.let { return it }
-        // CNCVerse-exact walk: iterate ALL 24 domains in list order until one
-        // answers checknewtv.php. This infra (mobidetect domains) is separate
-        // from the net7x per-IP limiter — live probes show checknewtv.php
-        // answers fine even while net7x is limited — so the old capped walk
-        // only made resolution fail on dead mirrors. The result is cached
-        // in-memory + persisted 24 h, so this walk is rare.
+        inFlightNewTvBase?.takeIf { it.isActive }?.let { return it.await() }
+        return newTvBaseMutex.withLock {
+            NewTvBase.value.takeIf { it.isNotBlank() }?.let { return@withLock it }
+            inFlightNewTvBase?.takeIf { it.isActive }?.let { return@withLock it.await() }
+            val deferred = coroutineScope { async(Dispatchers.IO) { resolveNewTvBaseInternal(probe) } }
+            inFlightNewTvBase = deferred
+            try {
+                deferred.await()
+            } finally {
+                if (inFlightNewTvBase === deferred) inFlightNewTvBase = null
+            }
+        }
+    }
+
+    private suspend fun resolveNewTvBaseInternal(probe: Boolean): String {
+        if (NewTvBase.value.isBlank()) NewTvBase.warm()
+        NewTvBase.value.takeIf { it.isNotBlank() }?.let { return it }
+        // Probe at most three domains. A limited response is IP-wide, so
+        // rotating through the remaining mirrors would only add traffic.
+        var hostsTried = 0
         for (host in NEWTV_DOMAINS) {
+            if (hostsTried++ >= 3) break
             val h = decodeBase64(host).trimEnd('/')
             HostThrottler.gate()
             val resp = runCatching {
                 app.get("$h/checknewtv.php", headers = NEWTV_HEADERS, timeout = 8)
             }.getOrNull()
 
-            var resolved: String? = null
-            if (resp != null && resp.code in 200..299) {
-                val token = NetMirrorParsers.parseNewTvToken(resp.text)?.tokenHash?.takeIf { it.isNotBlank() }
-                if (token != null) {
-                    val apiBase = Base64Decode.decodeUtf8(token)?.trimEnd('/')
-                    if (!apiBase.isNullOrBlank() && apiBase.startsWith("http")) resolved = apiBase
+            if (resp != null) {
+                when (NetMirrorGuard.classify(resp.code, resp.text)) {
+                    NetMirrorGuard.Verdict.LIMITED -> {
+                        NetMirrorGuard.onLimited(1)
+                        if (probe) return ""
+                        throw ErrorLoadingException(limitedMessage())
+                    }
+                    NetMirrorGuard.Verdict.OK -> {
+                        val token = NetMirrorParsers.parseNewTvToken(resp.text)?.tokenHash?.takeIf { it.isNotBlank() }
+                        if (token != null) {
+                            val apiBase = Base64Decode.decodeUtf8(token)?.trimEnd('/')
+                            if (!apiBase.isNullOrBlank() && apiBase.startsWith("http")) {
+                                NewTvBase.set(apiBase)
+                                return apiBase
+                            }
+                        }
+                    }
+                    else -> Unit
                 }
-            }
-            if (resolved != null) {
-                NewTvBase.set(resolved)
-                return resolved
             }
         }
 
@@ -531,51 +555,6 @@ internal object OTTMirrorBackend {
         )
     }
 
-    // Probe the HLS master the player would receive — ONE request, then a
-    // pure structural check. The master is emitted VERBATIM exactly like the
-    // four working reference implementations (Sushan64/NetMirror-Extension,
-    // Spyou/Zangetsu, SaurabhKaperwan/CSX, m2k3a/mangayomi): the CDN
-    // validates lazily per client context (app-fingerprint UA + Referer +
-    // Cookie: hd=on + Usertoken), so pre-flighting variant playlists or
-    // segments from this network context is meaningless (a datacenter-IP 404
-    // does NOT mean the player's device will 404) and only added a request
-    // burst right before the player's own ~11-request HLS prepare. The only
-    // gate the references use (Zangetsu _looksPlayable) is structural:
-    // reject the broken audio-only stubs (no #EXT-X-STREAM-INF, empty-host
-    // "https:///files/.." audio URIs) — those throw the "unexpected runtime
-    // error" (1004) / burn into the 1003 loader timeout at prepare.
-    // Result cached 10 min under master|<ott>|<contentId>.
-    private suspend fun probeNewTvMaster(
-        url: String,
-        referer: String,
-        ott: OttService,
-        contentId: String,
-    ): MasterProbe {
-        if (!url.contains(".m3u8", ignoreCase = true)) return MasterProbe.EMPTY
-        NetMirrorResponseCache.get<MasterProbe>("master|${ott.id}|$contentId")?.let { return it }
-        return try {
-            HostThrottler.gate()
-            val resp = softCatch {
-                app.get(url, headers = newTvStreamHeaders(referer, ott, NewTvUserToken.cached(ott)), timeout = 10)
-            } ?: return MasterProbe.EMPTY
-            val body = resp.text
-            if (!NetMirrorParsers.newTvMasterPlayable(body)) return MasterProbe.EMPTY
-            val probe = MasterProbe(NetMirrorParsers.parseMasterResolution(body)?.second)
-            NetMirrorResponseCache.put("master|${ott.id}|$contentId", probe)
-            probe
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            MasterProbe.EMPTY
-        }
-    }
-
-    private data class MasterProbe(val defaultHeight: Int?) {
-        companion object {
-            val EMPTY = MasterProbe(null)
-        }
-    }
-
     /**
      * Playback headers for NewTV HLS requests (master + variants + segments).
      * The CDN validates these lazily on every request — they ARE the auth:
@@ -612,6 +591,15 @@ internal object OTTMirrorBackend {
                 return@withContext true
             }
         }
+        val linkKey = "${ott.id}:$contentId"
+        val linkLock = linkLocks.computeIfAbsent(linkKey) { Mutex() }
+        try {
+            return@withContext linkLock.withLock {
+                LinkCache.get(contentId)?.let { cached ->
+                    if (cached.isNotEmpty()) {
+                        cached.forEach { runCatching { callback(it) } }
+                        return@withLock true
+                    }
         // ------------------------------------------------------------------
         // Hard 30 s deadline: resolveNewTvBase can walk 24 dead domains and
         // every request carries a timeout — without a bound the load spinner
@@ -653,17 +641,15 @@ internal object OTTMirrorBackend {
                 // the CDN). The master link carries the SAME header set so
                 // the player's prepare inherits the app fingerprint, which
                 // is what unlocks the labeled audio groups (dual audio).
-                val masterProbe = newTv?.let { probeNewTvMaster(it.vlink, it.referer, ott, contentId) }
-
                 val allLinks = mutableListOf<ExtractorLink>()
                 allLinks += embedLinks
 
-                if (newTv != null && masterProbe != null) {
+                if (newTv != null) {
                     allLinks += emitNewTv(
                         ott,
                         url = newTv.vlink,
                         referer = newTv.referer,
-                        quality = masterProbe.defaultHeight ?: getQualityFromName(newTv.vlink),
+                        quality = getQualityFromName(newTv.vlink),
                     )
                 }
 
@@ -684,6 +670,10 @@ internal object OTTMirrorBackend {
         // per-IP limiter, and a rate-limit error at play is worse than a
         // silent miss.
         emittedCount > 0
+            }
+        } finally {
+            linkLocks.remove(linkKey, linkLock)
+        }
     }
 
     /**
@@ -695,11 +685,29 @@ internal object OTTMirrorBackend {
      */
     private object NewTvUserToken {
         private const val TTL_MS = 55 * 60 * 1000L
-        private val values = java.util.concurrent.ConcurrentHashMap<String, Pair<String, Long>>()
+        private val values = ConcurrentHashMap<String, Pair<String, Long>>()
+        private val mutex = Mutex()
+        private val inFlight = ConcurrentHashMap<String, Deferred<String>>()
 
         suspend fun refresh(ott: OttService): String {
             cached(ott).takeIf { it.isNotBlank() }?.let { return it }
+            inFlight[ott.id]?.takeIf { it.isActive }?.let { return it.await() }
+            return mutex.withLock {
+                cached(ott).takeIf { it.isNotBlank() }?.let { return@withLock it }
+                inFlight[ott.id]?.takeIf { it.isActive }?.let { return@withLock it.await() }
+                val deferred = coroutineScope { async(Dispatchers.IO) { refreshInternal(ott) } }
+                inFlight[ott.id] = deferred
+                try {
+                    deferred.await()
+                } finally {
+                    inFlight.remove(ott.id, deferred)
+                }
+            }
+        }
+
+        private suspend fun refreshInternal(ott: OttService): String {
             val apiBase = softCatch { resolveNewTvBase() } ?: return ""
+            HostThrottler.gate()
             val resp = softCatch {
                 app.get(
                     "$apiBase/newtv/otp.php",
@@ -710,6 +718,10 @@ internal object OTTMirrorBackend {
                     timeout = 8,
                 )
             } ?: return ""
+            if (NetMirrorGuard.classify(resp.code, resp.text) == NetMirrorGuard.Verdict.LIMITED) {
+                NetMirrorGuard.onLimited(1)
+                throw ErrorLoadingException(limitedMessage())
+            }
             val token = runCatching {
                 org.json.JSONObject(resp.text).optString("usertoken")
             }.getOrDefault("").takeIf { it.isNotBlank() } ?: ""
@@ -741,35 +753,32 @@ internal object OTTMirrorBackend {
         // LinkCache window — CDN-signed, no per-tap rotation. Cache the raw
         // body 10 min so a refresh-after-network-blip doesn't fan out another
         // newtv/player.php request into a draining IP bucket.
-        var attempts = 0
-        while (attempts++ < 4) {
-            val cached = NetMirrorResponseCache.get<String>("player|${ott.id}|$contentId")
-            if (cached != null) return newTvPlayerFromBody(cached, apiBase)
-            HostThrottler.gate()
-            val resp = softCatch {
-                app.get(
-                    playerUrl,
-                    headers = NEWTV_HEADERS + mapOf(
-                        "Ott" to newTvOttHeader(ott),
-                        "Usertoken" to usertoken,
-                    ),
-                    timeout = 10,
-                )
-            } ?: return null
+        val cached = NetMirrorResponseCache.get<String>("player|${ott.id}|$contentId")
+        if (cached != null) return newTvPlayerFromBody(cached, apiBase)
+        HostThrottler.gate()
+        val resp = softCatch {
+            app.get(
+                playerUrl,
+                headers = NEWTV_HEADERS + mapOf(
+                    "Ott" to newTvOttHeader(ott),
+                    "Usertoken" to usertoken,
+                ),
+                timeout = 10,
+            )
+        } ?: return null
 
-            when (NetMirrorGuard.classify(resp.code, resp.text)) {
-                NetMirrorGuard.Verdict.OK -> {
-                    NetMirrorResponseCache.put("player|${ott.id}|$contentId", resp.text)
-                    return newTvPlayerFromBody(resp.text, apiBase)
-                }
-                NetMirrorGuard.Verdict.LIMITED -> {
-                    if (!NetMirrorGuard.onLimited(attempts)) return null
-                }
-                // player.php needs no session; anything else final.
-                else -> return null
+        when (NetMirrorGuard.classify(resp.code, resp.text)) {
+            NetMirrorGuard.Verdict.OK -> {
+                NetMirrorResponseCache.put("player|${ott.id}|$contentId", resp.text)
+                return newTvPlayerFromBody(resp.text, apiBase)
             }
+            NetMirrorGuard.Verdict.LIMITED -> {
+                NetMirrorGuard.onLimited(1)
+                return null
+            }
+            // player.php needs no session; anything else final.
+            else -> return null
         }
-        return null
     }
 
     private fun newTvPlayerFromBody(body: String, apiBase: String): NewTvPlayer? {
