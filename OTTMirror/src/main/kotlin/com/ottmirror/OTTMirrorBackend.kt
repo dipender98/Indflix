@@ -600,6 +600,7 @@ internal object OTTMirrorBackend {
                         cached.forEach { runCatching { callback(it) } }
                         return@withLock true
                     }
+                }
         // ------------------------------------------------------------------
         // Hard 30 s deadline: resolveNewTvBase can walk 24 dead domains and
         // every request carries a timeout — without a bound the load spinner
