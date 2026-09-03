@@ -21,7 +21,7 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/dipender98/Indflix/main/Multimovies/icon.png",
         "apiVersion": 1,
-        "fileHash": "sha256-749d254b0dc48d5f5b4f6b3c01cb68cee44f5a4b3415e8eebf026df3283e56ba"
+        "fileHash": "sha256-1b3214ac32d384d197a5460cec9281cf71186a3a3b35a5758cd23979b8e70aed"
     },
     {
         "url": "https://raw.githubusercontent.com/dipender98/Indflix/builds/OTTMirror.cs3",
@@ -33,7 +33,7 @@
             "Indflix"
         ],
         "description": "Federated embed-server resolver keyed by TMDB/IMDB id. Races dozens of independent HLS/DASH servers, picks the fastest CDN per title, and exposes multi-language audio + per-quality links.",
-        "fileSize": 35764,
+        "fileSize": 37925,
         "repositoryUrl": "https://github.com/dipender98/Indflix",
         "language": "hi",
         "tvTypes": [
@@ -42,6 +42,6 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/dipender98/Indflix/main/OTTMirror/icon.png",
         "apiVersion": 1,
-        "fileHash": "sha256-6fea7bb652c4efe3fbde590fdbd87ab3f702a6340e320945e13d9db85af32a89"
+        "fileHash": "sha256-45cc9249b62c1c6e6a8d1f7fc7f8e0f8b334e5cc39c196f17a2d688a21332c99"
     }
 ]
