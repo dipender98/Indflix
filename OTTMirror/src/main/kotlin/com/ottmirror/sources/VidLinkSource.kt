@@ -1,7 +1,9 @@
-﻿package com.ottmirror
+﻿package com.ottmirror.sources
+
+import com.ottmirror.core.HttpKit
 /**
 
- * FILE: VidlinkSource.kt â€” the VidLink third-party stream source
+ * FILE: VidLinkSource.kt â€” the VidLink third-party stream source
  * (vidlink.pro).
  *
  *  - [VidlinkSource]  token generation (XSalsa20-Poly1305 secretbox over
@@ -14,7 +16,7 @@
  *                     VidlinkTest.kt).
  *
  * Role: a stream source â€” same category as the entries in Multimovies'
- * Extractors.kt, self-contained because it carries its own crypto. If
+ * sources/ExternalSources.kt, self-contained because it carries its own crypto. If
  * VidLink rotates its key, only [VidlinkSource.KEY_HEX] needs updating.
  */
 

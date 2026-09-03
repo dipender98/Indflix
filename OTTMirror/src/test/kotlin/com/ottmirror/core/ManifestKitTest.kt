@@ -1,4 +1,11 @@
-package com.ottmirror
+﻿package com.ottmirror.core
+/**
+
+ * FILE: ManifestKitTest.kt â€” guards the [ManifestKit] service.
+ *
+ *  - HLS master-playlist parsing (variants, audio renditions).
+ *  - Audio-priority classification (Hindi / dual-audio / original).
+ */
 
 import kotlin.test.Test
 import kotlin.test.assertEquals

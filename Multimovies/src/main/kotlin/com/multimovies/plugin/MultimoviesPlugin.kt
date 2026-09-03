@@ -1,7 +1,7 @@
 ﻿package com.multimovies
 /**
 
- * FILE: Multimovies.kt â€” the Multimovies plugin (entry + site + engine).
+ * FILE: MultimoviesPlugin.kt â€” the Multimovies plugin and provider engine.
  *
  * Everything Multimovies-site-specific lives here:
  *  - [Multimovies]          plugin entrypoint (@CloudstreamPlugin); registers
@@ -14,8 +14,8 @@
  *  - [GlobalSources]        registry of id-keyed global embed sources
  *                           (2embed, VidSrc, 111Movies, ...).
  *
- * Reusable shared services live in Core.kt; third-party stream APIs in
- * Extractors.kt.
+ * Reusable shared services live in core/SharedServices.kt; third-party stream
+ * APIs live in sources/ExternalSources.kt.
  */
 
 import android.content.Context

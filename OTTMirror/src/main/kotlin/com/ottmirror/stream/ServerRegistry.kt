@@ -1,9 +1,9 @@
-﻿package com.ottmirror
+﻿package com.ottmirror.stream
 
 import kotlin.math.min
 
 /**
- * FILE: ServerFarm.kt — the OTTMirror server registry + health tracking
+ * FILE: ServerRegistry.kt — the OTTMirror server registry + health tracking
  * (WHICH servers exist and how they are doing).
  *
  *  - [ServerIdType]   whether a server is keyed by TMDB or IMDB id.
@@ -16,7 +16,7 @@ import kotlin.math.min
  *
  * Distinct from StreamEngine.kt: this is data + health state; the engine
  * holds the orchestration that consumes it. Third-party sources with their
- * own logic live in VidlinkSource.kt.
+ * own logic lives in sources/VidLinkSource.kt.
  */
 
 /** Whether a server is keyed by a TMDB id or an IMDB id. */

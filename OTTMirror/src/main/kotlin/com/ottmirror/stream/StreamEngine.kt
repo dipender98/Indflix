@@ -1,4 +1,8 @@
-﻿package com.ottmirror
+﻿package com.ottmirror.stream
+
+import com.ottmirror.core.HttpKit
+import com.ottmirror.core.ManifestKit
+import com.ottmirror.sources.VidlinkSource
 /**
 
  * FILE: StreamEngine.kt â€” the OTTMirror resolution engine (HOW a TMDB id
@@ -7,13 +11,13 @@
  *  - [StreamEngine]   fans out to healthy servers in parallel, probes audio
  *                     + speed, gates on dual-audio (Hindi first) and emits
  *                     the fastest usable link set.
- *  - [ServerFarm]     server registry + [HealthMonitor] — moved to
- *                     ServerFarm.kt (data + health state, no orchestration).
+ *  - [ServerFarm]     server registry + [HealthMonitor] — defined in
+ *                     ServerRegistry.kt (data + health state, no orchestration).
  *
- * Distinct from Core.kt (stateless primitives: HTTP, TMDB, manifest
- * parsing, title matching) and ServerFarm.kt (server registry + health
+ * Distinct from core/CoreServices.kt (stateless primitives: HTTP, TMDB, manifest
+ * parsing, title matching) and ServerRegistry.kt (server registry + health
  * data): this file holds the orchestration. Third-party stream sources
- * live in VidlinkSource.kt.
+ * live in sources/VidLinkSource.kt.
  */
 
 import com.lagradost.cloudstream3.app

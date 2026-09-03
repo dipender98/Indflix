@@ -1,19 +1,20 @@
 ﻿package com.multimovies
 /**
 
- * FILE: Core.kt â€” Multimovies shared services (reusable, site-agnostic).
+ * FILE: SharedServices.kt â€” Multimovies shared services (reusable, site-agnostic).
  *
  *  - [HttpKit]        shared HTTP client (get / getJson / post + retry).
  *  - [CryptoJs]       CryptoJS-AES envelope helpers (OpenSSL "Salted__"
- *                     format) used by the encrypted APIs in Extractors.kt.
+ *                     format) used by the encrypted APIs in
+ *                     sources/ExternalSources.kt.
  *  - [TmdbService]    TMDB metadata: search, meta, season data, the
  *                     IMDB -> TMDB id fallback.
  *  - Search ranking  pure TMDB search relevance ranking + poster upgrades
  *                     (top-level functions: relevanceOf, titleDistance,
  *                     upgradePosterUrl, ...).
  *
- * Site-specific code lives in Multimovies.kt; third-party stream APIs in
- * Extractors.kt.
+ * Site-specific code lives in plugin/MultimoviesPlugin.kt; third-party stream
+ * APIs live in sources/ExternalSources.kt.
  */
 
 import com.lagradost.cloudstream3.Actor

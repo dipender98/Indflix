@@ -1,4 +1,7 @@
-﻿package com.ottmirror
+﻿package com.ottmirror.plugin
+
+import com.ottmirror.core.TmdbService
+import com.ottmirror.stream.StreamEngine
 /**
 
  * FILE: OTTMirror.kt â€” the OTTMirror plugin (entry + TMDB catalog provider).
@@ -7,10 +10,10 @@
  *  - [OTTMirrorProvider]  TMDB-keyed MainAPI: no catalog of its own â€” every
  *                         title is resolved on demand against TMDB metadata,
  *                         then handed to the resolution engine in
- *                         StreamEngine.kt.
+ *                         stream/StreamEngine.kt.
  *
- * Shared services live in Core.kt; the VidLink stream source in
- * VidlinkSource.kt.
+ * Shared services live in core/CoreServices.kt; the VidLink stream source in
+ * sources/VidLinkSource.kt.
  */
 
 import android.content.Context

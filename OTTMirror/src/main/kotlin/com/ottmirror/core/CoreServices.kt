@@ -1,7 +1,7 @@
-﻿package com.ottmirror
+﻿package com.ottmirror.core
 /**
 
- * FILE: Core.kt â€” OTTMirror shared services (reusable primitives).
+ * FILE: CoreServices.kt â€” shared OTTMirror primitives.
  *
  *  - [HttpKit]       shared HTTP helpers (speed probing, common headers).
  *  - [TmdbService]   TMDB search / metadata / season data.
@@ -10,8 +10,8 @@
  *  - [TitleMatch]    fuzzy title matching (normalize, levenshtein, year
  *                    tolerance) used to verify search results.
  *
- * The resolution orchestration lives in StreamEngine.kt; the VidLink stream
- * source in VidlinkSource.kt.
+ * The resolution orchestration lives in stream/StreamEngine.kt; the VidLink
+ * source lives in sources/VidLinkSource.kt.
  */
 
 import com.lagradost.cloudstream3.Actor

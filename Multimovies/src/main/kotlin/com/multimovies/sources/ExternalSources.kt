@@ -1,7 +1,7 @@
 ﻿package com.multimovies
 /**
 
- * FILE: Extractors.kt â€” third-party stream APIs (id -> direct streams).
+ * FILE: ExternalSources.kt â€” third-party stream APIs (id -> direct streams).
  *
  * Deterministic JSON endpoints that work without the Multimovies site:
  *  - NxshaExtractor   nxsha.space encrypted API (AES envelopes, wire rules).
@@ -9,8 +9,8 @@
  *                     HLS up to 1080p with subtitles.
  *  - VidemExtractor   videm.xyz multi-server JSON API.
  *
- * These are swapped in/out independently; shared plumbing lives in Core.kt,
- * everything site-specific in Multimovies.kt.
+ * These are swapped in/out independently; shared plumbing lives in
+ * core/SharedServices.kt, everything site-specific in plugin/MultimoviesPlugin.kt.
  */
 
 import com.lagradost.cloudstream3.SubtitleFile
