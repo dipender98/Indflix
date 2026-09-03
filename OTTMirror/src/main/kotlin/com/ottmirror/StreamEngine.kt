@@ -1,8 +1,25 @@
-package com.ottmirror
+﻿package com.ottmirror
+/**
 
-import com.lagradost.cloudstream3.SubtitleFile
+ * FILE: StreamEngine.kt â€” the OTTMirror resolution engine (HOW a TMDB id
+ * becomes playable links).
+ *
+ *  - [StreamEngine]   fans out to healthy servers in parallel, probes audio
+ *                     + speed, gates on dual-audio (Hindi first) and emits
+ *                     the fastest usable link set.
+ *  - [ServerFarm]     server registry + [HealthMonitor] — moved to
+ *                     ServerFarm.kt (data + health state, no orchestration).
+ *
+ * Distinct from Core.kt (stateless primitives: HTTP, TMDB, manifest
+ * parsing, title matching) and ServerFarm.kt (server registry + health
+ * data): this file holds the orchestration. Third-party stream sources
+ * live in VidlinkSource.kt.
+ */
+
 import com.lagradost.cloudstream3.app
+import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.utils.*
+import kotlin.math.min
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -21,7 +38,7 @@ import org.jsoup.Jsoup
  *    at least Hindi+English audio tracks. When none do, falls back to
  *    the best available single-audio source.
  */
-object StreamResolver {
+object StreamEngine {
 
     private const val MAX_CONCURRENT = 5
     private const val MAX_SERVERS = 12
@@ -153,6 +170,18 @@ object StreamResolver {
         // Per-server referer (some APIs 403 without it, e.g. api.shows.st).
         val referer = spec.referer ?: embedUrl.substringBefore("?")
 
+        // VidLink: encrypted-token API. Token embeds the TMDB id + a +480s
+        // timestamp (VidlinkSource); the response carries stream.playlist (an
+        // adaptive multi-audio master up to 1080p) + captions. Key rotation
+        // (rare) is fixed by updating VidlinkSource.KEY_HEX only.
+        if (spec.id == "vidlink") {
+            if (type != "movie" && (season <= 0 || episode <= 0)) return emptyList()
+            val result = resolveVidlink(spec, tmdbId, type, season, episode, start)
+            if (result.isNotEmpty()) return result
+            HealthMonitor.recordFailure(spec.id)
+            return emptyList()
+        }
+
         // 0. JSON API branch (api.shows.st style): parse JSON, take source.url +
         //    source.qualities[] + subtitles[]. The signed stream URLs carry no
         //    file extension, so regex harvest would never find them.
@@ -179,7 +208,7 @@ object StreamResolver {
         if (direct.isNotEmpty()) {
             val subs = grabSubtitles(unwrapped)
             val result = direct.map { url ->
-                val probed = HttpKit2.probeSpeed(url, referer)
+                val probed = HttpKit.probeSpeed(url, referer)
                 val pri = probeAudio(url, referer)
                 RawStream(spec.id, spec.name, url, url.contains(".m3u8", ignoreCase = true), referer, 0, probed, subs,
                     audioPriority = pri, audioLabel = audioLabelFor(pri))
@@ -196,7 +225,7 @@ object StreamResolver {
         }.getOrDefault(false)
         if (regOk && regLinks.isNotEmpty()) {
             val result = regLinks.map { link ->
-                val probed = HttpKit2.probeSpeed(link.url, link.referer)
+                val probed = HttpKit.probeSpeed(link.url, link.referer)
                 val pri = if (link.url.contains(".m3u8", ignoreCase = true)) probeAudio(link.url, link.referer) else 0
                 RawStream(spec.id, spec.name, link.url, link.type == ExtractorLinkType.M3U8, link.referer, link.quality, probed,
                     regSubs.map { it.lang to it.url },
@@ -211,7 +240,7 @@ object StreamResolver {
         if (jsUrls.isNotEmpty()) {
             val subs = grabSubtitles(unwrapped)
             val result = jsUrls.map { url ->
-                val probed = HttpKit2.probeSpeed(url, referer)
+                val probed = HttpKit.probeSpeed(url, referer)
                 val pri = probeAudio(url, referer)
                 RawStream(spec.id, spec.name, url, url.contains(".m3u8", ignoreCase = true), referer, 0, probed, subs,
                     audioPriority = pri, audioLabel = audioLabelFor(pri))
@@ -224,7 +253,7 @@ object StreamResolver {
         val videoSrc = harvestVideoSource(unwrapped, embedUrl)
         if (videoSrc != null) {
             val subs = grabSubtitles(unwrapped)
-            val probed = HttpKit2.probeSpeed(videoSrc, referer)
+            val probed = HttpKit.probeSpeed(videoSrc, referer)
             val pri = probeAudio(videoSrc, referer)
             HealthMonitor.recordSuccess(spec.id, System.currentTimeMillis() - start, null)
             return listOf(RawStream(spec.id, spec.name, videoSrc, videoSrc.contains(".m3u8", ignoreCase = true), referer, 0, probed, subs,
@@ -268,6 +297,80 @@ object StreamResolver {
         return ManifestKit.audioPriority(master)
     }
 
+    /** Headers for vidlink.pro API + playlist requests (site Referer/Origin required). */
+    private fun vidlinkHeaders(mediaPageUrl: String): Map<String, String> = mapOf(
+        "User-Agent" to HttpKit.userAgent,
+        "Accept" to "*/*",
+        "Origin" to "https://vidlink.pro",
+        "Referer" to mediaPageUrl,
+    )
+
+    /**
+     * VidLink resolver: token API -> stream.playlist (multi-audio HLS master) ->
+     * one inline-manifest RawStream. The master is fetched once here so the
+     * audio probe and quality height come free (no second fetch in emit()).
+     */
+    private suspend fun resolveVidlink(
+        spec: ServerSpec,
+        tmdbId: Int,
+        type: String,
+        season: Int,
+        episode: Int,
+        start: Long,
+    ): List<RawStream> {
+        val apiUrl = if (type == "movie") VidlinkSource.movieApiUrl(tmdbId.toString())
+        else VidlinkSource.tvApiUrl(tmdbId.toString(), season, episode)
+        val mediaPage = if (type == "movie") "https://vidlink.pro/movie/$tmdbId"
+        else "https://vidlink.pro/tv/$tmdbId/$season/$episode"
+
+        val jsonText = withTimeoutOrNull(8_000L) {
+            runCatching {
+                app.get(apiUrl, timeout = 8, headers = vidlinkHeaders(mediaPage)).text
+            }.getOrNull()
+        } ?: return emptyList()
+        val root = runCatching { org.json.JSONObject(jsonText) }.getOrNull() ?: return emptyList()
+
+        val masterUrl = root.optJSONObject("stream")?.optString("playlist")?.takeIf { it.isNotBlank() }
+            ?: root.optString("url").takeIf { it.isNotBlank() }
+            ?: return emptyList()
+
+        val subs = root.optJSONArray("captions")?.let { arr ->
+            (0 until arr.length()).mapNotNull { i ->
+                val c = arr.optJSONObject(i) ?: return@mapNotNull null
+                val u = c.optString("url").takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                val lang = c.optString("lang").ifBlank { c.optString("name") }.ifBlank { "English" }
+                lang to u
+            }
+        } ?: emptyList()
+
+        // Fetch the master playlist once: audio priority + best height inline.
+        val masterText = withTimeoutOrNull(6_000L) {
+            runCatching {
+                app.get(masterUrl, timeout = 6, headers = vidlinkHeaders(mediaPage)).text
+            }.getOrNull()
+        }
+        val master = ManifestKit.parseMaster(masterText, masterUrl)
+        val height = master?.let { ManifestKit.bestHeight(it.variants) } ?: 0
+        val pri = master?.let { ManifestKit.audioPriority(it) } ?: 0
+
+        HealthMonitor.recordSuccess(spec.id, System.currentTimeMillis() - start, null)
+        return listOf(
+            RawStream(
+                serverId = spec.id,
+                serverName = spec.name,
+                url = masterUrl,
+                isM3u8 = master != null || masterUrl.contains(".m3u8", ignoreCase = true),
+                referer = "https://vidlink.pro/",
+                qualityHint = height,
+                subtitles = subs,
+                audioPriority = pri,
+                audioLabel = audioLabelFor(pri),
+                inlineManifest = masterText?.takeIf { master != null },
+            )
+        )
+    }
+
+
     /**
      * JSON API resolver (api.shows.st / 111Movies shape):
      * `{ "source": { "url": ..., "qualities": [{"quality","url"}] }, "subtitles": [...] }`
@@ -308,7 +411,7 @@ object StreamResolver {
             val isHls = inlineManifest != null || url.contains(".m3u8", ignoreCase = true)
             val pri = if (inlineManifest != null) probeAudioInline(inlineManifest)
                 else if (isHls && url.isNotBlank()) probeAudio(url, referer) else 0
-            val probed = if (url.isNotBlank()) HttpKit2.probeSpeed(url, referer) else null
+            val probed = if (url.isNotBlank()) HttpKit.probeSpeed(url, referer) else null
             val height = inlineManifest?.let { m ->
                 ManifestKit.parseMaster(m)?.let { ManifestKit.bestHeight(it.variants) }
             } ?: 0
@@ -327,7 +430,7 @@ object StreamResolver {
                 val qUrl = q.optString("url").takeIf { it.isNotBlank() } ?: return@mapNotNull null
                 val qLabel = q.optString("quality").takeIf { it.isNotBlank() }
                 val height = qLabel?.let { Regex("(\\d{3,4})").find(it)?.groupValues?.get(1)?.toIntOrNull() } ?: 0
-                val probed = HttpKit2.probeSpeed(qUrl, referer)
+                val probed = HttpKit.probeSpeed(qUrl, referer)
                 RawStream(
                     serverId = spec.id, serverName = spec.name,
                     url = qUrl, isM3u8 = false, referer = referer,
@@ -411,3 +514,7 @@ object StreamResolver {
         return h
     }
 }
+
+
+
+

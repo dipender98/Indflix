@@ -1,20 +1,61 @@
-package com.multimovies
+﻿package com.multimovies
+/**
 
+ * FILE: Multimovies.kt â€” the Multimovies plugin (entry + site + engine).
+ *
+ * Everything Multimovies-site-specific lives here:
+ *  - [Multimovies]          plugin entrypoint (@CloudstreamPlugin); registers
+ *                           the provider with CloudStream.
+ *  - [MultimoviesProvider]  MainAPI â€” scrapes multimovies.motorcycles
+ *                           (search / load / loadLinks, dooplayer servers).
+ *  - [MultiSourcePuller]    parallel-pull engine: races every source with a
+ *                           per-source timeout, unwraps embeds, sorts links
+ *                           by latency + Hindi-audio preference.
+ *  - [GlobalSources]        registry of id-keyed global embed sources
+ *                           (2embed, VidSrc, 111Movies, ...).
+ *
+ * Reusable shared services live in Core.kt; third-party stream APIs in
+ * Extractors.kt.
+ */
+
+import android.content.Context
 import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.LoadResponse.Companion.addImdbId
 import com.lagradost.cloudstream3.LoadResponse.Companion.addScore
 import com.lagradost.cloudstream3.network.CloudflareKiller
+import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
+import com.lagradost.cloudstream3.plugins.Plugin
+import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.utils.*
-import kotlinx.coroutines.*
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withLock
-import org.jsoup.Jsoup
-import org.jsoup.nodes.Document
-import org.jsoup.nodes.Element
+import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import com.lagradost.cloudstream3.utils.getQualityFromName
+import com.lagradost.cloudstream3.utils.loadExtractor
 import java.net.URLEncoder
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.*
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
+import org.jsoup.Jsoup
+import org.jsoup.nodes.Document
+import org.jsoup.nodes.Element
+
+/**
+ * Registers the Multimovies provider with CloudStream.
+ */
+@CloudstreamPlugin
+class Multimovies : Plugin() {
+    override fun load(context: Context) {
+        // All providers/extractors added here are registered in the app.
+        registerMainAPI(MultimoviesProvider())
+    }
+}
 
 /** Tiny in-memory cache for search results so repeated searches (and quick-search
  *  typing) are instant instead of re-fetching the site. Bounded in size, TTL per
@@ -1250,3 +1291,858 @@ internal object MultimoviesDomainResolver {
         }
     }
 }
+
+/**
+ * Session-scoped memory of per-source extraction speed. [MultiSourcePuller.pull]
+ * records how long each source took to produce links (or fail/timeout), and the
+ * final link sort uses the measured average — so "fast" is decided by the user's
+ * actual network, with the curated SOURCE_PRIORITY list only as the cold-start
+ * fallback.
+ *
+ * In-memory only (this CloudStream build exposes no persistent settings API);
+ * resets on app restart.
+ */
+internal object SourceSpeedTracker {
+    /** Penalty (ms) added per failed attempt, so sources that fail often are
+     *  demoted below consistently-fast ones. */
+    private const val FAILURE_PENALTY_MS = 30_000L
+
+    private data class Stats(var successes: Int = 0, var totalMs: Long = 0L, var failures: Int = 0) {
+        fun avgMs(): Double = if (successes == 0) Double.MAX_VALUE
+        else (totalMs + failures * FAILURE_PENALTY_MS).toDouble() / successes
+    }
+
+    private val map = java.util.concurrent.ConcurrentHashMap<String, Stats>()
+
+    fun record(name: String, durationMs: Long, success: Boolean) {
+        map.compute(name) { _, s ->
+            val stats = s ?: Stats()
+            if (success) {
+                stats.successes++
+                stats.totalMs += durationMs
+            } else {
+                stats.failures++
+            }
+            stats
+        }
+    }
+
+    /** Learned average extraction latency for [name], or null when never measured.
+     *  Measured-but-never-succeeded sources return [Double.MAX_VALUE] (slowest). */
+    fun averageLatency(name: String): Double? = map[name]?.avgMs()
+}
+
+/**
+ * MultiSourcePuller - the source-priority / parallel-pull / timeout engine.
+ *
+ * Given a list of (serverName, url) pairs it:
+ *   1. Orders them by measured speed ([SourceSpeedTracker]) with the static
+ *      [MultimoviesProvider.SOURCE_PRIORITY] as fallback.
+ *   2. Launches ALL of them concurrently (parallel pulling).
+ *   3. Wraps each individual source in a [timeoutMs] timeout (default 30s).
+ *      A single slow/dead source can never block the others.
+ *   4. Returns the successfully extracted links, sorted by measured speed.
+ *
+* Per source it runs a unified extraction pipeline:
+     *     a. CloudStream's extractor registry (loadExtractor)
+     *     b. a generic m3u8/mp4 sniff of the player page
+ *
+ * This is intentionally decoupled from the provider so the strategy can be
+ * tuned (timeouts, priority weights, concurrency limits) in one place.
+ */
+object MultiSourcePuller {
+
+    data class Source(
+        val name: String,
+        val url: String,
+        val referer: String? = null,
+        val headers: Map<String, String> = emptyMap(),
+        val tmdbId: String? = null,
+        val imdbId: String? = null,
+        val season: Int? = null,
+        val episode: Int? = null,
+        val latencyMs: Long = Long.MAX_VALUE,
+    )
+
+    /** Max iframe levels to unwrap before treating a page as the player. */
+    private const val MAX_UNWRAP_LEVELS = 4
+
+    /** Regexes for the generic embed sniffer: stream URLs to harvest directly. */
+    internal val STREAM_URL_REGEXES = listOf(
+        Regex("""https?://[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*"""),
+        Regex("""https?://[^\s"'<>\\]+\.mp4[^\s"'<>\\]*"""),
+        Regex("""https?://[^\s"'<>\\]+\.webm[^\s"'<>\\]*"""),
+        Regex("""https?://[^\s"'<>\\]+\.mkv[^\s"'<>\\]*"""),
+    )
+
+    /**
+     * Pure helper: pull the first stream URL (m3u8/mp4/webm/mkv) from raw page text.
+     * Testable without network access.
+     */
+    internal fun extractStreamUrl(text: String): String? {
+        if (text.isBlank()) return null
+        // Normalize JSON-escaped slashes/backslashes so the plain `https?://` regex
+        // can still match URLs embedded in JSON (\/ -> /).
+        val normalized = text.replace("\\/", "/").replace("\\\"", "\"")
+        for (r in STREAM_URL_REGEXES) {
+            r.findAll(normalized).firstOrNull()?.groupValues?.get(0)?.let { raw ->
+                val cleaned = raw.trim('"', '\'')
+                if (cleaned.isNotBlank()) return cleaned
+            }
+        }
+        return null
+    }
+
+    /** Detect a modiplay-style proxy player endpoint in page text, e.g.
+     *  `\/proxy.php?serve_m3u8=1&ref=...&url=<url-encoded m3u8>&ebd=...`.
+     *  The proxy endpoint serves the playlist directly (Content-Type mpegurl),
+     *  so the returned URL is playable as-is. Returns null when absent. */
+    internal fun buildProxyStreamUrl(text: String, baseUrl: String): String? {
+        if (text.isBlank()) return null
+        val normalized = text.replace("\\/", "/")
+        val m = Regex("""(?:https?:)?//[^"'\s<>]*proxy\.php\?[^"'\s<>]*serve_m3u8=1[^"'\s<>]*""")
+            .find(normalized)
+            ?: Regex("""/(?:[^"'\s<>]*proxy\.php\?[^"'\s<>]*serve_m3u8=1[^"'\s<>]*)""")
+                .find(normalized)
+        val raw = m?.value?.trim('"', '\'', '\\') ?: return null
+        return resolveRelative(baseUrl, raw).takeIf { it.startsWith("http") }
+    }
+
+    /** Pull a stream URL from a `<video src>` / `<source src>` element. */
+    internal fun extractVideoSourceUrl(text: String, baseUrl: String): String? {
+        if (text.isBlank()) return null
+        val src = Jsoup.parse(text).selectFirst("video[src], video source[src], source[src]")
+            ?.attr("src")?.trim() ?: return null
+        if (src.isBlank()) return null
+        return resolveRelative(baseUrl, src).takeIf { it.startsWith("http") }
+    }
+
+    /** Pull a stream URL from common JS player config shapes embedded in the page:
+     *  `sources:[{file:"...m3u8"}]`, `file:"...m3u8"`, `url:"...m3u8"`,
+     *  `hlsUrl:"..."`, `streamUrl:"..."`. Returns null when absent. */
+    internal fun extractFromJsConfig(text: String): String? {
+        if (text.isBlank()) return null
+        val normalized = text.replace("\\/", "/")
+        val patterns = listOf(
+            Regex("""["']?(?:file|url|src|hlsUrl|hls_source|streamUrl|stream_url|playUrl)["']?\s*[:=]\s*["']([^"']+\.(?:m3u8|mp4)[^"']*)["']""", RegexOption.IGNORE_CASE),
+            Regex("""sources\s*[:=]\s*\[\s*\{\s*["']?file["']?\s*[:=]\s*["']([^"']+\.(?:m3u8|mp4)[^"']*)["']""", RegexOption.IGNORE_CASE),
+            Regex("""["'](?:source|src)["']\s*[:=]\s*["']([^"']+\.(?:m3u8|mp4)[^"']*)["']""", RegexOption.IGNORE_CASE),
+        )
+        for (p in patterns) {
+            p.findAll(normalized).firstOrNull()?.groupValues?.get(1)?.let {
+                val v = it.trim()
+                if (v.isNotBlank()) return v
+            }
+        }
+        return null
+    }
+
+    /** Decode a URL-encoded m3u8 URL found inside a query string (e.g. `url=%2F..%2Fmaster.m3u8...`)
+     *  and return it as a plain https URL. */
+    internal fun decodeEncodedStreamUrl(text: String): String? {
+        if (text.isBlank()) return null
+        val m = Regex("""url=([^"'&\s]+?%2F[^"'&\s]*master\.m3u8[^"'&\s]*)""", RegexOption.IGNORE_CASE)
+            .find(text) ?: return null
+        val encoded = m.groupValues[1]
+        return runCatching {
+            java.net.URLDecoder.decode(encoded, "UTF-8")
+        }.getOrNull()?.takeIf { it.startsWith("http") }
+    }
+
+    private val sharedHeaders = mapOf(
+        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
+    )
+
+    /** Hosts that back the Cineverse modiplay/vibuxer serve_m3u8=1 proxy. The
+     *  proxy returns 403 to bare requests; it requires a same-site Referer and
+     *  Origin (it was handed out by the Multimovies dooplayer player) or it
+     *  won't sign the playlist. Used by [headersFor] so every Cineverse call
+     *  - admin-ajax wrap, unwrap, and the final proxy fetch - carries the
+     *  required pair. The set is a best-effort list; [isCineverseHost] also
+     *  matches any URL carrying `serve_m3u8` so a CDN host rotation can't
+     *  silently drop the required headers. */
+    private val cineverseCdnHosts = setOf(
+        "vibuxer.com",
+        "www.vibuxer.com",
+        "modiplay.com",
+        "www.modiplay.com",
+        "cinemodiy.com",
+        "cinehive.com",
+        "play.cineverse.com",
+        "cdn.cineverse.com",
+    )
+
+    private fun hostOf(url: String): String =
+        url.substringAfter("://").substringBefore("/").lowercase()
+
+    /** True when the URL belongs to the Cineverse modiplay/vibuxer CDN, or is a
+     *  `serve_m3u8=1` proxy relay (the signature of the Cineverse flow) on any
+     *  host. The URL-wide marker check makes header injection survive CDN host
+     *  rotation. */
+    internal fun isCineverseHost(url: String): Boolean =
+        cineverseCdnHosts.contains(hostOf(url)) ||
+            hostOf(url).let { h -> cineverseCdnHosts.any { h == it || h.endsWith(".$it") } } ||
+            url.contains("serve_m3u8", ignoreCase = true)
+
+    /** Deterministic identity for an emitted link: `<Server>[ Hindi]`.
+     *  Every ExtractorLink must carry this exact string in BOTH `source` and
+     *  `name`: CloudStream saves player priorities keyed on an exact match of
+     *  `source` while the server list displays `name`, so any drift (CDN
+     *  suffixes, quality suffixes, per-load counters) breaks the user's
+     *  ranking. Deliberately free of runtime-derived parts — extractor/extension
+     *  availability and CDN hosts must never influence it. */
+    internal fun linkLabel(base: String?, hindi: Boolean): String =
+        (base?.trim()?.takeIf { it.isNotEmpty() } ?: "Multimovies") +
+            (if (hindi) " Hindi" else "")
+
+    /** Build the header set for a request to [url]. The Cineverse CDN requires
+     *  the page that linked to it as Referer/Origin; for other hosts the
+     *  caller-supplied headers and shared UA are used as-is. Pure / cheap. */
+    internal fun headersFor(
+        url: String,
+        referer: String?,
+        extra: Map<String, String> = emptyMap(),
+    ): Map<String, String> {
+        val out = LinkedHashMap<String, String>(sharedHeaders.size + extra.size + 2)
+        out.putAll(sharedHeaders)
+        out.putAll(extra)
+        if (!referer.isNullOrBlank()) out["Referer"] = referer
+        if (isCineverseHost(url) || url.contains("serve_m3u8", ignoreCase = true)) {
+            // vibuxer.com / proxy.php signs only when it sees the originating
+            // site as Referer and a matching Origin. The plugin's embed URL
+            // comes from the dooplayer player on the live multimovies.* mirror,
+            // so that's the referer we advertise.
+            val ref = referer?.takeIf { it.isNotBlank() } ?: "${MultimoviesDomainResolver.currentDomain()}/"
+            out["Referer"] = ref
+            val origin = ref.substringBefore("/seasons/")
+                .substringBefore("/movies/")
+                .substringBefore("/tvshows/")
+                .takeIf { it.startsWith("http") } ?: MultimoviesDomainResolver.currentDomain()
+            out["Origin"] = origin
+        }
+        return out
+    }
+
+    /** Resolve a possibly-relative [path] against [baseUrl], producing an absolute
+     *  https URL. Handles protocol-relative (//), absolute, and root-relative. */
+    internal fun resolveRelative(baseUrl: String, path: String): String {
+        if (path.startsWith("//")) return "https:$path"
+        if (path.startsWith("http", ignoreCase = true)) return path
+        val schemeHost = Regex("""^https?://[^/]+""").find(baseUrl)?.value ?: return path
+        return if (path.startsWith("/")) "$schemeHost$path" else "$schemeHost/$path"
+    }
+
+    /**
+     * Recursively follow iframes until the deepest player URL is found. A wrapper
+     * page (e.g. an aggregator/redirector) is fetched and its first iframe src
+     * followed, up to [MAX_UNWRAP_LEVELS]. Direct stream URLs (.m3u8/.mp4) and
+     * proxy relay URLs (serve_m3u8=1) short-circuit: the page that exposes them
+     * IS the stream, so [MultiSourcePuller.pull] can emit it directly without
+     * re-fetching.
+     */
+    suspend fun unwrapEmbed(
+        url: String,
+        referer: String? = null,
+        headers: Map<String, String> = sharedHeaders,
+    ): String {
+        var current = url
+        repeat(MAX_UNWRAP_LEVELS) {
+            // Terminal: a URL that IS a stream — direct m3u8/mp4 file, or a
+            // modiplay/proxy relay (serve_m3u8=1) that serves the playlist
+            // directly. Checked on the whole URL string (not just the host)
+            // because these markers live in the path/query; fetching them as
+            // HTML would only re-download a playlist and risk misparsing it.
+            if (current.contains(".m3u8", ignoreCase = true) ||
+                current.contains(".mp4", ignoreCase = true) ||
+                current.contains("serve_m3u8=", ignoreCase = true)
+            ) return current
+            val text = runCatching {
+                app.get(current, timeout = 5, headers = headersFor(current, referer, headers)).text
+            }.getOrNull() ?: return current
+            // Short-circuit: a page exposing a proxy/stream URL is the player itself.
+            buildProxyStreamUrl(text, current)?.let { return it }
+            extractStreamUrl(text)?.let { return it }
+            extractVideoSourceUrl(text, current)?.let { return it }
+            val next = Jsoup.parse(text).selectFirst("iframe")?.attr("src")?.takeIf { it.isNotBlank() }
+                ?: return current
+            val resolved = resolveRelative(current, next)
+            if (resolved == current) return current
+            current = resolved
+        }
+        return current
+    }
+
+    /** True when a link name/label indicates a Hindi audio track. */
+    internal fun isHindi(link: ExtractorLink): Boolean {
+        val hay = buildString {
+            link.name?.let { append(it) }
+            append(' ')
+            link.source?.let { append(it) }
+        }.lowercase()
+        return hay.contains("hindi") || hay.contains("हिन्दी") || hay.contains("हिंदी")
+    }
+
+    /** True when a source URL, name, or stream URL contains a Hindi/streamhg hint.
+     *  Used by [sniff] to name the extracted link so the Hindi-preference sort
+     *  can prefer it. Checks the proxy platform (streamhg = Hindi), explicit
+     *  language params (lan=hindi), and any Hindi text in the source name. */
+    internal fun isHindiHint(sourceName: String, sourceUrl: String, streamUrl: String?): Boolean {
+        val hay = buildString {
+            append(sourceName.lowercase())
+            append('|')
+            append(sourceUrl.lowercase())
+            if (streamUrl != null) { append('|'); append(streamUrl.lowercase()) }
+        }
+        return hay.contains("streamhg") || hay.contains("hindi") || hay.contains("हिन्दी") || hay.contains("हिंदी") || hay.contains("lan=hindi") || hay.contains("modiplay") || hay.contains("serve_m3u8")
+    }
+
+    /**
+     * @param sources   raw server list (unsorted is fine, sorting happens here)
+     * @param timeoutMs per-source hard timeout in ms (project default: 15_000)
+     * @param priorityOf maps a server name to a sort index (lower = better)
+     * @param preferHindi when true, Hindi-audio links win latency/priority ties
+     * @param onSubtitle called for each subtitle found
+     * @param onLink optional: called immediately for every extracted link (streaming —
+     *        lets the player start the fastest source instead of waiting for all sources)
+     * @return list of extractor links, ordered by measured speed then priority then latency then Hindi
+     */
+    suspend fun pull(
+        sources: List<Source>,
+        timeoutMs: Long = MultimoviesProvider.SOURCE_TIMEOUT_MS,
+        priorityOf: (String) -> Int,
+        preferHindi: Boolean = true,
+        onSubtitle: (SubtitleFile) -> Unit,
+        onLink: (ExtractorLink) -> Unit = {},
+    ): List<ExtractorLink> = withContext(Dispatchers.IO) {
+        if (sources.isEmpty()) return@withContext emptyList()
+
+        val links = Collections.synchronizedList(mutableListOf<ExtractorLink>())
+        val subs = Collections.synchronizedList(mutableListOf<SubtitleFile>())
+
+        // Launch higher-priority sources first so the reliable/fast ones (Cineverse)
+        // start resolving and emit their link before slower fallbacks.
+        val orderedSources = sources.sortedBy { priorityOf(it.name) }
+        coroutineScope {
+            orderedSources.map { src ->
+                async {
+                    val startedMs = System.currentTimeMillis()
+                    val result = withTimeoutOrNull(timeoutMs) {
+                        runCatching {
+                            val found = extractSource(src, onSubtitle = { subs.add(it) })
+                            found.map { l ->
+                                val link = toExtractorLink(src, l)
+                                links.add(link)
+                                onLink(link)
+                                link
+                            }
+                        }
+                    }
+                    val made = result?.getOrNull().orEmpty()
+                    SourceSpeedTracker.record(
+                        src.name,
+                        System.currentTimeMillis() - startedMs,
+                        success = made.isNotEmpty(),
+                    )
+                }
+            }.awaitAll()
+        }
+
+        subs.forEach { onSubtitle(it) }
+        sortLinks(links, sources, priorityOf, preferHindi)
+    }
+
+    /** Wrap a raw extractor link with the source's headers/referer defaults.
+     *  Identity is NOT touched here: every extractSource branch already emits
+     *  final `source == name == linkLabel(...)` labels. */
+    private fun toExtractorLink(src: Source, l: ExtractorLink): ExtractorLink =
+        ExtractorLink(
+            source = l.source,
+            name = l.name,
+            url = l.url,
+            referer = l.referer ?: src.url,
+            quality = l.quality,
+            headers = l.headers ?: src.headers,
+            extractorData = null,
+            type = l.type,
+            audioTracks = l.audioTracks ?: emptyList(),
+        )
+
+    /** Normalize an [ExtractorLink.source] / [Source.name] into a stable key for
+     *  speed tracking and priority lookup: strips any duplicate counter
+     *  ("Name-2"), trailing language annotation (" Hindi") and the trailing
+     *  parenthesized server label, so "Nxsha (Nitro) Hindi-2",
+     *  "Cineverse-2" and "Cineverse (Vibuxer)" all reduce to their
+     *  SOURCE_PRIORITY name. */
+    internal fun sourceKey(source: String?): String {
+        if (source == null) return ""
+        return source
+            .replace(Regex("""-\d+$"""), "")
+            .replace(Regex("""\s+Hindi$""", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("""\s+\([^)]*\)$"""), "")
+            .trim()
+    }
+
+    /**
+     * Order links for the player. Primary key is the curated static [priorityOf]
+     * ranking (so Cineverse / the reliable fast sources always come first);
+     * measured per-source speed and per-call embed latency only break ties within
+     * the same priority, then the Hindi preference, then adaptive HLS over fixed
+     * progressive files — an m3u8 manifest lets the player start quickly at a
+     * lower rendition and ramp quality up automatically.
+     */
+    internal fun sortLinks(
+        links: List<ExtractorLink>,
+        sources: List<Source>,
+        priorityOf: (String) -> Int,
+        preferHindi: Boolean = true,
+    ): List<ExtractorLink> {
+        val latencyByName = sources.associate { it.name to it.latencyMs }
+        val comparator = compareBy<ExtractorLink>(
+            { priorityOf(sourceKey(it.source)) },
+            { SourceSpeedTracker.averageLatency(sourceKey(it.source)) ?: Double.MAX_VALUE },
+            { latencyByName[sourceKey(it.source)] ?: Long.MAX_VALUE },
+        ).thenByDescending { if (preferHindi) isHindi(it) else false }
+            .thenByDescending { it.type == ExtractorLinkType.M3U8 }
+        return links.sortedWith(comparator)
+    }
+
+    /** True when [url] points at a YouTube host (trailer embeds). */
+    internal fun isYouTubeHost(url: String): Boolean {
+        val host = hostOf(url)
+        return host.contains("youtube.com") || host.contains("youtu.be") ||
+            host.contains("youtube-nocookie")
+    }
+
+    /** Unified per-source extraction: dedicated host extractor, then registry, then sniff. */
+    private suspend fun extractSource(
+        src: Source,
+        onSubtitle: (SubtitleFile) -> Unit,
+    ): List<ExtractorLink> {
+        // Trailers/YouTube embeds are not streams — never surface them as sources.
+        if (isYouTubeHost(src.url)) return emptyList()
+
+        // Nxsha: the web player resolves servers/sources through same-origin
+        // CryptoJS-AES envelopes (no stream URL in any HTML), so it needs the
+        // dedicated extractor too.
+        if (hostOf(src.url).contains("nxsha")) {
+            val subs = mutableListOf<SubtitleFile>()
+            val nxLinks = NxshaExtractor.extract(src) { subs.add(SubtitleFile(it.lang, it.url)) }
+            subs.forEach { onSubtitle(it) }
+            return nxLinks.map { s ->
+                val source = s.name
+                val type = if (s.isM3u8 || s.url.contains(".m3u8", ignoreCase = true)) {
+                    ExtractorLinkType.M3U8
+                } else ExtractorLinkType.VIDEO
+                // Streams come back without headers; mirror browser behavior by
+                // advertising the embed page as Referer unless told otherwise.
+                val refererHeader = s.headers["Referer"] ?: src.referer ?: src.url
+                val headers = buildMap {
+                    putAll(src.headers)
+                    putAll(s.headers)
+                    if (!s.headers.containsKey("Referer")) put("Referer", refererHeader)
+                }
+                ExtractorLink(
+                    source = source,
+                    name = source,
+                    url = s.url,
+                    referer = refererHeader,
+                    quality = getQualityFromName(s.quality.ifEmpty { s.url }),
+                    headers = headers,
+                    extractorData = null,
+                    type = type,
+                    audioTracks = emptyList(),
+                )
+            }
+        }
+
+        // VidEm (videm.xyz): signed-token multi-server HLS player. The embed page
+        // is server-rendered, so the dedicated extractor reproduces the
+        // embed -> sources -> play flow deterministically (no browser needed).
+        if (hostOf(src.url).contains("videm")) {
+            return VidemExtractor.extract(src).map { s ->
+                val label = linkLabel(
+                    "VidEm (${s.name})",
+                    isHindiHint(src.name, src.url, s.url),
+                )
+                ExtractorLink(
+                    source = label,
+                    name = label,
+                    url = s.url,
+                    referer = s.headers["Referer"] ?: src.url,
+                    quality = getQualityFromName(s.quality.ifEmpty { s.url }),
+                    headers = s.headers + src.headers,
+                    extractorData = null,
+                    type = if (s.isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO,
+                    audioTracks = emptyList(),
+                )
+            }
+        }
+
+        // 111Movies (api.shows.st): deterministic JSON API behind the vidlove
+        // player SPA. Emits source.url (adaptive HLS master playlist) + subs.
+        if (hostOf(src.url).contains("shows.st")) {
+            val subs = mutableListOf<SubtitleFile>()
+            val showLinks = ShowsExtractor.extract(src, onSubtitle = { subs.add(it) })
+            subs.forEach { onSubtitle(it) }
+            return showLinks.map { s ->
+                val label = linkLabel(
+                    "111Movies (${s.name})",
+                    isHindiHint(src.name, src.url, s.url),
+                )
+                ExtractorLink(
+                    source = label,
+                    name = label,
+                    url = s.url,
+                    referer = s.headers["Referer"] ?: src.url,
+                    quality = getQualityFromName(s.quality.ifEmpty { s.url }),
+                    headers = s.headers + src.headers,
+                    extractorData = null,
+                    type = if (s.isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO,
+                    audioTracks = emptyList(),
+                )
+            }
+        }
+
+        // If unwrapEmbed already surfaced a playable stream or proxy relay URL,
+        // emit it directly — no extra page fetch needed.
+        directStreamLink(src)?.let { return listOf(it) }
+
+        // Stage a: CloudStream extractor registry (installed/built-in extractors).
+        // Relabeled to the source's stable identity — registry links carry bare
+        // extractor names that would miss SOURCE_PRIORITY and drift whenever
+        // extensions are installed or removed.
+        val found = mutableListOf<ExtractorLink>()
+        val registryOk = runCatching {
+            loadExtractor(
+                url = src.url,
+                referer = src.referer,
+                subtitleCallback = onSubtitle,
+                callback = { found.add(it) },
+            )
+        }.getOrDefault(false)
+        if (registryOk && found.isNotEmpty()) {
+            return found.map { l ->
+                val label = linkLabel(
+                    src.name,
+                    isHindi(l) || isHindiHint(src.name, src.url, l.url),
+                )
+                ExtractorLink(
+                    source = label,
+                    name = label,
+                    url = l.url,
+                    referer = l.referer,
+                    quality = l.quality,
+                    headers = l.headers,
+                    extractorData = null,
+                    type = l.type,
+                    audioTracks = l.audioTracks ?: emptyList(),
+                )
+            }
+        }
+
+        // Stage b: generic m3u8/mp4 sniff.
+        return sniff(src)
+    }
+
+    /** When [src.url] is itself a playable stream (serve_m3u8 proxy relay, m3u8 or
+     *  mp4), build the ExtractorLink right away. Returns null otherwise so the
+     *  generic pipeline runs. */
+    private fun directStreamLink(src: Source): ExtractorLink? {
+        val u = src.url
+        val isStream = u.contains("serve_m3u8=1", ignoreCase = true) ||
+            u.contains(".m3u8", ignoreCase = true) ||
+            u.contains(".mp4", ignoreCase = true) ||
+            u.contains(".webm", ignoreCase = true)
+        if (!isStream) return null
+        val label = linkLabel(src.name, isHindiHint(src.name, src.url, u))
+        val type = if (u.contains(".m3u8", ignoreCase = true)) ExtractorLinkType.M3U8
+        else ExtractorLinkType.VIDEO
+        // Use headersFor so the Cineverse serve_m3u8 proxy request, which the
+        // player will replay against the emitted link, carries the same
+        // Referer/Origin pair the embed originally needed.
+        val headers = headersFor(u, src.referer, src.headers)
+        return ExtractorLink(
+            source = label,
+            name = label,
+            url = u,
+            referer = src.referer ?: u,
+            quality = getQualityFromName(u),
+            headers = headers,
+            extractorData = null,
+            type = type,
+            audioTracks = emptyList(),
+        )
+    }
+
+    /** Generic fallback: fetch the player page and harvest the first stream URL
+     *  using a multi-strategy approach (direct regex, proxy pattern, video/source
+     *  tags, JS config objects, URL-encoded m3u8). */
+    private suspend fun sniff(src: Source): List<ExtractorLink> {
+        val headers = headersFor(src.url, src.referer, src.headers)
+        val text = runCatching {
+            app.get(src.url, timeout = 5, headers = headers).text
+        }.getOrNull() ?: return emptyList()
+
+        val stream = buildProxyStreamUrl(text, src.url)
+            ?: extractStreamUrl(text)
+            ?: extractVideoSourceUrl(text, src.url)
+            ?: extractFromJsConfig(text)
+            ?: decodeEncodedStreamUrl(text)
+            ?: return emptyList()
+
+        val label = linkLabel(src.name, isHindiHint(src.name, src.url, stream))
+        val linkType = if (stream.contains(".m3u8", ignoreCase = true)) ExtractorLinkType.M3U8
+        else ExtractorLinkType.VIDEO
+        return listOf(
+            ExtractorLink(
+                source = label,
+                name = label,
+                url = stream,
+                referer = src.url,
+                quality = getQualityFromName(stream),
+                headers = headers,
+                extractorData = null,
+                type = linkType,
+                audioTracks = emptyList(),
+            )
+        )
+    }
+}
+
+/** Whether a [GlobalSource] is keyed by an IMDB id or a TMDB id. */
+enum class SourceId { IMDB, TMDB }
+
+/** Ids + season/episode resolved during [MultimoviesProvider.load] and needed to
+ *  build direct stream URLs in [MultimoviesProvider.loadLinks]. */
+data class SourceMeta(
+    val imdbId: String,
+    val tmdbId: String? = null,
+    val season: Int? = null,
+    val episode: Int? = null,
+)
+
+/** Maps the exact url passed to loadLinks() (episode url / movie url) to its ids
+ *  and season/episode, populated during load() so loadLinks() never re-solves
+ *  Cloudflare just to get an IMDB/TMDB id. */
+object SourceMetaCache {
+    private val map = ConcurrentHashMap<String, SourceMeta>()
+    fun put(key: String, meta: SourceMeta) = map.put(key, meta)
+    fun get(key: String): SourceMeta? = map[key]
+}
+
+/** One resolved dooplayer server: its display name, the final (post-unwrap)
+ *  stream/embed URL, the admin-ajax round-trip latency as a speed hint, and
+ *  the raw pre-unwrap embed URL (still carrying the IMDB id) used only for
+ *  last-resort meta recovery. Lives here so [EmbedPrefetchCache] and
+ *  MultimoviesProvider share a single definition. */
+data class ResolvedEmbed(
+    val name: String,
+    val url: String,
+    val latencyMs: Long,
+    val embedUrl: String? = null,
+)
+
+/** Session-level cache of player sources prefetched in the background while a
+ *  movie's detail page is open, keyed by the page URL loadLinks() receives.
+ *  A completed hit lets playback start without re-fetching the page or hitting
+ *  admin-ajax at all. TTL is short because embed/stream URLs carry expiring
+ *  signed tokens; bounded with evict-oldest like SearchCache.
+ *
+ *  While a prefetch is still running the entry holds its coroutine, so a Play
+ *  tap (or a detail-page revisit) awaits/joins the same job instead of
+ *  duplicating the network work. */
+object EmbedPrefetchCache {
+    private data class Entry(
+        val embeds: List<ResolvedEmbed>?,
+        val inFlight: Deferred<List<ResolvedEmbed>>?,
+        val expiresAt: Long,
+    )
+
+    private const val TTL_MS = 4 * 60 * 1000L
+    private const val MAX_SIZE = 32
+
+    private val map = ConcurrentHashMap<String, Entry>()
+
+    /** Completed, still-valid results for [key], or null (also when in-flight). */
+    fun get(key: String): List<ResolvedEmbed>? {
+        val e = map[key] ?: return null
+        if (System.currentTimeMillis() > e.expiresAt) {
+            map.remove(key)
+            return null
+        }
+        return e.embeds
+    }
+
+    /** Runs [resolve] for [key] unless one is already running or completed, in
+     *  which case it joins that work. Exactly one caller executes [resolve];
+     *  the result is cached (or the entry invalidated when empty) and shared
+     *  with every concurrent caller. */
+    suspend fun resolveOrJoin(
+        key: String,
+        resolve: suspend () -> List<ResolvedEmbed>,
+        timeoutAtMs: Long = System.currentTimeMillis() + TTL_MS,
+    ): List<ResolvedEmbed> {
+        get(key)?.let { return it }
+        map[key]?.inFlight?.let { return it.await() }
+
+        val job = CompletableDeferred<List<ResolvedEmbed>>()
+        map.putIfAbsent(key, Entry(null, job, timeoutAtMs))
+        if (map[key]?.inFlight === job) {
+            // We own the resolution: run it and complete the shared job.
+            return try {
+                val result = resolve()
+                if (result.isNotEmpty()) put(key, result) else invalidate(key)
+                job.complete(result)
+                result
+            } catch (t: Throwable) {
+                invalidate(key)
+                job.completeExceptionally(t)
+                throw t
+            }
+        }
+        // Lost the race: await the winner's job, or its already-cached result.
+        return map[key]?.inFlight?.await() ?: get(key) ?: emptyList()
+    }
+
+    /** Wait up to [timeoutMs] for an in-flight prefetch of [key] to finish.
+     *  Returns completed results if present or finished within the wait, else
+     *  null (caller falls back to the full resolution path). */
+    suspend fun awaitInFlight(key: String, timeoutMs: Long = 1500L): List<ResolvedEmbed>? {
+        get(key)?.let { return it }
+        val e = map[key] ?: return null
+        val job = e.inFlight ?: return null
+        return withTimeoutOrNull(timeoutMs) { job.await() }
+    }
+
+    fun put(key: String, embeds: List<ResolvedEmbed>) {
+        if (embeds.isEmpty()) return
+        if (map.size >= MAX_SIZE) {
+            map.entries.minByOrNull { it.value.expiresAt }?.key?.let { map.remove(it) }
+        }
+        map[key] = Entry(embeds, null, System.currentTimeMillis() + TTL_MS)
+    }
+
+    /** Drops a stale entry so the next play attempt falls back to full resolution. */
+    fun invalidate(key: String) {
+        map.remove(key)
+    }
+}
+
+/** Session-level cache of resolved stream links per (imdbId, season, episode).
+ *  Reopening the same title/episode reuses cached streams (zero probe latency);
+ *  entries expire so stale URLs/tokens don't linger forever. TTL is short (5 min)
+ *  because most stream URLs carry expiring signed tokens. */
+object LinkCache {
+    private data class Entry(val links: List<ExtractorLink>, val expiresAt: Long)
+    private const val TTL_MS = 5 * 60 * 1000L
+    private val map = ConcurrentHashMap<String, Entry>()
+
+    fun get(imdbId: String?, season: Int?, episode: Int?): List<ExtractorLink>? {
+        if (imdbId == null) return null
+        val key = "$imdbId|$season|$episode"
+        val e = map[key] ?: return null
+        if (System.currentTimeMillis() > e.expiresAt) {
+            map.remove(key)
+            return null
+        }
+        return e.links
+    }
+
+    fun put(imdbId: String?, season: Int?, episode: Int?, links: List<ExtractorLink>) {
+        if (imdbId == null || links.isEmpty()) return
+        map["$imdbId|$season|$episode"] = Entry(links, System.currentTimeMillis() + TTL_MS)
+    }
+}
+
+/** A curated, id-based public streaming source. Extensible — add more hosts by
+ *  appending entries; the runtime probe (in loadLinks/pull) keeps only the ones
+ *  that actually respond from the user's network. */
+class GlobalSource(
+    val name: String,
+    val idType: SourceId,
+    val buildUrl: (id: String, season: Int?, episode: Int?) -> String?,
+    val headers: Map<String, String> = emptyMap(),
+)
+
+/** Curated global source registry (dooplayer-independent). URL patterns verified
+ *  from public documentation / health-checked provider lists. Note: many public
+ *  embed hosts rotate/expire fast (vixsrc.to went Next.js, vidsrc.net died,
+ *  vidlink.pro API 404, multiembed.mov 403), so the list is kept to hosts that
+ *  actually respond; the dooplayer embeds resolved from the site remain the
+ *  primary source path. Append new hosts as they become available — the runtime
+ *  probe (in loadLinks/pull) keeps only the ones that answer from the user's
+ *  network.
+ *
+ *  Aug 2026 live diagnostic: each host is called on its final hop so we skip
+ *  any 301 chain at runtime (vidsrc-embed.su -> vsembed.ru, 111movies.com ->
+ *  111movies.net -> player.vidlove.cc). The Referer matches the live final
+ *  host so the player page actually renders. */
+object GlobalSources {
+    val list: List<GlobalSource> = listOf(
+        GlobalSource(
+            name = "2embed.cc",
+            idType = SourceId.IMDB,
+            buildUrl = { id, s, e ->
+                if (s != null && e != null) "https://www.2embed.cc/embed/tv?imdb=$id&s=$s&e=$e"
+                else "https://www.2embed.cc/embed/movie?imdb=$id"
+            },
+            headers = mapOf("Referer" to "https://www.2embed.cc/"),
+        ),
+        GlobalSource(
+            // Aug 2026: vidsrc-embed.su now 301-redirects to vsembed.ru; pointing
+            // straight at the live host saves a round-trip on every loadLinks.
+            name = "VidSrc",
+            idType = SourceId.IMDB,
+            buildUrl = { id, s, e ->
+                if (s != null && e != null) "https://vsembed.ru/embed/$id/$s-$e"
+                else "https://vsembed.ru/embed/$id"
+            },
+            headers = mapOf("Referer" to "https://vsembed.ru/"),
+        ),
+        GlobalSource(
+            // Aug 2026: 111Movies backend — the player.vidlove.cc SPA is JS-only,
+            // but its data API at api.shows.st is fully deterministic: the JSON
+            // response carries source.url (adaptive HLS master playlist) and
+            // subtitles. IMDB-keyed: /movie accepts an IMDB id directly, /tv
+            // requires a TMDB id (used only when already resolved during load()'s
+            // metadata fetch — no extra TMDB public-API call). Dedicated
+            // ShowsExtractor branch in MultiSourcePuller.
+            name = "111Movies",
+            idType = SourceId.IMDB,
+            buildUrl = { id, s, e ->
+                if (s != null && e != null) "https://api.shows.st/tv?id=$id&season=$s&episode=$e&mode=json"
+                else "https://api.shows.st/movie?id=$id&mode=json"
+            },
+            headers = mapOf("Referer" to "https://player.vidlove.cc/"),
+        ),
+        GlobalSource(
+            // Aug 2026: Nxsha's own player API (nitro, MbPly, Citadel, StremFx,
+            // ...). IMDB-keyed: NxshaExtractor resolves an IMDB id to TMDB through
+            // Nxsha's own fk.nxsha.xyz proxy (not the TMDB public API), then
+            // decrypts the encrypted /api/servers + /api/sources.
+            name = "Nxsha",
+            idType = SourceId.IMDB,
+            buildUrl = { id, s, e ->
+                if (s != null && e != null) "https://nxsha.space/embed/tv/$id/$s/$e"
+                else "https://nxsha.space/embed/movie/$id"
+            },
+            headers = mapOf("Referer" to "https://nxsha.space/"),
+        ),
+        GlobalSource(
+            // Aug 2026: VidEm (videm.xyz) is a fast, multi-server HLS player
+            // discovered via the vidapi.xyz aggregator. IMDB-keyed: its embed page
+            // normalizes the id internally, so an IMDB id works directly. The
+            // dedicated VidemExtractor branch in MultiSourcePuller resolves its
+            // signed-token /api.php sources + play endpoints without a browser.
+            name = "VidEm",
+            idType = SourceId.IMDB,
+            buildUrl = { id, s, e ->
+                if (s != null && e != null) "https://videm.xyz/embed/tv/$id/$s/$e"
+                else "https://videm.xyz/embed/movie/$id"
+            },
+            headers = mapOf("Referer" to "https://videm.xyz/"),
+        ),
+    )
+}
+
+

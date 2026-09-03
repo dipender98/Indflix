@@ -1,13 +1,39 @@
-package com.ottmirror
+﻿package com.ottmirror
+/**
 
+ * FILE: OTTMirror.kt â€” the OTTMirror plugin (entry + TMDB catalog provider).
+ *
+ *  - [OTTMirror]          plugin entrypoint (@CloudstreamPlugin).
+ *  - [OTTMirrorProvider]  TMDB-keyed MainAPI: no catalog of its own â€” every
+ *                         title is resolved on demand against TMDB metadata,
+ *                         then handed to the resolution engine in
+ *                         StreamEngine.kt.
+ *
+ * Shared services live in Core.kt; the VidLink stream source in
+ * VidlinkSource.kt.
+ */
+
+import android.content.Context
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addImdbId
 import com.lagradost.cloudstream3.LoadResponse.Companion.addScore
+import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
+import com.lagradost.cloudstream3.plugins.Plugin
 import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withTimeoutOrNull
+
+/**
+ * Registers the OTTMirror provider with CloudStream.
+ */
+@CloudstreamPlugin
+class OTTMirror : Plugin() {
+    override fun load(context: Context) {
+        registerMainAPI(OTTMirrorProvider())
+    }
+}
 
 /**
  * OTTMirror — a federated embed-server resolver keyed by TMDB/IMDB id.
@@ -43,14 +69,14 @@ class OTTMirrorProvider : MainAPI() {
     // ------------------------------------------------------------------
 
     override suspend fun search(query: String): List<SearchResponse>? {
-        val items = withTimeoutOrNull(6000L) { TmdbService2.search(query) }.orEmpty()
+        val items = withTimeoutOrNull(6000L) { TmdbService.search(query) }.orEmpty()
         if (items.isEmpty()) return null
         return items.mapNotNull { it.toSearchResponse() }
     }
 
     override suspend fun quickSearch(query: String): List<SearchResponse>? = search(query)
 
-    private fun TmdbService2.TmdbItem.toSearchResponse(): SearchResponse? {
+    private fun TmdbService.TmdbItem.toSearchResponse(): SearchResponse? {
         val id = tmdbId ?: return null
         if (name.isBlank()) return null
         val url = "https://www.themoviedb.org/${if (type == "movie") "movie" else "tv"}/$id"
@@ -83,8 +109,8 @@ class OTTMirrorProvider : MainAPI() {
         val tmdbType = if (type == "movie") "movie" else "tv"
         val items = withTimeoutOrNull(6000L) {
             when (kind) {
-                "popular" -> TmdbService2.popular(tmdbType, page)
-                else -> TmdbService2.trending(tmdbType, page)
+                "popular" -> TmdbService.popular(tmdbType, page)
+                else -> TmdbService.trending(tmdbType, page)
             }
         }.orEmpty()
         if (items.isEmpty()) return null
@@ -102,7 +128,7 @@ class OTTMirrorProvider : MainAPI() {
         val (tmdbId, type) = tmdb
         val isMovie = type == "movie"
 
-        val meta = withTimeoutOrNull(7000L) { TmdbService2.fetchMeta(tmdbId, type) }
+        val meta = withTimeoutOrNull(7000L) { TmdbService.fetchMeta(tmdbId, type) }
 
         val title = meta?.name ?: return null
         val poster = meta?.poster
@@ -127,13 +153,13 @@ class OTTMirrorProvider : MainAPI() {
         }
 
         // TV: enumerate seasons from TMDB, then fetch episodes per season.
-        val seasons = TmdbService2.fetchTvSeasons(tmdbId)
+        val seasons = TmdbService.fetchTvSeasons(tmdbId)
         if (seasons.isEmpty()) return null
 
         val episodes = coroutineScope {
             seasons.map { season ->
                 async {
-                    withTimeoutOrNull(6000L) { TmdbService2.fetchSeasonPublic(tmdbId, season) }
+                    withTimeoutOrNull(6000L) { TmdbService.fetchSeasonPublic(tmdbId, season) }
                 }
             }.awaitAll().filterNotNull().flatten()
         }
@@ -182,16 +208,16 @@ class OTTMirrorProvider : MainAPI() {
         val season = epMatch?.groupValues?.get(2)?.toIntOrNull() ?: -1
         val episode = epMatch?.groupValues?.get(3)?.toIntOrNull() ?: -1
 
-        val detail = withTimeoutOrNull(3000L) { TmdbService2.fetchMeta(tmdbId, type) }
+        val detail = withTimeoutOrNull(3000L) { TmdbService.fetchMeta(tmdbId, type) }
         val imdbId = detail?.imdbId
 
         val streams = withTimeoutOrNull(45_000L) {
-            StreamResolver.resolve(tmdbId, imdbId, type, season, episode)
+            StreamEngine.resolve(tmdbId, imdbId, type, season, episode)
         }.orEmpty()
 
         if (streams.isEmpty()) return false
 
-        StreamResolver.emit(streams, callback, subtitleCallback)
+        StreamEngine.emit(streams, callback, subtitleCallback)
         return true
     }
 
@@ -207,3 +233,4 @@ class OTTMirrorProvider : MainAPI() {
         return id to if (m.groupValues[1] == "movie") "movie" else "series"
     }
 }
+

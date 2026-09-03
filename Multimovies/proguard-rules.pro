@@ -1,8 +1,8 @@
 # CloudStream loads the plugin by instantiating the Plugin subclass, and users
 # reach everything else through statically-referenced code paths, so only the
 # reflective entry points must survive shrinking. Everything reachable from
-# MultimoviesPlugin is kept automatically by R8's reachability analysis.
--keep class com.multimovies.MultimoviesPlugin { *; }
+# Multimovies is kept automatically by R8's reachability analysis.
+-keep class com.multimovies.Multimovies { *; }
 
 # Annotations + generics info needed by CloudStream's dex inspection and the
 # gradle plugin's repo.json generation.
