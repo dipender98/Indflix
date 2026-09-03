@@ -102,6 +102,72 @@ class ManifestKitTest {
     }
 
     @Test
+    fun audioPriority_hindiOnly() {
+        val master = """
+#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="Hindi",LANGUAGE="hi",URI="hi.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080,AUDIO="audio"
+1080p.m3u8
+        """.trimIndent()
+        val result = ManifestKit.parseMaster(master, "https://cdn.example.com/")
+        assertNotNull(result)
+        assertEquals(4, ManifestKit.audioPriority(result))
+    }
+
+    @Test
+    fun audioPriority_hindiEnglish() {
+        val master = """
+#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="Hindi",LANGUAGE="hi",URI="hi.m3u8"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",LANGUAGE="en",URI="en.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080,AUDIO="audio"
+1080p.m3u8
+        """.trimIndent()
+        val result = ManifestKit.parseMaster(master, "https://cdn.example.com/")
+        assertNotNull(result)
+        assertEquals(3, ManifestKit.audioPriority(result))
+    }
+
+    @Test
+    fun audioPriority_originalOnly() {
+        val master = """
+#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="Original",LANGUAGE="ja",URI="orig.m3u8",DEFAULT=YES
+#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080,AUDIO="audio"
+1080p.m3u8
+        """.trimIndent()
+        val result = ManifestKit.parseMaster(master, "https://cdn.example.com/")
+        assertNotNull(result)
+        assertEquals(2, ManifestKit.audioPriority(result))
+    }
+
+    @Test
+    fun audioPriority_englishOnly() {
+        val master = """
+#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",LANGUAGE="en",URI="en.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080,AUDIO="audio"
+1080p.m3u8
+        """.trimIndent()
+        val result = ManifestKit.parseMaster(master, "https://cdn.example.com/")
+        assertNotNull(result)
+        assertEquals(1, ManifestKit.audioPriority(result))
+    }
+
+    @Test
+    fun audioPriority_otherOnly() {
+        val master = """
+#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="Tamil",LANGUAGE="ta",URI="ta.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080,AUDIO="audio"
+1080p.m3u8
+        """.trimIndent()
+        val result = ManifestKit.parseMaster(master, "https://cdn.example.com/")
+        assertNotNull(result)
+        assertEquals(0, ManifestKit.audioPriority(result))
+    }
+
+    @Test
     fun isMaster_detectsMaster() {
         assertTrue(ManifestKit.isMaster("#EXT-X-STREAM-INF:BANDWIDTH=1000\nfile.m3u8"))
         assertFalse(ManifestKit.isMaster("#EXTM3U\n#EXTINF:5\nfile.ts"))

@@ -238,4 +238,25 @@ object ManifestKit {
         }
         return hay.contains("english") || hay.contains("eng") || hay.contains("english")
     }
+
+    /** True if rendition is likely the original/default track (no language attr, default=YES, or name "original"). */
+    fun isOriginal(rendition: MediaRendition): Boolean =
+        rendition.language == null ||
+            rendition.default ||
+            rendition.name.contains("original", ignoreCase = true)
+
+    /** Returns priority 4(Hindi) > 3(Hindi+English) > 2(Original) > 1(English) > 0(Other). */
+    fun audioPriority(master: MasterPlaylist): Int {
+        if (master.audio.isEmpty()) return 0
+        val hasHindi = master.audio.any { isHindi(it) }
+        val hasEnglish = master.audio.any { isEnglish(it) }
+        val hasOriginal = master.audio.any { isOriginal(it) }
+        return when {
+            hasHindi && hasEnglish -> 3
+            hasHindi -> 4
+            hasOriginal -> 2
+            hasEnglish -> 1
+            else -> 0
+        }
+    }
 }

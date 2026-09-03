@@ -26,7 +26,20 @@ data class ServerSpec(
 object ServerFarm {
 
     val allServers: List<ServerSpec> = listOf(
-        // ── Verified live (IMDB-keyed, handled by CloudStream extractor registry) ──
+        // ── JSON API (deterministic, TMDB-keyed) — verified live Sept 2026 ──
+        // api.shows.st returns {"source":{url, manifest (inline HLS master), qualities[]}, "subtitles":[]}.
+        // ONLY TMDB ids yield a non-null source (IMDB ids give source:null).
+        // source.url is a signed URL with no file extension; source.manifest is the
+        // full master playlist text — StreamResolver parses it inline.
+        ServerSpec(
+            id = "shows.st", name = "111Movies",
+            idType = ServerIdType.TMDB,
+            movieUrl = "https://api.shows.st/movie?id={id}&mode=json",
+            tvUrl = "https://api.shows.st/tv?id={id}&season={season}&episode={episode}&mode=json",
+            isJsonApi = true, referer = "https://player.vidlove.cc/",
+            hasSubtitles = true, maxQuality = 1080, timeoutSec = 12,
+        ),
+        // ── Verified responding embeds (handled by CloudStream extractor registry / harvest) ──
         ServerSpec(
             id = "2embed.cc", name = "2Embed",
             idType = ServerIdType.IMDB,
@@ -43,46 +56,38 @@ object ServerFarm {
             referer = "https://vsembed.ru/",
             hasSubtitles = true, maxQuality = 1080, timeoutSec = 10,
         ),
-        // ── Verified live (JSON API, deterministic) ──
-        // Sept 2026 probe: requires Referer https://player.vidlove.cc/ — without
-        // it the API 403s / returns no source. source.url = adaptive stream,
-        // source.qualities[] = per-quality MP4 URLs, subtitles[] = tracks.
+        // ── Vidsrc family (TMDB-keyed) — live per tmdb-embed-providers core list, Sept 2026 ──
         ServerSpec(
-            id = "shows.st", name = "111Movies",
+            id = "vidsrc.pm", name = "VidSrc PM",
+            idType = ServerIdType.TMDB,
+            movieUrl = "https://vidsrc.pm/embed/movie?tmdb={id}",
+            tvUrl = "https://vidsrc.pm/embed/tv?tmdb={id}&season={season}&episode={episode}",
+            referer = "https://vidsrc.pm/",
+            hasSubtitles = false, maxQuality = 1080, timeoutSec = 10,
+        ),
+        ServerSpec(
+            id = "vidsrc.to", name = "VidSrc TO",
+            idType = ServerIdType.TMDB,
+            movieUrl = "https://vidsrc.to/embed/movie/{id}",
+            tvUrl = "https://vidsrc.to/embed/tv/{id}/{season}/{episode}",
+            referer = "https://vidsrc.to/",
+            hasSubtitles = false, maxQuality = 1080, timeoutSec = 10,
+        ),
+        ServerSpec(
+            id = "vidsrc.cc", name = "VidSrc CC",
+            idType = ServerIdType.TMDB,
+            movieUrl = "https://vidsrc.cc/embed/movie/{id}",
+            tvUrl = "https://vidsrc.cc/embed/tv/{id}/{season}/{episode}",
+            referer = "https://vidsrc.cc/",
+            hasSubtitles = false, maxQuality = 1080, timeoutSec = 10,
+        ),
+        ServerSpec(
+            id = "2embed.skin", name = "2Embed Skin",
             idType = ServerIdType.IMDB,
-            movieUrl = "https://api.shows.st/movie?id={id}&mode=json",
-            tvUrl = "https://api.shows.st/tv?id={id}&season={season}&episode={episode}&mode=json",
-            isJsonApi = true, referer = "https://player.vidlove.cc/",
-            hasSubtitles = true, maxQuality = 1080, timeoutSec = 10,
-        ),
-        // ── Verified responding (TMDB-keyed) ──
-        ServerSpec(
-            id = "vidlink", name = "VidLink",
-            idType = ServerIdType.TMDB,
-            movieUrl = "https://vidlink.pro/movie/{id}",
-            tvUrl = "https://vidlink.pro/tv/{id}/{season}/{episode}",
-            hasSubtitles = true, maxQuality = 1080, timeoutSec = 10,
-        ),
-        ServerSpec(
-            id = "2embed-org", name = "2Embed (org)",
-            idType = ServerIdType.TMDB,
-            movieUrl = "https://2embed.org/embed/movie/{id}",
-            tvUrl = "https://2embed.org/embed/tv/{id}/{season}/{episode}",
-            hasSubtitles = true, maxQuality = 1080, timeoutSec = 10,
-        ),
-        ServerSpec(
-            id = "embeddb", name = "EmbedDB",
-            idType = ServerIdType.TMDB,
-            movieUrl = "https://embeddb.com/embed/movie/{id}",
-            tvUrl = "https://embeddb.com/embed/tv/{id}/{season}/{episode}",
-            hasSubtitles = true, maxQuality = 1080, timeoutSec = 10,
-        ),
-        ServerSpec(
-            id = "cine2", name = "Cine2",
-            idType = ServerIdType.TMDB,
-            movieUrl = "https://cine2.com/embed/movie/{id}",
-            tvUrl = "https://cine2.com/embed/tv/{id}/{season}/{episode}",
-            hasSubtitles = true, maxQuality = 1080, timeoutSec = 10,
+            movieUrl = "https://2embed.skin/embed/movie?imdb={id}",
+            tvUrl = "https://2embed.skin/embed/tv?imdb={id}&s={season}&e={episode}",
+            referer = "https://2embed.skin/",
+            hasSubtitles = false, maxQuality = 1080, timeoutSec = 10,
         ),
     )
 

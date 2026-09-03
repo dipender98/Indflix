@@ -41,7 +41,9 @@ object StreamResolver {
         val qualityHint: Int = 0,
         val measuredKbps: Long? = null,
         val subtitles: List<Pair<String, String>> = emptyList(),
-        val hasHindiEnglish: Boolean = false, // true if HLS master has Hi+En audio
+        val audioPriority: Int = 0,
+        val audioLabel: String = "",
+        val inlineManifest: String? = null, // HLS master playlist text delivered inline (JSON API)
     )
 
     /**
@@ -69,9 +71,12 @@ object StreamResolver {
             }.awaitAll().filterNotNull().flatten()
         }
 
-        // Dual-audio gating: prefer servers with Hi+En, fallback to rest
-        val dualAudio = resolved.filter { it.hasHindiEnglish }
-        return if (dualAudio.isNotEmpty()) dualAudio else resolved
+        // Dual-audio gating: prefer servers with Hindi, fallback to other languages
+        val sorted = resolved.sortedByDescending { it.audioPriority }
+        val best = sorted.firstOrNull()?.audioPriority ?: 0
+        return if (best >= 4) sorted.filter { it.audioPriority >= 4 }
+            else if (best >= 3) sorted.filter { it.audioPriority >= 3 }
+            else sorted
     }
 
     /**
@@ -81,11 +86,9 @@ object StreamResolver {
         if (streams.isEmpty()) return
         val emitted = java.util.Collections.synchronizedSet(HashSet<String>())
 
-        // Sort: dual-audio first, then by speed
-        val sorted = streams.sortedWith(
-            compareByDescending<RawStream> { it.hasHindiEnglish }
-                .thenByDescending { it.measuredKbps ?: 0L }
-        )
+        // Sort: Hindi priority first, then by speed
+        val sorted = streams.sortedWith(compareByDescending<RawStream> { it.audioPriority }
+            .thenByDescending { it.measuredKbps ?: 0L })
 
         sorted.forEach { raw ->
             if (raw.url.isBlank()) return@forEach
@@ -94,7 +97,7 @@ object StreamResolver {
             raw.subtitles.forEach { (lang, subUrl) -> onSubtitle(SubtitleFile(lang, subUrl)) }
 
             if (raw.isM3u8) {
-                val masterText = withTimeoutOrNull(4000L) {
+                val masterText = raw.inlineManifest ?: withTimeoutOrNull(4000L) {
                     runCatching {
                         app.get(raw.url, timeout = 4, headers = mapOf("Referer" to (raw.referer ?: ""))).text
                     }.getOrNull()
@@ -102,7 +105,7 @@ object StreamResolver {
                 val master = ManifestKit.parseMaster(masterText, raw.url)
                 val label = buildString {
                     append(raw.serverName)
-                    if (raw.hasHindiEnglish) append(" • Hi+En")
+                    if (raw.audioLabel.isNotBlank()) append(" • ${raw.audioLabel}")
                 }
 
                 if (master?.isMultiAudio == true) {
@@ -177,8 +180,9 @@ object StreamResolver {
             val subs = grabSubtitles(unwrapped)
             val result = direct.map { url ->
                 val probed = HttpKit2.probeSpeed(url, referer)
-                val hasHiEn = probeDualAudio(url, referer)
-                RawStream(spec.id, spec.name, url, url.contains(".m3u8", ignoreCase = true), referer, 0, probed, subs, hasHiEn)
+                val pri = probeAudio(url, referer)
+                RawStream(spec.id, spec.name, url, url.contains(".m3u8", ignoreCase = true), referer, 0, probed, subs,
+                    audioPriority = pri, audioLabel = audioLabelFor(pri))
             }
             HealthMonitor.recordSuccess(spec.id, System.currentTimeMillis() - start, null)
             return result
@@ -193,9 +197,10 @@ object StreamResolver {
         if (regOk && regLinks.isNotEmpty()) {
             val result = regLinks.map { link ->
                 val probed = HttpKit2.probeSpeed(link.url, link.referer)
-                val hasHiEn = link.url.contains(".m3u8", ignoreCase = true) && probeDualAudio(link.url, link.referer)
+                val pri = if (link.url.contains(".m3u8", ignoreCase = true)) probeAudio(link.url, link.referer) else 0
                 RawStream(spec.id, spec.name, link.url, link.type == ExtractorLinkType.M3U8, link.referer, link.quality, probed,
-                    regSubs.map { it.lang to it.url }, hasHiEn)
+                    regSubs.map { it.lang to it.url },
+                    audioPriority = pri, audioLabel = audioLabelFor(pri))
             }
             HealthMonitor.recordSuccess(spec.id, System.currentTimeMillis() - start, null)
             return result
@@ -207,8 +212,9 @@ object StreamResolver {
             val subs = grabSubtitles(unwrapped)
             val result = jsUrls.map { url ->
                 val probed = HttpKit2.probeSpeed(url, referer)
-                val hasHiEn = probeDualAudio(url, referer)
-                RawStream(spec.id, spec.name, url, url.contains(".m3u8", ignoreCase = true), referer, 0, probed, subs, hasHiEn)
+                val pri = probeAudio(url, referer)
+                RawStream(spec.id, spec.name, url, url.contains(".m3u8", ignoreCase = true), referer, 0, probed, subs,
+                    audioPriority = pri, audioLabel = audioLabelFor(pri))
             }
             HealthMonitor.recordSuccess(spec.id, System.currentTimeMillis() - start, null)
             return result
@@ -219,9 +225,10 @@ object StreamResolver {
         if (videoSrc != null) {
             val subs = grabSubtitles(unwrapped)
             val probed = HttpKit2.probeSpeed(videoSrc, referer)
-            val hasHiEn = probeDualAudio(videoSrc, referer)
+            val pri = probeAudio(videoSrc, referer)
             HealthMonitor.recordSuccess(spec.id, System.currentTimeMillis() - start, null)
-            return listOf(RawStream(spec.id, spec.name, videoSrc, videoSrc.contains(".m3u8", ignoreCase = true), referer, 0, probed, subs, hasHiEn))
+            return listOf(RawStream(spec.id, spec.name, videoSrc, videoSrc.contains(".m3u8", ignoreCase = true), referer, 0, probed, subs,
+                audioPriority = pri, audioLabel = audioLabelFor(pri)))
         }
 
         // 7. Subtitle-only fallback
@@ -235,14 +242,30 @@ object StreamResolver {
         return emptyList()
     }
 
-    /** Probe a master playlist for Hindi+English audio. Returns false if not HLS or unreadable. */
-    private suspend fun probeDualAudio(url: String, referer: String?): Boolean {
-        if (!url.contains(".m3u8", ignoreCase = true)) return false
+    /** Returns audio label for the given priority. */
+    private fun audioLabelFor(priority: Int): String = when (priority) {
+        4 -> "Hindi"
+        3 -> "Hindi+English"
+        2 -> "Original"
+        1 -> "English"
+        else -> ""
+    }
+
+    /** Probe HLS master for best audio language priority. */
+    private suspend fun probeAudio(url: String, referer: String?): Int {
+        if (!url.contains(".m3u8", ignoreCase = true)) return 0
         val text = withTimeoutOrNull(3000L) {
             runCatching { app.get(url, timeout = 3, headers = mapOf("Referer" to (referer ?: ""))).text }.getOrNull()
-        } ?: return false
-        val master = ManifestKit.parseMaster(text, url) ?: return false
-        return ManifestKit.hasHindiEnglishAudio(master)
+        } ?: return 0
+        val master = ManifestKit.parseMaster(text, url) ?: return 0
+        return ManifestKit.audioPriority(master)
+    }
+
+    /** Probe an inline master playlist for audio priority (no network). */
+    private fun probeAudioInline(manifestText: String?): Int {
+        if (manifestText.isNullOrBlank()) return 0
+        val master = ManifestKit.parseMaster(manifestText) ?: return 0
+        return ManifestKit.audioPriority(master)
     }
 
     /**
@@ -275,17 +298,25 @@ object StreamResolver {
 
         val out = mutableListOf<RawStream>()
 
-        // Adaptive master (source.url) — probe for Hi+En dual audio.
+        // Adaptive master (source.url). source.manifest carries the FULL HLS master
+        // playlist inline (variant URIs are absolute https URLs) — the signed url has
+        // no file extension, so manifest presence is the HLS signal.
         val masterUrl = source.optString("url").takeIf { it.isNotBlank() }
-        if (masterUrl != null) {
-            val probed = HttpKit2.probeSpeed(masterUrl, referer)
-            val isHls = masterUrl.contains(".m3u8", ignoreCase = true)
-            val hasHiEn = if (isHls) probeDualAudio(masterUrl, referer) else false
+        val inlineManifest = source.optString("manifest").takeIf { it.isNotBlank() && it.contains("#EXT-X-STREAM-INF") }
+        if (masterUrl != null || inlineManifest != null) {
+            val url = masterUrl ?: ""
+            val isHls = inlineManifest != null || url.contains(".m3u8", ignoreCase = true)
+            val pri = if (inlineManifest != null) probeAudioInline(inlineManifest)
+                else if (isHls && url.isNotBlank()) probeAudio(url, referer) else 0
+            val probed = if (url.isNotBlank()) HttpKit2.probeSpeed(url, referer) else null
+            val height = inlineManifest?.let { m ->
+                ManifestKit.parseMaster(m)?.let { ManifestKit.bestHeight(it.variants) }
+            } ?: 0
             out.add(RawStream(
                 serverId = spec.id, serverName = spec.name,
-                url = masterUrl, isM3u8 = isHls, referer = referer,
-                qualityHint = 0, measuredKbps = probed, subtitles = subs,
-                hasHindiEnglish = hasHiEn,
+                url = url, isM3u8 = isHls, referer = referer,
+                qualityHint = height, measuredKbps = probed, subtitles = subs,
+                audioPriority = pri, audioLabel = audioLabelFor(pri), inlineManifest = inlineManifest,
             ))
         }
 
@@ -301,7 +332,7 @@ object StreamResolver {
                     serverId = spec.id, serverName = spec.name,
                     url = qUrl, isM3u8 = false, referer = referer,
                     qualityHint = height, measuredKbps = probed, subtitles = subs,
-                    hasHindiEnglish = false,
+                    audioPriority = 0, audioLabel = "",
                 )
             }.let { out.addAll(it) }
         }

@@ -179,13 +179,13 @@ class OTTMirrorProvider : MainAPI() {
 
         // Episodes carry season/episode in the URL; movies/episodes without it default to -1.
         val epMatch = episodeUrl.find(data)
-        val season = epMatch?.groupValues?.get(3)?.toIntOrNull() ?: -1
-        val episode = epMatch?.groupValues?.get(4)?.toIntOrNull() ?: -1
+        val season = epMatch?.groupValues?.get(2)?.toIntOrNull() ?: -1
+        val episode = epMatch?.groupValues?.get(3)?.toIntOrNull() ?: -1
 
         val detail = withTimeoutOrNull(3000L) { TmdbService2.fetchMeta(tmdbId, type) }
         val imdbId = detail?.imdbId
 
-        val streams = withTimeoutOrNull(20_000L) {
+        val streams = withTimeoutOrNull(45_000L) {
             StreamResolver.resolve(tmdbId, imdbId, type, season, episode)
         }.orEmpty()
 
