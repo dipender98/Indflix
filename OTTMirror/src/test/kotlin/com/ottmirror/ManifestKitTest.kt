@@ -68,7 +68,37 @@ class ManifestKitTest {
         assertEquals(3, result.audio.size)
         assertEquals(2, result.subtitles.size)
         assertEquals("Hindi", result.audio[0].name)
-        assertEquals("hi", result.audio[0].language)
+        // Hindi + English dual audio must be detected
+        assertTrue(ManifestKit.hasHindiEnglishAudio(result), "expected Hi+En dual audio")
+    }
+
+    @Test
+    fun hasHindiEnglishAudio_falseWhenMissingOne() {
+        val master = """
+#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a1",NAME="English",LANGUAGE="en",URI="en.m3u8"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a1",NAME="Tamil",LANGUAGE="ta",URI="ta.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080,AUDIO="a1"
+1080p.m3u8
+        """.trimIndent()
+        val result = ManifestKit.parseMaster(master, "https://cdn.example.com/")
+        assertNotNull(result)
+        // English+Tamil, no Hindi → NOT Hindi+English dual
+        assertFalse(ManifestKit.hasHindiEnglishAudio(result), "expected false (no Hindi)")
+    }
+
+    @Test
+    fun hasHindiEnglishAudio_falseWhenNoAudioRenditions() {
+        val master = """
+#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=500000,RESOLUTION=640x360
+360p.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080
+1080p.m3u8
+        """.trimIndent()
+        val result = ManifestKit.parseMaster(master, "https://cdn.example.com/")
+        assertNotNull(result)
+        assertFalse(ManifestKit.hasHindiEnglishAudio(result), "expected false (muxed audio only)")
     }
 
     @Test

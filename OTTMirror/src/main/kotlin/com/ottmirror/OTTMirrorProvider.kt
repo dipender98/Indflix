@@ -182,8 +182,11 @@ class OTTMirrorProvider : MainAPI() {
         val season = epMatch?.groupValues?.get(3)?.toIntOrNull() ?: -1
         val episode = epMatch?.groupValues?.get(4)?.toIntOrNull() ?: -1
 
+        val detail = withTimeoutOrNull(3000L) { TmdbService2.fetchMeta(tmdbId, type) }
+        val imdbId = detail?.imdbId
+
         val streams = withTimeoutOrNull(20_000L) {
-            StreamResolver.resolve(tmdbId, type, season, episode)
+            StreamResolver.resolve(tmdbId, imdbId, type, season, episode)
         }.orEmpty()
 
         if (streams.isEmpty()) return false

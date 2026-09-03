@@ -9,27 +9,29 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.withTimeoutOrNull
 import org.jsoup.Jsoup
-import java.util.Collections
 
 /**
- * The federated resolution engine.
+ * Federated resolution engine.
  *
- * Given a TMDB/IMDB id + type, it fans out to healthy servers in the farm,
- * unwraps embed/iframe pages down to real stream URLs, measures throughput,
- * and emits links fastest-first. Multi-audio masters are emitted as an
- * adaptive link first (so ExoPlayer's audio-track menu shows all dubs),
- * followed by per-quality split links.
+ * 1. Fans out to healthy embed servers in parallel.
+ * 2. Uses the same multi-strategy pipeline as Multimovies:
+ *    fetch → unwrap iframes → bare-URL regex harvest → loadExtractor registry
+ *    → JS config → <video> source → subtitles.
+ * 3. Dual-audio gating: only emits servers whose master playlist carries
+ *    at least Hindi+English audio tracks. When none do, falls back to
+ *    the best available single-audio source.
  */
 object StreamResolver {
 
-    /** Max concurrent server probes at once. */
     private const val MAX_CONCURRENT = 5
-    /** How many servers to try per resolve. */
     private const val MAX_SERVERS = 12
-    /** Max iframe unwrap depth. */
-    private const val MAX_UNWRAP_LEVELS = 4
+    private const val MAX_UNWRAP = 4
+    private val STREAM_REGEX = listOf(
+        Regex("""https?://[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*"""),
+        Regex("""https?://[^\s"'<>\\]+\.mp4[^\s"'<>\\]*"""),
+        Regex("""https?://[^\s"'<>\\]+\.webm[^\s"'<>\\]*"""),
+    )
 
-    /** A raw stream candidate pulled from a server. */
     data class RawStream(
         val serverId: String,
         val serverName: String,
@@ -37,315 +39,266 @@ object StreamResolver {
         val isM3u8: Boolean,
         val referer: String? = null,
         val qualityHint: Int = 0,
-        val measuredKbps: Long? = null, // fresh throughput probe from this resolve
-        val subtitles: List<Pair<String, String>> = emptyList(), // (lang, url)
-    )
-
-    /** The resolved result for one title/episode. */
-    data class ResolvedLinks(
-        val links: List<ExtractorLink>,
-        val subs: List<SubtitleFile>,
+        val measuredKbps: Long? = null,
+        val subtitles: List<Pair<String, String>> = emptyList(),
+        val hasHindiEnglish: Boolean = false, // true if HLS master has Hi+En audio
     )
 
     /**
-     * Resolve all stream candidates for a movie/episode across the farm.
-     * Returns raw streams ordered by measured speed (fastest first).
+     * Resolve all streams across the farm.
      */
-    suspend fun resolve(
-        tmdbId: Int,
-        type: String,          // "movie" | "series"
-        season: Int = -1,
-        episode: Int = -1,
-    ): List<RawStream> {
+    suspend fun resolve(tmdbId: Int, imdbId: String?, type: String, season: Int = -1, episode: Int = -1): List<RawStream> {
         if (tmdbId <= 0) return emptyList()
-
-        // Pick servers: prioritize healthy ones; include a few "trial" (untested) ones.
         val servers = ServerFarm.allServers
             .filter { HealthMonitor.isHealthy(it.id) }
             .sortedByDescending { HealthMonitor.speedScore(it.id) }
             .take(MAX_SERVERS)
-
         if (servers.isEmpty()) return emptyList()
 
-        val semaphore = Semaphore(MAX_CONCURRENT)
+        val sem = Semaphore(MAX_CONCURRENT)
         val resolved = coroutineScope {
             servers.map { spec ->
                 async {
-                    semaphore.acquire()
+                    sem.acquire()
                     try {
                         withTimeoutOrNull(spec.timeoutSec * 1000L) {
-                            runCatching { resolveOne(spec, tmdbId, type, season, episode) }
-                                .getOrNull()
+                            runCatching { resolveOne(spec, tmdbId, imdbId, type, season, episode) }.getOrNull()
                         }
-                    } finally {
-                        semaphore.release()
-                    }
+                    } finally { sem.release() }
                 }
             }.awaitAll().filterNotNull().flatten()
         }
 
-        // Fastest first: fresh per-stream measurement wins, EMA breaks ties.
-        return resolved.sortedWith(
-            compareByDescending<RawStream> { it.measuredKbps ?: 0L }
-                .thenByDescending { HealthMonitor.speedScore(it.serverId) }
-                .thenBy { if (it.isM3u8) 0 else 1 }
-        )
+        // Dual-audio gating: prefer servers with Hi+En, fallback to rest
+        val dualAudio = resolved.filter { it.hasHindiEnglish }
+        return if (dualAudio.isNotEmpty()) dualAudio else resolved
     }
 
     /**
-     * Emit resolved links to the CloudStream callbacks, fastest-first.
-     * Multi-audio masters are emitted once as an adaptive link, then per-quality
-     * splits via [M3u8Helper.generateM3u8].
+     * Emit links fastest-first. Dual-audio masters get the adaptive link first.
      */
-    suspend fun emit(
-        streams: List<RawStream>,
-        onLink: (ExtractorLink) -> Unit,
-        onSubtitle: (SubtitleFile) -> Unit,
-    ) {
+    suspend fun emit(streams: List<RawStream>, onLink: (ExtractorLink) -> Unit, onSubtitle: (SubtitleFile) -> Unit) {
         if (streams.isEmpty()) return
-        val emitted = Collections.synchronizedSet(HashSet<String>())
+        val emitted = java.util.Collections.synchronizedSet(HashSet<String>())
 
-        streams.forEach { raw ->
-            if (raw.url.isBlank()) return@forEach // subtitle-only carrier
+        // Sort: dual-audio first, then by speed
+        val sorted = streams.sortedWith(
+            compareByDescending<RawStream> { it.hasHindiEnglish }
+                .thenByDescending { it.measuredKbps ?: 0L }
+        )
+
+        sorted.forEach { raw ->
+            if (raw.url.isBlank()) return@forEach
             if (!emitted.add(raw.url)) return@forEach
 
-            // Subtitles from the server payload (manifest-level handled below).
-            raw.subtitles.forEach { (lang, subUrl) ->
-                onSubtitle(SubtitleFile(lang, subUrl))
-            }
-
-            val referer = raw.referer
-            val quality = raw.qualityHint
+            raw.subtitles.forEach { (lang, subUrl) -> onSubtitle(SubtitleFile(lang, subUrl)) }
 
             if (raw.isM3u8) {
-                // Try to read the master playlist to detect multi-audio and variants.
-                val masterText = withTimeoutOrNull(5000L) {
+                val masterText = withTimeoutOrNull(4000L) {
                     runCatching {
-                        app.get(raw.url, timeout = 5, headers = if (referer != null) mapOf("Referer" to referer) else mapOf()).text
+                        app.get(raw.url, timeout = 4, headers = mapOf("Referer" to (raw.referer ?: ""))).text
                     }.getOrNull()
                 }
                 val master = ManifestKit.parseMaster(masterText, raw.url)
+                val label = buildString {
+                    append(raw.serverName)
+                    if (raw.hasHindiEnglish) append(" • Hi+En")
+                }
 
                 if (master?.isMultiAudio == true) {
-                    // Adaptive master first: the player exposes the audio-track menu.
-                    onLink(
-                        ExtractorLink(
-                            source = raw.serverName,
-                            name = "${raw.serverName} Auto • multi-audio",
-                            url = raw.url,
-                            referer = referer ?: "",
-                            quality = ManifestKit.bestHeight(master.variants).takeIf { it > 0 } ?: quality,
-                            headers = if (referer != null) mapOf("Referer" to referer) else emptyMap(),
-                            type = ExtractorLinkType.M3U8,
-                        )
-                    )
-                    // Then per-quality splits.
-                    M3u8Helper.generateM3u8(
-                        source = raw.serverName,
-                        streamUrl = raw.url,
-                        referer = referer ?: "",
-                        quality = quality.takeIf { it > 0 },
-                        headers = if (referer != null) mapOf("Referer" to referer) else emptyMap(),
+                    onLink(ExtractorLink(
+                        source = raw.serverName, name = "$label Auto",
+                        url = raw.url, referer = raw.referer ?: "",
+                        quality = ManifestKit.bestHeight(master.variants).takeIf { it > 0 } ?: raw.qualityHint,
+                        headers = mapOf("Referer" to (raw.referer ?: "")), type = ExtractorLinkType.M3U8,
+                    ))
+                    M3u8Helper.generateM3u8(raw.serverName, raw.url, raw.referer ?: "",
+                        quality = raw.qualityHint.takeIf { it > 0 },
+                        headers = mapOf("Referer" to (raw.referer ?: "")),
                     ).forEach { onLink(it) }
-                    // Manifest-level subtitles.
-                    master.subtitles.forEach { rend ->
-                        rend.uri?.let { subUrl ->
-                            onSubtitle(
-                                SubtitleFile(
-                                    rend.language ?: rend.name,
-                                    ManifestKit.resolveUrl(raw.url, subUrl),
-                                )
-                            )
-                        }
+                    master.subtitles.forEach { r ->
+                        r.uri?.let { onSubtitle(SubtitleFile(r.language ?: r.name, ManifestKit.resolveUrl(raw.url, it))) }
                     }
                 } else {
-                    // Single-audio: per-quality splits only.
-                    M3u8Helper.generateM3u8(
-                        source = raw.serverName,
-                        streamUrl = raw.url,
-                        referer = referer ?: "",
-                        quality = quality.takeIf { it > 0 },
-                        headers = if (referer != null) mapOf("Referer" to referer) else emptyMap(),
+                    M3u8Helper.generateM3u8(raw.serverName, raw.url, raw.referer ?: "",
+                        quality = raw.qualityHint.takeIf { it > 0 },
+                        headers = mapOf("Referer" to (raw.referer ?: "")),
                     ).forEach { onLink(it) }
-                    master?.subtitles?.forEach { rend ->
-                        rend.uri?.let { subUrl ->
-                            onSubtitle(
-                                SubtitleFile(
-                                    rend.language ?: rend.name,
-                                    ManifestKit.resolveUrl(raw.url, subUrl),
-                                )
-                            )
-                        }
+                    master?.subtitles?.forEach { r ->
+                        r.uri?.let { onSubtitle(SubtitleFile(r.language ?: r.name, ManifestKit.resolveUrl(raw.url, it))) }
                     }
                 }
             } else {
-                // Direct MP4 etc.
-                onLink(
-                    ExtractorLink(
-                        source = raw.serverName,
-                        name = "${raw.serverName} ${ManifestKit.qualityLabel(quality)}".trim(),
-                        url = raw.url,
-                        referer = referer ?: "",
-                        quality = quality,
-                        headers = if (referer != null) mapOf("Referer" to referer) else emptyMap(),
-                        type = ExtractorLinkType.VIDEO,
-                    )
-                )
+                onLink(ExtractorLink(
+                    source = raw.serverName, name = "${raw.serverName} ${ManifestKit.qualityLabel(raw.qualityHint)}".trim(),
+                    url = raw.url, referer = raw.referer ?: "", quality = raw.qualityHint,
+                    headers = mapOf("Referer" to (raw.referer ?: "")), type = ExtractorLinkType.VIDEO,
+                ))
             }
         }
     }
 
     // ------------------------------------------------------------------
-    // Internals
+    // Internals — multi-strategy pipeline (proven from Multimovies)
     // ------------------------------------------------------------------
 
-    /** Resolve one server spec down to raw streams. */
-    private suspend fun resolveOne(
-        spec: ServerSpec,
-        tmdbId: Int,
-        type: String,
-        season: Int,
-        episode: Int,
-    ): List<RawStream> {
+    private suspend fun resolveOne(spec: ServerSpec, tmdbId: Int, imdbId: String?, type: String, season: Int, episode: Int): List<RawStream> {
         val start = System.currentTimeMillis()
-        val embedUrl = if (type == "movie") {
-            ServerFarm.buildMovieUrl(spec, tmdbId)
-        } else {
-            ServerFarm.buildTvUrl(spec, tmdbId, season, episode)
-        }
-
+        val id = if (spec.idType == ServerIdType.IMDB) (imdbId ?: return emptyList()) else tmdbId.toString()
+        val embedUrl = if (type == "movie") ServerFarm.buildMovieUrl(spec, id)
+        else ServerFarm.buildTvUrl(spec, id, season, episode)
         val referer = embedUrl.substringBefore("?")
+
+        // 1. Fetch embed page
         val rawText = withTimeoutOrNull((spec.timeoutSec - 2).coerceAtLeast(3) * 1000L) {
             runCatching {
-                app.get(
-                    embedUrl,
-                    timeout = (spec.timeoutSec - 2).coerceAtLeast(3).toLong(),
-                    headers = HttpKit2.commonHeaders + mapOf("Referer" to referer),
-                ).text
+                app.get(embedUrl, timeout = (spec.timeoutSec - 2).coerceAtLeast(3).toLong(), headers = okHeaders(referer)).text
             }.getOrNull()
         }
+        if (rawText.isNullOrBlank()) { HealthMonitor.recordFailure(spec.id); return emptyList() }
 
-        if (rawText.isNullOrBlank()) {
-            HealthMonitor.recordFailure(spec.id)
-            return emptyList()
-        }
+        // 2. Unwrap iframes
+        val unwrapped = unwrapPages(rawText, embedUrl, spec.timeoutSec)
 
-        // Unwrap iframes to the deepest player page.
-        val unwrapped = unwrap(rawText, embedUrl, spec.timeoutSec)
-        val streamUrls = extractStreamUrls(unwrapped)
-
-        if (streamUrls.isEmpty()) {
-            // Subtitle-only result: propagate subtitles but no stream.
-            val subs = extractSubtitles(unwrapped)
-            if (subs.isNotEmpty()) {
-                HealthMonitor.recordSuccess(spec.id, System.currentTimeMillis() - start, null)
-                return listOf(
-                    RawStream(
-                        serverId = spec.id,
-                        serverName = spec.name,
-                        url = "",
-                        isM3u8 = false,
-                        referer = referer,
-                        subtitles = subs,
-                    )
-                )
+        // 3. Direct stream URL regex harvest
+        val direct = harvestUrls(unwrapped)
+        if (direct.isNotEmpty()) {
+            val subs = grabSubtitles(unwrapped)
+            val result = direct.map { url ->
+                val probed = HttpKit2.probeSpeed(url, referer)
+                val hasHiEn = probeDualAudio(url, referer)
+                RawStream(spec.id, spec.name, url, url.contains(".m3u8", ignoreCase = true), referer, 0, probed, subs, hasHiEn)
             }
-            HealthMonitor.recordFailure(spec.id)
-            return emptyList()
-        }
-
-        val subs = extractSubtitles(unwrapped)
-        val result = streamUrls.mapNotNull { (url, isM3u8) ->
-            val probed = HttpKit2.probeSpeed(url, referer)
-            val quality = if (isM3u8) 0 else getQualityFromName(url)
-            RawStream(
-                serverId = spec.id,
-                serverName = spec.name,
-                url = url,
-                isM3u8 = isM3u8,
-                referer = referer,
-                qualityHint = quality,
-                measuredKbps = probed,
-                subtitles = subs,
-            )
-        }
-
-        // Record health: success if we found streams, failure otherwise.
-        if (result.isNotEmpty()) {
             HealthMonitor.recordSuccess(spec.id, System.currentTimeMillis() - start, null)
-        } else {
-            HealthMonitor.recordFailure(spec.id)
+            return result
         }
-        return result
+
+        // 4. CloudStream extractor registry (VidSrc, 2embed, embed.su etc.)
+        val regLinks = mutableListOf<ExtractorLink>()
+        val regSubs = mutableListOf<SubtitleFile>()
+        val regOk = runCatching {
+            loadExtractor(url = embedUrl, referer = referer, subtitleCallback = { regSubs.add(it) }, callback = { regLinks.add(it) })
+        }.getOrDefault(false)
+        if (regOk && regLinks.isNotEmpty()) {
+            val result = regLinks.map { link ->
+                val probed = HttpKit2.probeSpeed(link.url, link.referer)
+                val hasHiEn = link.url.contains(".m3u8", ignoreCase = true) && probeDualAudio(link.url, link.referer)
+                RawStream(spec.id, spec.name, link.url, link.type == ExtractorLinkType.M3U8, link.referer, link.quality, probed,
+                    regSubs.map { it.lang to it.url }, hasHiEn)
+            }
+            HealthMonitor.recordSuccess(spec.id, System.currentTimeMillis() - start, null)
+            return result
+        }
+
+        // 5. JS config: file:"...", sources:[{file:"..."}]
+        val jsUrls = harvestJsUrls(unwrapped)
+        if (jsUrls.isNotEmpty()) {
+            val subs = grabSubtitles(unwrapped)
+            val result = jsUrls.map { url ->
+                val probed = HttpKit2.probeSpeed(url, referer)
+                val hasHiEn = probeDualAudio(url, referer)
+                RawStream(spec.id, spec.name, url, url.contains(".m3u8", ignoreCase = true), referer, 0, probed, subs, hasHiEn)
+            }
+            HealthMonitor.recordSuccess(spec.id, System.currentTimeMillis() - start, null)
+            return result
+        }
+
+        // 6. <video src> / <source src> HTML elements
+        val videoSrc = harvestVideoSource(unwrapped, embedUrl)
+        if (videoSrc != null) {
+            val subs = grabSubtitles(unwrapped)
+            val probed = HttpKit2.probeSpeed(videoSrc, referer)
+            val hasHiEn = probeDualAudio(videoSrc, referer)
+            HealthMonitor.recordSuccess(spec.id, System.currentTimeMillis() - start, null)
+            return listOf(RawStream(spec.id, spec.name, videoSrc, videoSrc.contains(".m3u8", ignoreCase = true), referer, 0, probed, subs, hasHiEn))
+        }
+
+        // 7. Subtitle-only fallback
+        val subs = grabSubtitles(unwrapped)
+        if (subs.isNotEmpty()) {
+            HealthMonitor.recordSuccess(spec.id, System.currentTimeMillis() - start, null)
+            return listOf(RawStream(spec.id, spec.name, "", false, referer, subtitles = subs))
+        }
+
+        HealthMonitor.recordFailure(spec.id)
+        return emptyList()
     }
 
-    /** Follow iframe chains until the deepest player page. Returns the final HTML. */
-    private suspend fun unwrap(html: String, baseUrl: String, timeoutSec: Int): String {
-        var currentHtml = html
-        var currentUrl = baseUrl
-        repeat(MAX_UNWRAP_LEVELS) {
-            val iframe = Jsoup.parse(currentHtml).selectFirst("iframe[src]")
-            val src = iframe?.attr("src")?.takeIf { it.isNotBlank() } ?: return currentHtml
-            val resolved = HttpKit2.resolveUrl(currentUrl, src)
-            if (resolved == currentUrl) return currentHtml
-            currentUrl = resolved
+    /** Probe a master playlist for Hindi+English audio. Returns false if not HLS or unreadable. */
+    private suspend fun probeDualAudio(url: String, referer: String?): Boolean {
+        if (!url.contains(".m3u8", ignoreCase = true)) return false
+        val text = withTimeoutOrNull(3000L) {
+            runCatching { app.get(url, timeout = 3, headers = mapOf("Referer" to (referer ?: ""))).text }.getOrNull()
+        } ?: return false
+        val master = ManifestKit.parseMaster(text, url) ?: return false
+        return ManifestKit.hasHindiEnglishAudio(master)
+    }
+
+    /** Follow iframes to the deepest player page. */
+    private suspend fun unwrapPages(html: String, baseUrl: String, timeoutSec: Int): String {
+        var curHtml = html; var curUrl = baseUrl
+        repeat(MAX_UNWRAP) {
+            val iframe = Jsoup.parse(curHtml).selectFirst("iframe[src]") ?: return curHtml
+            val src = iframe.attr("src").takeIf { it.isNotBlank() } ?: return curHtml
+            val resolved = relUrl(curUrl, src)
+            if (resolved == curUrl) return curHtml
+            curUrl = resolved
             val next = withTimeoutOrNull((timeoutSec - 2).coerceAtLeast(3) * 1000L) {
-                runCatching {
-                    app.get(
-                        currentUrl,
-                        timeout = (timeoutSec - 2).coerceAtLeast(3).toLong(),
-                        headers = HttpKit2.commonHeaders + mapOf("Referer" to currentUrl),
-                    ).text
-                }.getOrNull()
-            } ?: return currentHtml
-            if (next.isBlank()) return currentHtml
-            currentHtml = next
+                runCatching { app.get(curUrl, timeout = (timeoutSec - 2).coerceAtLeast(3).toLong(), headers = okHeaders(curUrl)).text }.getOrNull()
+            } ?: return curHtml
+            if (next.isBlank()) return curHtml
+            curHtml = next
         }
-        return currentHtml
+        return curHtml
     }
 
-    /** Extract direct stream URLs (.m3u8/.mp4) from a page's HTML/JS. */
-    internal fun extractStreamUrls(text: String?): List<Pair<String, Boolean>> {
+    /** Harvest bare m3u8/mp4/webm URLs from raw page text. */
+    private fun harvestUrls(text: String?): List<String> {
         if (text.isNullOrBlank()) return emptyList()
-        val out = mutableListOf<Pair<String, Boolean>>()
-        val seen = HashSet<String>()
+        val n = text.replace("\\/", "/").replace("\\\"", "\"")
+        return STREAM_REGEX.flatMap { r -> r.findAll(n).map { it.groupValues[0].trim('"', '\'') }.filter { it.startsWith("http") } }.distinct()
+    }
+
+    /** Extract from JS config: file:"..." / sources:[{file:"..."}] / url:"..." */
+    private fun harvestJsUrls(text: String?): List<String> {
+        if (text.isNullOrBlank()) return emptyList()
+        val n = text.replace("\\/", "/")
         val patterns = listOf(
-            Regex("""["']?(?:file|url|src|hlsUrl|hls_source|streamUrl|stream_url|playUrl|source)["']?\s*[:=]\s*["']([^"']+\.(?:m3u8|mp4)[^"']*)["']""", RegexOption.IGNORE_CASE),
+            Regex("""["']?(?:file|url|src|hlsUrl|hls_source|streamUrl|stream_url|playUrl)["']?\s*[:=]\s*["']([^"']+\.(?:m3u8|mp4)[^"']*)["']""", RegexOption.IGNORE_CASE),
             Regex("""sources\s*[:=]\s*\[\s*\{\s*["']?file["']?\s*[:=]\s*["']([^"']+\.(?:m3u8|mp4)[^"']*)["']""", RegexOption.IGNORE_CASE),
             Regex("""["'](?:source|src)["']\s*[:=]\s*["']([^"']+\.(?:m3u8|mp4)[^"']*)["']""", RegexOption.IGNORE_CASE),
         )
-        for (p in patterns) {
-            p.findAll(text).forEach { m ->
-                val u = m.groupValues[1].replace("\\/", "/").trim()
-                if (u.isNotBlank() && u.startsWith("http") && seen.add(u)) {
-                    out.add(u to u.contains(".m3u8", ignoreCase = true))
-                }
-            }
-        }
-        // Also check <video><source src="..."> and <source src="...">.
-        Jsoup.parse(text).select("video source[src], source[src]").forEach { el ->
-            val u = el.attr("src").trim()
-            if (u.isNotBlank() && u.startsWith("http") && seen.add(u)) {
-                out.add(u to u.contains(".m3u8", ignoreCase = true))
-            }
+        return patterns.flatMap { p -> p.findAll(n).map { it.groupValues[1].trim() }.filter { it.startsWith("http") } }.distinct()
+    }
+
+    /** Pull stream URL from <video src> / <source src>. */
+    private fun harvestVideoSource(text: String, baseUrl: String): String? {
+        val src = Jsoup.parse(text).selectFirst("video[src], video source[src], source[src]")?.attr("src")?.trim() ?: return null
+        return relUrl(baseUrl, src).takeIf { it.startsWith("http") }
+    }
+
+    /** Extract subtitle tracks from JWPlayer-style tracks array. */
+    private fun grabSubtitles(text: String?): List<Pair<String, String>> {
+        if (text.isNullOrBlank()) return emptyList()
+        val out = mutableListOf<Pair<String, String>>(); val seen = HashSet<String>()
+        Regex("""\{[^{}]*?"file"\s*:\s*"([^"]+)"[^{}]*?"label"\s*:\s*"([^"]+)"[^{}]*?\}""").findAll(text).forEach { m ->
+            val f = m.groupValues[1].replace("\\/", "/"); val l = m.groupValues[2]
+            if (f.isNotBlank() && l.isNotBlank() && seen.add(f)) out.add(l to f)
         }
         return out
     }
 
-    /** Extract subtitle tracks from a page's HTML/JS (JWPlayer-style tracks array). */
-    internal fun extractSubtitles(text: String?): List<Pair<String, String>> {
-        if (text.isNullOrBlank()) return emptyList()
-        val out = mutableListOf<Pair<String, String>>()
-        val seen = HashSet<String>()
-        // tracks:[{file:"...",label:"...",kind:"captions"}]
-        val trackRegex = Regex("""\{[^{}]*?"file"\s*:\s*"([^"]+)"[^{}]*?"label"\s*:\s*"([^"]+)"[^{}]*?\}""")
-        trackRegex.findAll(text).forEach { m ->
-            val file = m.groupValues[1].replace("\\/", "/")
-            val label = m.groupValues[2]
-            if (file.isNotBlank() && label.isNotBlank() && seen.add(file)) {
-                out.add(label to file)
-            }
-        }
-        return out
+    private fun relUrl(base: String, path: String): String {
+        if (path.startsWith("http", ignoreCase = true)) return path
+        if (path.startsWith("//")) return "https:$path"
+        val h = Regex("""^https?://[^/]+""").find(base)?.value ?: return path
+        return if (path.startsWith("/")) "$h$path" else "$h/$path"
+    }
+
+    private fun okHeaders(referer: String? = null): Map<String, String> {
+        val h = LinkedHashMap<String, String>()
+        h["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
+        if (!referer.isNullOrBlank()) h["Referer"] = referer
+        return h
     }
 }

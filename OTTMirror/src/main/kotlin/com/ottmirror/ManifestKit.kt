@@ -195,4 +195,47 @@ object ManifestKit {
 
     /** Max of two, but treats 0 (unknown) as -inf so known quality wins. */
     fun maxQuality(a: Int, b: Int): Int = if (a <= 0) b else if (b <= 0) a else max(a, b)
+
+    // ── Language detection ──────────────────────────────────
+
+    /** Language codes we know. */
+    private val LANG_HINDI = setOf("hi", "hin")
+    private val LANG_ENGLISH = setOf("en", "eng")
+
+    /** True if a rendition's language is Hindi. */
+    fun isHindi(rendition: MediaRendition): Boolean =
+        rendition.language?.lowercase()?.let { it in LANG_HINDI } == true ||
+            rendition.name.contains("hindi", ignoreCase = true) ||
+            rendition.name.contains("हिन्दी", ignoreCase = true)
+
+    /** True if a rendition's language is English. */
+    fun isEnglish(rendition: MediaRendition): Boolean =
+        rendition.language?.lowercase()?.let { it in LANG_ENGLISH } == true ||
+            rendition.name.contains("english", ignoreCase = true)
+
+    /** True if a master playlist has at least Hindi + English audio tracks. */
+    fun hasHindiEnglishAudio(master: MasterPlaylist): Boolean {
+        if (master.audio.isEmpty()) return false
+        val hasHindi = master.audio.any { isHindi(it) }
+        val hasEnglish = master.audio.any { isEnglish(it) }
+        return hasHindi && hasEnglish
+    }
+
+    /** True if a stream URL's name/context suggests Hindi audio. */
+    fun isHindiFromName(name: String?, url: String?): Boolean {
+        val hay = buildString {
+            name?.let { append(it.lowercase()); append(' ') }
+            url?.let { append(it.lowercase()); append(' ') }
+        }
+        return hay.contains("hindi") || hay.contains("हिन्दी") || hay.contains("हिंदी")
+    }
+
+    /** True if a stream URL's name/context suggests English audio. */
+    fun isEnglishFromName(name: String?, url: String?): Boolean {
+        val hay = buildString {
+            name?.let { append(it.lowercase()); append(' ') }
+            url?.let { append(it.lowercase()); append(' ') }
+        }
+        return hay.contains("english") || hay.contains("eng") || hay.contains("english")
+    }
 }
