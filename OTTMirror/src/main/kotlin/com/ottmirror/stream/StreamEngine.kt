@@ -92,12 +92,8 @@ object StreamEngine {
             }.awaitAll().filterNotNull().flatten()
         }
 
-        // Dual-audio gating: prefer servers with Hindi, fallback to other languages
-        val sorted = resolved.sortedByDescending { it.audioPriority }
-        val best = sorted.firstOrNull()?.audioPriority ?: 0
-        return if (best >= 4) sorted.filter { it.audioPriority >= 4 }
-            else if (best >= 3) sorted.filter { it.audioPriority >= 3 }
-            else sorted
+        // Prefer Hindi-capable streams while keeping every successful server visible.
+        return resolved.sortedByDescending { it.audioPriority }
     }
 
     /**
