@@ -9,7 +9,7 @@
             "Indflix"
         ],
         "description": "CloudStream provider that scrapes Multimovies and pulls sources in parallel with a per-source timeout.",
-        "fileSize": 75313,
+        "fileSize": 75522,
         "repositoryUrl": "https://github.com/dipender98/Indflix",
         "language": "hi",
         "tvTypes": [
@@ -21,7 +21,7 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/dipender98/Indflix/main/Multimovies/icon.png",
         "apiVersion": 1,
-        "fileHash": "sha256-b3ccd244180352f82804b8c83aa43b780f1b43137e60ad2333e783fb2e4b6675"
+        "fileHash": "sha256-0423a17deea98ada585d50bc4f9b489f2b77584161e0635c43cfa244c350947b"
     },
     {
         "url": "https://raw.githubusercontent.com/dipender98/Indflix/builds/OTTMirror.cs3",
@@ -33,7 +33,7 @@
             "Indflix"
         ],
         "description": "Federated embed-server resolver keyed by TMDB/IMDB id. Races dozens of independent HLS/DASH servers, picks the fastest CDN per title, and exposes multi-language audio + per-quality links.",
-        "fileSize": 38923,
+        "fileSize": 713,
         "repositoryUrl": "https://github.com/dipender98/Indflix",
         "language": "hi",
         "tvTypes": [
@@ -42,6 +42,6 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/dipender98/Indflix/main/OTTMirror/icon.png",
         "apiVersion": 1,
-        "fileHash": "sha256-70c77227321f44d5e7786a4970c0b0952d6e0696c253375504e31cb0e39723b3"
+        "fileHash": "sha256-74ee92c946040d0696f10072a459bb7c8bb1f6c0fd22c82b58c465d0ffc5d334"
     }
 ]
