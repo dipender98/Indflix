@@ -147,7 +147,18 @@ object StreamResolver {
         val id = if (spec.idType == ServerIdType.IMDB) (imdbId ?: return emptyList()) else tmdbId.toString()
         val embedUrl = if (type == "movie") ServerFarm.buildMovieUrl(spec, id)
         else ServerFarm.buildTvUrl(spec, id, season, episode)
-        val referer = embedUrl.substringBefore("?")
+        // Per-server referer (some APIs 403 without it, e.g. api.shows.st).
+        val referer = spec.referer ?: embedUrl.substringBefore("?")
+
+        // 0. JSON API branch (api.shows.st style): parse JSON, take source.url +
+        //    source.qualities[] + subtitles[]. The signed stream URLs carry no
+        //    file extension, so regex harvest would never find them.
+        if (spec.isJsonApi) {
+            val result = resolveJsonApi(spec, embedUrl, referer, start)
+            if (result.isNotEmpty()) return result
+            HealthMonitor.recordFailure(spec.id)
+            return emptyList()
+        }
 
         // 1. Fetch embed page
         val rawText = withTimeoutOrNull((spec.timeoutSec - 2).coerceAtLeast(3) * 1000L) {
@@ -232,6 +243,73 @@ object StreamResolver {
         } ?: return false
         val master = ManifestKit.parseMaster(text, url) ?: return false
         return ManifestKit.hasHindiEnglishAudio(master)
+    }
+
+    /**
+     * JSON API resolver (api.shows.st / 111Movies shape):
+     * `{ "source": { "url": ..., "qualities": [{"quality","url"}] }, "subtitles": [...] }`
+     * The signed stream URLs carry no file extension — JSON parsing is mandatory.
+     */
+    private suspend fun resolveJsonApi(
+        spec: ServerSpec,
+        apiUrl: String,
+        referer: String,
+        start: Long,
+    ): List<RawStream> {
+        val jsonText = withTimeoutOrNull((spec.timeoutSec - 2).coerceAtLeast(3) * 1000L) {
+            runCatching {
+                app.get(apiUrl, timeout = (spec.timeoutSec - 2).coerceAtLeast(3).toLong(), headers = okHeaders(referer)).text
+            }.getOrNull()
+        } ?: return emptyList()
+
+        val root = runCatching { org.json.JSONObject(jsonText) }.getOrNull() ?: return emptyList()
+        val source = root.optJSONObject("source") ?: return emptyList()
+        val subs = root.optJSONArray("subtitles")?.let { arr ->
+            (0 until arr.length()).mapNotNull { i ->
+                val s = arr.optJSONObject(i) ?: return@mapNotNull null
+                val label = s.optString("label").ifBlank { null } ?: return@mapNotNull null
+                val file = s.optString("file").ifBlank { null } ?: return@mapNotNull null
+                label to file
+            }
+        } ?: emptyList()
+
+        val out = mutableListOf<RawStream>()
+
+        // Adaptive master (source.url) — probe for Hi+En dual audio.
+        val masterUrl = source.optString("url").takeIf { it.isNotBlank() }
+        if (masterUrl != null) {
+            val probed = HttpKit2.probeSpeed(masterUrl, referer)
+            val isHls = masterUrl.contains(".m3u8", ignoreCase = true)
+            val hasHiEn = if (isHls) probeDualAudio(masterUrl, referer) else false
+            out.add(RawStream(
+                serverId = spec.id, serverName = spec.name,
+                url = masterUrl, isM3u8 = isHls, referer = referer,
+                qualityHint = 0, measuredKbps = probed, subtitles = subs,
+                hasHindiEnglish = hasHiEn,
+            ))
+        }
+
+        // Per-quality MP4s (source.qualities[]) — direct VIDEO links.
+        source.optJSONArray("qualities")?.let { arr ->
+            (0 until arr.length()).mapNotNull { i ->
+                val q = arr.optJSONObject(i) ?: return@mapNotNull null
+                val qUrl = q.optString("url").takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                val qLabel = q.optString("quality").takeIf { it.isNotBlank() }
+                val height = qLabel?.let { Regex("(\\d{3,4})").find(it)?.groupValues?.get(1)?.toIntOrNull() } ?: 0
+                val probed = HttpKit2.probeSpeed(qUrl, referer)
+                RawStream(
+                    serverId = spec.id, serverName = spec.name,
+                    url = qUrl, isM3u8 = false, referer = referer,
+                    qualityHint = height, measuredKbps = probed, subtitles = subs,
+                    hasHindiEnglish = false,
+                )
+            }.let { out.addAll(it) }
+        }
+
+        if (out.isNotEmpty()) {
+            HealthMonitor.recordSuccess(spec.id, System.currentTimeMillis() - start, null)
+        }
+        return out
     }
 
     /** Follow iframes to the deepest player page. */

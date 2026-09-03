@@ -13,6 +13,8 @@ data class ServerSpec(
     val movieUrl: String,
     val tvUrl: String,
     val isJsonApi: Boolean = false,
+    /** Referer this server requires for its embed/API/stream requests. */
+    val referer: String? = null,
     val hasSubtitles: Boolean = false,
     val maxQuality: Int = 0,
     val timeoutSec: Int = 10,
@@ -30,6 +32,7 @@ object ServerFarm {
             idType = ServerIdType.IMDB,
             movieUrl = "https://www.2embed.cc/embed/movie?imdb={id}",
             tvUrl = "https://www.2embed.cc/embed/tv?imdb={id}&s={season}&e={episode}",
+            referer = "https://www.2embed.cc/",
             hasSubtitles = true, maxQuality = 1080, timeoutSec = 10,
         ),
         ServerSpec(
@@ -37,15 +40,20 @@ object ServerFarm {
             idType = ServerIdType.IMDB,
             movieUrl = "https://vsembed.ru/embed/{id}",
             tvUrl = "https://vsembed.ru/embed/{id}/{season}-{episode}",
+            referer = "https://vsembed.ru/",
             hasSubtitles = true, maxQuality = 1080, timeoutSec = 10,
         ),
         // ── Verified live (JSON API, deterministic) ──
+        // Sept 2026 probe: requires Referer https://player.vidlove.cc/ — without
+        // it the API 403s / returns no source. source.url = adaptive stream,
+        // source.qualities[] = per-quality MP4 URLs, subtitles[] = tracks.
         ServerSpec(
             id = "shows.st", name = "111Movies",
             idType = ServerIdType.IMDB,
             movieUrl = "https://api.shows.st/movie?id={id}&mode=json",
             tvUrl = "https://api.shows.st/tv?id={id}&season={season}&episode={episode}&mode=json",
-            isJsonApi = true, hasSubtitles = true, maxQuality = 1080, timeoutSec = 10,
+            isJsonApi = true, referer = "https://player.vidlove.cc/",
+            hasSubtitles = true, maxQuality = 1080, timeoutSec = 10,
         ),
         // ── Verified responding (TMDB-keyed) ──
         ServerSpec(
