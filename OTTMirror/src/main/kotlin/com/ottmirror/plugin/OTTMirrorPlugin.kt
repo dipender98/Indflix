@@ -100,7 +100,8 @@ class OTTMirrorProvider : MainAPI() {
     private fun TmdbService.TmdbItem.toSearchResponse(): SearchResponse? {
         val id = tmdbId ?: return null
         if (name.isBlank()) return null
-        val url = "https://www.themoviedb.org//"
+        val tmdbPath = if (type == "movie") "movie" else "tv"
+        val url = "https://www.themoviedb.org/$tmdbPath/$id"
         val tvType = if (type == "movie") TvType.Movie else TvType.TvSeries
         val releaseYear = year?.toIntOrNull()
         return if (tvType == TvType.Movie) {
@@ -187,7 +188,7 @@ class OTTMirrorProvider : MainAPI() {
 
         val epList = episodes.map { ep ->
             // Encode season/episode into the episode URL so loadLinks() can parse it.
-            val epUrl = "https://www.themoviedb.org/tv//season//episode/"
+            val epUrl = "https://www.themoviedb.org/tv/$tmdbId/season/${ep.seasonNumber}/episode/${ep.episodeNumber}"
             newEpisode(epUrl) {
                 this.name = ep.name
                 this.season = ep.seasonNumber
