@@ -20,6 +20,7 @@ import com.ottmirror.sources.VidlinkSource
  * live in sources/VidLinkSource.kt.
  */
 
+import android.util.Log
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.utils.*
@@ -75,12 +76,34 @@ object StreamEngine {
      * Resolve all streams across the farm.
      */
     suspend fun resolve(tmdbId: Int, imdbId: String?, type: String, season: Int = -1, episode: Int = -1): List<RawStream> {
-        if (tmdbId <= 0) return emptyList()
-        val servers = ServerFarm.allServers
-            .filter { HealthMonitor.isHealthy(it.id) }
+        if (tmdbId <= 0) {
+            Log.w("OTTMirror", "resolve skipped: invalid tmdbId=$tmdbId")
+            return emptyList()
+        }
+        val healthy = ServerFarm.allServers.filter { HealthMonitor.isHealthy(it.id) }
+        // A fully-tripped farm used to return emptyList() instantly, so every tap
+        // showed "no link found" for a full trip window with zero network traffic.
+        // Once per cooldown window, clear the trips and re-probe the whole farm --
+        // one bad session must never lock the plugin out, but a dead uplink should
+        // not trigger a full-farm hammer on every tap either.
+        val candidates = if (healthy.isEmpty()) {
+            val now = System.currentTimeMillis()
+            if (now - lastFarmProbeAt < FARM_REPROBE_COOLDOWN_MS) {
+                Log.w("OTTMirror", "all servers tripped; re-probe cooldown active " +
+                    "(${(FARM_REPROBE_COOLDOWN_MS - (now - lastFarmProbeAt)) / 1000}s left)")
+                return emptyList()
+            }
+            lastFarmProbeAt = now
+            // Clear only the trip state, keeping latency/throughput history so the
+            // speedScore ordering survives the re-probe.
+            Log.w("OTTMirror", "all ${ServerFarm.allServers.size} servers tripped -- clearing trips, re-probing all")
+            HealthMonitor.resetTrips()
+            ServerFarm.allServers
+        } else healthy
+        val servers = candidates
             .sortedByDescending { HealthMonitor.speedScore(it.id) }
             .take(MAX_SERVERS)
-        if (servers.isEmpty()) return emptyList()
+        Log.d("OTTMirror", "resolve tmdb=$tmdbId type=$type s=$season e=$episode imdb=${imdbId ?: "none"} -> ${servers.size} servers")
 
         val sem = Semaphore(MAX_CONCURRENT)
         val resolved = coroutineScope {
@@ -88,13 +111,22 @@ object StreamEngine {
                 async {
                     sem.acquire()
                     try {
-                        withTimeoutOrNull(spec.timeoutSec * 1000L) {
+                        val outcome = withTimeoutOrNull(spec.timeoutSec * 1000L) {
                             runCatching { resolveOne(spec, tmdbId, imdbId, type, season, episode) }.getOrNull()
                         }
+                        if (outcome == null) {
+                            // resolveOne was cut off (hang/black-hole) or crashed before it could
+                            // record anything: count it as a failure so the breaker can trip.
+                            Log.w("OTTMirror", "${spec.id}: no result after ${spec.timeoutSec}s (timeout or crash), recording failure")
+                            HealthMonitor.recordFailure(spec.id)
+                        }
+                        outcome
                     } finally { sem.release() }
                 }
             }.awaitAll().filterNotNull().flatten()
         }
+
+        Log.d("OTTMirror", "resolved ${resolved.size} streams from ${servers.size} servers (${resolved.groupBy { it.serverId }.mapValues { it.value.size }})")
 
         // Prefer Hindi-capable streams while keeping every successful server visible.
         return resolved.sortedByDescending { it.audioPriority }
@@ -176,7 +208,9 @@ object StreamEngine {
 
     private suspend fun resolveOne(spec: ServerSpec, tmdbId: Int, imdbId: String?, type: String, season: Int, episode: Int): List<RawStream> {
         val start = System.currentTimeMillis()
-        val id = if (spec.idType == ServerIdType.IMDB) (imdbId ?: return emptyList()) else tmdbId.toString()
+        val id = if (spec.idType == ServerIdType.IMDB)
+            (imdbId ?: run { Log.w("OTTMirror", "${spec.id}: IMDB required but missing"); return emptyList() })
+        else tmdbId.toString()
         val embedUrl = if (type == "movie") ServerFarm.buildMovieUrl(spec, id)
         else ServerFarm.buildTvUrl(spec, id, season, episode)
         // Per-server referer (some APIs 403 without it, e.g. api.shows.st).
@@ -187,10 +221,13 @@ object StreamEngine {
         // adaptive multi-audio master up to 1080p) + captions. Key rotation
         // (rare) is fixed by updating VidlinkSource.KEY_HEX only.
         if (spec.id == "vidlink") {
-            if (type != "movie" && (season <= 0 || episode <= 0)) return emptyList()
-            val result = resolveVidlink(spec, tmdbId, type, season, episode, start)
-            if (result.isNotEmpty()) return result
-            HealthMonitor.recordFailure(spec.id)
+            if (type != "movie" && (season <= 0 || episode <= 0)) {
+                Log.w("OTTMirror", "${spec.id}: tv request without season/episode (s=$season e=$episode), skipping")
+                return emptyList()
+            }
+            val result = resolveVidlink(spec, tmdbId, type, season, episode)
+            if (result.isNotEmpty()) { okServer(spec, start, "vidlink api", result.size); return result }
+            failServer(spec, "vidlink returned no streams")
             return emptyList()
         }
 
@@ -198,9 +235,9 @@ object StreamEngine {
         //    source.qualities[] + subtitles[]. The signed stream URLs carry no
         //    file extension, so regex harvest would never find them.
         if (spec.isJsonApi) {
-            val result = resolveJsonApi(spec, embedUrl, referer, start)
-            if (result.isNotEmpty()) return result
-            HealthMonitor.recordFailure(spec.id)
+            val result = resolveJsonApi(spec, embedUrl, referer)
+            if (result.isNotEmpty()) { okServer(spec, start, "json api", result.size); return result }
+            failServer(spec, "json api returned no source")
             return emptyList()
         }
 
@@ -210,7 +247,7 @@ object StreamEngine {
                 app.get(embedUrl, timeout = (spec.timeoutSec - 2).coerceAtLeast(3).toLong(), headers = okHeaders(referer)).text
             }.getOrNull()
         }
-        if (rawText.isNullOrBlank()) { HealthMonitor.recordFailure(spec.id); return emptyList() }
+        if (rawText.isNullOrBlank()) { failServer(spec, "embed fetch blank/timeout: $embedUrl"); return emptyList() }
 
         // 2. Unwrap iframes
         val unwrapped = unwrapPages(rawText, embedUrl, spec.timeoutSec)
@@ -225,7 +262,7 @@ object StreamEngine {
                 RawStream(spec.id, spec.name, url, url.contains(".m3u8", ignoreCase = true), referer, 0, probed, subs,
                     audioPriority = pri, audioLabel = audioLabelFor(pri))
             }
-            HealthMonitor.recordSuccess(spec.id, System.currentTimeMillis() - start, null)
+            okServer(spec, start, "direct harvest", result.size)
             return result
         }
 
@@ -243,7 +280,7 @@ object StreamEngine {
                     regSubs.map { it.lang to it.url },
                     audioPriority = pri, audioLabel = audioLabelFor(pri))
             }
-            HealthMonitor.recordSuccess(spec.id, System.currentTimeMillis() - start, null)
+            okServer(spec, start, "extractor registry", result.size)
             return result
         }
 
@@ -257,7 +294,7 @@ object StreamEngine {
                 RawStream(spec.id, spec.name, url, url.contains(".m3u8", ignoreCase = true), referer, 0, probed, subs,
                     audioPriority = pri, audioLabel = audioLabelFor(pri))
             }
-            HealthMonitor.recordSuccess(spec.id, System.currentTimeMillis() - start, null)
+            okServer(spec, start, "js config harvest", result.size)
             return result
         }
 
@@ -267,7 +304,7 @@ object StreamEngine {
             val subs = grabSubtitles(unwrapped)
             val probed = HttpKit.probeSpeed(videoSrc, referer)
             val pri = probeAudio(videoSrc, referer)
-            HealthMonitor.recordSuccess(spec.id, System.currentTimeMillis() - start, null)
+            okServer(spec, start, "video tag", 1)
             return listOf(RawStream(spec.id, spec.name, videoSrc, videoSrc.contains(".m3u8", ignoreCase = true), referer, 0, probed, subs,
                 audioPriority = pri, audioLabel = audioLabelFor(pri)))
         }
@@ -275,12 +312,25 @@ object StreamEngine {
         // 7. Subtitle-only fallback
         val subs = grabSubtitles(unwrapped)
         if (subs.isNotEmpty()) {
-            HealthMonitor.recordSuccess(spec.id, System.currentTimeMillis() - start, null)
+            okServer(spec, start, "subtitles only", 0)
             return listOf(RawStream(spec.id, spec.name, "", false, referer, subtitles = subs))
         }
 
-        HealthMonitor.recordFailure(spec.id)
+        failServer(spec, "no harvestable stream across full pipeline")
         return emptyList()
+    }
+
+    /** Log + trip a server. Single choke point so every failure names its reason. */
+    private fun failServer(spec: ServerSpec, reason: String) {
+        Log.w("OTTMirror", "${spec.id}: $reason")
+        HealthMonitor.recordFailure(spec.id)
+    }
+
+    /** Log + record a successful resolution for a server. */
+    private fun okServer(spec: ServerSpec, start: Long, stage: String, streamCount: Int) {
+        val ms = System.currentTimeMillis() - start
+        Log.d("OTTMirror", "${spec.id}: OK via $stage, $streamCount streams in ${ms}ms")
+        HealthMonitor.recordSuccess(spec.id, ms, null)
     }
 
     /** Returns audio label for the given priority. */
@@ -329,7 +379,6 @@ object StreamEngine {
         type: String,
         season: Int,
         episode: Int,
-        start: Long,
     ): List<RawStream> {
         val apiUrl = if (type == "movie") VidlinkSource.movieApiUrl(tmdbId.toString())
         else VidlinkSource.tvApiUrl(tmdbId.toString(), season, episode)
@@ -340,20 +389,29 @@ object StreamEngine {
             runCatching {
                 app.get(apiUrl, timeout = 8, headers = vidlinkHeaders(mediaPage)).text
             }.getOrNull()
-        } ?: return emptyList()
-        val root = runCatching { org.json.JSONObject(jsonText) }.getOrNull() ?: return emptyList()
+        }
+        if (jsonText.isNullOrBlank()) {
+            Log.w("VidLink", "no API response (timeout/HTTP error) for $mediaPage")
+            return emptyList()
+        }
+        val root = runCatching { org.json.JSONObject(jsonText) }.getOrElse {
+            Log.w("VidLink", "non-JSON response for $mediaPage (${jsonText.length}B, starts: ${safeSnippet(jsonText)})")
+            return emptyList()
+        }
 
         // VidLink API error response: {"error":"Invalid token","code":2004}
         if (root.has("error") || root.has("code")) {
             val err = root.optJSONObject("error") ?: root
             val code = err.optInt("code", -1)
             val msg = err.optString("message").ifBlank { err.optString("error") }.ifBlank { "unknown" }
-            android.util.Log.w("VidLink", "API error code=$code msg=$msg")
-            HealthMonitor.recordFailure(spec.id)
+            Log.w("VidLink", "API error code=$code msg=$msg")
             return emptyList()
         }
 
-        val stream = root.optJSONObject("stream") ?: return emptyList()
+        val stream = root.optJSONObject("stream") ?: run {
+            Log.w("VidLink", "no \"stream\" object; root keys=${namesOf(root)}")
+            return emptyList()
+        }
 
         // Captions live at stream.captions (new shape) or root.captions (legacy).
         val subs = (stream.optJSONArray("captions") ?: root.optJSONArray("captions"))?.let { arr ->
@@ -382,7 +440,7 @@ object StreamEngine {
                 }
             }.orEmpty().sortedByDescending { it.first }
             if (entries.isNotEmpty()) {
-                HealthMonitor.recordSuccess(spec.id, System.currentTimeMillis() - start, null)
+                Log.d("VidLink", "qualities shape: ${entries.map { it.first }}p for $mediaPage")
                 return entries.map { (height, url) ->
                     RawStream(
                         serverId = spec.id,
@@ -396,13 +454,17 @@ object StreamEngine {
                     )
                 }
             }
+            Log.w("VidLink", "qualities present but no usable urls (keys=${namesOf(qualities)})")
         }
 
         // Legacy shape: stream.playlist (HLS master) — kept for when VidLink
         // serves an adaptive playlist again.
         val masterUrl = stream.optString("playlist").takeIf { it.isNotBlank() }
             ?: root.optString("url").takeIf { it.isNotBlank() }
-            ?: return emptyList()
+            ?: run {
+                Log.w("VidLink", "no qualities/playlist/url; stream keys=${namesOf(stream)} root keys=${namesOf(root)}")
+                return emptyList()
+            }
 
         // Fetch the master playlist once: audio priority + best height inline.
         val masterText = withTimeoutOrNull(6_000L) {
@@ -414,7 +476,6 @@ object StreamEngine {
         val height = master?.let { ManifestKit.bestHeight(it.variants) } ?: 0
         val pri = master?.let { ManifestKit.audioPriority(it) } ?: 0
 
-        HealthMonitor.recordSuccess(spec.id, System.currentTimeMillis() - start, null)
         return listOf(
             RawStream(
                 serverId = spec.id,
@@ -441,16 +502,26 @@ object StreamEngine {
         spec: ServerSpec,
         apiUrl: String,
         referer: String,
-        start: Long,
     ): List<RawStream> {
         val jsonText = withTimeoutOrNull((spec.timeoutSec - 2).coerceAtLeast(3) * 1000L) {
             runCatching {
                 app.get(apiUrl, timeout = (spec.timeoutSec - 2).coerceAtLeast(3).toLong(), headers = okHeaders(referer)).text
             }.getOrNull()
-        } ?: return emptyList()
+        }
+        if (jsonText.isNullOrBlank()) {
+            Log.w("OTTMirror", "${spec.id}: no JSON response (timeout/HTTP error) from $apiUrl")
+            return emptyList()
+        }
 
-        val root = runCatching { org.json.JSONObject(jsonText) }.getOrNull() ?: return emptyList()
-        val source = root.optJSONObject("source") ?: return emptyList()
+        val root = runCatching { org.json.JSONObject(jsonText) }.getOrElse {
+            Log.w("OTTMirror", "${spec.id}: non-JSON response from $apiUrl (${jsonText.length}B, starts: ${safeSnippet(jsonText)})")
+            return emptyList()
+        }
+        val source = root.optJSONObject("source") ?: run {
+            val nullSource = root.isNull("source")
+            Log.w("OTTMirror", "${spec.id}: missing \"source\" (${if (nullSource) "null -- id not known to this server" else "absent"}); root keys=${namesOf(root)}")
+            return emptyList()
+        }
         val subs = root.optJSONArray("subtitles")?.let { arr ->
             (0 until arr.length()).mapNotNull { i ->
                 val s = arr.optJSONObject(i) ?: return@mapNotNull null
@@ -501,8 +572,8 @@ object StreamEngine {
             }.let { out.addAll(it) }
         }
 
-        if (out.isNotEmpty()) {
-            HealthMonitor.recordSuccess(spec.id, System.currentTimeMillis() - start, null)
+        if (out.isEmpty()) {
+            Log.w("OTTMirror", "${spec.id}: source present but carried no url/manifest/qualities; source keys=${namesOf(source)}")
         }
         return out
     }
@@ -574,6 +645,25 @@ object StreamEngine {
         if (!referer.isNullOrBlank()) h["Referer"] = referer
         return h
     }
+
+    /** JSON key listing for failure logs (shape changes are one log line away).
+     *  Keys are server-controlled: strip control chars (log-forgery) and cap length. */
+    private fun namesOf(obj: org.json.JSONObject): String =
+        obj.names()?.let { n ->
+            (0 until n.length()).joinToString(",") { key -> sanitizeToken(n.optString(key)) }
+        } ?: "none"
+
+    /** Short, control-char-free prefix of a remote body for parse-failure hints --
+     *  long enough to recognise the shape, too short to carry a signed URL. */
+    private fun safeSnippet(text: String): String = sanitizeToken(text).take(40)
+
+    private fun sanitizeToken(s: String): String = s.filterNot { it.isISOControl() }.take(64)
+
+    /** Last farm-wide re-probe; cooldown keeps a dead uplink from hammering all
+     *  embeds (~30s of network) on every single playback tap. */
+    @Volatile
+    private var lastFarmProbeAt = 0L
+    private const val FARM_REPROBE_COOLDOWN_MS = 60_000L
 }
 
 

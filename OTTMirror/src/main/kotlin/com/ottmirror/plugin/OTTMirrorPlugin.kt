@@ -222,7 +222,10 @@ class OTTMirrorProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val tmdb = TmdbUrlParser.parseTmdbUrl(data) ?: return false
+        val tmdb = TmdbUrlParser.parseTmdbUrl(data) ?: run {
+            android.util.Log.w("OTTMirror", "loadLinks: not a TMDB url: $data")
+            return false
+        }
         val (tmdbId, type) = tmdb
 
         // Episodes carry season/episode in the URL; movies/episodes without it default to -1.
@@ -236,9 +239,15 @@ class OTTMirrorProvider : MainAPI() {
             StreamEngine.resolve(tmdbId, imdbId, type, season, episode)
         }.orEmpty()
 
-        if (streams.isEmpty()) return false
+        if (streams.isEmpty()) {
+            android.util.Log.w("OTTMirror", "loadLinks: zero streams for tmdb=$tmdbId/$type -> CloudStream shows \"no link found\"")
+            return false
+        }
 
-        StreamEngine.emit(streams, callback, subtitleCallback)
+        var emitted = 0
+        StreamEngine.emit(streams, { emitted++; callback(it) }, subtitleCallback)
+        android.util.Log.i("OTTMirror", "loadLinks: tmdb=$tmdbId/$type s=$season e=$episode -> ${streams.size} streams, $emitted links emitted")
         return true
     }
 }
+

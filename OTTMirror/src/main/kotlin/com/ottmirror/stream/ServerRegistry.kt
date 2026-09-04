@@ -12,7 +12,8 @@ import kotlin.math.min
  *  - [ServerFarm]     the seeded registry of verified-live hosts (Sept 2026)
  *                     + URL builders.
  *  - [HealthMonitor]  per-server EMA success rate / latency / throughput
- *                     with a circuit breaker (3 strikes = 15 min trip).
+ *                     with a circuit breaker (3 strikes = 5 min trip; a fully
+ *                     tripped farm is auto-reset by StreamEngine.resolve).
  *
  * Distinct from StreamEngine.kt: this is data + health state; the engine
  * holds the orchestration that consumes it. Third-party sources with their
@@ -153,8 +154,9 @@ object HealthMonitor {
 
     /** Max consecutive failures before tripping a server. */
     private const val MAX_CONSECUTIVE_FAILURES = 3
-    /** Trip duration in ms (15 min). */
-    private const val TRIP_DURATION_MS = 15 * 60 * 1000L
+    /** Trip duration in ms (5 min). Kept short: embed hosts flap, and a long trip
+     *  window plus a farm-wide trip shows "no link found" for the entire duration. */
+    private const val TRIP_DURATION_MS = 5 * 60 * 1000L
     /** EMA decay factor (0.0–1.0, higher = faster decay). */
     private const val ALPHA = 0.3
 
@@ -235,6 +237,14 @@ object HealthMonitor {
     /** Reset all health. */
     fun resetAll() {
         synchronized(lock) { healthMap.clear() }
+    }
+
+    /** Clear only circuit-breaker trip state, preserving latency/throughput
+     *  history so speedScore ordering survives a farm-wide re-probe. */
+    fun resetTrips() {
+        synchronized(lock) {
+            healthMap.replaceAll { _, h -> h.copy(failCount = 0, trippedUntil = 0L) }
+        }
     }
 
     /** EMA-based speed score: higher is better. Factors in throughput and latency. */
