@@ -330,11 +330,10 @@ object StreamEngine {
         } ?: return emptyList()
         val root = runCatching { org.json.JSONObject(jsonText) }.getOrNull() ?: return emptyList()
 
-        val masterUrl = root.optJSONObject("stream")?.optString("playlist")?.takeIf { it.isNotBlank() }
-            ?: root.optString("url").takeIf { it.isNotBlank() }
-            ?: return emptyList()
+        val stream = root.optJSONObject("stream") ?: return emptyList()
 
-        val subs = root.optJSONArray("captions")?.let { arr ->
+        // Captions live at stream.captions (new shape) or root.captions (legacy).
+        val subs = (stream.optJSONArray("captions") ?: root.optJSONArray("captions"))?.let { arr ->
             (0 until arr.length()).mapNotNull { i ->
                 val c = arr.optJSONObject(i) ?: return@mapNotNull null
                 val u = c.optString("url").takeIf { it.isNotBlank() } ?: return@mapNotNull null
@@ -342,6 +341,42 @@ object StreamEngine {
                 lang to u
             }
         } ?: emptyList()
+
+        // New shape (Sept 2026, sourceId mwVault): stream.qualities maps
+        // "360"/"480"/"720"/"1080" -> {type:"mp4", url (signed, TTL 3600), ...}.
+        // Direct MP4s — no playlist fetch, no speed probe (the CDN rate-limits
+        // hard; ExoPlayer range requests work as-is).
+        val qualities = stream.optJSONObject("qualities")
+        if (qualities != null && qualities.length() > 0) {
+            val entries = qualities.names()?.let { n ->
+                (0 until n.length()).mapNotNull { i ->
+                    val key = n.optString(i)
+                    val q = qualities.optJSONObject(key) ?: return@mapNotNull null
+                    val url = q.optString("url").takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                    (key.toIntOrNull() ?: 0) to url
+                }
+            }.orEmpty().sortedByDescending { it.first }
+            if (entries.isNotEmpty()) {
+                HealthMonitor.recordSuccess(spec.id, System.currentTimeMillis() - start, null)
+                return entries.map { (height, url) ->
+                    RawStream(
+                        serverId = spec.id,
+                        serverName = spec.name,
+                        url = url,
+                        isM3u8 = false,
+                        referer = "https://vidlink.pro/",
+                        qualityHint = height,
+                        subtitles = subs,
+                    )
+                }
+            }
+        }
+
+        // Legacy shape: stream.playlist (HLS master) — kept for when VidLink
+        // serves an adaptive playlist again.
+        val masterUrl = stream.optString("playlist").takeIf { it.isNotBlank() }
+            ?: root.optString("url").takeIf { it.isNotBlank() }
+            ?: return emptyList()
 
         // Fetch the master playlist once: audio priority + best height inline.
         val masterText = withTimeoutOrNull(6_000L) {
