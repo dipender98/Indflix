@@ -2,12 +2,14 @@
 
 import com.ottmirror.core.TmdbService
 import com.ottmirror.stream.StreamEngine
+import com.ottmirror.stream.ServerFarm
+import com.ottmirror.stream.ServerIdType
 /**
 
- * FILE: OTTMirror.kt â€” the OTTMirror plugin (entry + TMDB catalog provider).
+ * FILE: OTTMirror.kt — the OTTMirror plugin (entry + TMDB catalog provider).
  *
  *  - [OTTMirror]          plugin entrypoint (@CloudstreamPlugin).
- *  - [OTTMirrorProvider]  TMDB-keyed MainAPI: no catalog of its own â€” every
+ *  - [OTTMirrorProvider]  TMDB-keyed MainAPI: no catalog of its own — every
  *                         title is resolved on demand against TMDB metadata,
  *                         then handed to the resolution engine in
  *                         stream/StreamEngine.kt.
@@ -35,6 +37,22 @@ import kotlinx.coroutines.withTimeoutOrNull
 class OTTMirror : Plugin() {
     override fun load(context: Context) {
         registerMainAPI(OTTMirrorProvider())
+    }
+}
+
+/**
+ * Pure TMDB URL parser, extractable from [OTTMirrorProvider] for unit testing.
+ * No CloudStream dependency — safe for JVM unit tests.
+ */
+object TmdbUrlParser {
+    private val tmdbWebUrl = Regex("""themoviedb\.org/(movie|tv)/(\d+)""")
+
+    /** Parse a TMDB web URL into (tmdbId, type). Returns null for non-TMDB URLs. */
+    fun parseTmdbUrl(url: String?): Pair<Int, String>? {
+        if (url.isNullOrBlank()) return null
+        val m = tmdbWebUrl.find(url) ?: return null
+        val id = m.groupValues[2].toIntOrNull() ?: return null
+        return id to if (m.groupValues[1] == "movie") "movie" else "tv"
     }
 }
 
@@ -82,7 +100,7 @@ class OTTMirrorProvider : MainAPI() {
     private fun TmdbService.TmdbItem.toSearchResponse(): SearchResponse? {
         val id = tmdbId ?: return null
         if (name.isBlank()) return null
-        val url = "https://www.themoviedb.org/${if (type == "movie") "movie" else "tv"}/$id"
+        val url = "https://www.themoviedb.org//"
         val tvType = if (type == "movie") TvType.Movie else TvType.TvSeries
         val releaseYear = year?.toIntOrNull()
         return if (tvType == TvType.Movie) {
@@ -127,7 +145,7 @@ class OTTMirrorProvider : MainAPI() {
     // ------------------------------------------------------------------
 
     override suspend fun load(url: String): LoadResponse? {
-        val tmdb = parseTmdbUrl(url) ?: return null
+        val tmdb = TmdbUrlParser.parseTmdbUrl(url) ?: return null
         val (tmdbId, type) = tmdb
         val isMovie = type == "movie"
 
@@ -169,7 +187,7 @@ class OTTMirrorProvider : MainAPI() {
 
         val epList = episodes.map { ep ->
             // Encode season/episode into the episode URL so loadLinks() can parse it.
-            val epUrl = "https://www.themoviedb.org/tv/$tmdbId/season/${ep.seasonNumber}/episode/${ep.episodeNumber}"
+            val epUrl = "https://www.themoviedb.org/tv//season//episode/"
             newEpisode(epUrl) {
                 this.name = ep.name
                 this.season = ep.seasonNumber
@@ -203,7 +221,7 @@ class OTTMirrorProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val tmdb = parseTmdbUrl(data) ?: return false
+        val tmdb = TmdbUrlParser.parseTmdbUrl(data) ?: return false
         val (tmdbId, type) = tmdb
 
         // Episodes carry season/episode in the URL; movies/episodes without it default to -1.
@@ -211,9 +229,8 @@ class OTTMirrorProvider : MainAPI() {
         val season = epMatch?.groupValues?.get(2)?.toIntOrNull() ?: -1
         val episode = epMatch?.groupValues?.get(3)?.toIntOrNull() ?: -1
 
-        val detail = withTimeoutOrNull(3000L) { TmdbService.fetchMeta(tmdbId, type) }
-        val imdbId = detail?.imdbId
-
+        val needsImdb = ServerFarm.allServers.any { it.idType == ServerIdType.IMDB }
+        val imdbId = if (needsImdb) withTimeoutOrNull(3000L) { TmdbService.fetchMeta(tmdbId, type) }?.imdbId else null
         val streams = withTimeoutOrNull(45_000L) {
             StreamEngine.resolve(tmdbId, imdbId, type, season, episode)
         }.orEmpty()
@@ -223,17 +240,4 @@ class OTTMirrorProvider : MainAPI() {
         StreamEngine.emit(streams, callback, subtitleCallback)
         return true
     }
-
-    // ------------------------------------------------------------------
-    // Helpers
-    // ------------------------------------------------------------------
-
-    /** Parse a TMDB web URL into (tmdbId, type). Returns null for non-TMDB URLs. */
-    private fun parseTmdbUrl(url: String?): Pair<Int, String>? {
-        if (url.isNullOrBlank()) return null
-        val m = tmdbWebUrl.find(url) ?: return null
-        val id = m.groupValues[2].toIntOrNull() ?: return null
-        return id to if (m.groupValues[1] == "movie") "movie" else "series"
-    }
 }
-

@@ -1,17 +1,17 @@
-﻿package com.ottmirror.stream
+package com.ottmirror.stream
 
 import com.ottmirror.core.HttpKit
 import com.ottmirror.core.ManifestKit
 import com.ottmirror.sources.VidlinkSource
 /**
 
- * FILE: StreamEngine.kt â€” the OTTMirror resolution engine (HOW a TMDB id
+ * FILE: StreamEngine.kt — the OTTMirror resolution engine (HOW a TMDB id
  * becomes playable links).
  *
  *  - [StreamEngine]   fans out to healthy servers in parallel, probes audio
  *                     + speed, gates on dual-audio (Hindi first) and emits
  *                     the fastest usable link set.
- *  - [ServerFarm]     server registry + [HealthMonitor] — defined in
+ *  - [ServerFarm]     server registry + [HealthMonitor] � defined in
  *                     ServerRegistry.kt (data + health state, no orchestration).
  *
  * Distinct from core/CoreServices.kt (stateless primitives: HTTP, TMDB, manifest
@@ -36,8 +36,8 @@ import org.jsoup.Jsoup
  *
  * 1. Fans out to healthy embed servers in parallel.
  * 2. Uses the same multi-strategy pipeline as Multimovies:
- *    fetch → unwrap iframes → bare-URL regex harvest → loadExtractor registry
- *    → JS config → <video> source → subtitles.
+ *    fetch ? unwrap iframes ? bare-URL regex harvest ? loadExtractor registry
+ *    ? JS config ? <video> source ? subtitles.
  * 3. Dual-audio gating: only emits servers whose master playlist carries
  *    at least Hindi+English audio tracks. When none do, falls back to
  *    the best available single-audio source.
@@ -122,7 +122,7 @@ object StreamEngine {
                 val master = ManifestKit.parseMaster(masterText, raw.url)
                 val label = buildString {
                     append(raw.serverName)
-                    if (raw.audioLabel.isNotBlank()) append(" • ${raw.audioLabel}")
+                    if (raw.audioLabel.isNotBlank()) append(" � ${raw.audioLabel}")
                 }
 
                 if (master?.isMultiAudio == true) {
@@ -159,7 +159,7 @@ object StreamEngine {
     }
 
     // ------------------------------------------------------------------
-    // Internals — multi-strategy pipeline (proven from Multimovies)
+    // Internals � multi-strategy pipeline (proven from Multimovies)
     // ------------------------------------------------------------------
 
     private suspend fun resolveOne(spec: ServerSpec, tmdbId: Int, imdbId: String?, type: String, season: Int, episode: Int): List<RawStream> {
@@ -301,6 +301,7 @@ object StreamEngine {
     private fun vidlinkHeaders(mediaPageUrl: String): Map<String, String> = mapOf(
         "User-Agent" to HttpKit.userAgent,
         "Accept" to "*/*",
+        "Accept-Language" to "en-US,en;q=0.9",
         "Origin" to "https://vidlink.pro",
         "Referer" to mediaPageUrl,
     )
@@ -330,6 +331,16 @@ object StreamEngine {
         } ?: return emptyList()
         val root = runCatching { org.json.JSONObject(jsonText) }.getOrNull() ?: return emptyList()
 
+        // VidLink API error response: {"error":"Invalid token","code":2004}
+        if (root.has("error") || root.has("code")) {
+            val err = root.optJSONObject("error") ?: root
+            val code = err.optInt("code", -1)
+            val msg = err.optString("message").ifBlank { err.optString("error") }.ifBlank { "unknown" }
+            android.util.Log.w("VidLink", "API error code=$code msg=$msg")
+            HealthMonitor.recordFailure(spec.id)
+            return emptyList()
+        }
+
         val stream = root.optJSONObject("stream") ?: return emptyList()
 
         // Captions live at stream.captions (new shape) or root.captions (legacy).
@@ -344,7 +355,7 @@ object StreamEngine {
 
         // New shape (Sept 2026, sourceId mwVault): stream.qualities maps
         // "360"/"480"/"720"/"1080" -> {type:"mp4", url (signed, TTL 3600), ...}.
-        // Direct MP4s — no playlist fetch, no speed probe (the CDN rate-limits
+        // Direct MP4s � no playlist fetch, no speed probe (the CDN rate-limits
         // hard; ExoPlayer range requests work as-is).
         val qualities = stream.optJSONObject("qualities")
         if (qualities != null && qualities.length() > 0) {
@@ -372,7 +383,7 @@ object StreamEngine {
             }
         }
 
-        // Legacy shape: stream.playlist (HLS master) — kept for when VidLink
+        // Legacy shape: stream.playlist (HLS master) � kept for when VidLink
         // serves an adaptive playlist again.
         val masterUrl = stream.optString("playlist").takeIf { it.isNotBlank() }
             ?: root.optString("url").takeIf { it.isNotBlank() }
@@ -409,7 +420,7 @@ object StreamEngine {
     /**
      * JSON API resolver (api.shows.st / 111Movies shape):
      * `{ "source": { "url": ..., "qualities": [{"quality","url"}] }, "subtitles": [...] }`
-     * The signed stream URLs carry no file extension — JSON parsing is mandatory.
+     * The signed stream URLs carry no file extension � JSON parsing is mandatory.
      */
     private suspend fun resolveJsonApi(
         spec: ServerSpec,
@@ -437,7 +448,7 @@ object StreamEngine {
         val out = mutableListOf<RawStream>()
 
         // Adaptive master (source.url). source.manifest carries the FULL HLS master
-        // playlist inline (variant URIs are absolute https URLs) — the signed url has
+        // playlist inline (variant URIs are absolute https URLs) � the signed url has
         // no file extension, so manifest presence is the HLS signal.
         val masterUrl = source.optString("url").takeIf { it.isNotBlank() }
         val inlineManifest = source.optString("manifest").takeIf { it.isNotBlank() && it.contains("#EXT-X-STREAM-INF") }
@@ -458,7 +469,7 @@ object StreamEngine {
             ))
         }
 
-        // Per-quality MP4s (source.qualities[]) — direct VIDEO links.
+        // Per-quality MP4s (source.qualities[]) � direct VIDEO links.
         source.optJSONArray("qualities")?.let { arr ->
             (0 until arr.length()).mapNotNull { i ->
                 val q = arr.optJSONObject(i) ?: return@mapNotNull null
