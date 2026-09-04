@@ -54,11 +54,20 @@ object VidlinkSource {
      * Headers the CDN serving the stream URLs requires at PLAYBACK time.
      *
      * bcdn.hakunaymatata.com (vidlink's host, Sept 2026) fingerprint-filters
-     * by User-Agent: browser UAs get 428 Precondition Required / 429, while
-     * a native player UA passes through and streams fine. Verified live
-     * Sept 2026: "ExoPlayer" -> HTTP 200 with the full MP4 body.
+     * requests on more than User-Agent: browser UAs get 428 Precondition
+     * Required / 429, and requests without a vidlink Origin get 403. A native
+     * player UA plus the site Origin/Referer passes through and streams fine.
+     * Verified live Sept 2026: "ExoPlayer" -> HTTP 200 with the full MP4 body.
+     *
+     * These headers are forwarded to the player's HTTP stack for the emitted
+     * stream URL. Without them the player's request is rejected, surfacing as
+     * ExoPlayer ERROR_CODE_IO_BAD_HTTP_STATUS (2004).
      */
-    val PLAYER_HEADERS: Map<String, String> = mapOf("User-Agent" to "ExoPlayer")
+    val PLAYER_HEADERS: Map<String, String> = mapOf(
+        "User-Agent" to "ExoPlayer",
+        "Origin" to "https://vidlink.pro",
+        "Referer" to "https://vidlink.pro/",
+    )
 
     /** 24 zero bytes, same as the site's player. */
     private val NONCE = ByteArray(24)

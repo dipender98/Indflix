@@ -107,5 +107,16 @@ class VidlinkTest {
         val ua = VidlinkSource.PLAYER_HEADERS["User-Agent"]
         assertEquals("ExoPlayer", ua, "vidlink playback must use a native player UA")
     }
+
+    @Test
+    fun vidlinkPlayerHeaders_haveSiteContext() {
+        // The CDN also rejects stream requests that lack a vidlink
+        // Origin/Referer (403). The player headers must carry them so
+        // playback avoids ExoPlayer ERROR_CODE_IO_BAD_HTTP_STATUS (2004).
+        assertEquals("https://vidlink.pro", VidlinkSource.PLAYER_HEADERS["Origin"],
+            "vidlink playback must send the site Origin")
+        assertEquals("https://vidlink.pro/", VidlinkSource.PLAYER_HEADERS["Referer"],
+            "vidlink playback must send the site Referer")
+    }
 }
 

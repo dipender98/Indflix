@@ -150,9 +150,12 @@ object StreamEngine {
             raw.subtitles.forEach { (lang, subUrl) -> onSubtitle(SubtitleFile(lang, subUrl)) }
 
             // Link headers: Referer first (some CDNs require it), then per-stream
-            // extras (e.g. ExoPlayer UA for the vidlink CDN which 428s on browser UAs).
-            // Using a LinkedHashMap preserves order; an extra header that collides with
-            // Referer overrides it.
+            // extras. raw.extraHeaders carries the native-player UA + site
+            // Origin/Referer for vidlink CDN streams (see
+            // VidlinkSource.PLAYER_HEADERS) -- without them the player's playback
+            // request gets 403/428/429 and surfaces as ExoPlayer
+            // ERROR_CODE_IO_BAD_HTTP_STATUS (2004). Using a LinkedHashMap
+            // preserves order; an extra header that collides with Referer overrides it.
             val linkHeaders = LinkedHashMap<String, String>()
             linkHeaders["Referer"] = raw.referer ?: ""
             linkHeaders.putAll(raw.extraHeaders)
@@ -488,6 +491,7 @@ object StreamEngine {
                 audioPriority = pri,
                 audioLabel = audioLabelFor(pri),
                 inlineManifest = masterText?.takeIf { master != null },
+                extraHeaders = VidlinkSource.PLAYER_HEADERS,
             )
         )
     }
