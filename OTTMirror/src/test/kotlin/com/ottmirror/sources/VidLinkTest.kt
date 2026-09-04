@@ -98,5 +98,14 @@ class VidlinkTest {
         val c = VidlinkSource.token("603", 1_700_000_060L)
         assertTrue(a != c, "different timestamps must yield different tokens")
     }
+
+    @Test
+    fun vidlinkPlayerHeaders_useNativePlayerAgent() {
+        // The bcdn.hakunaymatata.com CDN User-Agent-fingerprints requests:
+        // browser UAs get 428/429, a native player UA gets 200. Playback
+        // headers therefore must override the UA with a non-browser value.
+        val ua = VidlinkSource.PLAYER_HEADERS["User-Agent"]
+        assertEquals("ExoPlayer", ua, "vidlink playback must use a native player UA")
+    }
 }
 

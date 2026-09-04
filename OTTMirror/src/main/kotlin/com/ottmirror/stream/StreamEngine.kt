@@ -65,6 +65,10 @@ object StreamEngine {
         val audioPriority: Int = 0,
         val audioLabel: String = "",
         val inlineManifest: String? = null, // HLS master playlist text delivered inline (JSON API)
+        /** Extra HTTP headers the player must send when fetching [url] (e.g.
+         *  "User-Agent: ExoPlayer" for CDNs that reject browser UAs). Merged
+         *  into the ExtractorLink headers at emission time. */
+        val extraHeaders: Map<String, String> = emptyMap(),
     )
 
     /**
@@ -113,10 +117,18 @@ object StreamEngine {
 
             raw.subtitles.forEach { (lang, subUrl) -> onSubtitle(SubtitleFile(lang, subUrl)) }
 
+            // Link headers: Referer first (some CDNs require it), then per-stream
+            // extras (e.g. ExoPlayer UA for the vidlink CDN which 428s on browser UAs).
+            // Using a LinkedHashMap preserves order; an extra header that collides with
+            // Referer overrides it.
+            val linkHeaders = LinkedHashMap<String, String>()
+            linkHeaders["Referer"] = raw.referer ?: ""
+            linkHeaders.putAll(raw.extraHeaders)
+
             if (raw.isM3u8) {
                 val masterText = raw.inlineManifest ?: withTimeoutOrNull(4000L) {
                     runCatching {
-                        app.get(raw.url, timeout = 4, headers = mapOf("Referer" to (raw.referer ?: ""))).text
+                        app.get(raw.url, timeout = 4, headers = linkHeaders).text
                     }.getOrNull()
                 }
                 val master = ManifestKit.parseMaster(masterText, raw.url)
@@ -130,11 +142,11 @@ object StreamEngine {
                         source = raw.serverName, name = "$label Auto",
                         url = raw.url, referer = raw.referer ?: "",
                         quality = ManifestKit.bestHeight(master.variants).takeIf { it > 0 } ?: raw.qualityHint,
-                        headers = mapOf("Referer" to (raw.referer ?: "")), type = ExtractorLinkType.M3U8,
+                        headers = linkHeaders, type = ExtractorLinkType.M3U8,
                     ))
                     M3u8Helper.generateM3u8(raw.serverName, raw.url, raw.referer ?: "",
                         quality = raw.qualityHint.takeIf { it > 0 },
-                        headers = mapOf("Referer" to (raw.referer ?: "")),
+                        headers = linkHeaders,
                     ).forEach { onLink(it) }
                     master.subtitles.forEach { r ->
                         r.uri?.let { onSubtitle(SubtitleFile(r.language ?: r.name, ManifestKit.resolveUrl(raw.url, it))) }
@@ -142,7 +154,7 @@ object StreamEngine {
                 } else {
                     M3u8Helper.generateM3u8(raw.serverName, raw.url, raw.referer ?: "",
                         quality = raw.qualityHint.takeIf { it > 0 },
-                        headers = mapOf("Referer" to (raw.referer ?: "")),
+                        headers = linkHeaders,
                     ).forEach { onLink(it) }
                     master?.subtitles?.forEach { r ->
                         r.uri?.let { onSubtitle(SubtitleFile(r.language ?: r.name, ManifestKit.resolveUrl(raw.url, it))) }
@@ -152,7 +164,7 @@ object StreamEngine {
                 onLink(ExtractorLink(
                     source = raw.serverName, name = "${raw.serverName} ${ManifestKit.qualityLabel(raw.qualityHint)}".trim(),
                     url = raw.url, referer = raw.referer ?: "", quality = raw.qualityHint,
-                    headers = mapOf("Referer" to (raw.referer ?: "")), type = ExtractorLinkType.VIDEO,
+                    headers = linkHeaders, type = ExtractorLinkType.VIDEO,
                 ))
             }
         }
@@ -356,7 +368,9 @@ object StreamEngine {
         // New shape (Sept 2026, sourceId mwVault): stream.qualities maps
         // "360"/"480"/"720"/"1080" -> {type:"mp4", url (signed, TTL 3600), ...}.
         // Direct MP4s — no playlist fetch, no speed probe (the CDN rate-limits
-        // hard; ExoPlayer range requests work as-is).
+        // hard). The CDN User-Agent-fingerprints requests and 428/429-rejects
+        // browser UAs, so the emission carries VidlinkSource.PLAYER_HEADERS
+        // (ExoPlayer UA) for playback to succeed.
         val qualities = stream.optJSONObject("qualities")
         if (qualities != null && qualities.length() > 0) {
             val entries = qualities.names()?.let { n ->
@@ -378,6 +392,7 @@ object StreamEngine {
                         referer = "https://vidlink.pro/",
                         qualityHint = height,
                         subtitles = subs,
+                        extraHeaders = VidlinkSource.PLAYER_HEADERS,
                     )
                 }
             }

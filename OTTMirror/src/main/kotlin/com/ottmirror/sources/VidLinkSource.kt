@@ -50,6 +50,16 @@ object VidlinkSource {
     private const val KEY_HEX =
         "c75136c5668bbfe65a7ecad431a745db68b5f381555b38d8f6c699449cf11fcd"
 
+    /**
+     * Headers the CDN serving the stream URLs requires at PLAYBACK time.
+     *
+     * bcdn.hakunaymatata.com (vidlink's host, Sept 2026) fingerprint-filters
+     * by User-Agent: browser UAs get 428 Precondition Required / 429, while
+     * a native player UA passes through and streams fine. Verified live
+     * Sept 2026: "ExoPlayer" -> HTTP 200 with the full MP4 body.
+     */
+    val PLAYER_HEADERS: Map<String, String> = mapOf("User-Agent" to "ExoPlayer")
+
     /** 24 zero bytes, same as the site's player. */
     private val NONCE = ByteArray(24)
 
