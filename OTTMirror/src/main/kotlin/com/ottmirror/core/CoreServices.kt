@@ -261,7 +261,24 @@ object TmdbService {
     // Internal helpers
     // ------------------------------------------------------------------
 
-    private fun parseTmdbMultiSearch(json: String): List<TmdbItem> {
+    /** Collapse search hits sharing a normalized (title, year). TMDB multi-search
+     *  sometimes lists the same title twice — the real entry plus a junk duplicate
+     *  of the other media type (e.g. "Breaking Bad" as tv/1396 and movie/1762067).
+     *  The highest-rated entry of each group wins. */
+    internal fun List<TmdbItem>.dedupedByTitle(): List<TmdbItem> {
+        val best = LinkedHashMap<String, TmdbItem>()
+        for (item in this) {
+            val key = item.name.trim().lowercase() + "|" + (item.year ?: "")
+            val current = best[key]
+            if (current == null || (item.rating ?: 0.0) > (current.rating ?: 0.0)) {
+                best[key] = item
+            }
+        }
+        return best.values.toList()
+    }
+
+    /** Parse a TMDB `/search/multi` response, deduplicated by (title, year). */
+    internal fun parseTmdbMultiSearch(json: String): List<TmdbItem> {
         return try {
             val root = JSONObject(json)
             val results = root.optJSONArray("results") ?: return emptyList()
@@ -280,7 +297,7 @@ object TmdbService {
                     poster = str(r, "poster_path")?.let { "$IMG_BASE$it" },
                     rating = r.optDouble("vote_average", -1.0).takeIf { it > 0 },
                 )
-            }
+            }.dedupedByTitle()
         } catch (e: Exception) {
             emptyList()
         }

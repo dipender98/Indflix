@@ -320,6 +320,22 @@ object TmdbService {
     // Search backends
     // ------------------------------------------------------------------
 
+    /** Collapse search hits sharing a normalized (title, year). TMDB multi-search
+     *  sometimes lists the same title twice — the real entry plus a junk duplicate
+     *  of the other media type (e.g. "Breaking Bad" as tv/1396 and movie/1762067).
+     *  The highest-rated entry of each group wins. */
+    internal fun List<TmdbItem>.dedupedByTitle(): List<TmdbItem> {
+        val best = LinkedHashMap<String, TmdbItem>()
+        for (item in this) {
+            val key = item.name.trim().lowercase() + "|" + (item.year ?: "")
+            val current = best[key]
+            if (current == null || (item.rating ?: 0.0) > (current.rating ?: 0.0)) {
+                best[key] = item
+            }
+        }
+        return best.values.toList()
+    }
+
     private suspend fun searchTmdb(query: String): List<TmdbItem> {
         val encoded = URLEncoder.encode(query.trim(), "UTF-8")
         val json = runCatching {
@@ -349,10 +365,11 @@ object TmdbService {
                     }?.let { (tmdbId, type) -> item.copy(tmdbId = tmdbId, type = type) }
                 }
             }.awaitAll().filterNotNull()
-        }
+        }.dedupedByTitle()
     }
 
-    /** Parse a TMDB `/search/multi` response into [TmdbItem]s (movies + series only). */
+    /** Parse a TMDB `/search/multi` response into [TmdbItem]s (movies + series
+     *  only), deduplicated by (title, year). */
     fun parseTmdbMultiSearch(raw: String?): List<TmdbItem> {
         if (raw.isNullOrBlank()) return emptyList()
         return try {
@@ -374,7 +391,7 @@ object TmdbService {
                     poster = str(m, "poster_path")?.let { "$IMG_BASE$it" },
                     rating = m.optDouble("vote_average", -1.0).takeIf { it > 0 },
                 )
-            }
+            }.dedupedByTitle()
         } catch (e: Exception) {
             emptyList()
         }
