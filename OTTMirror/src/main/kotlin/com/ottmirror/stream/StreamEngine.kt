@@ -242,6 +242,18 @@ object StreamEngine {
             failServer(spec, "vidlink returned no streams")
             return emptyList()
         }
+        if (spec.id == "myflixer-hindi") {
+            val result = resolveMyFlixerHindi(spec, tmdbId, imdbId, type, season, episode)
+            if (result.isNotEmpty()) { okServer(spec, start, "myflixer-hindi", result.size); return result }
+            failServer(spec, "myflixer-hindi returned no streams")
+            return emptyList()
+        }
+        if (spec.id == "nhd") {
+            val result = resolveNhd(spec, tmdbId, imdbId, type, season, episode)
+            if (result.isNotEmpty()) { okServer(spec, start, "nhd", result.size); return result }
+            failServer(spec, "nhd returned no streams")
+            return emptyList()
+        }
 
         // 0. JSON API branch (api.shows.st style): parse JSON, take source.url +
         //    source.qualities[] + subtitles[]. The signed stream URLs carry no
@@ -538,6 +550,74 @@ object StreamEngine {
         )
     }
 
+
+    private suspend fun resolveMyFlixerHindi(
+        spec: ServerSpec,
+        tmdbId: Int?,
+        imdbId: String?,
+        type: String,
+        season: Int,
+        episode: Int,
+    ): List<RawStream> {
+        val id = if (spec.idType == ServerIdType.IMDB) imdbId ?: return emptyList() else tmdbId?.toString() ?: return emptyList()
+        val embedUrl = if (type == "movie") {
+            "https://hindi.myflixerapi.com/embed/movie?imdb=$id"
+        } else {
+            "https://hindi.myflixerapi.com/embed/series?imdb=$id&sea=$season&epi=$episode"
+        }
+        val referer = "https://hindi.myflixerapi.com/"
+        Log.d("MyFlixerHindi", "Fetching $embedUrl")
+        val rawText = withTimeoutOrNull(8_000L) {
+            runCatching { app.get(embedUrl, timeout = 8, headers = okHeaders(referer)).text }.getOrNull()
+        } ?: return emptyList()
+        val (unwrapped, _) = unwrapPages(rawText, embedUrl, 12)
+        val jsUrls = harvestJsUrls(unwrapped)
+        if (jsUrls.isNotEmpty()) {
+            val pri = 4 // force Hindi
+            return jsUrls.map { url ->
+                RawStream(
+                    serverId = spec.id, serverName = spec.name,
+                    url = url, isM3u8 = url.contains(".m3u8", ignoreCase = true),
+                    referer = referer, audioPriority = pri, audioLabel = "Hindi"
+                )
+            }
+        }
+        return emptyList()
+    }
+
+    private suspend fun resolveNhd(
+        spec: ServerSpec,
+        tmdbId: Int?,
+        imdbId: String?,
+        type: String,
+        season: Int,
+        episode: Int,
+    ): List<RawStream> {
+        val id = if (spec.idType == ServerIdType.IMDB) imdbId ?: return emptyList() else tmdbId?.toString() ?: return emptyList()
+        val embedUrl = if (type == "movie") {
+            "https://nhdapi.com/movie/$id"
+        } else {
+            "https://nhdapi.com/tv/$id/$season/$episode"
+        }
+        val referer = "https://nhdapi.com/"
+        Log.d("NHD", "Fetching $embedUrl")
+        val rawText = withTimeoutOrNull(8_000L) {
+            runCatching { app.get(embedUrl, timeout = 8, headers = okHeaders(referer)).text }.getOrNull()
+        } ?: return emptyList()
+        val (unwrapped, _) = unwrapPages(rawText, embedUrl, 12)
+        val jsUrls = harvestJsUrls(unwrapped)
+        if (jsUrls.isNotEmpty()) {
+            val pri = probeAudio(jsUrls.first(), referer)
+            return jsUrls.map { url ->
+                RawStream(
+                    serverId = spec.id, serverName = spec.name,
+                    url = url, isM3u8 = url.contains(".m3u8", ignoreCase = true),
+                    referer = referer, audioPriority = pri, audioLabel = audioLabelFor(pri)
+                )
+            }
+        }
+        return emptyList()
+    }
 
     /**
      * JSON API resolver (api.shows.st / 111Movies shape):
