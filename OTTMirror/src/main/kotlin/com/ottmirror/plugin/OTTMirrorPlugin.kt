@@ -247,7 +247,7 @@ class OTTMirrorProvider : MainAPI() {
         var emitted = 0
         StreamEngine.emit(streams, { emitted++; callback(it) }, subtitleCallback)
         android.util.Log.i("OTTMirror", "loadLinks: tmdb=$tmdbId/$type s=$season e=$episode -> ${streams.size} streams, $emitted links emitted")
-        return true
+        return emitted > 0
     }
 }
 

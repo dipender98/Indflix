@@ -11,7 +11,7 @@ import com.ottmirror.sources.VidlinkSource
  *  - [StreamEngine]   fans out to healthy servers in parallel, probes audio
  *                     + speed, gates on dual-audio (Hindi first) and emits
  *                     the fastest usable link set.
- *  - [ServerFarm]     server registry + [HealthMonitor] — defined in
+ *  - [ServerFarm]     server registry + [HealthMonitor] ï¿½ defined in
  *                     ServerRegistry.kt (data + health state, no orchestration).
  *
  * Distinct from core/CoreServices.kt (stateless primitives: HTTP, TMDB, manifest
@@ -92,14 +92,15 @@ object StreamEngine {
             if (now - lastFarmProbeAt < FARM_REPROBE_COOLDOWN_MS) {
                 Log.w("OTTMirror", "all servers tripped; re-probe cooldown active " +
                     "(${(FARM_REPROBE_COOLDOWN_MS - (now - lastFarmProbeAt)) / 1000}s left)")
-                return emptyList()
+                emptyList()
+            } else {
+                lastFarmProbeAt = now
+                // Clear only the trip state, keeping latency/throughput history so the
+                // speedScore ordering survives the re-probe.
+                Log.w("OTTMirror", "all ${ServerFarm.allServers.size} servers tripped -- clearing trips, re-probing all")
+                HealthMonitor.resetTrips()
+                ServerFarm.allServers
             }
-            lastFarmProbeAt = now
-            // Clear only the trip state, keeping latency/throughput history so the
-            // speedScore ordering survives the re-probe.
-            Log.w("OTTMirror", "all ${ServerFarm.allServers.size} servers tripped -- clearing trips, re-probing all")
-            HealthMonitor.resetTrips()
-            ServerFarm.allServers
         } else healthy
         val servers = candidates
             .sortedByDescending { HealthMonitor.speedScore(it.id) }
@@ -146,8 +147,9 @@ object StreamEngine {
         if (streams.isEmpty()) return
         val emitted = java.util.Collections.synchronizedSet(HashSet<String>())
 
-        // Sort: Hindi priority first, then by speed
+        // Sort: Hindi first, then preferred resolution, then measured speed.
         val sorted = streams.sortedWith(compareByDescending<RawStream> { it.audioPriority }
+            .thenByDescending { it.qualityHint }
             .thenByDescending { it.measuredKbps ?: 0L })
 
         sorted.forEach { raw ->
@@ -157,7 +159,7 @@ object StreamEngine {
             raw.subtitles.forEach { (lang, subUrl) -> onSubtitle(SubtitleFile(lang, subUrl)) }
 
             // Link headers: per-stream extras first (vidlink CDN streams carry their
-            // exact playback requirements there — mwVault rejects ANY Referer,
+            // exact playback requirements there ï¿½ mwVault rejects ANY Referer,
             // mbVault needs the API-provided origin/referer), then a Referer
             // fallback only for streams that declare one (embed servers).
             // Never emit an empty Referer: the vidlink CDN 429s on its mere
@@ -178,7 +180,7 @@ object StreamEngine {
                 val master = ManifestKit.parseMaster(masterText, raw.url)
                 val label = buildString {
                     append(raw.serverName)
-                    if (raw.audioLabel.isNotBlank()) append(" • ${raw.audioLabel}")
+                    if (raw.audioLabel.isNotBlank()) append(" ï¿½ ${raw.audioLabel}")
                 }
 
                 if (master?.isMultiAudio == true) {
@@ -196,10 +198,23 @@ object StreamEngine {
                         r.uri?.let { onSubtitle(SubtitleFile(r.language ?: r.name, ManifestKit.resolveUrl(raw.url, it))) }
                     }
                 } else {
-                    M3u8Helper.generateM3u8(raw.serverName, raw.url, raw.referer ?: "",
+                    val variants = M3u8Helper.generateM3u8(raw.serverName, raw.url, raw.referer ?: "",
                         quality = raw.qualityHint.takeIf { it > 0 },
                         headers = linkHeaders,
-                    ).forEach { onLink(it) }
+                    )
+                    if (variants.isEmpty()) {
+                        onLink(ExtractorLink(
+                            source = raw.serverName,
+                            name = "$label Auto",
+                            url = raw.url,
+                            referer = raw.referer ?: "",
+                            quality = raw.qualityHint,
+                            headers = linkHeaders,
+                            type = ExtractorLinkType.M3U8,
+                        ))
+                    } else {
+                        variants.forEach { onLink(it) }
+                    }
                     master?.subtitles?.forEach { r ->
                         r.uri?.let { onSubtitle(SubtitleFile(r.language ?: r.name, ManifestKit.resolveUrl(raw.url, it))) }
                     }
@@ -215,7 +230,7 @@ object StreamEngine {
     }
 
     // ------------------------------------------------------------------
-    // Internals — multi-strategy pipeline (proven from Multimovies)
+    // Internals ï¿½ multi-strategy pipeline (proven from Multimovies)
     // ------------------------------------------------------------------
 
     private suspend fun resolveOne(spec: ServerSpec, tmdbId: Int, imdbId: String?, type: String, season: Int, episode: Int): List<RawStream> {
@@ -307,7 +322,7 @@ object StreamEngine {
         val regOk = runCatching {
             loadExtractor(url = embedUrl, referer = referer, subtitleCallback = { regSubs.add(it) }, callback = { regLinks.add(it) })
         }.getOrDefault(false)
-        // Also try the deepest unwrapped URL — most embed chains register a
+        // Also try the deepest unwrapped URL ï¿½ most embed chains register a
         // CloudStream extractor on the INNER host (the actual player), not the
         // outer wrapper. The outer page is the correct referer for the inner
         // player's CORS / origin check.
@@ -456,7 +471,7 @@ object StreamEngine {
         }
 
         // VidLink API error response: {"error":"Invalid token","code":2004}
-        // code 2004 here is the API's token error — NOT ExoPlayer's
+        // code 2004 here is the API's token error ï¿½ NOT ExoPlayer's
         // ERROR_CODE_IO_BAD_HTTP_STATUS. It appears when the site rotates its
         // secretbox key; fix by updating VidlinkSource.KEY_HEX.
         if (root.has("error") || root.has("code")) {
@@ -485,11 +500,11 @@ object StreamEngine {
         // New shape (Sept 2026, sourceId mwVault/mbVault): stream.qualities maps
         // "360"/"480"/"720"/"1080" -> {type:"mp4", url (signed, TTL 3600),
         // headers:{referer,origin} (mbVault only, else {}), requiresProxy}.
-        // Direct MP4s — no playlist fetch, no speed probe (the CDN rate-limits
+        // Direct MP4s ï¿½ no playlist fetch, no speed probe (the CDN rate-limits
         // hard). Playback headers are per-source (see
         // VidlinkSource.PLAYER_HEADERS): mwVault CDN 429s on any Referer so
         // only the native UA is sent; mbVault requires the API-provided
-        // headers. referer stays null so emit() injects nothing extra — a
+        // headers. referer stays null so emit() injects nothing extra ï¿½ a
         // blanket vidlink.pro Referer is exactly what breaks playback with
         // ExoPlayer ERROR_CODE_IO_BAD_HTTP_STATUS (2004).
         val qualities = stream.optJSONObject("qualities")
@@ -520,7 +535,7 @@ object StreamEngine {
             Log.w("VidLink", "qualities present but no usable urls (keys=${namesOf(qualities)})")
         }
 
-        // Legacy shape: stream.playlist (HLS master) — kept for when VidLink
+        // Legacy shape: stream.playlist (HLS master) ï¿½ kept for when VidLink
         // serves an adaptive playlist again.
         val masterUrl = stream.optString("playlist").takeIf { it.isNotBlank() }
             ?: root.optString("url").takeIf { it.isNotBlank() }
@@ -704,7 +719,7 @@ object StreamEngine {
     /**
      * JSON API resolver (api.shows.st / 111Movies shape):
      * `{ "source": { "url": ..., "qualities": [{"quality","url"}] }, "subtitles": [...] }`
-     * The signed stream URLs carry no file extension — JSON parsing is mandatory.
+     * The signed stream URLs carry no file extension ï¿½ JSON parsing is mandatory.
      */
     private suspend fun resolveJsonApi(
         spec: ServerSpec,
@@ -745,7 +760,7 @@ object StreamEngine {
         val out = mutableListOf<RawStream>()
 
         // Adaptive master (source.url). source.manifest carries the FULL HLS master
-        // playlist inline (variant URIs are absolute https URLs) — the signed url has
+        // playlist inline (variant URIs are absolute https URLs) ï¿½ the signed url has
         // no file extension, so manifest presence is the HLS signal.
         val masterUrl = source.optString("url").takeIf { it.isNotBlank() }
         val inlineManifest = source.optString("manifest").takeIf { it.isNotBlank() && it.contains("#EXT-X-STREAM-INF") }
@@ -766,7 +781,7 @@ object StreamEngine {
             ))
         }
 
-        // Per-quality MP4s (source.qualities[]) — direct VIDEO links.
+        // Per-quality MP4s (source.qualities[]) ï¿½ direct VIDEO links.
         source.optJSONArray("qualities")?.let { arr ->
             (0 until arr.length()).mapNotNull { i ->
                 val q = arr.optJSONObject(i) ?: return@mapNotNull null
@@ -791,7 +806,7 @@ object StreamEngine {
 
     /** Follow iframes to the deepest player page. Returns the deepest HTML and
      *  its final URL so [resolveOne] can also pass the inner URL to
-     *  [loadExtractor] — many embed chains (2embed -> vidsrc, superembed -> cloud-hosted
+     *  [loadExtractor] ï¿½ many embed chains (2embed -> vidsrc, superembed -> cloud-hosted
      *  player) only have a CloudStream extractor registered for the INNER host. */
     private suspend fun unwrapPages(html: String, baseUrl: String, timeoutSec: Int): Pair<String, String> {
         var curHtml = html; var curUrl = baseUrl
