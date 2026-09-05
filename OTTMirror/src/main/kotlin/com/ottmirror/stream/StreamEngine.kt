@@ -254,6 +254,12 @@ object StreamEngine {
             failServer(spec, "nhd returned no streams")
             return emptyList()
         }
+        if (spec.id == "ezvidapi") {
+            val result = resolveEzvidapi(spec, tmdbId, imdbId, type, season, episode)
+            if (result.isNotEmpty()) { okServer(spec, start, "ezvidapi", result.size); return result }
+            failServer(spec, "ezvidapi returned no streams")
+            return emptyList()
+        }
 
         // 0. JSON API branch (api.shows.st style): parse JSON, take source.url +
         //    source.qualities[] + subtitles[]. The signed stream URLs carry no
@@ -652,6 +658,47 @@ object StreamEngine {
             }
         }
         return emptyList()
+    }
+
+    private suspend fun resolveEzvidapi(
+        spec: ServerSpec,
+        tmdbId: Int?,
+        imdbId: String?,
+        type: String,
+        season: Int,
+        episode: Int,
+    ): List<RawStream> {
+        val id = if (spec.idType == ServerIdType.IMDB) imdbId ?: return emptyList() else tmdbId?.toString() ?: return emptyList()
+        val apiUrl = if (type == "movie") {
+            "https://ezvidapi.com/movie/vidsrc/$id"
+        } else {
+            "https://ezvidapi.com/tv/vidsrc/$id/$season/$episode"
+        }
+        val referer = "https://ezvidapi.com/"
+        Log.d("EzvidAPI", "Fetching $apiUrl")
+        val jsonText = withTimeoutOrNull(8_000L) {
+            runCatching { app.get(apiUrl, timeout = 8, headers = okHeaders(referer)).text }.getOrNull()
+        } ?: return emptyList()
+
+        // Try to parse JSON
+        val json = runCatching { org.json.JSONObject(jsonText) }.getOrNull()
+        val streamUrl = json?.optString("url")?.takeIf { it.isNotBlank() }
+            ?: json?.optString("stream")?.takeIf { it.isNotBlank() }
+            ?: jsonText.trim().takeIf { it.startsWith("http") } // fallback: plain URL
+
+        if (streamUrl == null) {
+            Log.w("EzvidAPI", "No URL in response: ${safeSnippet(jsonText)}")
+            return emptyList()
+        }
+
+        val pri = probeAudio(streamUrl, referer)
+        return listOf(
+            RawStream(
+                serverId = spec.id, serverName = spec.name,
+                url = streamUrl, isM3u8 = streamUrl.contains(".m3u8", ignoreCase = true),
+                referer = referer, audioPriority = pri, audioLabel = audioLabelFor(pri)
+            )
+        )
     }
 
     /**

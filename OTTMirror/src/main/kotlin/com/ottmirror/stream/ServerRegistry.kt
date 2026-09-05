@@ -148,6 +148,17 @@ object ServerFarm {
             referer = "https://nhdapi.com/",
             hasSubtitles = true, maxQuality = 1080, timeoutSec = 12,
         ),
+        // EzvidAPI: free TMDB-keyed JSON API returning direct HLS stream URLs.
+        // Uses `vidsrc` provider. Returns JSON with "url" field. No auth required.
+        // Fast, stable domain, 1080p, no ads.
+        ServerSpec(
+            id = "ezvidapi", name = "EzvidAPI",
+            idType = ServerIdType.TMDB,
+            movieUrl = "https://ezvidapi.com/movie/vidsrc/{id}",
+            tvUrl = "https://ezvidapi.com/tv/vidsrc/{id}/{season}/{episode}",
+            referer = "https://ezvidapi.com/",
+            hasSubtitles = false, maxQuality = 1080, timeoutSec = 10,
+        ),
     )
 
     fun buildMovieUrl(spec: ServerSpec, id: String): String =
