@@ -14,46 +14,83 @@ import kotlin.test.assertTrue
 
 class ServerFarmHindiTest {
 
-    private val spec: ServerSpec
-        get() = ServerFarm.allServers.first { it.id == "myflixer-hindi" }
+    private val vidlink: ServerSpec
+        get() = ServerFarm.allServers.first { it.id == "vidlink" }
 
     @Test
-    fun hindiServer_presentAndFlagged() {
-        val s = spec
-        assertEquals("MyFlixer Hindi", s.name)
+    fun vidlink_presentAndFlaggedHindi() {
+        assertEquals("VidLink", vidlink.name)
+        assertEquals(ServerIdType.TMDB, vidlink.idType)
+        assertTrue(vidlink.hindi, "VidLink must be flagged Hindi (multiLang=1 carries dubs)")
+        assertEquals(1080, vidlink.maxQuality)
+        assertTrue(vidlink.hasSubtitles)
+    }
+
+    @Test
+    fun vidlink_movieUrl_carriesMultiLang() {
+        val url = ServerFarm.buildMovieUrl(vidlink, "361743")
+        assertTrue(url.contains("multiLang=1"), "movie url must request multi-audio")
+        assertTrue(url.contains("/api/b/movie/"), "must hit the encrypted-token API")
+    }
+
+    @Test
+    fun vidlink_tvUrl_hasSeasonEpisode() {
+        val url = ServerFarm.buildTvUrl(vidlink, "1399", 1, 1)
+        assertTrue(url.contains("/api/b/tv/1399/1/1"), "tv url must carry season/episode path")
+        assertTrue(url.contains("multiLang=1"))
+    }
+
+    @Test
+    fun vaplayer_presentAndImdbKeyed() {
+        val s = ServerFarm.allServers.first { it.id == "vaplayer" }
+        assertEquals("VaPlayer", s.name)
         assertEquals(ServerIdType.IMDB, s.idType)
-        assertTrue(s.hindi, "MyFlixer Hindi must be flagged Hindi so it biases to priority 4")
-        assertEquals(1080, s.maxQuality)
-        assertTrue(s.hasSubtitles)
-        assertEquals("https://hindi.myflixerapi.com/", s.referer)
+        assertEquals("https://nextgencloudfabric.com/", s.referer)
+        val m = ServerFarm.buildMovieUrl(s, "tt0137523")
+        assertTrue(m.contains("imdb=tt0137523") && m.contains("type=movie"))
+        val tv = ServerFarm.buildTvUrl(s, "tt0944947", 1, 1)
+        assertTrue(tv.contains("type=tv") && tv.contains("season=1") && tv.contains("episode=1"))
     }
 
     @Test
-    fun hindiMovieUrl_usesImdbQuery() {
-        val url = ServerFarm.buildMovieUrl(spec, "tt0111161")
-        assertEquals("https://hindi.myflixerapi.com/embed/movie?imdb=tt0111161", url)
-        assertTrue(url.contains("imdb=tt0111161"))
+    fun vidrock_presentAndTmdbKeyed() {
+        val s = ServerFarm.allServers.first { it.id == "vidrock" }
+        assertEquals("VidRock", s.name)
+        assertEquals(ServerIdType.TMDB, s.idType)
+        val m = ServerFarm.buildMovieUrl(s, "550")
+        assertEquals("https://vidrock.ru/api/movie/550/", m)
+        val tv = ServerFarm.buildTvUrl(s, "1399", 1, 1)
+        assertEquals("https://vidrock.ru/api/tv/1399/1/1/", tv)
     }
 
     @Test
-    fun hindiTvUrl_usesSeaEpiParams() {
-        // TV uses sea/epi query params (not path form), confirmed live.
-        val url = ServerFarm.buildTvUrl(spec, "tt0903747", 4, 9)
-        assertEquals("https://hindi.myflixerapi.com/embed/series?imdb=tt0903747&sea=4&epi=9", url)
-        assertTrue(url.contains("sea=4"), "TV url must use sea= param")
-        assertTrue(url.contains("epi=9"), "TV url must use epi= param")
-        assertTrue(!url.contains("/4/9"), "TV url must NOT use path form")
+    fun videm_presentAndImdbKeyed() {
+        val s = ServerFarm.allServers.first { it.id == "videm" }
+        assertEquals("VidEm", s.name)
+        assertEquals(ServerIdType.IMDB, s.idType)
+        val m = ServerFarm.buildMovieUrl(s, "tt0137523")
+        assertEquals("https://videm.xyz/embed/movie/tt0137523", m)
+        val tv = ServerFarm.buildTvUrl(s, "tt0944947", 1, 1)
+        assertEquals("https://videm.xyz/embed/tv/tt0944947/1/1", tv)
     }
 
     @Test
-    fun hindiServer_hasUniqueId() {
+    fun nhd_presentAndTmdbKeyed() {
+        val s = ServerFarm.allServers.first { it.id == "nhd" }
+        assertEquals("NHD", s.name)
+        assertEquals(ServerIdType.TMDB, s.idType)
+    }
+
+    @Test
+    fun farm_hasUniqueIds() {
         val ids = ServerFarm.allServers.map { it.id }
         assertEquals(ids.size, ids.toSet().size, "server ids must be unique (HealthMonitor keys by id)")
     }
 
     @Test
-    fun hindiServer_withinServerCap() {
-        assertNotNull(ServerFarm.allServers.firstOrNull { it.id == "myflixer-hindi" })
+    fun farm_withinServerCap() {
         assertTrue(ServerFarm.allServers.size <= 12, "farm must stay within MAX_SERVERS cap")
+        assertTrue(ServerFarm.allServers.isNotEmpty())
+        assertNotNull(ServerFarm.allServers.firstOrNull { it.id == "vidlink" })
     }
 }

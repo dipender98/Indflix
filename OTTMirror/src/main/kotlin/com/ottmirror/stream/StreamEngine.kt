@@ -136,8 +136,10 @@ object StreamEngine {
 
         Log.d("OTTMirror", "resolved ${resolved.size} streams from ${servers.size} servers (${resolved.groupBy { it.serverId }.mapValues { it.value.size }})")
 
-        // Prefer Hindi-capable streams while keeping every successful server visible.
-        return resolved.sortedByDescending { it.audioPriority }
+        // Same ranking as emit(): Hindi first, then speed, then quality.
+        return resolved.sortedWith(compareByDescending<RawStream> { it.audioPriority }
+            .thenByDescending { it.measuredKbps ?: 0L }
+            .thenByDescending { it.qualityHint })
     }
 
     /**
@@ -147,10 +149,16 @@ object StreamEngine {
         if (streams.isEmpty()) return
         val emitted = java.util.Collections.synchronizedSet(HashSet<String>())
 
-        // Sort: Hindi first, then preferred resolution, then measured speed.
+        // Ranking (user spec: fastest Hindi first, then everything else):
+        // 1. audioPriority desc — Hindi-dub/Hindi-audio streams (4) lead,
+        //    original (2) / English (1) follow.
+        // 2. measuredKbps desc — fastest measured link wins inside each audio
+        //    group (JSON-API streams that skip probing — vidlink CDN 429s —
+        //    carry null and tie-break on quality below).
+        // 3. qualityHint desc — 1080p before 720p before 480p.
         val sorted = streams.sortedWith(compareByDescending<RawStream> { it.audioPriority }
-            .thenByDescending { it.qualityHint }
-            .thenByDescending { it.measuredKbps ?: 0L })
+            .thenByDescending { it.measuredKbps ?: 0L }
+            .thenByDescending { it.qualityHint })
 
         sorted.forEach { raw ->
             if (raw.url.isBlank()) return@forEach
@@ -267,6 +275,24 @@ object StreamEngine {
             val result = resolveNhd(spec, tmdbId, imdbId, type, season, episode)
             if (result.isNotEmpty()) { okServer(spec, start, "nhd", result.size); return result }
             failServer(spec, "nhd returned no streams")
+            return emptyList()
+        }
+        if (spec.id == "vaplayer") {
+            val result = resolveVaplayer(spec, tmdbId, imdbId, type, season, episode)
+            if (result.isNotEmpty()) { okServer(spec, start, "vaplayer", result.size); return result }
+            failServer(spec, "vaplayer returned no streams")
+            return emptyList()
+        }
+        if (spec.id == "vidrock") {
+            val result = resolveVidrock(spec, tmdbId, type, season, episode)
+            if (result.isNotEmpty()) { okServer(spec, start, "vidrock", result.size); return result }
+            failServer(spec, "vidrock returned no streams")
+            return emptyList()
+        }
+        if (spec.id == "videm") {
+            val result = resolveVidem(spec, tmdbId, imdbId, type, season, episode)
+            if (result.isNotEmpty()) { okServer(spec, start, "videm", result.size); return result }
+            failServer(spec, "videm returned no streams")
             return emptyList()
         }
         if (spec.id == "ezvidapi") {
@@ -625,6 +651,16 @@ object StreamEngine {
         return emptyList()
     }
 
+    /**
+     * NHD resolver (reversed Sept 2026): the extraction API key is embedded
+     * PER-PAGE-LOAD (stale keys 401), so:
+     *   1. GET nhdapi.com/movie/{id} (or /tv/{id}/{s}/{e}) and extract
+     *      `var API_KEY = "..."` and `/api/movie/{id}` from the page JS.
+     *   2. GET nhdapi.com/api/movie/{id}?key=... with the page as Referer.
+     *   3. Response carries playUrl (their /api/hls?t= proxy, needs the
+     *      page's exact UA) — emit with page UA + no Referer.
+     *audioTracks field (per-dub sibling URLs) marks Hindi dubs.
+     */
     private suspend fun resolveNhd(
         spec: ServerSpec,
         tmdbId: Int?,
@@ -633,46 +669,308 @@ object StreamEngine {
         season: Int,
         episode: Int,
     ): List<RawStream> {
-        val id = if (spec.idType == ServerIdType.IMDB) imdbId ?: return emptyList() else tmdbId?.toString() ?: return emptyList()
-        val embedUrl = if (type == "movie") {
-            "https://nhdapi.com/movie/$id"
-        } else {
-            "https://nhdapi.com/tv/$id/$season/$episode"
-        }
+        val id = tmdbId?.toString() ?: return emptyList()
+        val pageUrl = if (type == "movie") "https://nhdapi.com/movie/$id"
+        else "https://nhdapi.com/tv/$id/$season/$episode"
         val referer = "https://nhdapi.com/"
-        Log.d("NHD", "Fetching $embedUrl")
-        val rawText = withTimeoutOrNull(8_000L) {
-            runCatching { app.get(embedUrl, timeout = 8, headers = okHeaders(referer)).text }.getOrNull()
-        } ?: return emptyList()
-        val (unwrapped, _) = unwrapPages(rawText, embedUrl, 12)
+        Log.d("NHD", "page=$pageUrl")
 
-        // Try to extract m3u8 from player config in script tags
-        val doc = Jsoup.parse(unwrapped)
-        val sources = mutableListOf<String>()
+        // 1. Page first — carries the per-load API key.
+        val pageText = withTimeoutOrNull(8_000L) {
+            runCatching { app.get(pageUrl, timeout = 8, headers = okHeaders(referer)).text }.getOrNull()
+        } ?: run { Log.w("NHD", "page fetch failed"); return emptyList() }
+        val apiKey = Regex("""var\s+API_KEY\s*=\s*"([^"]+)"""").find(pageText)?.groupValues?.get(1)
+        if (apiKey.isNullOrBlank()) {
+            Log.w("NHD", "no API_KEY in page (keys embedded only when service is up)")
+            return emptyList()
+        }
+        val apiPath = Regex("""var\s+API_PATH\s*=\s*"([^"]+)"""").find(pageText)?.groupValues?.get(1)
+            ?: if (type == "movie") "/api/movie/$id" else "/api/tv/$id"
 
-        doc.select("script").forEach { script ->
-            val data = script.data()
-            val regex = Regex("""["']?(?:file|url|src|source|video_url|stream_url)["']?\s*[:=]\s*["'](https?://[^"']+\.(?:m3u8|mp4)[^"']*)["']""", RegexOption.IGNORE_CASE)
-            regex.findAll(data).forEach { match ->
-                match.groupValues[1].takeIf { it.isNotBlank() }?.let { sources.add(it) }
-            }
+        // 2. Extraction API.
+        val apiUrl = "https://nhdapi.com$apiPath?key=$apiKey"
+        val jsonText = withTimeoutOrNull(10_000L) {
+            runCatching {
+                app.get(apiUrl, timeout = 10, headers = okHeaders(pageUrl)).text
+            }.getOrNull()
+        } ?: run { Log.w("NHD", "extraction API no response"); return emptyList() }
+        val json = runCatching { org.json.JSONObject(jsonText) }.getOrElse {
+            Log.w("NHD", "non-JSON extraction response: ${safeSnippet(jsonText)}")
+            return emptyList()
+        }
+        if (!json.optBoolean("success", false)) {
+            Log.w("NHD", "extraction API success=false: ${safeSnippet(jsonText)}")
+            return emptyList()
         }
 
-        if (sources.isEmpty()) {
-            sources.addAll(harvestJsUrls(unwrapped))
-        }
+        val subs = mutableListOf<Pair<String, String>>()
+        // The page JS maps /api/subtitles — the JSON carries none, skip.
 
-        if (sources.isNotEmpty()) {
-            val pri = probeAudio(sources.first(), referer)
-            return sources.map { url ->
-                RawStream(
+        val playUrl = json.optString("playUrl").takeIf { it.isNotBlank() }
+        val kind = json.optString("kind").ifBlank { "hls" }
+        val audioTracks = json.optJSONArray("audioTracks")
+
+        // audioTracks is null on the single-dub path; per-dub sibling URLs list
+        // each dub as its own manifest. Hindi naming appears in the label.
+        val out = mutableListOf<RawStream>()
+        if (audioTracks != null && audioTracks.length() > 0) {
+            for (i in 0 until audioTracks.length()) {
+                val t = audioTracks.optJSONObject(i) ?: continue
+                val url = t.optString("url").takeIf { it.isNotBlank() } ?: continue
+                val label = t.optString("label").ifBlank { t.optString("name") }.ifBlank { "Audio" }
+                val isHindi = label.contains("hindi", ignoreCase = true)
+                out += RawStream(
                     serverId = spec.id, serverName = spec.name,
-                    url = url, isM3u8 = url.contains(".m3u8", ignoreCase = true),
-                    referer = referer, audioPriority = pri, audioLabel = audioLabelFor(pri)
+                    url = url, isM3u8 = url.contains(".m3u8", true) || kind == "hls",
+                    referer = null, qualityHint = 1080, subtitles = subs,
+                    audioPriority = if (isHindi) 4 else 1,
+                    audioLabel = if (isHindi) "Hindi" else label,
+                    extraHeaders = mapOf("User-Agent" to NHD_UA),
                 )
             }
+        } else if (!playUrl.isNullOrBlank()) {
+            out += RawStream(
+                serverId = spec.id, serverName = spec.name,
+                url = playUrl, isM3u8 = kind != "mp4",
+                referer = null, qualityHint = 1080, subtitles = subs,
+                extraHeaders = mapOf("User-Agent" to NHD_UA),
+            )
         }
-        return emptyList()
+        if (out.isEmpty()) Log.w("NHD", "no playUrl/audioTracks in response; keys=${namesOf(json)}")
+        return out
+    }
+
+    /**
+     * VaPlayer resolver (CSX CineStream, verified Sept 2026): IMDB-keyed JSON
+     * API → `data.stream_urls[]` are DIRECT HLS master playlists (up to
+     * 1920x800 ≈ 1080p). Zero crypto. Referer nextgencloudfabric.com required
+     * on both API and playlist fetches.
+     */
+    private suspend fun resolveVaplayer(
+        spec: ServerSpec,
+        tmdbId: Int?,
+        imdbId: String?,
+        type: String,
+        season: Int,
+        episode: Int,
+    ): List<RawStream> {
+        val imdb = imdbId ?: run { Log.w("VaPlayer", "imdbId required"); return emptyList() }
+        val apiUrl = if (type == "movie")
+            "https://streamdata.vaplayer.ru/api.php?imdb=$imdb&type=movie"
+        else
+            "https://streamdata.vaplayer.ru/api.php?imdb=$imdb&type=tv&season=$season&episode=$episode"
+        val referer = "https://nextgencloudfabric.com/"
+        val headers = okHeaders(referer)
+        Log.d("VaPlayer", "GET $apiUrl")
+
+        val jsonText = withTimeoutOrNull(10_000L) {
+            runCatching { app.get(apiUrl, timeout = 10, headers = headers).text }.getOrNull()
+        } ?: run { Log.w("VaPlayer", "no API response"); return emptyList() }
+        val root = runCatching { org.json.JSONObject(jsonText) }.getOrElse {
+            Log.w("VaPlayer", "non-JSON response: ${safeSnippet(jsonText)}")
+            return emptyList()
+        }
+        if (root.optInt("status_code", 0) != 200) {
+            Log.w("VaPlayer", "status_code=${root.optInt("status_code", -1)} (404 = not in catalog)")
+            return emptyList()
+        }
+        val data = root.optJSONObject("data") ?: return emptyList()
+        val urls = data.optJSONArray("stream_urls") ?: return emptyList()
+        val subs = data.optJSONArray("default_subs")?.let { arr ->
+            (0 until arr.length()).mapNotNull { i ->
+                val s = arr.optJSONObject(i) ?: return@mapNotNull null
+                val u = s.optString("url").takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                (s.optString("lang").ifBlank { s.optString("code").ifBlank { "English" } }) to u
+            }
+        } ?: emptyList()
+
+        val out = mutableListOf<RawStream>()
+        for (i in 0 until urls.length()) {
+            val u = urls.optString(i).takeIf { it.isNotBlank() } ?: continue
+            out += RawStream(
+                serverId = spec.id, serverName = spec.name,
+                url = u, isM3u8 = true, referer = referer,
+                qualityHint = 0, subtitles = subs,
+            )
+        }
+        Log.d("VaPlayer", "got ${out.size} master playlists")
+        return out
+    }
+
+    /**
+     * VidRock resolver (CSX CineStream, verified Sept 2026): TMDB-keyed JSON
+     * API → `{serverName: {url (AES-GCM b64url), language, type}}`. URLs are
+     * decrypted locally (key static, matches CSX's decryptVidrockUrl):
+     * 12-byte nonce prefix + ciphertext+tag, AES/GCM/NoPadding.
+     * `language` field marks "Hindi" when the server carries a Hindi dub.
+     */
+    private suspend fun resolveVidrock(
+        spec: ServerSpec,
+        tmdbId: Int?,
+        type: String,
+        season: Int,
+        episode: Int,
+    ): List<RawStream> {
+        val id = tmdbId ?: return emptyList()
+        val apiUrl = if (type == "movie") "https://vidrock.ru/api/movie/$id/"
+        else "https://vidrock.ru/api/tv/$id/$season/$episode/"
+        val headers = mapOf(
+            "User-Agent" to HttpKit.userAgent,
+            "Origin" to "https://vidrock.ru",
+            "Referer" to "https://vidrock.ru/",
+        )
+        Log.d("VidRock", "GET $apiUrl")
+
+        val jsonText = withTimeoutOrNull(10_000L) {
+            runCatching { app.get(apiUrl, timeout = 10, headers = headers).text }.getOrNull()
+        } ?: run { Log.w("VidRock", "no API response"); return emptyList() }
+        val root = runCatching { org.json.JSONObject(jsonText) }.getOrElse {
+            Log.w("VidRock", "non-JSON response: ${safeSnippet(jsonText)}")
+            return emptyList()
+        }
+
+        val out = mutableListOf<RawStream>()
+        val names = root.names() ?: return emptyList()
+        for (i in 0 until names.length()) {
+            val serverName = names.optString(i)
+            val sd = root.optJSONObject(serverName) ?: continue
+            val enc = sd.optString("url").takeIf { it.isNotBlank() && it != "error" && it != "null" } ?: continue
+            val decrypted = decryptVidrockUrl(enc) ?: run {
+                Log.w("VidRock", "decrypt failed for $serverName"); continue
+            }
+            val lang = sd.optString("language").ifBlank { "" }
+            val isHindi = lang.contains("hindi", ignoreCase = true)
+            out += RawStream(
+                serverId = spec.id, serverName = spec.name,
+                url = decrypted,
+                isM3u8 = decrypted.contains(".m3u8", true) || sd.optString("type") == "hls",
+                referer = "https://vidrock.ru/",
+                qualityHint = 1080, subtitles = emptyList(),
+                audioPriority = if (isHindi) 4 else 1,
+                audioLabel = lang.ifBlank { "" },
+            )
+        }
+        Log.d("VidRock", "got ${out.size} servers (${out.map { it.audioLabel }.distinct()})")
+        return out
+    }
+
+    /** VidRock AES-GCM decrypt — 12-byte nonce prefix, static 32-byte hex key.
+     *  Port of CSX's decryptVidrockUrl (verified against live payload). */
+    private fun decryptVidrockUrl(payload: String): String? = runCatching {
+        val keyHex = "7f3e9c2a8b5d1f4e6a9c3b7d2e5f8a1c4b6d9e2f5a8c1b4d7e9f2a5c8b1d4e7f"
+        val keyBytes = keyHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+        val std = payload.replace('-', '+').replace('_', '/')
+        val padded = std + "=".repeat((4 - std.length % 4) % 4)
+        val data = android.util.Base64.decode(padded, android.util.Base64.DEFAULT)
+        require(data.size > 12 + 16) { "payload too short" }
+        val nonce = data.copyOfRange(0, 12)
+        val cipherText = data.copyOfRange(12, data.size)
+
+        val cipher = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(
+            javax.crypto.Cipher.DECRYPT_MODE,
+            javax.crypto.spec.SecretKeySpec(keyBytes, "AES"),
+            javax.crypto.spec.GCMParameterSpec(128, nonce),
+        )
+        String(cipher.doFinal(cipherText), Charsets.UTF_8)
+    }.getOrNull()
+
+    /**
+     * VidEm resolver (2embed.cc's real player, reversed Sept 2026):
+     *   1. GET videm.xyz/embed/{movie|tv}/{imdb}[/s/e] — page carries a signed
+     *      `Q = {..., "ssr":{"servers":[{"ref","name","lang"},...]}}` object.
+     *   2. For each server ref: GET api.php?a=play&ref=...&t={Q.t} →
+     *      {"url":"/_stream?id=...","type":"hls"}.
+     *   3. /_stream URLs are HLS masters (up to 1080p); no Referer needed at
+     *      playback. lang field (null/English/Hindi) drives audio ranking.
+     */
+    private suspend fun resolveVidem(
+        spec: ServerSpec,
+        tmdbId: Int?,
+        imdbId: String?,
+        type: String,
+        season: Int,
+        episode: Int,
+    ): List<RawStream> {
+        val imdb = imdbId ?: run { Log.w("VidEm", "imdbId required"); return emptyList() }
+        val embedUrl = if (type == "movie") "https://videm.xyz/embed/movie/$imdb"
+        else "https://videm.xyz/embed/tv/$imdb/$season/$episode"
+        val referer = "https://videm.xyz/"
+        Log.d("VidEm", "GET $embedUrl")
+
+        val pageText = withTimeoutOrNull((spec.timeoutSec - 2).coerceAtLeast(4) * 1000L) {
+            runCatching { app.get(embedUrl, timeout = ((spec.timeoutSec - 2).coerceAtLeast(4)).toLong(), headers = okHeaders(referer)).text }.getOrNull()
+        } ?: run { Log.w("VidEm", "embed page fetch failed"); return emptyList() }
+
+        // Extract Q = {...} (single line JSON with ssr.servers[] + token t).
+        val qStart = pageText.indexOf("Q = {")
+        if (qStart < 0) { Log.w("VidEm", "no Q object on page"); return emptyList() }
+        val qJson = extractBalancedJson(pageText, qStart + 4) ?: run {
+            Log.w("VidEm", "Q object unparseable"); return emptyList()
+        }
+        val q = runCatching { org.json.JSONObject(qJson) }.getOrElse {
+            Log.w("VidEm", "Q not JSON: ${safeSnippet(qJson)}"); return emptyList()
+        }
+        val token = q.optString("t").takeIf { it.isNotBlank() } ?: run {
+            Log.w("VidEm", "Q has no token"); return emptyList()
+        }
+        val ssr = q.optJSONObject("ssr") ?: run { Log.w("VidEm", "Q has no ssr"); return emptyList() }
+        val servers = ssr.optJSONArray("servers") ?: run { Log.w("VidEm", "ssr has no servers"); return emptyList() }
+
+        val out = mutableListOf<RawStream>()
+        for (i in 0 until servers.length()) {
+            val sv = servers.optJSONObject(i) ?: continue
+            val ref = sv.optString("ref").takeIf { it.isNotBlank() } ?: continue
+            val svName = sv.optString("name").ifBlank { "VidEm" }
+            val lang = sv.optString("lang").ifBlank { "" }
+            val playApi = "https://videm.xyz/api.php?a=play&ref=${java.net.URLEncoder.encode(ref, "UTF-8")}" +
+                "&t=${java.net.URLEncoder.encode(token, "UTF-8")}"
+            val playJsonText = withTimeoutOrNull(6_000L) {
+                runCatching { app.get(playApi, timeout = 6, headers = okHeaders(referer)).text }.getOrNull()
+            } ?: continue
+            val playJson = runCatching { org.json.JSONObject(playJsonText) }.getOrElse { continue }
+            val streamPath = playJson.optString("url").takeIf { it.isNotBlank() } ?: continue
+            val streamUrl = if (streamPath.startsWith("http")) streamPath
+            else "https://videm.xyz$streamPath"
+            val isHindi = lang.contains("hindi", ignoreCase = true)
+            out += RawStream(
+                serverId = spec.id, serverName = "${spec.name} ${svName.substringAfter("Server ")}".trim(),
+                url = streamUrl,
+                isM3u8 = playJson.optString("type") == "hls" || streamUrl.contains(".m3u8", true),
+                referer = null, qualityHint = 1080, subtitles = emptyList(),
+                audioPriority = if (isHindi) 4 else 1,
+                audioLabel = lang,
+            )
+        }
+        Log.d("VidEm", "got ${out.size} streams from ${servers.length()} server refs")
+        return out
+    }
+
+    /** Extract a balanced {...} JSON object starting at [start] (which points
+     *  at '{'). Handles nested braces and strings with escapes — enough for
+     *  the videm Q object. Returns null if unbalanced. */
+    private fun extractBalancedJson(text: String, start: Int): String? {
+        if (start >= text.length || text[start] != '{') return null
+        var depth = 0
+        var inString = false
+        var escaped = false
+        for (i in start until text.length) {
+            val c = text[i]
+            if (escaped) { escaped = false; continue }
+            if (inString) {
+                when (c) {
+                    '\\' -> escaped = true
+                    '"' -> inString = false
+                }
+                continue
+            }
+            when (c) {
+                '"' -> inString = true
+                '{' -> depth++
+                '}' -> { depth--; if (depth == 0) return text.substring(start, i + 1) }
+            }
+        }
+        return null
     }
 
     private suspend fun resolveEzvidapi(
@@ -878,6 +1176,10 @@ object StreamEngine {
         if (!referer.isNullOrBlank()) h["Referer"] = referer
         return h
     }
+
+    /** UA nhdapi's HLS proxy expects at playback (the extraction API echoes it
+     *  back; using the browser UA gets 502 from the upstream). */
+    private const val NHD_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 
     /** JSON key listing for failure logs (shape changes are one log line away).
      *  Keys are server-controlled: strip control chars (log-forgery) and cap length. */

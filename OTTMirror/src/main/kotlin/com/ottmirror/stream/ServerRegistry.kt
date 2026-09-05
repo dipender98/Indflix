@@ -61,10 +61,10 @@ object ServerFarm {
         // {"source":{url, manifest (inline HLS master), qualities[]}, "subtitles":[]}.
         // ── Verified responding embeds (handled by CloudStream extractor registry / harvest) ──
         // VidLink: encrypted-token JSON API (XSalsa20-Poly1305, see VidlinkSource).
-        // multiLang=1 returns a multi-audio adaptive HLS master (Hindi dubs for
-        // Indian titles, English otherwise) with renditions up to 1080p.
-        // Token embeds the TMDB id + a +480s timestamp; only the key in
-        // VidlinkSource.KEY_HEX ever needs rotating when the site updates.
+        // multiLang=1 returns per-quality MP4s (360→1080p) with Hindi dubs for
+        // Indian titles. Token embeds the TMDB id + a +480s timestamp; only the
+        // key in VidlinkSource.KEY_HEX ever needs rotating when the site updates.
+        // RANK 1: Hindi-first priority — Hindi dubs + original Hindi audio.
         ServerSpec(
             id = "vidlink", name = "VidLink",
             idType = ServerIdType.TMDB,
@@ -72,92 +72,55 @@ object ServerFarm {
             tvUrl = "https://vidlink.pro/api/b/tv/{id}/{season}/{episode}?multiLang=1",
             isJsonApi = true, referer = "https://vidlink.pro/",
             hasSubtitles = true, maxQuality = 1080, timeoutSec = 15,
-        ),
-        ServerSpec(
-            id = "2embed.cc", name = "2Embed",
-            idType = ServerIdType.IMDB,
-            movieUrl = "https://www.2embed.cc/embed/movie?imdb={id}",
-            tvUrl = "https://www.2embed.cc/embed/tv?imdb={id}&s={season}&e={episode}",
-            referer = "https://www.2embed.cc/",
-            hasSubtitles = true, maxQuality = 1080, timeoutSec = 10,
-        ),
-        ServerSpec(
-            id = "vsembed", name = "VidSrc",
-            idType = ServerIdType.IMDB,
-            movieUrl = "https://vsembed.ru/embed/{id}",
-            tvUrl = "https://vsembed.ru/embed/{id}/{season}-{episode}",
-            referer = "https://vsembed.ru/",
-            hasSubtitles = true, maxQuality = 1080, timeoutSec = 10,
-        ),
-        // ── Vidsrc family (TMDB-keyed) — live per tmdb-embed-providers core list, Sept 2026 ──
-        ServerSpec(
-            id = "vidsrc.pm", name = "VidSrc PM",
-            idType = ServerIdType.TMDB,
-            movieUrl = "https://vidsrc.pm/embed/movie?tmdb={id}",
-            tvUrl = "https://vidsrc.pm/embed/tv?tmdb={id}&season={season}&episode={episode}",
-            referer = "https://vidsrc.pm/",
-            hasSubtitles = false, maxQuality = 1080, timeoutSec = 10,
-        ),
-        ServerSpec(
-            id = "vidsrc.to", name = "VidSrc TO",
-            idType = ServerIdType.TMDB,
-            movieUrl = "https://vidsrc.to/embed/movie/{id}",
-            tvUrl = "https://vidsrc.to/embed/tv/{id}/{season}/{episode}",
-            referer = "https://vidsrc.to/",
-            hasSubtitles = false, maxQuality = 1080, timeoutSec = 10,
-        ),
-        ServerSpec(
-            id = "vidsrc.cc", name = "VidSrc CC",
-            idType = ServerIdType.TMDB,
-            movieUrl = "https://vidsrc.cc/embed/movie/{id}",
-            tvUrl = "https://vidsrc.cc/embed/tv/{id}/{season}/{episode}",
-            referer = "https://vidsrc.cc/",
-            hasSubtitles = false, maxQuality = 1080, timeoutSec = 10,
-        ),
-        ServerSpec(
-            id = "2embed.skin", name = "2Embed Skin",
-            idType = ServerIdType.IMDB,
-            movieUrl = "https://2embed.skin/embed/movie?imdb={id}",
-            tvUrl = "https://2embed.skin/embed/tv?imdb={id}&s={season}&e={episode}",
-            referer = "https://2embed.skin/",
-            hasSubtitles = false, maxQuality = 1080, timeoutSec = 10,
-        ),
-        // Hindi MyFlixerAPI: the whole host is Hindi (Bollywood + Hindi-dubbed
-        // Hollywood). IMDB-keyed embed URL that rides the generic multi-strategy
-        // pipeline — no new resolver. TV uses sea/epi query params (not path).
-        // Domain clones rotate mirrors; swap the host in these two strings if it dies.
-        ServerSpec(
-            id = "myflixer-hindi", name = "MyFlixer Hindi",
-            idType = ServerIdType.IMDB,
-            movieUrl = "https://hindi.myflixerapi.com/embed/movie?imdb={id}",
-            tvUrl = "https://hindi.myflixerapi.com/embed/series?imdb={id}&sea={season}&epi={episode}",
-            referer = "https://hindi.myflixerapi.com/",
-            hasSubtitles = true, maxQuality = 1080, timeoutSec = 12,
             hindi = true,
         ),
-        // NHD API: modern TMDB/IMDB-keyed embed API with a multi-language audio
-        // switcher — Hindi for multi-dub / Indian titles. Rides the generic
-        // pipeline; probeAudio already ranks it Hindi when a dub is present, so
-        // no `hindi = true` force flag is needed here. Stable domain, no key
-        // required (ad-supported). Swap the host if it ever rotates.
+        // VaPlayer (CSX CineStream's top live server, verified Sept 2026):
+        // IMDB-keyed JSON API returning 3 direct HLS master playlists (up to
+        // 1920x800 ≈ 1080p). Zero crypto, zero captcha — fastest full pipeline.
+        // Indian titles (Hanu-Man etc.) resolve in original audio.
+        ServerSpec(
+            id = "vaplayer", name = "VaPlayer",
+            idType = ServerIdType.IMDB,
+            movieUrl = "https://streamdata.vaplayer.ru/api.php?imdb={id}&type=movie",
+            tvUrl = "https://streamdata.vaplayer.ru/api.php?imdb={id}&type=tv&season={season}&episode={episode}",
+            isJsonApi = true, referer = "https://nextgencloudfabric.com/",
+            hasSubtitles = true, maxQuality = 1080, timeoutSec = 12,
+        ),
+        // VidRock (CSX registry, verified Sept 2026): TMDB-keyed JSON API with
+        // per-server map (Nova/Atlas/Luna/Orion/Astra). URLs are AES-GCM
+        // encrypted — decrypted locally in StreamEngine (key is static, see
+        // VIDROCK_KEY_HEX). `language` field marks Hindi when present.
+        ServerSpec(
+            id = "vidrock", name = "VidRock",
+            idType = ServerIdType.TMDB,
+            movieUrl = "https://vidrock.ru/api/movie/{id}/",
+            tvUrl = "https://vidrock.ru/api/tv/{id}/{season}/{episode}/",
+            isJsonApi = true, referer = "https://vidrock.ru/",
+            hasSubtitles = false, maxQuality = 1080, timeoutSec = 12,
+        ),
+        // VidEm (2embed.cc's real player, reversed Sept 2026): IMDB-keyed.
+        // Embed page carries a signed `Q` object with per-server refs; each ref
+        // exchanges at api.php?a=play for a /_stream HLS URL (up to 1080p).
+        // No key, no captcha, no Referer needed at playback.
+        ServerSpec(
+            id = "videm", name = "VidEm",
+            idType = ServerIdType.IMDB,
+            movieUrl = "https://videm.xyz/embed/movie/{id}",
+            tvUrl = "https://videm.xyz/embed/tv/{id}/{season}/{episode}",
+            isJsonApi = true, referer = "https://videm.xyz/",
+            hasSubtitles = false, maxQuality = 1080, timeoutSec = 15,
+        ),
+        // NHD API: TMDB-keyed. The extraction API key is embedded per-page-load
+        // (rotates), so the resolver fetches /movie/{id} first, extracts
+        // API_KEY, then calls /api/movie/{id}?key=. Multi-language audio
+        // switcher — Hindi for multi-dub / Indian titles.
         ServerSpec(
             id = "nhd", name = "NHD",
             idType = ServerIdType.TMDB,
             movieUrl = "https://nhdapi.com/movie/{id}",
             tvUrl = "https://nhdapi.com/tv/{id}/{season}/{episode}",
             referer = "https://nhdapi.com/",
-            hasSubtitles = true, maxQuality = 1080, timeoutSec = 12,
-        ),
-        // EzvidAPI: free TMDB-keyed JSON API returning direct HLS stream URLs.
-        // Uses `vidsrc` provider. Returns JSON with "url" field. No auth required.
-        // Fast, stable domain, 1080p, no ads.
-        ServerSpec(
-            id = "ezvidapi", name = "EzvidAPI",
-            idType = ServerIdType.TMDB,
-            movieUrl = "https://ezvidapi.com/movie/vidsrc/{id}",
-            tvUrl = "https://ezvidapi.com/tv/vidsrc/{id}/{season}/{episode}",
-            referer = "https://ezvidapi.com/",
-            hasSubtitles = false, maxQuality = 1080, timeoutSec = 10,
+            hasSubtitles = true, maxQuality = 1080, timeoutSec = 15,
         ),
     )
 
