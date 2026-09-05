@@ -135,6 +135,19 @@ object ServerFarm {
             hasSubtitles = true, maxQuality = 1080, timeoutSec = 12,
             hindi = true,
         ),
+        // NHD API: modern TMDB/IMDB-keyed embed API with a multi-language audio
+        // switcher — Hindi for multi-dub / Indian titles. Rides the generic
+        // pipeline; probeAudio already ranks it Hindi when a dub is present, so
+        // no `hindi = true` force flag is needed here. Stable domain, no key
+        // required (ad-supported). Swap the host if it ever rotates.
+        ServerSpec(
+            id = "nhd", name = "NHD",
+            idType = ServerIdType.TMDB,
+            movieUrl = "https://nhdapi.com/movie/{id}",
+            tvUrl = "https://nhdapi.com/tv/{id}/{season}/{episode}",
+            referer = "https://nhdapi.com/",
+            hasSubtitles = true, maxQuality = 1080, timeoutSec = 12,
+        ),
     )
 
     fun buildMovieUrl(spec: ServerSpec, id: String): String =
