@@ -263,8 +263,8 @@ object StreamEngine {
         Log.d("OTTMirror", "${spec.id}: embed fetched, ${rawText.length}B")
 
         // 2. Unwrap iframes
-        val unwrapped = unwrapPages(rawText, embedUrl, spec.timeoutSec)
-        if (unwrapped !== rawText) Log.d("OTTMirror", "${spec.id}: unwrapped to new page, ${unwrapped.length}B")
+        val (unwrapped, unwrappedUrl) = unwrapPages(rawText, embedUrl, spec.timeoutSec)
+        if (unwrapped !== rawText) Log.d("OTTMirror", "${spec.id}: unwrapped to $unwrappedUrl, ${unwrapped.length}B")
 
         // 3. Direct stream URL regex harvest
         val direct = harvestUrls(unwrapped)
@@ -283,14 +283,23 @@ object StreamEngine {
             Log.d("OTTMirror", "${spec.id}: no direct urls in page")
         }
 
-        // 4. CloudStream extractor registry (VidSrc, 2embed, embed.su etc.)
+        // 4. CloudStream extractor registry (VidSrc, 2embed, embed.su, MyFlixer, etc.)
         val regLinks = mutableListOf<ExtractorLink>()
         val regSubs = mutableListOf<SubtitleFile>()
         val regOk = runCatching {
             loadExtractor(url = embedUrl, referer = referer, subtitleCallback = { regSubs.add(it) }, callback = { regLinks.add(it) })
         }.getOrDefault(false)
-        if (regOk && regLinks.isNotEmpty()) {
-            Log.d("OTTMirror", "${spec.id}: extractor registry returned ${regLinks.size} links")
+        // Also try the deepest unwrapped URL — most embed chains register a
+        // CloudStream extractor on the INNER host (the actual player), not the
+        // outer wrapper. The outer page is the correct referer for the inner
+        // player's CORS / origin check.
+        if (unwrappedUrl != embedUrl) {
+            runCatching {
+                loadExtractor(url = unwrappedUrl, referer = embedUrl, subtitleCallback = { regSubs.add(it) }, callback = { regLinks.add(it) })
+            }
+        }
+        if (regLinks.isNotEmpty()) {
+            Log.d("OTTMirror", "${spec.id}: extractor registry returned ${regLinks.size} links (outerOk=$regOk unwrapped=$unwrappedUrl)")
             val result = regLinks.map { link ->
                 val probed = HttpKit.probeSpeed(link.url, link.referer)
                 val pri = if (link.url.contains(".m3u8", ignoreCase = true)) probeAudio(link.url, link.referer) else 0
@@ -301,7 +310,7 @@ object StreamEngine {
             okServer(spec, start, "extractor registry", result.size)
             return result
         } else {
-            Log.d("OTTMirror", "${spec.id}: extractor registry returned no links (ok=$regOk)")
+            Log.d("OTTMirror", "${spec.id}: extractor registry returned no links (outerOk=$regOk unwrapped=$unwrappedUrl)")
         }
 
         // 5. JS config: file:"...", sources:[{file:"..."}]
@@ -618,22 +627,25 @@ object StreamEngine {
         return out
     }
 
-    /** Follow iframes to the deepest player page. */
-    private suspend fun unwrapPages(html: String, baseUrl: String, timeoutSec: Int): String {
+    /** Follow iframes to the deepest player page. Returns the deepest HTML and
+     *  its final URL so [resolveOne] can also pass the inner URL to
+     *  [loadExtractor] — many embed chains (2embed -> vidsrc, superembed -> cloud-hosted
+     *  player) only have a CloudStream extractor registered for the INNER host. */
+    private suspend fun unwrapPages(html: String, baseUrl: String, timeoutSec: Int): Pair<String, String> {
         var curHtml = html; var curUrl = baseUrl
         repeat(MAX_UNWRAP) {
-            val iframe = Jsoup.parse(curHtml).selectFirst("iframe[src]") ?: return curHtml
-            val src = iframe.attr("src").takeIf { it.isNotBlank() } ?: return curHtml
+            val iframe = Jsoup.parse(curHtml).selectFirst("iframe[src]") ?: return curHtml to curUrl
+            val src = iframe.attr("src").takeIf { it.isNotBlank() } ?: return curHtml to curUrl
             val resolved = relUrl(curUrl, src)
-            if (resolved == curUrl) return curHtml
+            if (resolved == curUrl) return curHtml to curUrl
             curUrl = resolved
             val next = withTimeoutOrNull((timeoutSec - 2).coerceAtLeast(3) * 1000L) {
                 runCatching { app.get(curUrl, timeout = (timeoutSec - 2).coerceAtLeast(3).toLong(), headers = okHeaders(curUrl)).text }.getOrNull()
-            } ?: return curHtml
-            if (next.isBlank()) return curHtml
+            } ?: return curHtml to curUrl
+            if (next.isBlank()) return curHtml to curUrl
             curHtml = next
         }
-        return curHtml
+        return curHtml to curUrl
     }
 
     /** Harvest bare m3u8/mp4/webm URLs from raw page text. */
@@ -643,14 +655,18 @@ object StreamEngine {
         return STREAM_REGEX.flatMap { r -> r.findAll(n).map { it.groupValues[0].trim('"', '\'') }.filter { it.startsWith("http") } }.distinct()
     }
 
-    /** Extract from JS config: file:"..." / sources:[{file:"..."}] / url:"..." */
+    /** Extract from JS config: file:"..." / sources:[{file:"..."}] / url:"..."
+     *  Also catches JWPlayer `setup({file:...})` and the broader set of stream
+     *  key names used by VidSrc / MyFlixer / SuperEmbed / NHD players. */
     private fun harvestJsUrls(text: String?): List<String> {
         if (text.isNullOrBlank()) return emptyList()
         val n = text.replace("\\/", "/")
         val patterns = listOf(
-            Regex("""["']?(?:file|url|src|hlsUrl|hls_source|streamUrl|stream_url|playUrl)["']?\s*[:=]\s*["']([^"']+\.(?:m3u8|mp4)[^"']*)["']""", RegexOption.IGNORE_CASE),
+            Regex("""["']?(?:file|url|src|hlsUrl|hls_source|streamUrl|stream_url|playUrl|play_url|file_url|source_url|videoUrl|video_url|stream)["']?\s*[:=]\s*["']([^"']+\.(?:m3u8|mp4)[^"']*)["']""", RegexOption.IGNORE_CASE),
             Regex("""sources\s*[:=]\s*\[\s*\{\s*["']?file["']?\s*[:=]\s*["']([^"']+\.(?:m3u8|mp4)[^"']*)["']""", RegexOption.IGNORE_CASE),
+            Regex("""sources\s*[:=]\s*\[\s*\{\s*["']?(?:url|src|source)["']?\s*[:=]\s*["']([^"']+\.(?:m3u8|mp4)[^"']*)["']""", RegexOption.IGNORE_CASE),
             Regex("""["'](?:source|src)["']\s*[:=]\s*["']([^"']+\.(?:m3u8|mp4)[^"']*)["']""", RegexOption.IGNORE_CASE),
+            Regex("""\.setup\s*\(\s*\{[^}]*?["']?file["']?\s*[:=]\s*["']([^"']+\.(?:m3u8|mp4)[^"']*)["']""", RegexOption.IGNORE_CASE),
         )
         return patterns.flatMap { p -> p.findAll(n).map { it.groupValues[1].trim() }.filter { it.startsWith("http") } }.distinct()
     }
