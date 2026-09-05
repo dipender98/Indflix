@@ -38,6 +38,11 @@ data class ServerSpec(
     val hasSubtitles: Boolean = false,
     val maxQuality: Int = 0,
     val timeoutSec: Int = 10,
+    /** Marks a server whose entire host serves Hindi audio (Bollywood +
+     *  Hindi-dubbed Hollywood). Ranked as Hindi (priority 4) even when the
+     *  manifest declares no labelled `hi` track, so probe-based detection —
+     *  which is unreliable for Hindi-only hosts — never buries it. */
+    val hindi: Boolean = false,
 )
 
 /**
@@ -116,6 +121,19 @@ object ServerFarm {
             tvUrl = "https://2embed.skin/embed/tv?imdb={id}&s={season}&e={episode}",
             referer = "https://2embed.skin/",
             hasSubtitles = false, maxQuality = 1080, timeoutSec = 10,
+        ),
+        // Hindi MyFlixerAPI: the whole host is Hindi (Bollywood + Hindi-dubbed
+        // Hollywood). IMDB-keyed embed URL that rides the generic multi-strategy
+        // pipeline — no new resolver. TV uses sea/epi query params (not path).
+        // Domain clones rotate mirrors; swap the host in these two strings if it dies.
+        ServerSpec(
+            id = "myflixer-hindi", name = "MyFlixer Hindi",
+            idType = ServerIdType.IMDB,
+            movieUrl = "https://hindi.myflixerapi.com/embed/movie?imdb={id}",
+            tvUrl = "https://hindi.myflixerapi.com/embed/series?imdb={id}&sea={season}&epi={episode}",
+            referer = "https://hindi.myflixerapi.com/",
+            hasSubtitles = true, maxQuality = 1080, timeoutSec = 12,
+            hindi = true,
         ),
     )
 

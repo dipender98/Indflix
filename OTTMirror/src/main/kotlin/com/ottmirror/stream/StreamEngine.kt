@@ -121,7 +121,13 @@ object StreamEngine {
                             Log.w("OTTMirror", "${spec.id}: no result after ${spec.timeoutSec}s (timeout or crash), recording failure")
                             HealthMonitor.recordFailure(spec.id)
                         }
-                        outcome
+                        // Hindi-only hosts often declare no labelled `hi` audio track,
+                        // so probe-based audioPriority would wrongly read 0. Bias the
+                        // streams from a `spec.hindi` server to Hindi (priority 4) so
+                        // they float above English sources in the audio-first sort.
+                        outcome?.map { s ->
+                            if (spec.hindi) s.copy(audioPriority = 4, audioLabel = "Hindi") else s
+                        }
                     } finally { sem.release() }
                 }
             }.awaitAll().filterNotNull().flatten()
