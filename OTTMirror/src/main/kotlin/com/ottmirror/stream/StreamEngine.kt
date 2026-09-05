@@ -81,6 +81,7 @@ object StreamEngine {
             return emptyList()
         }
         val healthy = ServerFarm.allServers.filter { HealthMonitor.isHealthy(it.id) }
+        Log.d("OTTMirror", "healthy: ${healthy.size}/${ServerFarm.allServers.size}")
         // A fully-tripped farm used to return emptyList() instantly, so every tap
         // showed "no link found" for a full trip window with zero network traffic.
         // Once per cooldown window, clear the trips and re-probe the whole farm --
@@ -253,13 +254,16 @@ object StreamEngine {
             }.getOrNull()
         }
         if (rawText.isNullOrBlank()) { failServer(spec, "embed fetch blank/timeout: $embedUrl"); return emptyList() }
+        Log.d("OTTMirror", "${spec.id}: embed fetched, ${rawText.length}B")
 
         // 2. Unwrap iframes
         val unwrapped = unwrapPages(rawText, embedUrl, spec.timeoutSec)
+        if (unwrapped !== rawText) Log.d("OTTMirror", "${spec.id}: unwrapped to new page, ${unwrapped.length}B")
 
         // 3. Direct stream URL regex harvest
         val direct = harvestUrls(unwrapped)
         if (direct.isNotEmpty()) {
+            Log.d("OTTMirror", "${spec.id}: direct harvest found ${direct.size} urls")
             val subs = grabSubtitles(unwrapped)
             val result = direct.map { url ->
                 val probed = HttpKit.probeSpeed(url, referer)
@@ -269,6 +273,8 @@ object StreamEngine {
             }
             okServer(spec, start, "direct harvest", result.size)
             return result
+        } else {
+            Log.d("OTTMirror", "${spec.id}: no direct urls in page")
         }
 
         // 4. CloudStream extractor registry (VidSrc, 2embed, embed.su etc.)
@@ -278,6 +284,7 @@ object StreamEngine {
             loadExtractor(url = embedUrl, referer = referer, subtitleCallback = { regSubs.add(it) }, callback = { regLinks.add(it) })
         }.getOrDefault(false)
         if (regOk && regLinks.isNotEmpty()) {
+            Log.d("OTTMirror", "${spec.id}: extractor registry returned ${regLinks.size} links")
             val result = regLinks.map { link ->
                 val probed = HttpKit.probeSpeed(link.url, link.referer)
                 val pri = if (link.url.contains(".m3u8", ignoreCase = true)) probeAudio(link.url, link.referer) else 0
@@ -287,11 +294,14 @@ object StreamEngine {
             }
             okServer(spec, start, "extractor registry", result.size)
             return result
+        } else {
+            Log.d("OTTMirror", "${spec.id}: extractor registry returned no links (ok=$regOk)")
         }
 
         // 5. JS config: file:"...", sources:[{file:"..."}]
         val jsUrls = harvestJsUrls(unwrapped)
         if (jsUrls.isNotEmpty()) {
+            Log.d("OTTMirror", "${spec.id}: js harvest found ${jsUrls.size} urls")
             val subs = grabSubtitles(unwrapped)
             val result = jsUrls.map { url ->
                 val probed = HttpKit.probeSpeed(url, referer)
@@ -301,22 +311,28 @@ object StreamEngine {
             }
             okServer(spec, start, "js config harvest", result.size)
             return result
+        } else {
+            Log.d("OTTMirror", "${spec.id}: no js harvest")
         }
 
         // 6. <video src> / <source src> HTML elements
         val videoSrc = harvestVideoSource(unwrapped, embedUrl)
         if (videoSrc != null) {
+            Log.d("OTTMirror", "${spec.id}: video tag found: $videoSrc")
             val subs = grabSubtitles(unwrapped)
             val probed = HttpKit.probeSpeed(videoSrc, referer)
             val pri = probeAudio(videoSrc, referer)
             okServer(spec, start, "video tag", 1)
             return listOf(RawStream(spec.id, spec.name, videoSrc, videoSrc.contains(".m3u8", ignoreCase = true), referer, 0, probed, subs,
                 audioPriority = pri, audioLabel = audioLabelFor(pri)))
+        } else {
+            Log.d("OTTMirror", "${spec.id}: no video tag")
         }
 
         // 7. Subtitle-only fallback
         val subs = grabSubtitles(unwrapped)
         if (subs.isNotEmpty()) {
+            Log.d("OTTMirror", "${spec.id}: subtitles only (${subs.size})")
             okServer(spec, start, "subtitles only", 0)
             return listOf(RawStream(spec.id, spec.name, "", false, referer, subtitles = subs))
         }
@@ -389,6 +405,7 @@ object StreamEngine {
         else VidlinkSource.tvApiUrl(tmdbId.toString(), season, episode)
         val mediaPage = if (type == "movie") "https://vidlink.pro/movie/$tmdbId"
         else "https://vidlink.pro/tv/$tmdbId/$season/$episode"
+        Log.d("VidLink", "apiUrl=$apiUrl mediaPage=$mediaPage")
 
         val jsonText = withTimeoutOrNull(8_000L) {
             runCatching {
@@ -399,6 +416,7 @@ object StreamEngine {
             Log.w("VidLink", "no API response (timeout/HTTP error) for $mediaPage")
             return emptyList()
         }
+        Log.d("VidLink", "API response length=${jsonText.length}, preview=${safeSnippet(jsonText)}")
         val root = runCatching { org.json.JSONObject(jsonText) }.getOrElse {
             Log.w("VidLink", "non-JSON response for $mediaPage (${jsonText.length}B, starts: ${safeSnippet(jsonText)})")
             return emptyList()
@@ -516,6 +534,7 @@ object StreamEngine {
         apiUrl: String,
         referer: String,
     ): List<RawStream> {
+        Log.d("OTTMirror", "${spec.id}: jsonApi GET $apiUrl")
         val jsonText = withTimeoutOrNull((spec.timeoutSec - 2).coerceAtLeast(3) * 1000L) {
             runCatching {
                 app.get(apiUrl, timeout = (spec.timeoutSec - 2).coerceAtLeast(3).toLong(), headers = okHeaders(referer)).text
@@ -525,6 +544,8 @@ object StreamEngine {
             Log.w("OTTMirror", "${spec.id}: no JSON response (timeout/HTTP error) from $apiUrl")
             return emptyList()
         }
+
+        Log.d("OTTMirror", "${spec.id}: jsonApi response ${jsonText.length}B, preview=${safeSnippet(jsonText)}")
 
         val root = runCatching { org.json.JSONObject(jsonText) }.getOrElse {
             Log.w("OTTMirror", "${spec.id}: non-JSON response from $apiUrl (${jsonText.length}B, starts: ${safeSnippet(jsonText)})")
@@ -676,7 +697,7 @@ object StreamEngine {
      *  embeds (~30s of network) on every single playback tap. */
     @Volatile
     private var lastFarmProbeAt = 0L
-    private const val FARM_REPROBE_COOLDOWN_MS = 60_000L
+    private const val FARM_REPROBE_COOLDOWN_MS = 15_000L
 }
 
 
