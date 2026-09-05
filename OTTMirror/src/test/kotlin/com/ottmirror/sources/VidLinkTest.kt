@@ -102,21 +102,45 @@ class VidlinkTest {
     @Test
     fun vidlinkPlayerHeaders_useNativePlayerAgent() {
         // The bcdn.hakunaymatata.com CDN User-Agent-fingerprints requests:
-        // browser UAs get 428/429, a native player UA gets 200. Playback
+        // browser UAs get 428, a native player UA gets 206. Playback
         // headers therefore must override the UA with a non-browser value.
         val ua = VidlinkSource.PLAYER_HEADERS["User-Agent"]
         assertEquals("ExoPlayer", ua, "vidlink playback must use a native player UA")
     }
 
     @Test
-    fun vidlinkPlayerHeaders_haveSiteContext() {
-        // The CDN also rejects stream requests that lack a vidlink
-        // Origin/Referer (403). The player headers must carry them so
-        // playback avoids ExoPlayer ERROR_CODE_IO_BAD_HTTP_STATUS (2004).
-        assertEquals("https://vidlink.pro", VidlinkSource.PLAYER_HEADERS["Origin"],
-            "vidlink playback must send the site Origin")
-        assertEquals("https://vidlink.pro/", VidlinkSource.PLAYER_HEADERS["Referer"],
-            "vidlink playback must send the site Referer")
+    fun vidlinkPlayerHeaders_baseHasNoReferer() {
+        // Live-probed Sept 2026: the mwVault CDN 429s ANY request that
+        // carries a Referer header (even an empty one). The base playback
+        // headers must therefore never include Referer/Origin.
+        assertTrue(!VidlinkSource.PLAYER_HEADERS.containsKey("Referer"),
+            "mwVault CDN 429s on Referer; base headers must not carry one")
+        assertTrue(!VidlinkSource.PLAYER_HEADERS.containsKey("Origin"),
+            "base headers must stay UA-only; Origin comes from per-quality API headers")
+    }
+
+    @Test
+    fun vidlinkQualityHeaders_emptyApiHeaders_yieldsUaOnly() {
+        // mwVault shape: headers:{} — the CDN serves the MP4 to a bare
+        // ExoPlayer UA (verified 206) and rejects anything with a Referer.
+        val q = org.json.JSONObject("""{"type":"mp4","url":"https://bcdn.hakunaymatata.com/x.mp4","headers":{},"requiresProxy":true}""")
+        val h = VidlinkSource.qualityPlaybackHeaders(q)
+        assertEquals(mapOf("User-Agent" to "ExoPlayer"), h,
+            "mwVault streams must play with UA-only headers")
+    }
+
+    @Test
+    fun vidlinkQualityHeaders_mergeApiProvided() {
+        // mbVault shape: per-quality headers carry the exact referer/origin
+        // the CDN requires (verified 206 with these values).
+        val q = org.json.JSONObject(
+            """{"type":"mp4","url":"https://bcdnxw.hakunaymatata.com/x.mp4",
+               "headers":{"referer":"https://filmboom.top/","origin":"https://filmboom.top"},
+               "requiresProxy":true}""")
+        val h = VidlinkSource.qualityPlaybackHeaders(q)
+        assertEquals("ExoPlayer", h["User-Agent"], "native UA kept")
+        assertEquals("https://filmboom.top/", h["Referer"], "API referer must be forwarded")
+        assertEquals("https://filmboom.top", h["Origin"], "API origin must be forwarded")
     }
 }
 

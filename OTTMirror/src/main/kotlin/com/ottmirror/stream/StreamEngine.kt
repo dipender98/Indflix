@@ -149,16 +149,18 @@ object StreamEngine {
 
             raw.subtitles.forEach { (lang, subUrl) -> onSubtitle(SubtitleFile(lang, subUrl)) }
 
-            // Link headers: Referer first (some CDNs require it), then per-stream
-            // extras. raw.extraHeaders carries the native-player UA + site
-            // Origin/Referer for vidlink CDN streams (see
-            // VidlinkSource.PLAYER_HEADERS) -- without them the player's playback
-            // request gets 403/428/429 and surfaces as ExoPlayer
-            // ERROR_CODE_IO_BAD_HTTP_STATUS (2004). Using a LinkedHashMap
-            // preserves order; an extra header that collides with Referer overrides it.
+            // Link headers: per-stream extras first (vidlink CDN streams carry their
+            // exact playback requirements there — mwVault rejects ANY Referer,
+            // mbVault needs the API-provided origin/referer), then a Referer
+            // fallback only for streams that declare one (embed servers).
+            // Never emit an empty Referer: the vidlink CDN 429s on its mere
+            // presence, which the player surfaces as
+            // ExoPlayer ERROR_CODE_IO_BAD_HTTP_STATUS (2004).
             val linkHeaders = LinkedHashMap<String, String>()
-            linkHeaders["Referer"] = raw.referer ?: ""
             linkHeaders.putAll(raw.extraHeaders)
+            if (!linkHeaders.containsKey("Referer") && !raw.referer.isNullOrBlank()) {
+                linkHeaders["Referer"] = raw.referer!!
+            }
 
             if (raw.isM3u8) {
                 val masterText = raw.inlineManifest ?: withTimeoutOrNull(4000L) {
@@ -403,11 +405,14 @@ object StreamEngine {
         }
 
         // VidLink API error response: {"error":"Invalid token","code":2004}
+        // code 2004 here is the API's token error — NOT ExoPlayer's
+        // ERROR_CODE_IO_BAD_HTTP_STATUS. It appears when the site rotates its
+        // secretbox key; fix by updating VidlinkSource.KEY_HEX.
         if (root.has("error") || root.has("code")) {
             val err = root.optJSONObject("error") ?: root
             val code = err.optInt("code", -1)
             val msg = err.optString("message").ifBlank { err.optString("error") }.ifBlank { "unknown" }
-            Log.w("VidLink", "API error code=$code msg=$msg")
+            Log.w("VidLink", "API error code=$code msg=$msg (code 2004 = token key rotated; update VidlinkSource.KEY_HEX)")
             return emptyList()
         }
 
@@ -426,12 +431,16 @@ object StreamEngine {
             }
         } ?: emptyList()
 
-        // New shape (Sept 2026, sourceId mwVault): stream.qualities maps
-        // "360"/"480"/"720"/"1080" -> {type:"mp4", url (signed, TTL 3600), ...}.
+        // New shape (Sept 2026, sourceId mwVault/mbVault): stream.qualities maps
+        // "360"/"480"/"720"/"1080" -> {type:"mp4", url (signed, TTL 3600),
+        // headers:{referer,origin} (mbVault only, else {}), requiresProxy}.
         // Direct MP4s — no playlist fetch, no speed probe (the CDN rate-limits
-        // hard). The CDN User-Agent-fingerprints requests and 428/429-rejects
-        // browser UAs, so the emission carries VidlinkSource.PLAYER_HEADERS
-        // (ExoPlayer UA) for playback to succeed.
+        // hard). Playback headers are per-source (see
+        // VidlinkSource.PLAYER_HEADERS): mwVault CDN 429s on any Referer so
+        // only the native UA is sent; mbVault requires the API-provided
+        // headers. referer stays null so emit() injects nothing extra — a
+        // blanket vidlink.pro Referer is exactly what breaks playback with
+        // ExoPlayer ERROR_CODE_IO_BAD_HTTP_STATUS (2004).
         val qualities = stream.optJSONObject("qualities")
         if (qualities != null && qualities.length() > 0) {
             val entries = qualities.names()?.let { n ->
@@ -439,21 +448,21 @@ object StreamEngine {
                     val key = n.optString(i)
                     val q = qualities.optJSONObject(key) ?: return@mapNotNull null
                     val url = q.optString("url").takeIf { it.isNotBlank() } ?: return@mapNotNull null
-                    (key.toIntOrNull() ?: 0) to url
+                    Triple(key.toIntOrNull() ?: 0, url, q)
                 }
             }.orEmpty().sortedByDescending { it.first }
             if (entries.isNotEmpty()) {
                 Log.d("VidLink", "qualities shape: ${entries.map { it.first }}p for $mediaPage")
-                return entries.map { (height, url) ->
+                return entries.map { (height, url, q) ->
                     RawStream(
                         serverId = spec.id,
                         serverName = spec.name,
                         url = url,
                         isM3u8 = false,
-                        referer = "https://vidlink.pro/",
+                        referer = null,
                         qualityHint = height,
                         subtitles = subs,
-                        extraHeaders = VidlinkSource.PLAYER_HEADERS,
+                        extraHeaders = VidlinkSource.qualityPlaybackHeaders(q),
                     )
                 }
             }
@@ -485,7 +494,7 @@ object StreamEngine {
                 serverName = spec.name,
                 url = masterUrl,
                 isM3u8 = master != null || masterUrl.contains(".m3u8", ignoreCase = true),
-                referer = "https://vidlink.pro/",
+                referer = null,
                 qualityHint = height,
                 subtitles = subs,
                 audioPriority = pri,

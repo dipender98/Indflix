@@ -46,19 +46,14 @@ data class ServerSpec(
 object ServerFarm {
 
     val allServers: List<ServerSpec> = listOf(
-        // ── JSON API (deterministic, TMDB-keyed) — verified live Sept 2026 ──
-        // api.shows.st returns {"source":{url, manifest (inline HLS master), qualities[]}, "subtitles":[]}.
-        // ONLY TMDB ids yield a non-null source (IMDB ids give source:null).
-        // source.url is a signed URL with no file extension; source.manifest is the
-        // full master playlist text — StreamEngine parses it inline.
-        ServerSpec(
-            id = "shows.st", name = "111Movies",
-            idType = ServerIdType.TMDB,
-            movieUrl = "https://api.shows.st/movie?id={id}&mode=json",
-            tvUrl = "https://api.shows.st/tv?id={id}&season={season}&episode={episode}&mode=json",
-            isJsonApi = true, referer = "https://player.vidlove.cc/",
-            hasSubtitles = true, maxQuality = 1080, timeoutSec = 12,
-        ),
+        // ── JSON API (deterministic, TMDB-keyed) ────────────────────────────
+        // api.shows.st (111Movies) was removed Sept 2026: Cloudflare has
+        // zone-blocked shows.st entirely ("Terms of Service violations" 403
+        // for every request), so it failed resolution on every tap and only
+        // burned a concurrent slot + tripped the breaker. Re-add a ServerSpec
+        // here if the zone comes back or a mirror appears — the JSON API
+        // branch in StreamEngine.resolveJsonApi still supports its shape:
+        // {"source":{url, manifest (inline HLS master), qualities[]}, "subtitles":[]}.
         // ── Verified responding embeds (handled by CloudStream extractor registry / harvest) ──
         // VidLink: encrypted-token JSON API (XSalsa20-Poly1305, see VidlinkSource).
         // multiLang=1 returns a multi-audio adaptive HLS master (Hindi dubs for

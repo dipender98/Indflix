@@ -53,21 +53,43 @@ object VidlinkSource {
     /**
      * Headers the CDN serving the stream URLs requires at PLAYBACK time.
      *
-     * bcdn.hakunaymatata.com (vidlink's host, Sept 2026) fingerprint-filters
-     * requests on more than User-Agent: browser UAs get 428 Precondition
-     * Required / 429, and requests without a vidlink Origin get 403. A native
-     * player UA plus the site Origin/Referer passes through and streams fine.
-     * Verified live Sept 2026: "ExoPlayer" -> HTTP 200 with the full MP4 body.
+     * Probed live Sept 2026 against bcdn.hakunaymatata.com (vidlink's host):
+     *  - mwVault sources (the majority of titles, API `headers` field is
+     *    empty): the CDN 428/429-rejects ANY request carrying a Referer
+     *    header (even an empty one), and 428-rejects browser UAs. A bare
+     *    "ExoPlayer" UA alone, or UA + Origin, streams with HTTP 206.
+     *  - mbVault sources (API `headers` field is non-empty, e.g. a
+     *    filmboom.top origin/referer): the CDN requires exactly those
+     *    per-quality headers from the API response — a generic vidlink.pro
+     *    origin/referer is rejected.
      *
      * These headers are forwarded to the player's HTTP stack for the emitted
-     * stream URL. Without them the player's request is rejected, surfacing as
-     * ExoPlayer ERROR_CODE_IO_BAD_HTTP_STATUS (2004).
+     * stream URL. Without the right combo the player's request is rejected
+     * (403/428/429), surfacing as ExoPlayer ERROR_CODE_IO_BAD_HTTP_STATUS
+     * (2004). Streams that need custom values (mbVault) carry their own
+     * extraHeaders parsed from the API response.
      */
-    val PLAYER_HEADERS: Map<String, String> = mapOf(
-        "User-Agent" to "ExoPlayer",
-        "Origin" to "https://vidlink.pro",
-        "Referer" to "https://vidlink.pro/",
-    )
+    val PLAYER_HEADERS: Map<String, String> = mapOf("User-Agent" to "ExoPlayer")
+
+    /**
+     * Playback headers for one quality entry from the /api/b response.
+     *
+     * Base is [PLAYER_HEADERS] (native UA only — the mwVault CDN 429s on any
+     * Referer). When the API supplies a per-quality `headers` object
+     * (mbVault sources carry e.g. referer/origin filmboom.top), those exact
+     * values are merged in — the CDN accepts nothing else for those URLs.
+     *
+     * [quality] is one entry of `stream.qualities` (may carry
+     * `headers: {referer, origin}` or an empty object).
+     */
+    fun qualityPlaybackHeaders(quality: org.json.JSONObject): Map<String, String> {
+        val out = LinkedHashMap<String, String>(PLAYER_HEADERS)
+        quality.optJSONObject("headers")?.let { h ->
+            h.optString("referer").takeIf { it.isNotBlank() }?.let { out["Referer"] = it }
+            h.optString("origin").takeIf { it.isNotBlank() }?.let { out["Origin"] = it }
+        }
+        return out
+    }
 
     /** 24 zero bytes, same as the site's player. */
     private val NONCE = ByteArray(24)
