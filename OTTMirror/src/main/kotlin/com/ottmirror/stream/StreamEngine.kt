@@ -571,10 +571,29 @@ object StreamEngine {
             runCatching { app.get(embedUrl, timeout = 8, headers = okHeaders(referer)).text }.getOrNull()
         } ?: return emptyList()
         val (unwrapped, _) = unwrapPages(rawText, embedUrl, 12)
-        val jsUrls = harvestJsUrls(unwrapped)
-        if (jsUrls.isNotEmpty()) {
+
+        // Try to extract m3u8 from player config in script tags
+        val doc = Jsoup.parse(unwrapped)
+        val sources = mutableListOf<String>()
+
+        // Look for script tags containing JWPlayer or Clappr config
+        doc.select("script").forEach { script ->
+            val data = script.data()
+            // Match patterns like file:"http...m3u8", url:"http...m3u8", source:"http...m3u8"
+            val regex = Regex("""["']?(?:file|url|src|source|video_url|stream_url)["']?\s*[:=]\s*["'](https?://[^"']+\.(?:m3u8|mp4)[^"']*)["']""", RegexOption.IGNORE_CASE)
+            regex.findAll(data).forEach { match ->
+                match.groupValues[1].takeIf { it.isNotBlank() }?.let { sources.add(it) }
+            }
+        }
+
+        // Also try harvestJsUrls as fallback
+        if (sources.isEmpty()) {
+            sources.addAll(harvestJsUrls(unwrapped))
+        }
+
+        if (sources.isNotEmpty()) {
             val pri = 4 // force Hindi
-            return jsUrls.map { url ->
+            return sources.map { url ->
                 RawStream(
                     serverId = spec.id, serverName = spec.name,
                     url = url, isM3u8 = url.contains(".m3u8", ignoreCase = true),
@@ -605,10 +624,26 @@ object StreamEngine {
             runCatching { app.get(embedUrl, timeout = 8, headers = okHeaders(referer)).text }.getOrNull()
         } ?: return emptyList()
         val (unwrapped, _) = unwrapPages(rawText, embedUrl, 12)
-        val jsUrls = harvestJsUrls(unwrapped)
-        if (jsUrls.isNotEmpty()) {
-            val pri = probeAudio(jsUrls.first(), referer)
-            return jsUrls.map { url ->
+
+        // Try to extract m3u8 from player config in script tags
+        val doc = Jsoup.parse(unwrapped)
+        val sources = mutableListOf<String>()
+
+        doc.select("script").forEach { script ->
+            val data = script.data()
+            val regex = Regex("""["']?(?:file|url|src|source|video_url|stream_url)["']?\s*[:=]\s*["'](https?://[^"']+\.(?:m3u8|mp4)[^"']*)["']""", RegexOption.IGNORE_CASE)
+            regex.findAll(data).forEach { match ->
+                match.groupValues[1].takeIf { it.isNotBlank() }?.let { sources.add(it) }
+            }
+        }
+
+        if (sources.isEmpty()) {
+            sources.addAll(harvestJsUrls(unwrapped))
+        }
+
+        if (sources.isNotEmpty()) {
+            val pri = probeAudio(sources.first(), referer)
+            return sources.map { url ->
                 RawStream(
                     serverId = spec.id, serverName = spec.name,
                     url = url, isM3u8 = url.contains(".m3u8", ignoreCase = true),
