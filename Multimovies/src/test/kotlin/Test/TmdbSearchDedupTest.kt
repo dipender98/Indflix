@@ -1,4 +1,5 @@
-package com.multimovies
+﻿package Test
+import com.multimovies.TmdbService
 
 import kotlin.test.Test
 import kotlin.test.assertEquals

@@ -5,10 +5,10 @@ Indflix contains two independently installable CloudStream plugins. They share t
 ```text
 Indflix/
   Multimovies/                     Multimovies plugin artifact
-    src/main/kotlin/com/multimovies/
-      plugin/                      CloudStream entrypoint and provider workflow
-      core/                        HTTP, TMDB, crypto, and pure ranking helpers
-      sources/                     Third-party source APIs and protocol adapters
+    src/main/kotlin/com/multimovies/ flat layout (no subpackages)
+      MultimoviesPlugin.kt         CloudStream entrypoint and provider workflow
+      SharedServices.kt            HTTP, TMDB, crypto, and pure ranking helpers
+      ExternalSources.kt           Third-party source APIs and protocol adapters
   IndStream/                       IndStream plugin artifact
     src/main/kotlin/com/indstream/ flat layout (no subpackages)
       IndStreamPlugin.kt           CloudStream entrypoint and TMDB catalog provider
@@ -24,7 +24,8 @@ Indflix/
 ## Rules for future changes
 
 - Keep `Multimovies` and `IndStream` as separate installable artifacts. Do not merge provider policies or TMDB clients without compatibility tests.
-- Multimovies keeps its `plugin/`, `core/`, `sources/` split; IndStream is intentionally flat — one package, files named after one primary responsibility.
+- Both modules use the same flat layout — one package, files named after one primary responsibility. No `plugin/`, `core/`, `sources/`, `stream/` subfolders.
+- Unit tests for both modules live in `src/test/kotlin/Test/` (package `Test`), importing `com.multimovies` or `com.indstream` classes.
 - Put CloudStream registration and provider workflows in the plugin entry file.
 - Put reusable services and pure helpers in CoreServices.kt.
 - Put stream selection, health, and link emission in StreamEngine.kt.
