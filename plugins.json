@@ -1,5 +1,26 @@
 [
     {
+        "url": "https://raw.githubusercontent.com/dipender98/Indflix/builds/IndStream.cs3",
+        "status": 1,
+        "version": 4,
+        "name": "IndStream",
+        "internalName": "IndStream",
+        "authors": [
+            "Indflix"
+        ],
+        "description": "Federated embed-server resolver keyed by TMDB/IMDB id. Races dozens of independent HLS/DASH servers, picks the fastest CDN per title, and exposes multi-language audio + per-quality links.",
+        "fileSize": 66090,
+        "repositoryUrl": "https://github.com/dipender98/Indflix",
+        "language": "hi",
+        "tvTypes": [
+            "Movie",
+            "TvSeries"
+        ],
+        "iconUrl": "https://raw.githubusercontent.com/dipender98/Indflix/main/IndStream/icon.png",
+        "apiVersion": 1,
+        "fileHash": "sha256-aad1b8988ca75d30a45a97838df84a629dcb695ffa2ed7ee162956e90cd2b8fd"
+    },
+    {
         "url": "https://raw.githubusercontent.com/dipender98/Indflix/builds/Multimovies.cs3",
         "status": 1,
         "version": 3,
@@ -21,27 +42,6 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/dipender98/Indflix/main/Multimovies/icon.png",
         "apiVersion": 1,
-        "fileHash": "sha256-7e759c52f02821b5a0b102a14b76b9d5a29d2f443b5105e2718385fd5be5d128"
-    },
-    {
-        "url": "https://raw.githubusercontent.com/dipender98/Indflix/builds/OTTMirror.cs3",
-        "status": 1,
-        "version": 3,
-        "name": "OTTMirror",
-        "internalName": "OTTMirror",
-        "authors": [
-            "Indflix"
-        ],
-        "description": "Federated embed-server resolver keyed by TMDB/IMDB id. Races dozens of independent HLS/DASH servers, picks the fastest CDN per title, and exposes multi-language audio + per-quality links.",
-        "fileSize": 62214,
-        "repositoryUrl": "https://github.com/dipender98/Indflix",
-        "language": "hi",
-        "tvTypes": [
-            "Movie",
-            "TvSeries"
-        ],
-        "iconUrl": "https://raw.githubusercontent.com/dipender98/Indflix/main/OTTMirror/icon.png",
-        "apiVersion": 1,
-        "fileHash": "sha256-ea997e54db8771035ac757f4a787b32070573a24691ef6070251605995f12fb1"
+        "fileHash": "sha256-6fde9277a503e487b9d81c0ecdcd5552b8567d94398fbf7beab78238788ccb19"
     }
 ]
