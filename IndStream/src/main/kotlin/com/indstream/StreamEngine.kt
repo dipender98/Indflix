@@ -159,9 +159,23 @@ object StreamEngine {
      * flow through. Streams with qualityHint 0 (unknown, e.g. adaptive HLS
      * masters) are kept: their variants get labelled by M3u8Helper at playback.
      */
-    suspend fun emit(streams: List<RawStream>, onLink: (ExtractorLink) -> Unit, onSubtitle: (SubtitleFile) -> Unit) {
+    suspend fun emit(
+        streams: List<RawStream>,
+        onLink: (ExtractorLink) -> Unit,
+        onSubtitle: (SubtitleFile) -> Unit,
+        /** TMDB original_language ("ja", "hi", …): a stream whose audio label is
+         *  "Original" carries this language, so "VidLink (japanese)" is shown
+         *  instead of "VidLink (original)". */
+        originalLang: String? = null,
+    ) {
         if (streams.isEmpty()) return
         val emitted = java.util.Collections.synchronizedSet(HashSet<String>())
+
+        // Quality gate before numbering (user spec: 720p minimum) so the
+        // -1..-N group numbers are contiguous: gate first, then rank.
+        val eligible = streams.filter { raw ->
+            raw.url.isNotBlank() && !(raw.qualityHint in 1 until MIN_QUALITY_P)
+        }
 
         // Ranking (user spec: fastest Hindi first, then everything else):
         // 1. audioPriority desc â€” Hindi-dub/Hindi-audio streams (4) lead,
@@ -170,24 +184,21 @@ object StreamEngine {
         //    group (JSON-API streams that skip probing â€” vidlink CDN 429s â€”
         //    carry null and tie-break on quality below).
         // 3. qualityHint desc â€” 1080p before 720p before 480p.
-        val sorted = streams.sortedWith(compareByDescending<RawStream> { it.audioPriority }
+        val sorted = eligible.sortedWith(compareByDescending<RawStream> { it.audioPriority }
             .thenByDescending { it.measuredKbps ?: 0L }
             .thenByDescending { it.qualityHint })
 
-        sorted.forEach { raw ->
-            if (raw.url.isBlank()) return@forEach
-            if (!emitted.add(raw.url)) return@forEach
+        // Naming (user spec): "{Server[-n]} ({lang}) {res}" — identical
+        // (name, language, resolution) groups numbered 1..N, to the last one.
+        // dedupeNames returns a list parallel to `sorted`: numbers[i] is the
+        // group number for sorted[i] (0 = unique, no number).
+        val numbers = LinkNaming.dedupeNames(sorted, originalLang)
 
-            // Quality gate: drop sub-720p sources (user spec: 720p minimum).
-            // qualityHint 0 = unknown height (adaptive master) â€” kept, the
-            // player picks the variant; per-variant filtering happens below
-            // for M3U8s whose master declares heights.
-            if (raw.qualityHint in 1 until MIN_QUALITY_P) {
-                Log.d("IndStream", "emit: dropping ${raw.serverName} ${raw.qualityHint}p (< ${MIN_QUALITY_P}p): ${raw.url.take(60)}")
-                return@forEach
-            }
+        sorted.forEachIndexed { index, raw ->
+            val dupIdx = numbers.getOrElse(index) { 0 }
+            if (!emitted.add(raw.url)) return@forEachIndexed
 
-            raw.subtitles.forEach { (lang, subUrl) -> onSubtitle(SubtitleFile(lang, subUrl)) }
+            raw.subtitles.forEach { (lang, subUrl) -> onSubtitle(SubtitleFile(LinkNaming.canonicalSubtitleName(lang), subUrl)) }
 
             // Link headers: per-stream extras first (vidlink CDN streams carry their
             // exact playback requirements there ï¿½ mwVault rejects ANY Referer,
@@ -214,25 +225,47 @@ object StreamEngine {
                     val langs = it.audio.map { r -> "lang=${r.language ?: "none"} name=${r.name} group=${r.groupId}" }
                     Log.d("IndStream", "audioTracks server=${raw.serverName} multiAudio=${it.isMultiAudio} renditions=$langs")
                 }
-                val label = buildString {
-                    append(raw.serverName)
-                    if (raw.audioLabel.isNotBlank()) append(" ï¿½ ${raw.audioLabel}")
-                }
+                // Multi-audio masters carry every language at once — tag them
+                // "multi" (single muxed streams keep their own label).
+                val tagLabel = if (master?.isMultiAudio == true) "multi" else raw.audioLabel
+                // The final height drives the resolution part of the label: for
+                // adaptive masters it comes from the parsed variants, so a
+                // 1080p master shows "1080p" instead of "Auto".
+                val fullHeight = master?.let { ManifestKit.bestHeight(it.variants) }
+                    ?.takeIf { it > 0 } ?: raw.qualityHint
+                val label = LinkNaming.displayName(
+                    serverName = raw.serverName,
+                    audioLabel = tagLabel,
+                    qualityHint = fullHeight,
+                    duplicateIndex = dupIdx,
+                    originalLang = originalLang,
+                )
 
                 if (master?.isMultiAudio == true) {
                     onLink(ExtractorLink(
                         source = raw.serverName, name = "$label Auto",
                         url = raw.url, referer = raw.referer ?: "",
-                        quality = ManifestKit.bestHeight(master.variants).takeIf { it > 0 } ?: raw.qualityHint,
+                        quality = fullHeight,
                         headers = linkHeaders, type = ExtractorLinkType.M3U8,
                     ))
                     M3u8Helper.generateM3u8(raw.serverName, raw.url, raw.referer ?: "",
                         quality = raw.qualityHint.takeIf { it > 0 },
                         headers = linkHeaders,
                     ).filter { it.quality <= 0 || it.quality >= MIN_QUALITY_P }
-                        .forEach { onLink(it) }
+                        .forEach { v ->
+                            // Per-variant resolution: the 720p rung is labelled
+                            // 720p, the 1080p rung 1080p — each keeps the group
+                            // server suffix (VidLink-1 720p / VidLink-1 1080p).
+                            onLink(relabel(v, LinkNaming.displayName(
+                                serverName = raw.serverName,
+                                audioLabel = tagLabel,
+                                qualityHint = v.quality,
+                                duplicateIndex = dupIdx,
+                                originalLang = originalLang,
+                            )))
+                        }
                     master.subtitles.forEach { r ->
-                        r.uri?.let { onSubtitle(SubtitleFile(r.language ?: r.name, ManifestKit.resolveUrl(raw.url, it))) }
+                        r.uri?.let { onSubtitle(SubtitleFile(LinkNaming.canonicalSubtitleName(r.language ?: r.name), ManifestKit.resolveUrl(raw.url, it))) }
                     }
                 } else {
                     val variants = M3u8Helper.generateM3u8(raw.serverName, raw.url, raw.referer ?: "",
@@ -254,15 +287,30 @@ object StreamEngine {
                         // (240â†’1080); keep only 720p+ variants (plus the auto
                         // master link emitted above for ABR playback).
                         variants.filter { it.quality <= 0 || it.quality >= MIN_QUALITY_P }
-                            .forEach { onLink(it) }
+                            .forEach { v ->
+                                onLink(relabel(v, LinkNaming.displayName(
+                                    serverName = raw.serverName,
+                                    audioLabel = raw.audioLabel,
+                                    qualityHint = v.quality,
+                                    duplicateIndex = dupIdx,
+                                    originalLang = originalLang,
+                                )))
+                            }
                     }
                     master?.subtitles?.forEach { r ->
-                        r.uri?.let { onSubtitle(SubtitleFile(r.language ?: r.name, ManifestKit.resolveUrl(raw.url, it))) }
+                        r.uri?.let { onSubtitle(SubtitleFile(LinkNaming.canonicalSubtitleName(r.language ?: r.name), ManifestKit.resolveUrl(raw.url, it))) }
                     }
                 }
             } else {
                 onLink(ExtractorLink(
-                    source = raw.serverName, name = "${raw.serverName} ${ManifestKit.qualityLabel(raw.qualityHint)}".trim(),
+                    source = raw.serverName,
+                    name = LinkNaming.displayName(
+                        serverName = raw.serverName,
+                        audioLabel = raw.audioLabel,
+                        qualityHint = raw.qualityHint,
+                        duplicateIndex = dupIdx,
+                        originalLang = originalLang,
+                    ),
                     url = raw.url, referer = raw.referer ?: "", quality = raw.qualityHint,
                     headers = linkHeaders, type = ExtractorLinkType.VIDEO,
                 ))
@@ -273,6 +321,21 @@ object StreamEngine {
     // ------------------------------------------------------------------
     // Internals ï¿½ multi-strategy pipeline (proven from Multimovies)
     // ------------------------------------------------------------------
+
+    /** Rebuild [link] with [newName] in both `source` and `name` (CloudStream
+     *  keys player-priority on `source` and displays `name`, so they must
+     *  match). Everything else (url/referer/quality/headers/type) is kept. */
+    private fun relabel(link: ExtractorLink, newName: String): ExtractorLink = ExtractorLink(
+        source = newName,
+        name = newName,
+        url = link.url,
+        referer = link.referer,
+        quality = link.quality,
+        headers = link.headers,
+        extractorData = link.extractorData,
+        type = link.type,
+        audioTracks = link.audioTracks,
+    )
 
     private suspend fun resolveOne(spec: ServerSpec, tmdbId: Int, imdbId: String?, type: String, season: Int, episode: Int): List<RawStream> {
         val start = System.currentTimeMillis()
@@ -569,12 +632,19 @@ object StreamEngine {
         }
 
         // Captions live at stream.captions (new shape) or root.captions (legacy).
+        // The `language` field carries the display name — often a NATIVE-SCRIPT
+        // string (اُردُو / বাংলা / العربية / 中文 …), verified live Sept 2026.
+        // `lang`/`name` do NOT exist on the current shape; reading them first is
+        // what made every track show as a numbered "English 1..10" duplicate.
         val subs = (stream.optJSONArray("captions") ?: root.optJSONArray("captions"))?.let { arr ->
             (0 until arr.length()).mapNotNull { i ->
                 val c = arr.optJSONObject(i) ?: return@mapNotNull null
                 val u = c.optString("url").takeIf { it.isNotBlank() } ?: return@mapNotNull null
-                val lang = c.optString("lang").ifBlank { c.optString("name") }.ifBlank { "English" }
-                lang to u
+                val lang = c.optString("language")
+                    .ifBlank { c.optString("lang") }
+                    .ifBlank { c.optString("name") }
+                    .ifBlank { "English" }
+                LinkNaming.canonicalSubtitleName(lang) to u
             }
         } ?: emptyList()
 
@@ -1774,6 +1844,7 @@ object StreamEngine {
     private var lastFarmProbeAt = 0L
     private const val FARM_REPROBE_COOLDOWN_MS = 15_000L
 }
+
 
 
 

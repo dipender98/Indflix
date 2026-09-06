@@ -66,6 +66,10 @@ class IndStreamProvider : MainAPI() {
 
     override var mainUrl = "https://www.themoviedb.org"
     override var name = "IndStream"
+    // India flag in the search-provider picker (three-dot menu) and provider
+    // lists — MainAPI.lang defaults to "en" (UK flag) unless overridden.
+    // CloudStream's SubtitleHelper maps "hi" -> IN.
+    override var lang = "hi"
     override val hasMainPage = true
     override val hasQuickSearch = true
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
@@ -231,7 +235,12 @@ class IndStreamProvider : MainAPI() {
         val episode = epMatch?.groupValues?.get(3)?.toIntOrNull() ?: -1
 
         val needsImdb = ServerFarm.allServers.any { it.idType == ServerIdType.IMDB }
-        val imdbId = if (needsImdb) withTimeoutOrNull(3000L) { TmdbService.fetchMeta(tmdbId, type) }?.imdbId else null
+        // fetchMeta is cached by TmdbService, so reusing the detail here gives us
+        // both the IMDB id and the original_language (for "(japanese)"-style tags)
+        // at no extra network cost.
+        val metaDetail = withTimeoutOrNull(3000L) { TmdbService.fetchMeta(tmdbId, type) }
+        val imdbId = if (needsImdb) metaDetail?.imdbId else null
+        val originalLang = metaDetail?.originalLanguage
         val streams = withTimeoutOrNull(45_000L) {
             StreamEngine.resolve(tmdbId, imdbId, type, season, episode)
         }.orEmpty()
@@ -242,7 +251,7 @@ class IndStreamProvider : MainAPI() {
         }
 
         var emitted = 0
-        StreamEngine.emit(streams, { emitted++; callback(it) }, subtitleCallback)
+        StreamEngine.emit(streams, { emitted++; callback(it) }, subtitleCallback, originalLang)
         android.util.Log.i("IndStream", "loadLinks: tmdb=$tmdbId/$type s=$season e=$episode -> ${streams.size} streams, $emitted links emitted")
         return emitted > 0
     }

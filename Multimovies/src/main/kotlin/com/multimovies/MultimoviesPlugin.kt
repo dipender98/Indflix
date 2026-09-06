@@ -171,6 +171,10 @@ class MultimoviesProvider : MainAPI() {
 
     override var mainUrl = MultimoviesDomainResolver.SEED_DOMAIN
     override var name = "Multimovies"
+    // India flag in the search-provider picker (three-dot menu) and provider
+    // lists — MainAPI.lang defaults to "en" (UK flag) unless overridden.
+    // CloudStream's SubtitleHelper maps "hi" -> IN.
+    override var lang = "hi"
 
     private val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
     private val commonHeaders = mapOf("User-Agent" to userAgent)
@@ -1484,16 +1488,20 @@ object MultiSourcePuller {
             hostOf(url).let { h -> cineverseCdnHosts.any { h == it || h.endsWith(".$it") } } ||
             url.contains("serve_m3u8", ignoreCase = true)
 
-    /** Deterministic identity for an emitted link: `<Server>[ Hindi]`.
+    /** Deterministic identity for an emitted link: `<Server>[ (hindi)]`.
      *  Every ExtractorLink must carry this exact string in BOTH `source` and
      *  `name`: CloudStream saves player priorities keyed on an exact match of
      *  `source` while the server list displays `name`, so any drift (CDN
      *  suffixes, quality suffixes, per-load counters) breaks the user's
      *  ranking. Deliberately free of runtime-derived parts — extractor/extension
-     *  availability and CDN hosts must never influence it. */
-    internal fun linkLabel(base: String?, hindi: Boolean): String =
-        (base?.trim()?.takeIf { it.isNotEmpty() } ?: "Multimovies") +
-            (if (hindi) " Hindi" else "")
+     *  availability and CDN hosts must never influence it.
+     *
+     *  User spec (Sept 2026): language is always in brackets — "(hindi)",
+     *  "(eng)", "(multi)" — matching the IndStream [LinkNaming] convention. */
+    internal fun linkLabel(base: String?, hindi: Boolean): String {
+        val server = base?.trim()?.takeIf { it.isNotEmpty() } ?: "Multimovies"
+        return if (hindi) "$server (hindi)" else server
+    }
 
     /** Build the header set for a request to [url]. The Cineverse CDN requires
      *  the page that linked to it as Referer/Origin; for other hosts the

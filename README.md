@@ -6,8 +6,6 @@ CloudStream → Settings → Extensions → Add repository:
 https://raw.githubusercontent.com/dipender98/Indflix/builds/repo.json
 ```
 
-[![DMCA Protected](https://images.dmca.com/Badges/dmca_protected_120_120.png)](https://www.dmca.com/Protection/Status.aspx?ID=)
-
 ## Project structure
 
 This repository contains two separate CloudStream plugins: `Multimovies` and
@@ -21,60 +19,54 @@ GPL-3.0. See [LICENSE](LICENSE) for the full text and
 [NOTICE](NOTICE) for third-party attributions (CSX CineStream,
 CloudstreamExtensions, CloudStream).
 
-## DMCA / takedown policy
+## DMCA
 
-Indflix is a **provider plugin** for the open-source
-[CloudStream](https://github.com/recloudstream/cloudstream) app. It is a
-discovery/aggregator layer only — it does **not** host, upload, cache,
-scrape, store, mirror, or rebroadcast any video, audio, image, or other
-copyrighted content itself. It resolves public JSON APIs and embed
-player URLs of third-party hosts that are independent of this project,
-and the stream URL is handed back to the user's CloudStream client for
-direct playback from the original host.
+This repository is a **provider plugin** for the open-source
+[CloudStream](https://github.com/recloudstream/cloudstream) app.
+It does **not** host, upload, or redistribute any copyrighted media.
+All stream URLs are resolved at runtime from third-party APIs
+independent of this project.
 
-### What this means in plain terms
+If you are a copyright holder and believe that source code or a
+static asset in this repo infringes your copyright, open an issue
+at <https://github.com/dipender98/Indflix/issues> or email
+<dipender98@gmail.com>. The maintainer aims to respond within
+**48 hours** and remove infringing material within **7 business
+days**.
 
-- The repository contains no media files (video, audio, thumbnails, or
-  subtitles) of any movie, series, anime, or other work.
-- All media URLs returned by the plugins are fetched at runtime from
-  the third-party hosts configured in
-  [`IndStream/src/main/kotlin/com/indstream/ServerRegistry.kt`](IndStream/src/main/kotlin/com/indstream/ServerRegistry.kt)
-  and the equivalent `Multimovies` source files. The project authors do
-  not control, operate, or have access to those hosts.
-- The plugins contain no DRM circumvention, no decryption of paid
-  streaming services, and no copy-protection bypass.
-- The plugins are released under [GPL-3.0](LICENSE) for the source
-  code only. No copyrighted content is included in, distributed with,
-  or required by the source code.
+## Acknowledgements
 
-### How to send a takedown notice
+Indflix stands on the shoulders of a generous open-source community. With
+thanks to:
 
-If you are a copyright holder (or an authorized agent) and you believe
-that **source code, metadata, or a static asset shipped in this
-repository** infringes your copyright, send a written notice that
-includes all 17 items of 17 U.S.C. § 512(c)(3) to the repository
-maintainer:
+- **[CloudStream](https://github.com/recloudstream/cloudstream)** — the
+  open-source streaming app this repo plugs into. None of this would
+  exist without it.
+- **[recloudstream](https://github.com/recloudstream)** — for maintaining
+  the CloudStream gradle plugin, the extension API, and the docs that
+  made writing these plugins possible.
+- **[CloudstreamExtensions](https://github.com/CloudstreamExtensions)** —
+  the long-running community index of CloudStream plugins, which set
+  the conventions (manifest format, repo layout, plugin entry shape) we
+  follow here.
+- **[CSX CineStream](https://github.com/SaurabhKaperwan/CSX)**
+  (SaurabhKaperwan) — the upstream pattern we leaned on hardest while
+  wiring up embed harvesters, the MovieBox resolver, and the
+  server-fan-out patterns. The CSX `ProviderRegistry` and
+  `ApiConstants` are an excellent reference for anyone writing
+  CloudStream providers in Kotlin.
+- **[CSX Utils](https://github.com/SaurabhKaperwan/Utils)** — the
+  dynamic provider-URL manifest (`urls.json`) that several of CSX's
+  embed hosts publish; a great example of a host-rotation pattern
+  resilient to CDN changes.
+- The **enc-dec.app / dec-meowtv / dec-videasy / dec-vidup** family of
+  decryption endpoints — referenced from the CSX ecosystem and very
+  useful while reverse-engineering the embedded players.
+- Every developer who has filed an issue, opened a PR, or shared a
+  debug log. Bug reports are the single biggest contribution to keep
+  this plugin working.
 
-- **GitHub**: open an issue at
-  <https://github.com/dipender98/Indflix/issues> **or** use GitHub's
-  built-in "Report" button on the offending file or line.
-- **Email**: <dipender98@gmail.com> (PGP key available on request).
-
-A valid notice must identify the work claimed, the allegedly
-infringing material with enough detail to locate it (URL + commit
-SHA + line numbers), your contact information, and a statement under
-penalty of perjury that you are authorized to act for the owner.
-
-> **Note for hosting platforms (GitHub, etc.)**: this repository does
-> not host, link to, or distribute copyrighted media. DMCA notices
-> that target *content returned at runtime from third-party hosts* —
-> i.e. URLs or media files that never appear in this repo — are out
-> of scope for § 512 takedowns against this codebase. Please direct
-> those to the operators of the third-party host.
-
-### Takedown response time
-
-The maintainer aims to acknowledge a valid notice within **48 hours**
-and to remove or rewrite the offending material within **7 business
-days**. Counter-notices are handled per 17 U.S.C. § 512(g).
+If you maintain a CloudStream plugin, an open-source stream
+aggregator, or a TMDB/IMDB metadata service and you'd like to be
+listed here, open an issue — happy to credit upstream work.
 

@@ -138,6 +138,10 @@ object TmdbService {
         val tmdbId: Int? = null,
         val imdbId: String? = null,
         val name: String? = null,
+        /** TMDB "original_language" code ("hi", "ja", "en", …). Powers the
+         *  (original) tag on emitted server names — a stream whose audio label is
+         *  "Original" and whose title's origin is Japanese is Japanese audio. */
+        val originalLanguage: String? = null,
         val poster: String? = null,
         val backdrop: String? = null,
         val year: String? = null,
@@ -322,6 +326,7 @@ object TmdbService {
                 tmdbId = m.optInt("id", -1).takeIf { it > 0 },
                 imdbId = m.optJSONObject("external_ids")?.let { str(it, "imdb_id") },
                 name = name,
+                originalLanguage = m.optString("original_language").takeIf { it.isNotBlank() && it != "null" },
                 poster = str(m, "poster_path")?.let { "$IMG_BASE$it" },
                 backdrop = str(m, "backdrop_path")?.let { "$IMG_BACKDROP$it" },
                 year = (str(m, "release_date") ?: str(m, "first_air_date"))?.take(4),
