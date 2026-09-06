@@ -35,6 +35,7 @@ import com.lagradost.cloudstream3.utils.loadExtractor
 import java.net.URLEncoder
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.*
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Deferred
@@ -257,6 +258,18 @@ class MultimoviesProvider : MainAPI() {
         /** How many top-priority player servers the movie-page background
          *  prefetch resolves ahead of the Play tap. */
         const val EMBED_PREFETCH_COUNT = 2
+
+        /** Fast-start fill window: after the first link is emitted, keep pulling
+         *  fast sources for this long so the player gets a few alternates, then
+         *  return so playback starts. The remaining (slower) sources keep
+         *  resolving in the background and land in [FastStartCache] for instant
+         *  replay. */
+        const val FAST_START_FILL_MS = 2_500L
+
+        /** Hard cap on how long [loadLinks] waits before returning, regardless of
+         *  whether the farm has finished. Safety net so a totally dead farm still
+         *  surfaces "no link found" instead of hanging. */
+        const val FAST_START_MAX_MS = 45_000L
 
         /** Max number of detail-page Documents cached in memory. Beyond this,
          *  oldest entries are evicted when a new page is fetched. */
@@ -729,6 +742,13 @@ class MultimoviesProvider : MainAPI() {
                 SourceMetaCache.put(realUrl, SourceMeta(imdbId ?: "", tmdbId?.toString(), null, null))
             }
 
+            // Global id-based sources (2embed / VidSrc / 111Movies / Nxsha / VidEm)
+            // need exactly the ids we now hold — pre-resolve them while the user
+            // reads the detail page so the global path is as warm as the embed path.
+            if (isMovie) prefetchGlobals(
+                SourceMeta(imdbId ?: "", tmdbId?.toString(), null, null), realUrl,
+            )
+
             if (isMovie) {
                 newMovieLoadResponse(title, realUrl, TvType.Movie, realUrl) {
                     this.posterUrl = poster
@@ -882,6 +902,36 @@ class MultimoviesProvider : MainAPI() {
         }
     }
 
+    /** Movie-only pre-warm of the GLOBAL id-based sources into [FastStartCache]
+     *  (the dooplayer embed path has [prefetchEmbeds]; without this the global
+     *  path only resolved on the Play tap). Runs with the gate closed — results
+     *  only land in the cache, nothing touches a player. Never blocks load(). */
+    private fun prefetchGlobals(meta: SourceMeta, pageUrl: String) {
+        if (meta.imdbId.isBlank() && meta.tmdbId == null) return
+        if (FastStartCache.get(pageUrl)?.isNotEmpty() == true) return
+        val sources = buildGlobalSources(meta)
+        if (sources.isEmpty()) return
+        val emitted = java.util.concurrent.atomic.AtomicBoolean(false)
+        searchScope.launch {
+            runCatching {
+                sources.forEach { g ->
+                    pullSource(
+                        g, ConcurrentHashMap(), pageUrl,
+                        Collections.synchronizedSet(HashSet()),
+                        Collections.synchronizedList(mutableListOf()),
+                        { _ -> }, { },
+                        // Closed gate: pre-warm NEVER emits to a player — the
+                        // gathered links land in FastStartCache only.
+                        linksAccepted = java.util.concurrent.atomic.AtomicBoolean(false),
+                        firstLink = null,
+                        cacheKey = pageUrl,
+                    )
+                }
+                emitted.set(true)
+            }
+        }
+    }
+
     /** Resolve the top-priority player servers for [pageUrl] to their final
      *  post-unwrap URLs. Empty when the page exposes no usable options. */
     private suspend fun resolveTopEmbeds(pageUrl: String, doc: Document): List<ResolvedEmbed> {
@@ -919,10 +969,34 @@ class MultimoviesProvider : MainAPI() {
         // don't linger; no liveness probe delays the first frame.
         if (meta != null) {
             LinkCache.get(meta.imdbId, meta.season, meta.episode)?.let { cached ->
-                if (cached.isNotEmpty()) {
-                    cached.forEach { runCatching { callback(it) } }
+                if (cached.first.isNotEmpty()) {
+                    cached.first.forEach { runCatching { callback(it) } }
+                    // Replayed titles must keep their subtitles too — the
+                    // cache stores the normalized server subs (Sept 2026:
+                    // cached replays used to come back subtitle-less).
+                    cached.second.forEach { runCatching { subtitleCallback(it) } }
                     return@withDomainRetry true
                 }
+            }
+        }
+
+        // Fast path 1.5: fast-start cache. If a previous play (or a background pull
+        // from a prior visit) already resolved this exact load url, replay those
+        // links instantly so the player starts with zero head.
+        FastStartCache.get(data)?.let { cached ->
+            if (cached.isNotEmpty()) {
+                cached.forEach { runCatching { callback(it) } }
+                if (meta != null) {
+                    val missing = SubtitleFallback.missingLanguages(
+                        cached.mapNotNull { SubtitleServices.canonicalName(it.name ?: "") }.toSet(),
+                        SubtitleFallback.desiredLanguages(),
+                    )
+                    if (missing.isNotEmpty()) {
+                        SubtitleFallback.fetch(meta.imdbId, meta.season, meta.episode, missing)
+                            .forEach { runCatching { subtitleCallback(it) } }
+                    }
+                }
+                return@withDomainRetry true
             }
         }
 
@@ -958,49 +1032,109 @@ class MultimoviesProvider : MainAPI() {
         // is unwrapped and pulled concurrently, so the fastest working source emits
         // its link first — CloudStream's loading dialog stays visible while slower
         // sources resolve and populates the source list the user can switch between.
+        //
+        // [firstLink]/[linksAccepted] drive the fast-start: links (and subtitles)
+        // are pushed to the player only while [linksAccepted] is true (the fill
+        // window); once loadLinks returns, it flips false so the still-running
+        // background pulls stop touching the (now-closed) player and only land in
+        // [FastStartCache] for instant replay.
         val emitted = Collections.synchronizedSet(HashSet<String>())
         val found = Collections.synchronizedList(mutableListOf<ExtractorLink>())
         val sourceRefs = Collections.synchronizedList(mutableListOf<MultiSourcePuller.Source>())
+        val firstLink = CompletableDeferred<Unit>()
+        val linksAccepted = AtomicBoolean(true)
+        // Subtitle accounting (user spec Sept 2026): every server-owned
+        // subtitle passes through `trackedSubtitle` — names are canonicalized
+        // ("hin" -> "Hindi", اُردُو -> "Urdu"), duplicates per (lang|url) are
+        // dropped, and the language set is remembered so the OpenSubtitles
+        // fallback can top up precisely what no server carried.
+        val collectedSubs = Collections.synchronizedList(mutableListOf<SubtitleFile>())
+        val coveredSubLangs = Collections.synchronizedSet(HashSet<String>())
+        val emittedSubKeys = Collections.synchronizedSet(HashSet<String>())
+        val trackedSubtitle: (SubtitleFile) -> Unit = { sub ->
+            val canonical = SubtitleServices.canonicalName(sub.lang)
+            if (emittedSubKeys.add("$canonical|${sub.url}")) {
+                coveredSubLangs.add(canonical)
+                val normalized = SubtitleFile(canonical, sub.url)
+                collectedSubs.add(normalized)
+                // Only surface subtitles to the player while the fill window is open;
+                // later arrivals are cached for replay rather than pushed live.
+                if (linksAccepted.get()) runCatching { subtitleCallback(normalized) }
+            }
+        }
 
-        // Streaming pipeline: every source (global id-based + each dooplayer embed)
-        // is pulled concurrently, launched in priority order so Cineverse (the
-        // reliable/fast Hindi source) starts resolving and emits its link first;
-        // lower-priority fallbacks join as they resolve.
+        // Streaming pipeline with fast-start: every source (global id-based + each
+        // dooplayer embed) is pulled concurrently, launched in priority order so
+        // Cineverse (the reliable/fast Hindi source) starts resolving and emits its
+        // link first; lower-priority fallbacks join as they resolve.
+        //
+        // The pulls run in the detached [searchScope] so they survive this function
+        // returning: the first link is pushed to the player the moment it's ready
+        // (selecting the fastest server in real time), a short fill window collects
+        // a few more fast sources, then loadLinks returns and playback begins while
+        // the slower servers keep resolving into [FastStartCache] for instant replay.
         val globalSources = buildGlobalSources(meta)
         val orderedEmbeds = embeds.sortedBy { priorityOf(it.name) }
         val labelCounter = ConcurrentHashMap<String, Int>()
 
-        coroutineScope {
-            val embedJobs = orderedEmbeds.map { e ->
-                async {
-                    val finalUrl = MultiSourcePuller.unwrapEmbed(e.url, referer = data, headers = commonHeaders)
-                    // After unwrap, the URL may now point at a downstream CDN
-                    // (Cineverse -> vibuxer / serve_m3u8 proxy). Augment headers
-                    // with the host-specific pair the proxy requires so the
-                    // link the player replays against doesn't 403.
-                    val srcHeaders = commonHeaders + MultiSourcePuller.headersFor(finalUrl, referer = data)
-                    val src = MultiSourcePuller.Source(
-                        name = e.name,
-                        url = finalUrl,
-                        referer = data,
-                        headers = srcHeaders,
-                        // Cached ids let the Nxsha extractor resolve even when the
-                        // embed URL itself carries no tmdb/imdb marker.
-                        tmdbId = meta?.tmdbId,
-                        imdbId = meta?.imdbId,
-                        latencyMs = e.latencyMs,
-                    )
-                    sourceRefs.add(src)
-                    pullSource(src, labelCounter, data, emitted, found, subtitleCallback, callback)
-                }
+        val embedJobs = orderedEmbeds.map { e ->
+            searchScope.launch {
+                val finalUrl = MultiSourcePuller.unwrapEmbed(e.url, referer = data, headers = commonHeaders)
+                // After unwrap, the URL may now point at a downstream CDN
+                // (Cineverse -> vibuxer / serve_m3u8 proxy). Augment headers
+                // with the host-specific pair the proxy requires so the
+                // link the player replays against doesn't 403.
+                val srcHeaders = commonHeaders + MultiSourcePuller.headersFor(finalUrl, referer = data)
+                val src = MultiSourcePuller.Source(
+                    name = e.name,
+                    url = finalUrl,
+                    referer = data,
+                    headers = srcHeaders,
+                    // Cached ids let the Nxsha extractor resolve even when the
+                    // embed URL itself carries no tmdb/imdb marker.
+                    tmdbId = meta?.tmdbId,
+                    imdbId = meta?.imdbId,
+                    latencyMs = e.latencyMs,
+                )
+                sourceRefs.add(src)
+                pullSource(src, labelCounter, data, emitted, found, trackedSubtitle, callback,
+                    linksAccepted = linksAccepted, firstLink = firstLink, cacheKey = data)
             }
-            val globalJobs = globalSources.map { g ->
-                sourceRefs.add(g)
-                async {
-                    pullSource(g, labelCounter, data, emitted, found, subtitleCallback, callback)
-                }
+        }
+        val globalJobs = globalSources.map { g ->
+            sourceRefs.add(g)
+            searchScope.launch {
+                pullSource(g, labelCounter, data, emitted, found, trackedSubtitle, callback,
+                    linksAccepted = linksAccepted, firstLink = firstLink, cacheKey = data)
             }
-            (embedJobs + globalJobs).awaitAll()
+        }
+
+        // Wait for the first link, enjoy a short fill window to grab a few more fast
+        // sources, then hand off to playback. The hard cap guarantees we never hang
+        // past FAST_START_MAX_MS even if the whole farm is slow/dead.
+        withTimeoutOrNull(FAST_START_MAX_MS) {
+            firstLink.await()
+            if (linksAccepted.get()) delay(FAST_START_FILL_MS)
+        }
+        linksAccepted.set(false)
+
+        // OpenSubtitles top-up: when the pulled servers carried no captions
+        // for a wanted language (Hindi/English), fetch them from the fallback
+        // provider — budgeted, dropped on timeout, never blocks the streams
+        // that are already in the player (user spec Sept 2026).
+        if (meta != null) {
+            val missing = SubtitleFallback.missingLanguages(
+                coveredSubLangs.toSet(), SubtitleFallback.desiredLanguages(),
+            )
+            if (missing.isNotEmpty()) {
+                SubtitleFallback.fetch(meta.imdbId, meta.season, meta.episode, missing)
+                    .forEach { sub ->
+                        if (emittedSubKeys.add("${sub.lang}|${sub.url}")) {
+                            collectedSubs.add(sub)
+                            runCatching { subtitleCallback(sub) }
+                        }
+                    }
+            }
         }
 
         val sorted = MultiSourcePuller.sortLinks(found.toList(), sourceRefs.toList(), ::priorityOf, preferHindi = true)
@@ -1009,8 +1143,16 @@ class MultimoviesProvider : MainAPI() {
             // A fully dead prefetched entry would otherwise poison every retry
             // within its TTL — drop it so the next attempt takes the full path.
             if (prefetched) EmbedPrefetchCache.invalidate(data)
+            // Fallback: a background pull may have landed a link in FastStartCache
+            // between the fill window closing and here — replay it so we don't
+            // surface "no link found" when a stream is actually ready.
+            val bg = FastStartCache.get(data)
+            if (bg != null && bg.isNotEmpty()) {
+                bg.forEach { runCatching { callback(it) } }
+                return@withDomainRetry true
+            }
         } else if (meta != null) {
-            LinkCache.put(meta.imdbId, meta.season, meta.episode, deduped)
+            LinkCache.put(meta.imdbId, meta.season, meta.episode, deduped, collectedSubs.toList())
         }
 
         return@withDomainRetry deduped.isNotEmpty()
@@ -1036,6 +1178,16 @@ class MultimoviesProvider : MainAPI() {
         found: MutableList<ExtractorLink>,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
+        /** Fast-start gate: when non-null, links are only pushed to the player
+         *  while this flag is true (the fill window); otherwise they are resolved
+         *  purely into [found]/[FastStartCache] in the background. */
+        linksAccepted: java.util.concurrent.atomic.AtomicBoolean? = null,
+        /** Completed on the first link so the fast-start await in [loadLinks] can
+         *  return and start playback. */
+        firstLink: CompletableDeferred<Unit>? = null,
+        /** When set, every resolved link is also merged into [FastStartCache] (keyed
+         *  by the load url) so a re-tap replays instantly. */
+        cacheKey: String? = null,
     ): List<ExtractorLink> {
         /** Disambiguate duplicate labels within a single load: the first link
          *  with a given label keeps it; subsequent links with the same label
@@ -1054,19 +1206,28 @@ class MultimoviesProvider : MainAPI() {
             )
         }
 
+        /** Emit one disambiguated link: always record it for sorting/caching, and
+         *  push it to the player only while the fast-start fill window is open. */
+        fun emitOne(l: ExtractorLink) {
+            val key = "${hostOf(l.url ?: "")}|${l.quality}"
+            if (!emitted.add(key)) return
+            val dis = disambiguate(l)
+            found.add(dis)
+            if (cacheKey != null) FastStartCache.put(cacheKey, listOf(dis))
+            if (linksAccepted == null || linksAccepted.get()) {
+                runCatching { callback(dis) }
+                firstLink?.complete(Unit)
+            }
+        }
+
         val cineverseFastLink = if (MultiSourcePuller.isCineverseHost(src.url) &&
             (src.url.contains("serve_m3u8=1", ignoreCase = true) ||
                 src.url.contains(".m3u8", ignoreCase = true) ||
                 src.url.contains(".mp4", ignoreCase = true))
         ) buildDirectLink(src) else null
         if (cineverseFastLink != null) {
-            val key = "${hostOf(cineverseFastLink.url ?: "")}|${cineverseFastLink.quality}"
-            if (emitted.add(key)) {
-                val dis = disambiguate(cineverseFastLink)
-                found.add(dis)
-                SourceSpeedTracker.record(src.name, 0L, success = true)
-                runCatching { callback(dis) }
-            }
+            SourceSpeedTracker.record(src.name, 0L, success = true)
+            emitOne(cineverseFastLink)
             return listOf(cineverseFastLink)
         }
         return MultiSourcePuller.pull(
@@ -1074,14 +1235,7 @@ class MultimoviesProvider : MainAPI() {
             timeoutMs = SOURCE_TIMEOUT_MS,
             priorityOf = ::priorityOf,
             onSubtitle = subtitleCallback,
-            onLink = { l ->
-                val key = "${hostOf(l.url ?: "")}|${l.quality}"
-                if (emitted.add(key)) {
-                    val dis = disambiguate(l)
-                    found.add(dis)
-                    runCatching { callback(dis) }
-                }
-            },
+            onLink = { l -> emitOne(l) },
         )
     }
 
@@ -1500,7 +1654,7 @@ object MultiSourcePuller {
      *  "(eng)", "(multi)" — matching the IndStream [LinkNaming] convention. */
     internal fun linkLabel(base: String?, hindi: Boolean): String {
         val server = base?.trim()?.takeIf { it.isNotEmpty() } ?: "Multimovies"
-        return if (hindi) "$server (hindi)" else server
+        return if (hindi) "$server (Hindi)" else server
     }
 
     /** Build the header set for a request to [url]. The Cineverse CDN requires
@@ -2041,11 +2195,15 @@ object EmbedPrefetchCache {
  *  entries expire so stale URLs/tokens don't linger forever. TTL is short (5 min)
  *  because most stream URLs carry expiring signed tokens. */
 object LinkCache {
-    private data class Entry(val links: List<ExtractorLink>, val expiresAt: Long)
+    private data class Entry(
+        val links: List<ExtractorLink>,
+        val subs: List<SubtitleFile>,
+        val expiresAt: Long,
+    )
     private const val TTL_MS = 5 * 60 * 1000L
     private val map = ConcurrentHashMap<String, Entry>()
 
-    fun get(imdbId: String?, season: Int?, episode: Int?): List<ExtractorLink>? {
+    fun get(imdbId: String?, season: Int?, episode: Int?): Pair<List<ExtractorLink>, List<SubtitleFile>>? {
         if (imdbId == null) return null
         val key = "$imdbId|$season|$episode"
         val e = map[key] ?: return null
@@ -2053,13 +2211,41 @@ object LinkCache {
             map.remove(key)
             return null
         }
+        return e.links to e.subs
+    }
+
+    fun put(imdbId: String?, season: Int?, episode: Int?, links: List<ExtractorLink>, subs: List<SubtitleFile> = emptyList()) {
+        if (imdbId == null || links.isEmpty()) return
+        map["$imdbId|$season|$episode"] = Entry(links, subs, System.currentTimeMillis() + TTL_MS)
+    }
+}
+
+/** Per-load-url cache of resolved stream links for the fast-start path. Keyed by
+ *  the exact url loadLinks() receives (episode/movie page), so a re-tap — or a
+ *  Play tapped while a background pull from a prior visit is still warm — emits
+ *  instantly with zero head. Also the landing zone for servers that were still
+ *  resolving when playback started: they keep streaming into this cache so the
+ *  next play already has the full list. Short TTL (stream URLs are signed/expiring). */
+object FastStartCache {
+    private data class Entry(val links: List<ExtractorLink>, val expiresAt: Long)
+    private const val TTL_MS = 5 * 60 * 1000L
+    private val map = ConcurrentHashMap<String, Entry>()
+
+    fun get(key: String): List<ExtractorLink>? {
+        val e = map[key] ?: return null
+        if (System.currentTimeMillis() > e.expiresAt) { map.remove(key); return null }
         return e.links
     }
 
-    fun put(imdbId: String?, season: Int?, episode: Int?, links: List<ExtractorLink>) {
-        if (imdbId == null || links.isEmpty()) return
-        map["$imdbId|$season|$episode"] = Entry(links, System.currentTimeMillis() + TTL_MS)
+    /** Merge [links] for [key] into the existing set (dedup by url) and extend TTL. */
+    fun put(key: String, links: List<ExtractorLink>) {
+        if (links.isEmpty()) return
+        val existing = get(key).orEmpty()
+        val merged = (existing + links).distinctBy { it.url }
+        map[key] = Entry(merged, System.currentTimeMillis() + TTL_MS)
     }
+
+    fun clear() = map.clear()
 }
 
 /** A curated, id-based public streaming source. Extensible — add more hosts by

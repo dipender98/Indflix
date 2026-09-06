@@ -6,18 +6,18 @@ import com.indstream.StreamEngine.RawStream
  * FILE: LinkNaming.kt — the ONE naming rule every emitted link must follow
  * (user spec, Sept 2026):
  *
- *   `{ServerName[-n]} ({language}) {Resolution}`
+ *   `{ServerName[-n]} ({Language}) {Resolution}`
  *
  *  - {ServerName}  base server name. When several links share the exact same
  *                  (name, language, resolution), ALL members are numbered
  *                  right after the server name with "-n": 2 servers render as
- *                  "VidLink-1 (hindi) 1080p" / "VidLink-2 (hindi) 1080p", 5
+ *                  "VidLink-1 (Hindi) 1080p" / "VidLink-2 (Hindi) 1080p", 5
  *                  servers number "-1"…"-5", 20 number "-1"…"-20" — to the
  *                  last one. A unique server keeps its plain name (no "-1").
- *  - ({language})  always present, in brackets. Tokens: hindi, eng, multi,
- *                  japanese, original, … — see [languageTag]. A stream that
- *                  carries several languages at once (dual-audio master) is
- *                  "multi".
+ *  - ({Language})  always present, in brackets. Full display names with a
+ *                  capital initial: Hindi, English, Multi, Japanese, …  — see
+ *                  [languageTag]. A stream that carries several languages at
+ *                  once (dual-audio master) is "Multi".
  *  - {Resolution}  the stream's tallest known height ("1080p", "4K"). A
  *                  resolution that already appears inside the server-name
  *                  indicator is NOT repeated (spec: drop it).
@@ -25,55 +25,26 @@ import com.indstream.StreamEngine.RawStream
 object LinkNaming {
 
     /**
-     * Canonical display token for a language. Accepts anything a resolver
-     * might recover (ISO codes, API strings, native-script names like
-     * "हिन्दी"/"اُردُو") and maps it into the short families the UI shows:
-     * hindi, eng, multi, japanese, … Falls back to the cleaned input.
+     * Canonical display name for a language: FULL name with a capital
+     * initial — "Hindi", "English", "Japanese", "Multi" (user spec, Sept
+     * 2026: never short forms like "eng" or lowercase like "hindi").
+     * Accepts anything a resolver might recover (ISO codes, API strings,
+     * native-script names like "हिन्दी"/"اُردُو"). Unknown/blank falls
+     * back to "Multi" (the honest bucket for unlabeled or dual-audio
+     * streams), never empty.
      */
     fun languageTag(raw: String?): String {
-        if (raw.isNullOrBlank()) return "multi"
+        if (raw.isNullOrBlank()) return "Multi"
         val s = raw.trim().lowercase()
-        return when {
-            // Dual/multi audio FIRST: duo wording or the "a+b" combo form must
-            // win over the single-language contains() checks below (a string
-            // like "Hindi+English" contains "hindi").
-            s.contains("dual") || s.contains("multi") || s.contains("+") || s.contains("&") ||
-                s.contains("hindi+english") || s.contains("hindi & english") || s.contains("both") -> "multi"
-            // Hindi family (incl. Devanagari + short codes).
-            s.contains("hindi") || s == "hi" || s == "hin" || s.contains("हिन्दी") || s.contains("हिंदी") -> "hindi"
-            s.contains("urdu") || s == "ur" || s.contains("اُردُو") || s.contains("اردو") -> "urdu"
-            // English family.
-            s.contains("english") || s == "eng" || s == "en" || s.contains("inglés") -> "eng"
-            // Common single languages.
-            s.contains("japan") || s == "ja" || s == "jp" || s.contains("日本") -> "japanese"
-            s.contains("tamil") -> "tamil"
-            s.contains("telugu") -> "telugu"
-            s.contains("kannada") -> "kannada"
-            s.contains("malayalam") -> "malayalam"
-            s.contains("bengali") || s.contains("বাংলা") -> "bengali"
-            s.contains("marathi") -> "marathi"
-            s.contains("punjabi") -> "punjabi"
-            s.contains("gujarati") -> "gujarati"
-            s.contains("korean") || s == "ko" -> "korean"
-            s.contains("mandarin") || s.contains("chinese") || s.contains("中文") || s == "zh" -> "chinese"
-            s.contains("french") || s.contains("français") || s == "fr" -> "french"
-            s.contains("spanish") || s.contains("español") || s == "es" -> "spanish"
-            s.contains("german") || s == "de" -> "german"
-            s.contains("arabic") || s.contains("العربية") || s == "ar" -> "arabic"
-            s.contains("russian") || s.contains("русский") || s == "ru" -> "russian"
-            s.contains("portuguese") || s.contains("português") -> "portuguese"
-            s.contains("indonesian") || s == "id" -> "indonesian"
-            s.contains("filipino") || s.contains("tagalog") -> "filipino"
-            s.contains("turkish") || s == "tr" -> "turkish"
-            s.contains("italian") || s == "it" -> "italian"
-            s.contains("thai") || s == "th" -> "thai"
-            // Original = whatever language the title itself is (set upstream);
-            // shown as-is in brackets.
-            s == "original" || s == "orig" || s == "org" -> "original"
-            // Unknown codes map straight through ("te", "kn", …) trimmed to
-            // something readable — never empty.
-            else -> s.substringBefore('-').substringBefore(' ').take(12).ifBlank { "multi" }
-        }
+        // Dual/multi audio FIRST: duo wording or the "a+b" combo form must
+        // win over the single-language checks below (a string like
+        // "Hindi+English" contains "hindi").
+        if (s.contains("dual") || s.contains("multi") || s.contains("+") || s.contains("&") ||
+            s.contains("hindi+english") || s.contains("hindi & english") || s.contains("both")) return "Multi"
+        // "Original" is not a language — callers pass the TMDB original_language
+        // so languageTagFor() maps it to the real name; on its own it stays.
+        if (s == "original" || s == "orig" || s == "org") return "Original"
+        return canonicalSubtitleName(s)
     }
 
     /**
@@ -84,7 +55,7 @@ object LinkNaming {
     fun languageTagFor(raw: String?, originalLang: String? = null): String {
         val s = raw?.trim()?.lowercase().orEmpty()
         if (s.isEmpty() || s == "original" || s == "orig" || s == "org") {
-            return originalLang?.let { languageTag(it) } ?: "original"
+            return originalLang?.let { languageTag(it) } ?: "Original"
         }
         return languageTag(s)
     }
@@ -125,14 +96,14 @@ object LinkNaming {
         val tag = languageTagFor(audioLabel, originalLang)
         val nameWithSub = if (subIndicator.isNullOrBlank()) base else "$base $subIndicator".trim()
         // User spec: the 1/2/3… counter comes directly after the server name,
-        // separated by "-": "VidLink-2 (hindi) 1080p" — NOT at the end of the
+        // separated by "-": "VidLink-2 (Hindi) 1080p" — NOT at the end of the
         // whole label.
         val serverPart = if (duplicateIndex > 0) "$nameWithSub-$duplicateIndex" else nameWithSub
 
-        // Brands already naming the language ("MyFlixer Hindi" + hindi tag)
+        // Brands already naming the language ("MyFlixer Hindi" + Hindi tag)
         // don't repeat it: the (lang) bracket is dropped for them.
         val tagPart = if (
-            tag != "multi" &&
+            tag != "Multi" &&
             Regex("\\b${Regex.escape(tag)}\\b", RegexOption.IGNORE_CASE).containsMatchIn(nameWithSub)
         ) "" else "($tag)"
 
@@ -198,39 +169,42 @@ object LinkNaming {
      *  subtitle menu shows "Urdu", "Bengali", "Arabic" … instead of a dozen
      *  identical fallback labels (verified live: VidLink captions carry
      *  `language` fields like اُردُو | বাংলা | العربية | 中文 which older code
-     *  never read, defaulting every track to "English"). */
+     *  never read, defaulting every track to "English").
+     *  Also maps the 3-letter ISO 639-2 codes (ara, ger, eng, hin, tam …)
+     *  used by OpenSubtitles-based subtitle providers. */
     fun canonicalSubtitleName(raw: String?): String {
         val s = raw?.trim().orEmpty()
         if (s.isBlank()) return "Subtitle"
         val lower = s.lowercase()
         return when {
             lower.contains("हिन्द") || lower.contains("हिंद") || lower == "hi" || lower == "hin" || lower.contains("hindi") -> "Hindi"
-            lower.contains("اُردُو") || lower.contains("اردو") || lower.contains("urdu") || lower == "ur" -> "Urdu"
-            lower.contains("বাংলা") || lower.contains("bengali") || lower.contains("bangla") || lower == "bn" -> "Bengali"
-            lower.contains("العربية") || lower.contains("عرب") || lower.contains("arabic") || lower == "ar" -> "Arabic"
-            lower.contains("русск") || lower.contains("russian") || lower == "ru" -> "Russian"
-            lower.contains("中文") || lower.contains("mandarin") || lower.contains("chinese") || lower == "zh" -> "Chinese"
-            lower.contains("日本語") || lower.contains("日本") || lower.contains("japanese") || lower == "ja" || lower == "jp" -> "Japanese"
-            lower.contains("한국어") || lower.contains("한국") || lower.contains("korean") || lower == "ko" -> "Korean"
-            lower.contains("français") || lower.contains("francais") || lower.contains("french") || lower == "fr" -> "French"
-            lower.contains("español") || lower.contains("espanol") || lower.contains("spanish") || lower == "es" -> "Spanish"
-            lower.contains("português") || lower.contains("portugues") || lower.contains("portuguese") || lower == "pt" -> "Portuguese"
-            lower.contains("filipino") || lower.contains("tagalog") -> "Filipino"
-            lower.contains("indonesian") || lower.contains("bahasa") || lower == "id" -> "Indonesian"
+            lower.contains("اُردُو") || lower.contains("اردو") || lower.contains("urdu") || lower == "ur" || lower == "urd" -> "Urdu"
+            lower.contains("বাংলা") || lower.contains("bengali") || lower.contains("bangla") || lower == "bn" || lower == "ben" || lower == "bang" -> "Bengali"
+            lower.contains("العربية") || lower.contains("عرب") || lower.contains("arabic") || lower == "ar" || lower == "ara" || lower == "arb" -> "Arabic"
+            lower.contains("русск") || lower.contains("russian") || lower == "ru" || lower == "rus" -> "Russian"
+            lower.contains("中文") || lower.contains("mandarin") || lower.contains("chinese") || lower == "zh" || lower == "chi" || lower == "zho" -> "Chinese"
+            lower.contains("日本語") || lower.contains("日本") || lower.contains("japanese") || lower == "ja" || lower == "jp" || lower == "jpn" -> "Japanese"
+            lower.contains("한국어") || lower.contains("한국") || lower.contains("korean") || lower == "ko" || lower == "kor" -> "Korean"
+            lower.contains("français") || lower.contains("francais") || lower.contains("french") || lower == "fr" || lower == "fre" || lower == "fra" -> "French"
+            lower.contains("español") || lower.contains("espanol") || lower.contains("spanish") || lower == "es" || lower == "spa" -> "Spanish"
+            lower.contains("português") || lower.contains("portugues") || lower.contains("portuguese") || lower == "pt" || lower == "por" -> "Portuguese"
+            lower.contains("filipino") || lower.contains("tagalog") || lower == "fil" -> "Filipino"
+            lower.contains("indonesian") || lower.contains("bahasa") || lower == "id" || lower == "ind" -> "Indonesian"
             lower.contains("english") || lower == "en" || lower == "eng" -> "English"
-            lower.contains("tamil") || lower == "ta" -> "Tamil"
-            lower.contains("telugu") || lower == "te" -> "Telugu"
-            lower.contains("malayalam") || lower == "ml" -> "Malayalam"
-            lower.contains("kannada") || lower == "kn" -> "Kannada"
-            lower.contains("marathi") || lower == "mr" -> "Marathi"
-            lower.contains("punjabi") || lower == "pa" -> "Punjabi"
-            lower.contains("gujarati") || lower == "gu" -> "Gujarati"
-            lower.contains("nepali") || lower == "ne" -> "Nepali"
-            lower.contains("sinhala") || lower == "si" -> "Sinhala"
-            lower.contains("thai") || lower == "th" -> "Thai"
-            lower.contains("turkish") || lower == "tr" -> "Turkish"
-            lower.contains("german") || lower == "de" -> "German"
-            lower.contains("italian") || lower == "it" -> "Italian"
+            lower.contains("tamil") || lower == "ta" || lower == "tam" -> "Tamil"
+            lower.contains("telugu") || lower == "te" || lower == "tel" -> "Telugu"
+            lower.contains("malayalam") || lower == "ml" || lower == "mal" -> "Malayalam"
+            lower.contains("kannada") || lower == "kn" || lower == "kan" -> "Kannada"
+            lower.contains("marathi") || lower == "mr" || lower == "mar" -> "Marathi"
+            lower.contains("punjabi") || lower == "pa" || lower == "pan" -> "Punjabi"
+            lower.contains("gujarati") || lower == "gu" || lower == "guj" -> "Gujarati"
+            lower.contains("nepali") || lower == "ne" || lower == "nep" -> "Nepali"
+            lower.contains("sinhala") || lower.contains("singhalese") || lower == "si" || lower == "sin" -> "Sinhala"
+            lower.contains("thai") || lower == "th" || lower == "tha" -> "Thai"
+            lower.contains("turkish") || lower == "tr" || lower == "tur" -> "Turkish"
+            lower.contains("german") || lower == "de" || lower == "ger" || lower == "deu" -> "German"
+            lower.contains("italian") || lower == "it" || lower == "ita" -> "Italian"
+            lower.contains("hindi dubbed") || lower == "dubbed" -> "Hindi"
             else -> s.substringBefore('-').substringBefore(' ').ifBlank { "Subtitle" }
         }
     }

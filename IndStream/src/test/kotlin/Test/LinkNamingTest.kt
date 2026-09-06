@@ -21,46 +21,49 @@ class LinkNamingTest {
 
     @Test
     fun languageTag_hindiEnglishMulti() {
-        assertEquals("hindi", LinkNaming.languageTag("Hindi"))
-        assertEquals("hindi", LinkNaming.languageTag("hi"))
-        assertEquals("hindi", LinkNaming.languageTag("हिन्दी"))
-        assertEquals("eng", LinkNaming.languageTag("English"))
-        assertEquals("eng", LinkNaming.languageTag("en"))
-        assertEquals("multi", LinkNaming.languageTag("Hindi+English"))
-        assertEquals("multi", LinkNaming.languageTag("Dual Audio"))
-        assertEquals("multi", LinkNaming.languageTag("both"))
+        // User spec Sept 2026: FULL names, capital initial — never "eng"/
+        // "hindi" short forms.
+        assertEquals("Hindi", LinkNaming.languageTag("Hindi"))
+        assertEquals("Hindi", LinkNaming.languageTag("hi"))
+        assertEquals("Hindi", LinkNaming.languageTag("हिन्दी"))
+        assertEquals("English", LinkNaming.languageTag("English"))
+        assertEquals("English", LinkNaming.languageTag("en"))
+        assertEquals("English", LinkNaming.languageTag("eng"))
+        assertEquals("Multi", LinkNaming.languageTag("Hindi+English"))
+        assertEquals("Multi", LinkNaming.languageTag("Dual Audio"))
+        assertEquals("Multi", LinkNaming.languageTag("both"))
     }
 
     @Test
     fun languageTag_nativeScriptNames() {
-        assertEquals("urdu", LinkNaming.languageTag("اُردُو"))
-        assertEquals("urdu", LinkNaming.languageTag("urdu"))
-        assertEquals("bengali", LinkNaming.languageTag("বাংলা"))
-        assertEquals("arabic", LinkNaming.languageTag("العربية"))
-        assertEquals("russian", LinkNaming.languageTag("Русский"))
-        assertEquals("chinese", LinkNaming.languageTag("中文"))
-        assertEquals("japanese", LinkNaming.languageTag("日本語"))
+        assertEquals("Urdu", LinkNaming.languageTag("اُردُو"))
+        assertEquals("Urdu", LinkNaming.languageTag("urdu"))
+        assertEquals("Bengali", LinkNaming.languageTag("বাংলা"))
+        assertEquals("Arabic", LinkNaming.languageTag("العربية"))
+        assertEquals("Russian", LinkNaming.languageTag("Русский"))
+        assertEquals("Chinese", LinkNaming.languageTag("中文"))
+        assertEquals("Japanese", LinkNaming.languageTag("日本語"))
     }
 
     @Test
     fun languageTag_blankDefaultsToMulti() {
-        assertEquals("multi", LinkNaming.languageTag(""))
-        assertEquals("multi", LinkNaming.languageTag(null))
+        assertEquals("Multi", LinkNaming.languageTag(""))
+        assertEquals("Multi", LinkNaming.languageTag(null))
     }
 
     // ── languageTagFor ───────────────────────────────────────────
 
     @Test
     fun languageTagFor_originalUsesTmdbCode() {
-        assertEquals("japanese", LinkNaming.languageTagFor("Original", "ja"))
-        assertEquals("hindi", LinkNaming.languageTagFor("", "hi"))
-        assertEquals("eng", LinkNaming.languageTagFor(null, "en"))
+        assertEquals("Japanese", LinkNaming.languageTagFor("Original", "ja"))
+        assertEquals("Hindi", LinkNaming.languageTagFor("", "hi"))
+        assertEquals("English", LinkNaming.languageTagFor(null, "en"))
     }
 
     @Test
     fun languageTagFor_explicitOverridesOriginal() {
         // Explicit "Hindi" stays Hindi even if TMDB says Japanese.
-        assertEquals("hindi", LinkNaming.languageTagFor("Hindi", "ja"))
+        assertEquals("Hindi", LinkNaming.languageTagFor("Hindi", "ja"))
     }
 
     // ── displayName ──────────────────────────────────────────────
@@ -70,7 +73,7 @@ class LinkNamingTest {
         val name = LinkNaming.displayName(
             serverName = "VidLink", audioLabel = "Hindi", qualityHint = 1080,
         )
-        assertEquals("VidLink (hindi) 1080p", name)
+        assertEquals("VidLink (Hindi) 1080p", name)
     }
 
     @Test
@@ -89,7 +92,7 @@ class LinkNamingTest {
             serverName = "PrimeSrc", audioLabel = "Original", qualityHint = 1080,
             subIndicator = "Nova 1080p",
         )
-        assertEquals("PrimeSrc Nova 1080p (original)", name)
+        assertEquals("PrimeSrc Nova 1080p (Original)", name)
     }
 
     @Test
@@ -97,15 +100,15 @@ class LinkNamingTest {
         val name = LinkNaming.displayName(
             serverName = "VaPlayer", audioLabel = "English", qualityHint = 0,
         )
-        assertEquals("VaPlayer (eng)", name)
+        assertEquals("VaPlayer (English)", name)
     }
 
     @Test
     fun displayName_multiAudio() {
         val name = LinkNaming.displayName(
-            serverName = "VidLink", audioLabel = "multi", qualityHint = 1080,
+            serverName = "VidLink", audioLabel = "Multi", qualityHint = 1080,
         )
-        assertEquals("VidLink (multi) 1080p", name)
+        assertEquals("VidLink (Multi) 1080p", name)
     }
 
     // ── numbering: unique → no number ────────────────────────────
@@ -178,8 +181,8 @@ class LinkNamingTest {
                 qualityHint = s.qualityHint, duplicateIndex = nums[i],
             )
         }
-        assertEquals("VidLink-1 (hindi) 1080p", names[0])
-        assertEquals("VidLink-2 (hindi) 1080p", names[1])
+        assertEquals("VidLink-1 (Hindi) 1080p", names[0])
+        assertEquals("VidLink-2 (Hindi) 1080p", names[1])
     }
 
     @Test
@@ -191,7 +194,7 @@ class LinkNamingTest {
                 serverName = s.serverName, audioLabel = s.audioLabel,
                 qualityHint = s.qualityHint, duplicateIndex = nums[i],
             )
-            assertEquals("PrimeSrc-${i + 1} (eng) 720p", name)
+            assertEquals("PrimeSrc-${i + 1} (English) 720p", name)
         }
     }
 
@@ -216,6 +219,10 @@ class LinkNamingTest {
         assertEquals("Hindi", LinkNaming.canonicalSubtitleName("hi"))
         assertEquals("English", LinkNaming.canonicalSubtitleName("en"))
         assertEquals("English", LinkNaming.canonicalSubtitleName("English"))
+        // 3-letter ISO 639-2 codes (OpenSubtitles addon shape, verified live).
+        assertEquals("Arabic", LinkNaming.canonicalSubtitleName("ara"))
+        assertEquals("German", LinkNaming.canonicalSubtitleName("ger"))
+        assertEquals("Hindi", LinkNaming.canonicalSubtitleName("hin"))
     }
 
     @Test

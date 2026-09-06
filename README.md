@@ -1,72 +1,56 @@
+## About
+
+Indflix is a [CloudStream](https://github.com/recloudstream/cloudstream)
+provider plugin for movies, TV series, anime, and cartoons. It races
+multiple independent stream servers per title and exposes
+**multi-language audio** — Hindi, English, Tamil, Telugu, dubbed, dual-audio.
+
 ## Install
 
-CloudStream → Settings → Extensions → Add repository:
+CloudStream → **Settings** → **Extensions** → **Add repository**:
 
 ```
 https://raw.githubusercontent.com/dipender98/Indflix/builds/repo.json
 ```
 
-## Project structure
+## Features
 
-This repository contains two separate CloudStream plugins: `Multimovies` and
-`IndStream`. Both use a single flat package (`com.multimovies` and
-`com.indstream` respectively). See [ARCHITECTURE.md](ARCHITECTURE.md) before
-adding new files.
+- 🎬 **Multi-server streaming** — VidLink, VaPlayer, VidRock, VidEm,
+  PrimeSrc, MyFlixer Hindi, MovieBox, Videasy Hindi
+- 🇮🇳 **Hindi audio priority** — Hindi servers ranked first, with
+  per-server audio language detection
+- 📺 **Full media support** — Movies, TV series, anime, anime movies,
+  cartoons
+- 🎯 **Quality gate** — streams below 720p filtered out; up to 4K
 
 ## License
 
-GPL-3.0. See [LICENSE](LICENSE) for the full text and
-[NOTICE](NOTICE) for third-party attributions (CSX CineStream,
-CloudstreamExtensions, CloudStream).
+[GPL-3.0](LICENSE) · [Third-party notices](NOTICE)
 
 ## DMCA
 
-This repository is a **provider plugin** for the open-source
+This is a **provider plugin** for the open-source
 [CloudStream](https://github.com/recloudstream/cloudstream) app.
 It does **not** host, upload, or redistribute any copyrighted media.
 All stream URLs are resolved at runtime from third-party APIs
 independent of this project.
 
-If you are a copyright holder and believe that source code or a
-static asset in this repo infringes your copyright, open an issue
-at <https://github.com/dipender98/Indflix/issues> or email
-<dipender98@gmail.com>. The maintainer aims to respond within
-**48 hours** and remove infringing material within **7 business
-days**.
+These extensions function like an ordinary browser that fetches
+video files from the internet. The content accessed is not hosted
+by this repository or the CloudStream app. It is the sole
+responsibility of the user to comply with their country's or
+state's laws. If you believe content is violating intellectual
+property, please contact the actual file hosts — not the owners
+of this repository.
 
-## Acknowledgements
+If you are a copyright holder and believe that **source code** in
+this repository infringes your copyright, open an
+[issue](https://github.com/dipender98/Indflix/issues).
 
-Indflix stands on the shoulders of a generous open-source community. With
-thanks to:
+## Credits
 
-- **[CloudStream](https://github.com/recloudstream/cloudstream)** — the
-  open-source streaming app this repo plugs into. None of this would
-  exist without it.
-- **[recloudstream](https://github.com/recloudstream)** — for maintaining
-  the CloudStream gradle plugin, the extension API, and the docs that
-  made writing these plugins possible.
-- **[CloudstreamExtensions](https://github.com/CloudstreamExtensions)** —
-  the long-running community index of CloudStream plugins, which set
-  the conventions (manifest format, repo layout, plugin entry shape) we
-  follow here.
-- **[CSX CineStream](https://github.com/SaurabhKaperwan/CSX)**
-  (SaurabhKaperwan) — the upstream pattern we leaned on hardest while
-  wiring up embed harvesters, the MovieBox resolver, and the
-  server-fan-out patterns. The CSX `ProviderRegistry` and
-  `ApiConstants` are an excellent reference for anyone writing
-  CloudStream providers in Kotlin.
-- **[CSX Utils](https://github.com/SaurabhKaperwan/Utils)** — the
-  dynamic provider-URL manifest (`urls.json`) that several of CSX's
-  embed hosts publish; a great example of a host-rotation pattern
-  resilient to CDN changes.
-- The **enc-dec.app / dec-meowtv / dec-videasy / dec-vidup** family of
-  decryption endpoints — referenced from the CSX ecosystem and very
-  useful while reverse-engineering the embedded players.
-- Every developer who has filed an issue, opened a PR, or shared a
-  debug log. Bug reports are the single biggest contribution to keep
-  this plugin working.
-
-If you maintain a CloudStream plugin, an open-source stream
-aggregator, or a TMDB/IMDB metadata service and you'd like to be
-listed here, open an issue — happy to credit upstream work.
+- [CloudStream](https://github.com/recloudstream/cloudstream) · [recloudstream](https://github.com/recloudstream)
+- [CSX CineStream](https://github.com/SaurabhKaperwan/CSX) · [CSX Utils](https://github.com/SaurabhKaperwan/Utils)
+- [CloudstreamExtensions](https://github.com/CloudstreamExtensions)
+- [enc-dec.app](https://enc-dec.app) decryption endpoints
 

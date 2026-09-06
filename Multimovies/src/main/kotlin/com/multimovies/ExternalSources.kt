@@ -268,7 +268,7 @@ object NxshaExtractor {
             if (MultiSourcePuller.isYouTubeHost(url)) continue
             val quality = s.optString("quality")
             val hindi = NxshaProtocol.isHindiQuality(quality) || MultiSourcePuller.isHindiHint(label, url, null)
-            val fullName = if (hindi) "$label (hindi)" else label
+            val fullName = if (hindi) "$label (Hindi)" else label
 
             if (!s.optBoolean("isEmbed", false)) {
                 val streamType = s.optString("type")

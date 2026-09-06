@@ -146,6 +146,11 @@ object VideasySource {
     /** Parsed source entry. */
     data class Source(val quality: String, val url: String)
 
+    /** Full decoded payload: stream sources + the server's own subtitle
+     *  tracks ({url, language|lang|code} items — usually empty, but they
+     *  must be taken when present, user spec Sept 2026). */
+    data class Result(val sources: List<Source>, val subtitles: List<Pair<String, String>>)
+
     // ---- JVM-test hooks (internal, same-package access) ----
 
     internal fun mixForTest(x0: Long): Int = mix(x0)
@@ -167,7 +172,7 @@ object VideasySource {
         mediaType: String,
         season: Int,
         episode: Int,
-    ): List<Source> {
+    ): Result {
         return try {
             val seedJson = com.lagradost.cloudstream3.app.get(
                 "$API/seed?mediaId=$tmdbId", timeout = 6, headers = apiHeaders(),
@@ -175,7 +180,7 @@ object VideasySource {
             val seed = JSONObject(seedJson).optString("seed")
             if (seed.isBlank()) {
                 Log.w("VideasyHindi", "no seed in response: ${seedJson.take(120)}")
-                return emptyList()
+                return Result(emptyList(), emptyList())
             }
 
             val q = buildString {
@@ -195,20 +200,35 @@ object VideasySource {
             ).text
             if (enc.isBlank() || enc.startsWith("<")) {
                 Log.w("VideasyHindi", "bad response (${enc.length}B): ${enc.take(80)}")
-                return emptyList()
+                return Result(emptyList(), emptyList())
             }
 
             val jsonText = decrypt(enc, seed, tmdbId)
             val root = JSONObject(jsonText)
-            val arr = root.optJSONArray("sources") ?: return emptyList()
-            (0 until arr.length()).mapNotNull { i ->
-                val s = arr.optJSONObject(i) ?: return@mapNotNull null
-                val url = s.optString("url").takeIf { it.isNotBlank() } ?: return@mapNotNull null
-                Source(s.optString("quality"), url)
-            }
+            val sources = root.optJSONArray("sources")?.let { arr ->
+                (0 until arr.length()).mapNotNull { i ->
+                    val s = arr.optJSONObject(i) ?: return@mapNotNull null
+                    val url = s.optString("url").takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                    Source(s.optString("quality"), url)
+                }
+            } ?: emptyList()
+            // The payload's own subtitle tracks ({url, language|lang|code}).
+            // Usually absent for hdmovie — emitted when present so server-
+            // owned captions are never dropped (user spec Sept 2026).
+            val subtitles = root.optJSONArray("subtitles")?.let { arr ->
+                (0 until arr.length()).mapNotNull { i ->
+                    val s = arr.optJSONObject(i) ?: return@mapNotNull null
+                    val url = (s.optString("url").ifBlank { s.optString("file") })
+                        .takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                    val lang = s.optString("language").ifBlank { s.optString("lang") }
+                        .ifBlank { s.optString("code") }.ifBlank { "English" }
+                    lang to url
+                }
+            } ?: emptyList()
+            Result(sources, subtitles)
         } catch (e: Exception) {
             Log.w("VideasyHindi", "fetchSources failed: ${e.message}")
-            emptyList()
+            Result(emptyList(), emptyList())
         }
     }
 }
