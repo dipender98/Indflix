@@ -15,10 +15,14 @@ https://raw.githubusercontent.com/dipender98/Indflix/builds/repo.json
 
 ## Features
 
-- 🎬 **Multi-server streaming** — VidLink, VaPlayer, VidRock, VidEm,
-  PrimeSrc, MyFlixer Hindi, MovieBox, Videasy Hindi
-- 🇮🇳 **Hindi audio priority** — Hindi servers ranked first, with
-  per-server audio language detection
+- ⚡ **Instant play** — servers are probed in real time and the link most
+  likely to start playing immediately is picked first (fast HLS streams,
+  no waiting on slow sources); the rest fill in in the background
+- 🎬 **Multi-server streaming** — 16 servers including VidLink, VaPlayer,
+  VidRock, MovieBox, Videasy Hindi, 8Stream, MP4Hydra, VidZee, VixSrc
+  and more
+- 🌐 **Multi-language audio** — Hindi, English, Tamil, Telugu, Bengali,
+  dual-audio; each stream is labelled with its actual audio language
 - 📺 **Full media support** — Movies, TV series, anime, anime movies,
   cartoons
 - 🎯 **Quality gate** — streams below 720p filtered out; up to 4K
