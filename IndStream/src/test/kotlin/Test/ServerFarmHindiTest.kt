@@ -103,6 +103,29 @@ class ServerFarmHindiTest {
     }
 
     @Test
+    fun moviebox_presentAndTitled() {
+        val s = ServerFarm.allServers.first { it.id == "moviebox" }
+        assertEquals("MovieBox", s.name)
+        assertEquals(ServerIdType.IMDB, s.idType)
+        // DASH ladders reach 2160p; nothing downstream may clamp quality.
+        assertEquals(2160, s.maxQuality)
+        assertEquals("https://fmoviesunblocked.net/", s.referer)
+        assertTrue(s.hasSubtitles)
+    }
+
+    @Test
+    fun primesrc_presentAndImdbKeyed() {
+        val s = ServerFarm.allServers.first { it.id == "primesrc" }
+        assertEquals("PrimeSrc", s.name)
+        assertEquals(ServerIdType.IMDB, s.idType)
+        assertEquals(1080, s.maxQuality)
+        val m = ServerFarm.buildMovieUrl(s, "tt0137523")
+        assertEquals("https://primesrc.me/api/v1/s?imdb=tt0137523&type=movie", m)
+        val tv = ServerFarm.buildTvUrl(s, "tt0944947", 2, 5)
+        assertEquals("https://primesrc.me/api/v1/s?imdb=tt0944947&type=tv&season=2&episode=5", tv)
+    }
+
+    @Test
     fun farm_hasUniqueIds() {
         val ids = ServerFarm.allServers.map { it.id }
         assertEquals(ids.size, ids.toSet().size, "server ids must be unique (HealthMonitor keys by id)")

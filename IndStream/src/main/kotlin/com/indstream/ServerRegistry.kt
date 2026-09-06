@@ -124,11 +124,12 @@ object ServerFarm {
             hasSubtitles = false, maxQuality = 1080, timeoutSec = 15,
             hindi = true,
         ),
-        // MyFlixer Hindi (hindi.myflixerapi.com, reversed Sept 2026): IMDB-keyed
-        // with the id in the path (/embed/tt...). Small library (~115 titles:
-        // Bollywood + Hindi-dubbed Hollywood) but everything on it is Hindi
-        // audio. Resolution via their AJAX API (see resolveMyFlixerHindi).
-        // RANK 1 for Hindi: whole host is Hindi-flagged.
+        // MyFlixer Hindi (hindi.myflixerapi.com): IMDB-keyed with the id in the
+        // path (/embed/tt...). Sept 2026 status: the embed page is captcha-walled
+        // and /ajax/get_stream_link is 404 — only /api/status (clean JSON hit/
+        // miss) survives. resolveMyFlixerHindi uses it as a cheap miss check;
+        // the embed flow still runs on hits in case the app-side client passes
+        // the wall. Whole host is Hindi audio.
         ServerSpec(
             id = "myflixer-hindi", name = "MyFlixer Hindi",
             idType = ServerIdType.IMDB,
@@ -137,6 +138,37 @@ object ServerFarm {
             referer = "https://hindi.myflixerapi.com/",
             hasSubtitles = false, maxQuality = 1080, timeoutSec = 15,
             hindi = true,
+        ),
+        // MovieBox (h5-api.aoneroom.com app API, ported from CSX CineStream
+        // Sept 2026): title-keyed JSON API — x-user bearer token from the app
+        // pkgs endpoint, POST /subject/search by title, per-subject
+        // /subject/download + /subject/play returning direct MP4/HLS + DASH
+        // (up to 2160p 4K, vipLocked filtered) + captions. Title brackets mark
+        // the audio ("Title [Hindi]" = Hindi dub) — audio priority is set per
+        // stream in resolveMovieBox, so hindi=false here. Playback needs
+        // Referer/Origin https://fmoviesunblocked.net/. Huge fast library,
+        // zero captcha — the fastest Hindi-dub source in the farm.
+        ServerSpec(
+            id = "moviebox", name = "MovieBox",
+            idType = ServerIdType.IMDB,
+            movieUrl = "https://h5-api.aoneroom.com/wefeed-h5api-bff",
+            tvUrl = "https://h5-api.aoneroom.com/wefeed-h5api-bff",
+            isJsonApi = true, referer = "https://fmoviesunblocked.net/",
+            hasSubtitles = true, maxQuality = 2160, timeoutSec = 20,
+        ),
+        // PrimeSrc (primesrc.me, verified live Sept 2026): IMDB-keyed JSON API.
+        // GET /api/v1/s?imdb={id}&type=movie|tv[&season=&episode=] returns
+        // servers[] ({name, key, file_name, audio_language, audio_type}); each
+        // key exchanges at /api/v1/l?key={key} for a player URL resolved
+        // through the standard pipeline (Filemoon/Voe/Streamtape/Mixdrop…).
+        // audio_language "hi" marks Hindi dubs → priority 4 per stream.
+        ServerSpec(
+            id = "primesrc", name = "PrimeSrc",
+            idType = ServerIdType.IMDB,
+            movieUrl = "https://primesrc.me/api/v1/s?imdb={id}&type=movie",
+            tvUrl = "https://primesrc.me/api/v1/s?imdb={id}&type=tv&season={season}&episode={episode}",
+            isJsonApi = true, referer = "https://primesrc.me/",
+            hasSubtitles = false, maxQuality = 1080, timeoutSec = 15,
         ),
         // NHD API: TMDB-keyed. Temporarily disabled because the service is broken
         // (returns no streams and causes delays). Uncomment if it comes back.
