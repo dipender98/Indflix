@@ -6,6 +6,8 @@ CloudStream → Settings → Extensions → Add repository:
 https://raw.githubusercontent.com/dipender98/Indflix/builds/repo.json
 ```
 
+[![DMCA Protected](https://images.dmca.com/Badges/dmca_protected_120_120.png)](https://www.dmca.com/Protection/Status.aspx?ID=)
+
 ## Project structure
 
 This repository contains two separate CloudStream plugins: `Multimovies` and
