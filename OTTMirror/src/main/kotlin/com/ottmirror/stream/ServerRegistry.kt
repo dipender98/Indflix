@@ -110,18 +110,30 @@ object ServerFarm {
             isJsonApi = true, referer = "https://videm.xyz/",
             hasSubtitles = false, maxQuality = 1080, timeoutSec = 15,
         ),
-        // NHD API: TMDB-keyed. The extraction API key is embedded per-page-load
-        // (rotates), so the resolver fetches /movie/{id} first, extracts
-        // API_KEY, then calls /api/movie/{id}?key=. Multi-language audio
-        // switcher — Hindi for multi-dub / Indian titles.
+        // MyFlixer Hindi (hindi.myflixerapi.com, reversed Sept 2026): IMDB-keyed
+        // with the id in the path (/embed/tt...). Small library (~115 titles:
+        // Bollywood + Hindi-dubbed Hollywood) but everything on it is Hindi
+        // audio. Resolution via their AJAX API (see resolveMyFlixerHindi).
+        // RANK 1 for Hindi: whole host is Hindi-flagged.
         ServerSpec(
-            id = "nhd", name = "NHD",
-            idType = ServerIdType.TMDB,
-            movieUrl = "https://nhdapi.com/movie/{id}",
-            tvUrl = "https://nhdapi.com/tv/{id}/{season}/{episode}",
-            referer = "https://nhdapi.com/",
-            hasSubtitles = true, maxQuality = 1080, timeoutSec = 15,
+            id = "myflixer-hindi", name = "MyFlixer Hindi",
+            idType = ServerIdType.IMDB,
+            movieUrl = "https://hindi.myflixerapi.com/embed/{id}",
+            tvUrl = "https://hindi.myflixerapi.com/embed/{id}",
+            referer = "https://hindi.myflixerapi.com/",
+            hasSubtitles = false, maxQuality = 1080, timeoutSec = 15,
+            hindi = true,
         ),
+        // NHD API: TMDB-keyed. Temporarily disabled because the service is broken
+        // (returns no streams and causes delays). Uncomment if it comes back.
+        // ServerSpec(
+        //     id = "nhd", name = "NHD",
+        //     idType = ServerIdType.TMDB,
+        //     movieUrl = "https://nhdapi.com/movie/{id}",
+        //     tvUrl = "https://nhdapi.com/tv/{id}/{season}/{episode}",
+        //     referer = "https://nhdapi.com/",
+        //     hasSubtitles = true, maxQuality = 1080, timeoutSec = 15,
+        // ),
     )
 
     fun buildMovieUrl(spec: ServerSpec, id: String): String =

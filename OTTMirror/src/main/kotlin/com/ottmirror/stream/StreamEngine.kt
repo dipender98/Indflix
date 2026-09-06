@@ -48,6 +48,8 @@ object StreamEngine {
     private const val MAX_CONCURRENT = 5
     private const val MAX_SERVERS = 12
     private const val MAX_UNWRAP = 4
+    /** Minimum stream height to emit (user spec: 720p and above only). */
+    private const val MIN_QUALITY_P = 720
     private val STREAM_REGEX = listOf(
         Regex("""https?://[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*"""),
         Regex("""https?://[^\s"'<>\\]+\.mp4[^\s"'<>\\]*"""),
@@ -102,10 +104,14 @@ object StreamEngine {
                 ServerFarm.allServers
             }
         } else healthy
-        val servers = candidates
+        // Hindi-first fast path: Hindi-flagged servers are placed FIRST
+        // (ahead of the rest of the farm) so their results arrive — and can
+        // play — before slower English sources finish probing.
+        val hindiFirst = candidates.filter { it.hindi }
+        val others = candidates.filterNot { it.hindi }
             .sortedByDescending { HealthMonitor.speedScore(it.id) }
-            .take(MAX_SERVERS)
-        Log.d("OTTMirror", "resolve tmdb=$tmdbId type=$type s=$season e=$episode imdb=${imdbId ?: "none"} -> ${servers.size} servers")
+        val servers = (hindiFirst + others).take(MAX_SERVERS)
+        Log.d("OTTMirror", "resolve tmdb=$tmdbId type=$type s=$season e=$episode imdb=${imdbId ?: "none"} -> ${servers.size} servers (hindi-first: ${hindiFirst.map { it.id }})")
 
         val sem = Semaphore(MAX_CONCURRENT)
         val resolved = coroutineScope {
@@ -144,6 +150,11 @@ object StreamEngine {
 
     /**
      * Emit links fastest-first. Dual-audio masters get the adaptive link first.
+     *
+     * Quality gate (user spec): only 720p and above are emitted — 360/480p
+     * sources are dropped here, the single choke point every server's results
+     * flow through. Streams with qualityHint 0 (unknown, e.g. adaptive HLS
+     * masters) are kept: their variants get labelled by M3u8Helper at playback.
      */
     suspend fun emit(streams: List<RawStream>, onLink: (ExtractorLink) -> Unit, onSubtitle: (SubtitleFile) -> Unit) {
         if (streams.isEmpty()) return
@@ -163,6 +174,15 @@ object StreamEngine {
         sorted.forEach { raw ->
             if (raw.url.isBlank()) return@forEach
             if (!emitted.add(raw.url)) return@forEach
+
+            // Quality gate: drop sub-720p sources (user spec: 720p minimum).
+            // qualityHint 0 = unknown height (adaptive master) — kept, the
+            // player picks the variant; per-variant filtering happens below
+            // for M3U8s whose master declares heights.
+            if (raw.qualityHint in 1 until MIN_QUALITY_P) {
+                Log.d("OTTMirror", "emit: dropping ${raw.serverName} ${raw.qualityHint}p (< ${MIN_QUALITY_P}p): ${raw.url.take(60)}")
+                return@forEach
+            }
 
             raw.subtitles.forEach { (lang, subUrl) -> onSubtitle(SubtitleFile(lang, subUrl)) }
 
@@ -186,6 +206,11 @@ object StreamEngine {
                     }.getOrNull()
                 }
                 val master = ManifestKit.parseMaster(masterText, raw.url)
+                // Debug: what audio renditions does this master actually carry?
+                master?.let {
+                    val langs = it.audio.map { r -> "lang=${r.language ?: "none"} name=${r.name} group=${r.groupId}" }
+                    Log.d("OTTMirror", "audioTracks server=${raw.serverName} multiAudio=${it.isMultiAudio} renditions=$langs")
+                }
                 val label = buildString {
                     append(raw.serverName)
                     if (raw.audioLabel.isNotBlank()) append(" � ${raw.audioLabel}")
@@ -201,7 +226,8 @@ object StreamEngine {
                     M3u8Helper.generateM3u8(raw.serverName, raw.url, raw.referer ?: "",
                         quality = raw.qualityHint.takeIf { it > 0 },
                         headers = linkHeaders,
-                    ).forEach { onLink(it) }
+                    ).filter { it.quality <= 0 || it.quality >= MIN_QUALITY_P }
+                        .forEach { onLink(it) }
                     master.subtitles.forEach { r ->
                         r.uri?.let { onSubtitle(SubtitleFile(r.language ?: r.name, ManifestKit.resolveUrl(raw.url, it))) }
                     }
@@ -221,7 +247,11 @@ object StreamEngine {
                             type = ExtractorLinkType.M3U8,
                         ))
                     } else {
-                        variants.forEach { onLink(it) }
+                        // Per-variant gate: adaptive masters expose every rung
+                        // (240→1080); keep only 720p+ variants (plus the auto
+                        // master link emitted above for ABR playback).
+                        variants.filter { it.quality <= 0 || it.quality >= MIN_QUALITY_P }
+                            .forEach { onLink(it) }
                     }
                     master?.subtitles?.forEach { r ->
                         r.uri?.let { onSubtitle(SubtitleFile(r.language ?: r.name, ManifestKit.resolveUrl(raw.url, it))) }
@@ -444,7 +474,11 @@ object StreamEngine {
             runCatching { app.get(url, timeout = 3, headers = mapOf("Referer" to (referer ?: ""))).text }.getOrNull()
         } ?: return 0
         val master = ManifestKit.parseMaster(text, url) ?: return 0
-        return ManifestKit.audioPriority(master)
+        val priority = ManifestKit.audioPriority(master)
+        // Debug: what audio renditions did the probe see?
+        val langs = master.audio.map { r -> "lang=${r.language ?: "none"} name=${r.name}" }
+        Log.d("OTTMirror", "probeAudio url=${url.take(80)} priority=$priority renditions=$langs")
+        return priority
     }
 
     /** Probe an inline master playlist for audio priority (no network). */
@@ -481,9 +515,9 @@ object StreamEngine {
         else "https://vidlink.pro/tv/$tmdbId/$season/$episode"
         Log.d("VidLink", "apiUrl=$apiUrl mediaPage=$mediaPage")
 
-        val jsonText = withTimeoutOrNull(8_000L) {
+        val jsonText = withTimeoutOrNull(6_000L) {
             runCatching {
-                app.get(apiUrl, timeout = 8, headers = vidlinkHeaders(mediaPage)).text
+                app.get(apiUrl, timeout = 6, headers = vidlinkHeaders(mediaPage)).text
             }.getOrNull()
         }
         if (jsonText.isNullOrBlank()) {
@@ -538,9 +572,12 @@ object StreamEngine {
             val entries = qualities.names()?.let { n ->
                 (0 until n.length()).mapNotNull { i ->
                     val key = n.optString(i)
+                    val height = key.toIntOrNull() ?: 0
+                    // Filter out streams below 720p
+                    if (height < 720) return@mapNotNull null
                     val q = qualities.optJSONObject(key) ?: return@mapNotNull null
                     val url = q.optString("url").takeIf { it.isNotBlank() } ?: return@mapNotNull null
-                    Triple(key.toIntOrNull() ?: 0, url, q)
+                    Triple(height, url, q)
                 }
             }.orEmpty().sortedByDescending { it.first }
             if (entries.isNotEmpty()) {
@@ -598,6 +635,25 @@ object StreamEngine {
     }
 
 
+    /**
+     * MyFlixer Hindi resolver (reversed Sept 2026): the site is IMDB-keyed with
+     * the id directly in the path — /embed/tt1234567 (NOT ?imdb= query).
+     *
+     * Chain (verified live against Fast X tt5433140):
+     *   1. GET hindi.myflixerapi.com/embed/{imdbId} — page carries
+     *      `data-movie-id="<obfuscatedId>"` on #embed-player plus a server
+     *      list (`<a class="server" data-id="8zj">Server-Videasy</a>` etc).
+     *      Titles not in their library (~115 titles) return "movie not found".
+     *   2. GET /ajax/get_stream_link?id={serverDataId}&movie={movieId}
+     *      (X-Requested-With: XMLHttpRequest + embed Referer) →
+     *      {"success":true,"data":{"link":"<player url>","token":"..."}}.
+     *      Server "9x" (Api.Myflixerapi.com) returns a DIRECT stream page;
+     *      "8zj" (Videasy) / "LBv" (Vidcore) return embed player URLs.
+     *   3. The link is resolved through the normal pipeline (unwrap/extract).
+     *
+     * The whole host serves Hindi audio (Bollywood + Hindi dubs), so streams
+     * are biased to audioPriority 4 via spec.hindi.
+     */
     private suspend fun resolveMyFlixerHindi(
         spec: ServerSpec,
         tmdbId: Int?,
@@ -606,49 +662,113 @@ object StreamEngine {
         season: Int,
         episode: Int,
     ): List<RawStream> {
-        val id = if (spec.idType == ServerIdType.IMDB) imdbId ?: return emptyList() else tmdbId?.toString() ?: return emptyList()
-        val embedUrl = if (type == "movie") {
-            "https://hindi.myflixerapi.com/embed/movie?imdb=$id"
-        } else {
-            "https://hindi.myflixerapi.com/embed/series?imdb=$id&sea=$season&epi=$episode"
+        val id = imdbId ?: run {
+            Log.w("MyFlixerHindi", "IMDB id required (host is IMDB-keyed), got none")
+            return emptyList()
         }
         val referer = "https://hindi.myflixerapi.com/"
+        val embedUrl = "https://hindi.myflixerapi.com/embed/$id"
         Log.d("MyFlixerHindi", "Fetching $embedUrl")
         val rawText = withTimeoutOrNull(8_000L) {
             runCatching { app.get(embedUrl, timeout = 8, headers = okHeaders(referer)).text }.getOrNull()
-        } ?: return emptyList()
-        val (unwrapped, _) = unwrapPages(rawText, embedUrl, 12)
+        } ?: run { Log.w("MyFlixerHindi", "embed fetch failed"); return emptyList() }
 
-        // Try to extract m3u8 from player config in script tags
-        val doc = Jsoup.parse(unwrapped)
-        val sources = mutableListOf<String>()
-
-        // Look for script tags containing JWPlayer or Clappr config
-        doc.select("script").forEach { script ->
-            val data = script.data()
-            // Match patterns like file:"http...m3u8", url:"http...m3u8", source:"http...m3u8"
-            val regex = Regex("""["']?(?:file|url|src|source|video_url|stream_url)["']?\s*[:=]\s*["'](https?://[^"']+\.(?:m3u8|mp4)[^"']*)["']""", RegexOption.IGNORE_CASE)
-            regex.findAll(data).forEach { match ->
-                match.groupValues[1].takeIf { it.isNotBlank() }?.let { sources.add(it) }
-            }
+        // "movie not found" page = title not in their library.
+        if (rawText.contains("movie-not-found") || rawText.contains("Movie or Episode Not Found", ignoreCase = true)) {
+            Log.d("MyFlixerHindi", "$id not in library")
+            return emptyList()
         }
 
-        // Also try harvestJsUrls as fallback
-        if (sources.isEmpty()) {
-            sources.addAll(harvestJsUrls(unwrapped))
+        val movieId = Regex("""data-movie-id="([^"]+)"""").find(rawText)?.groupValues?.get(1)
+        if (movieId.isNullOrBlank()) {
+            Log.w("MyFlixerHindi", "no data-movie-id in embed page (${rawText.length}B)")
+            return emptyList()
+        }
+        val serverIds = Regex("""class="server dropdown-item" data-id="([^"]+)"""").findAll(rawText)
+            .mapNotNull { it.groupValues.getOrNull(1) }
+            .toList()
+        if (serverIds.isEmpty()) {
+            Log.w("MyFlixerHindi", "no server data-ids in embed page")
+            return emptyList()
+        }
+        Log.d("MyFlixerHindi", "movieId=$movieId servers=$serverIds")
+
+        // Ask each server for a stream link; the direct-stream server first
+        // (Api.Myflixerapi.com historically last in the list, but its link is
+        // a bare stream page — the others are player embeds needing unwrap).
+        val ajaxHeaders = okHeaders(embedUrl).toMutableMap().apply {
+            put("X-Requested-With", "XMLHttpRequest")
+        }
+        val links = mutableListOf<String>()
+        for (sid in serverIds) {
+            val ajaxUrl = "https://hindi.myflixerapi.com/ajax/get_stream_link?id=$sid&movie=$movieId&is_init=false&captcha="
+            val jsonText = withTimeoutOrNull(6_000L) {
+                runCatching { app.get(ajaxUrl, timeout = 6, headers = ajaxHeaders).text }.getOrNull()
+            } ?: continue
+            val json = runCatching { org.json.JSONObject(jsonText) }.getOrNull() ?: continue
+            if (!json.optBoolean("success", false)) continue
+            val link = json.optJSONObject("data")?.optString("link")?.takeIf { it.isNotBlank() } ?: continue
+            Log.d("MyFlixerHindi", "server=$sid link=$link")
+            links.add(link)
+        }
+        if (links.isEmpty()) {
+            Log.w("MyFlixerHindi", "no stream links from any server")
+            return emptyList()
         }
 
-        if (sources.isNotEmpty()) {
-            val pri = 4 // force Hindi
-            return sources.map { url ->
+        // Resolve each link through the standard pipeline (unwrap iframes,
+        // extractor registry, harvest). The host is Hindi-flagged so results
+        // rank as Hindi audio.
+        val out = mutableListOf<RawStream>()
+        for (link in links) {
+            val resolved = resolveEmbedLink(spec, link, referer) ?: continue
+            out += resolved
+        }
+        if (out.isNotEmpty()) {
+            okServer(spec, System.currentTimeMillis(), "myflixer-hindi ajax", out.size)
+        }
+        return out
+    }
+
+    /** Resolve one player/stream link through the multi-strategy pipeline
+     *  (unwrap → harvest → extractor registry). Returns null on failure. */
+    private suspend fun resolveEmbedLink(spec: ServerSpec, link: String, referer: String): List<RawStream>? {
+        val rawText = withTimeoutOrNull(8_000L) {
+            runCatching { app.get(link, timeout = 8, headers = okHeaders(referer)).text }.getOrNull()
+        } ?: return null
+        val (unwrapped, unwrappedUrl) = unwrapPages(rawText, link, spec.timeoutSec)
+
+        // Direct stream URLs in the page/JS config.
+        val direct = harvestUrls(unwrapped) + harvestJsUrls(unwrapped)
+        if (direct.isNotEmpty()) {
+            return direct.map { url ->
                 RawStream(
                     serverId = spec.id, serverName = spec.name,
                     url = url, isM3u8 = url.contains(".m3u8", ignoreCase = true),
-                    referer = referer, audioPriority = pri, audioLabel = "Hindi"
+                    referer = referer, audioPriority = 4, audioLabel = "Hindi",
                 )
             }
         }
-        return emptyList()
+
+        // CloudStream extractor registry on the inner player host.
+        val regLinks = mutableListOf<ExtractorLink>()
+        val regSubs = mutableListOf<SubtitleFile>()
+        runCatching {
+            loadExtractor(url = unwrappedUrl, referer = link,
+                subtitleCallback = { regSubs.add(it) }, callback = { regLinks.add(it) })
+        }
+        if (regLinks.isNotEmpty()) {
+            return regLinks.map { l ->
+                RawStream(
+                    serverId = spec.id, serverName = spec.name,
+                    url = l.url, isM3u8 = l.type == ExtractorLinkType.M3U8,
+                    referer = l.referer, qualityHint = l.quality,
+                    subtitles = regSubs.map { it.lang to it.url },
+                    audioPriority = 4, audioLabel = "Hindi",
+                )
+            }
+        }
+        return null
     }
 
     /**

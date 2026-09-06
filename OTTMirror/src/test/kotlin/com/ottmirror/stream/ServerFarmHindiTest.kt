@@ -74,11 +74,24 @@ class ServerFarmHindiTest {
         assertEquals("https://videm.xyz/embed/tv/tt0944947/1/1", tv)
     }
 
+    // NHD disabled Sept 2026 (service broken, no streams + delays).
+    // Re-enable this test alongside the ServerSpec in ServerRegistry.kt.
+    // @Test
+    // fun nhd_presentAndTmdbKeyed() {
+    //     val s = ServerFarm.allServers.first { it.id == "nhd" }
+    //     assertEquals("NHD", s.name)
+    //     assertEquals(ServerIdType.TMDB, s.idType)
+    // }
+
     @Test
-    fun nhd_presentAndTmdbKeyed() {
-        val s = ServerFarm.allServers.first { it.id == "nhd" }
-        assertEquals("NHD", s.name)
-        assertEquals(ServerIdType.TMDB, s.idType)
+    fun myflixerHindi_presentAndImdbKeyed() {
+        val s = ServerFarm.allServers.first { it.id == "myflixer-hindi" }
+        assertEquals("MyFlixer Hindi", s.name)
+        assertEquals(ServerIdType.IMDB, s.idType)
+        assertTrue(s.hindi, "MyFlixer Hindi must be flagged Hindi (whole host serves Hindi audio)")
+        val m = ServerFarm.buildMovieUrl(s, "tt5433140")
+        assertEquals("https://hindi.myflixerapi.com/embed/tt5433140", m,
+            "embed url must carry the IMDB id in the path (verified Sept 2026)")
     }
 
     @Test
