@@ -62,9 +62,11 @@ object ServerFarm {
         // ── Verified responding embeds (handled by CloudStream extractor registry / harvest) ──
         // VidLink: encrypted-token JSON API (XSalsa20-Poly1305, see VidlinkSource).
         // multiLang=1 returns per-quality MP4s (360→1080p) with Hindi dubs for
-        // Indian titles. Token embeds the TMDB id + a +480s timestamp; only the
-        // key in VidlinkSource.KEY_HEX ever needs rotating when the site updates.
-        // RANK 1: Hindi-first priority — Hindi dubs + original Hindi audio.
+        // Indian titles AND the original/English track. It is NOT a Hindi-only
+        // host, so it must NOT be flagged `hindi = true` — that blanket forces
+        // every stream to label "Hindi" (StreamEngine.kt:168) even when the
+        // played track is English. Leave hindi=false and let the per-master audio
+        // probe (resolveVidlink legacy path) report the real language.
         ServerSpec(
             id = "vidlink", name = "VidLink",
             idType = ServerIdType.TMDB,
@@ -72,7 +74,7 @@ object ServerFarm {
             tvUrl = "https://vidlink.pro/api/b/tv/{id}/{season}/{episode}?multiLang=1",
             isJsonApi = true, referer = "https://vidlink.pro/",
             hasSubtitles = true, maxQuality = 1080, timeoutSec = 15,
-            hindi = true,
+            hindi = false,
         ),
         // VaPlayer (CSX CineStream's top live server, verified Sept 2026):
         // IMDB-keyed JSON API returning 3 direct HLS master playlists (up to
@@ -102,14 +104,18 @@ object ServerFarm {
         // Embed page carries a signed `Q` object with per-server refs; each ref
         // exchanges at api.php?a=play for a /_stream HLS URL (up to 1080p).
         // No key, no captcha, no Referer needed at playback.
-        ServerSpec(
-            id = "videm", name = "VidEm",
-            idType = ServerIdType.IMDB,
-            movieUrl = "https://videm.xyz/embed/movie/{id}",
-            tvUrl = "https://videm.xyz/embed/tv/{id}/{season}/{episode}",
-            isJsonApi = true, referer = "https://videm.xyz/",
-            hasSubtitles = false, maxQuality = 1080, timeoutSec = 15,
-        ),
+        // DISABLED Sept 2026 (user report): links still resolve but every
+        // playback errors out and the player hops to the next server — the
+        // /_stream URLs die at fetch time. Re-enable alongside resolveVidem
+        // when the upstream recovers.
+        // ServerSpec(
+        //     id = "videm", name = "VidEm",
+        //     idType = ServerIdType.IMDB,
+        //     movieUrl = "https://videm.xyz/embed/movie/{id}",
+        //     tvUrl = "https://videm.xyz/embed/tv/{id}/{season}/{episode}",
+        //     isJsonApi = true, referer = "https://videm.xyz/",
+        //     hasSubtitles = false, maxQuality = 1080, timeoutSec = 15,
+        // ),
         // Videasy "Fade" (Hindi) — TMDB-keyed, cipher-decrypted API (reversed
         // Sept 2026 from player.videasy.net chunk 8351; see VideasySource).
         // The decrypted /hdmovie route returns per-audio muxed HLS masters
@@ -125,20 +131,20 @@ object ServerFarm {
             hindi = true,
         ),
         // MyFlixer Hindi (hindi.myflixerapi.com): IMDB-keyed with the id in the
-        // path (/embed/tt...). Sept 2026 status: the embed page is captcha-walled
-        // and /ajax/get_stream_link is 404 — only /api/status (clean JSON hit/
-        // miss) survives. resolveMyFlixerHindi uses it as a cheap miss check;
-        // the embed flow still runs on hits in case the app-side client passes
-        // the wall. Whole host is Hindi audio.
-        ServerSpec(
-            id = "myflixer-hindi", name = "MyFlixer Hindi",
-            idType = ServerIdType.IMDB,
-            movieUrl = "https://hindi.myflixerapi.com/embed/{id}",
-            tvUrl = "https://hindi.myflixerapi.com/embed/{id}",
-            referer = "https://hindi.myflixerapi.com/",
-            hasSubtitles = false, maxQuality = 1080, timeoutSec = 15,
-            hindi = true,
-        ),
+        // path (/embed/tt...). Whole host is Hindi audio.
+        // DISABLED Sept 2026 (user report + code audit): the embed page is
+        // captcha-walled and /ajax/get_stream_link is 404 — the server never
+        // yields a stream, it just burns a concurrency slot and trips the
+        // breaker. Re-enable alongside resolveMyFlixerHindi if it recovers.
+        // ServerSpec(
+        //     id = "myflixer-hindi", name = "MyFlixer Hindi",
+        //     idType = ServerIdType.IMDB,
+        //     movieUrl = "https://hindi.myflixerapi.com/embed/{id}",
+        //     tvUrl = "https://hindi.myflixerapi.com/embed/{id}",
+        //     referer = "https://hindi.myflixerapi.com/",
+        //     hasSubtitles = false, maxQuality = 1080, timeoutSec = 15,
+        //     hindi = true,
+        // ),
         // MovieBox (h5-api.aoneroom.com app API, ported from CSX CineStream
         // Sept 2026): title-keyed JSON API — x-user bearer token from the app
         // pkgs endpoint, POST /subject/search by title, per-subject
@@ -162,13 +168,74 @@ object ServerFarm {
         // key exchanges at /api/v1/l?key={key} for a player URL resolved
         // through the standard pipeline (Filemoon/Voe/Streamtape/Mixdrop…).
         // audio_language "hi" marks Hindi dubs → priority 4 per stream.
+        // DISABLED Sept 2026 (user report): API returns no streams any more.
+        // Re-enable alongside resolvePrimeSrc if it recovers.
+        // ServerSpec(
+        //     id = "primesrc", name = "PrimeSrc",
+        //     idType = ServerIdType.IMDB,
+        //     movieUrl = "https://primesrc.me/api/v1/s?imdb={id}&type=movie",
+        //     tvUrl = "https://primesrc.me/api/v1/s?imdb={id}&type=tv&season={season}&episode={episode}",
+        //     isJsonApi = true, referer = "https://primesrc.me/",
+        //     hasSubtitles = false, maxQuality = 1080, timeoutSec = 15,
+        // ),
+        // 8Stream (himanshu8443/8StreamApi): IMDB-keyed JSON API — /mediaInfo
+        // returns per-language playlist entries (Hindi/English/Tamil/Telugu/
+        // Bengali) whose {file,key} pair exchanges at POST /api/v1/getStream
+        // for a DIRECT HLS master. Two calls per language, zero captcha —
+        // bullet-train instant play. Movies only (no episode targeting).
         ServerSpec(
-            id = "primesrc", name = "PrimeSrc",
+            id = "8stream", name = "8Stream",
             idType = ServerIdType.IMDB,
-            movieUrl = "https://primesrc.me/api/v1/s?imdb={id}&type=movie",
-            tvUrl = "https://primesrc.me/api/v1/s?imdb={id}&type=tv&season={season}&episode={episode}",
-            isJsonApi = true, referer = "https://primesrc.me/",
-            hasSubtitles = false, maxQuality = 1080, timeoutSec = 15,
+            movieUrl = "https://8-stream-api.vercel.app/api/v1/mediaInfo?id={id}",
+            tvUrl = "https://8-stream-api.vercel.app/api/v1/mediaInfo?id={id}",
+            isJsonApi = true, referer = "https://8-stream-api.vercel.app/",
+            hasSubtitles = false, maxQuality = 1080, timeoutSec = 12,
+        ),
+        // MP4Hydra (mp4hydra.org): title-slug keyed multipart POST to /info2
+        // returns per-quality HLS sources across Beta servers with embedded
+        // subtitle tracks. Hindi duals appear as rows labelled Hindi; the slug
+        // falls back title+year → title. Referer required at playback.
+        ServerSpec(
+            id = "mp4hydra", name = "MP4Hydra",
+            idType = ServerIdType.TMDB,
+            movieUrl = "https://mp4hydra.org/info2?v=8",
+            tvUrl = "https://mp4hydra.org/info2?v=8",
+            isJsonApi = true, referer = "https://mp4hydra.org/",
+            hasSubtitles = true, maxQuality = 2160, timeoutSec = 12,
+        ),
+        // VidZee (player.vidzee.wtf): TMDB-keyed multi-server JSON API —
+        // sr=1..10 return per-language sources ({link,name,language}); some
+        // links are AES-256-CBC tokens decrypted locally (static key, see
+        // decodeVidZeeToken). Playback needs Referer core.vidzee.wtf.
+        ServerSpec(
+            id = "vidzee", name = "VidZee",
+            idType = ServerIdType.TMDB,
+            movieUrl = "https://player.vidzee.wtf/api/server?id={id}",
+            tvUrl = "https://player.vidzee.wtf/api/server?id={id}&ss={season}&ep={episode}",
+            isJsonApi = true, referer = "https://player.vidzee.wtf/",
+            hasSubtitles = false, maxQuality = 2160, timeoutSec = 15,
+        ),
+        // VixSrc (vixsrc.to): TMDB-keyed embed page whose window.masterPlaylist
+        // {url, token, expires} assembles a signed adaptive HLS master. The
+        // page URL is the playback Referer; wyzie.ru serves the subtitles.
+        ServerSpec(
+            id = "vixsrc", name = "VixSrc",
+            idType = ServerIdType.TMDB,
+            movieUrl = "https://vixsrc.to/movie/{id}",
+            tvUrl = "https://vixsrc.to/tv/{id}/{season}/{episode}",
+            isJsonApi = true, referer = "https://vixsrc.to/",
+            hasSubtitles = true, maxQuality = 2160, timeoutSec = 12,
+        ),
+        // StreamProvider (byteful): TMDB-keyed one-shot GET returning a direct
+        // cached m3u8 (plain text or {url} JSON) — the simplest fast server in
+        // the farm; audio is probed from the master itself.
+        ServerSpec(
+            id = "streamprovider", name = "StreamProvider",
+            idType = ServerIdType.TMDB,
+            movieUrl = "https://streamprovider.byteful.me/?tmdbId={id}",
+            tvUrl = "https://streamprovider.byteful.me/?tmdbId={id}&season={season}&episode={episode}",
+            isJsonApi = true, referer = "https://streamprovider.byteful.me/",
+            hasSubtitles = false, maxQuality = 1080, timeoutSec = 10,
         ),
         // NHD API: TMDB-keyed. Temporarily disabled because the service is broken
         // (returns no streams and causes delays). Uncomment if it comes back.

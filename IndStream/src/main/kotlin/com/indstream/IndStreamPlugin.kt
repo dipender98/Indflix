@@ -313,14 +313,19 @@ class IndStreamProvider : MainAPI() {
         val imdbDeferred = fastStartScope.async {
             if (needsImdb) metaDeferred.await()?.imdbId else null
         }
+        // Buffer every server's streams here instead of emitting them the instant
+        // they resolve. A server that resolves first is NOT necessarily the one
+        // that starts the video fastest, so we collect candidates across the settle
+        // window and let emit() pick the best-starting one as the FIRST link.
+        val buffered = Collections.synchronizedList(mutableListOf<StreamEngine.RawStream>())
         fastStartScope.launch {
             try {
                 StreamEngine.resolveRealtime(tmdbId, type, season, episode, imdbIdProvider = { imdbDeferred.await() }) { _, streams ->
-                    StreamEngine.FastStartCache.put(cacheKey, streams)
-                    if (linksAccepted.get()) {
-                        val langs = StreamEngine.emit(streams, { emitted.incrementAndGet(); callback(it) }, subtitleCallback, originalLangNow())
-                        coveredSubLangs.addAll(langs)
-                        if (emitted.get() > 0) firstReady.complete(Unit)
+                    if (streams.isNotEmpty()) {
+                        buffered.addAll(streams)
+                        StreamEngine.FastStartCache.put(cacheKey, buffered.toList())
+                        // Signal "we have something to pick" so the settle window can begin.
+                        if (linksAccepted.get() && emitted.get() == 0) firstReady.complete(Unit)
                     }
                 }
             } catch (t: Throwable) {
@@ -330,16 +335,31 @@ class IndStreamProvider : MainAPI() {
             }
         }
 
-        // Wait for the first link, enjoy a short fill window to collect a few more
-        // fast sources, then hand off to playback. The hard cap guarantees we never
-        // hang past FAST_START_MAX_MS even if the whole farm is slow/dead.
+        // Settle briefly so a few genuinely-fast servers (MovieBox, VidLink, …) can
+        // report before we commit to a link. We do NOT emit-on-first-arrival: the
+        // link chosen is the highest startupScore one from everything gathered.
+        // The hard cap guarantees we never hang past FAST_START_MAX_MS even if the
+        // whole farm is slow/dead.
         withTimeoutOrNull(StreamEngine.FAST_START_MAX_MS) {
             firstReady.await()
             if (linksAccepted.get()) delay(StreamEngine.FAST_START_FILL_MS)
         }
         linksAccepted.set(false)
 
-        val started = emitted.get() > 0
+        // Emit the gathered streams ranked best-first. emit() orders by startupScore
+        // (history + fresh probe + soft language), so the player's first/auto-played
+        // link is the one that actually begins playback soonest.
+        val started = if (buffered.isNotEmpty()) {
+            val langs = StreamEngine.emit(
+                buffered.toList(),
+                { emitted.incrementAndGet(); callback(it) },
+                subtitleCallback,
+                originalLangNow(),
+            )
+            coveredSubLangs.addAll(langs)
+            true
+        } else false
+
         android.util.Log.i("IndStream", "loadLinks: tmdb=$tmdbId/$type s=$season e=$episode -> started=$started, $emitted links emitted")
         if (started) {
             // Awaiting is safe: metaDeferred is bounded by its own 3s timeout.

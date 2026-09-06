@@ -1653,8 +1653,24 @@ object MultiSourcePuller {
      *  User spec (Sept 2026): language is always in brackets — "(hindi)",
      *  "(eng)", "(multi)" — matching the IndStream [LinkNaming] convention. */
     internal fun linkLabel(base: String?, hindi: Boolean): String {
-        val server = base?.trim()?.takeIf { it.isNotEmpty() } ?: "Multimovies"
+        val server = base?.trim()?.takeIf { it.isNotEmpty() }?.dedupeResolution()
+            ?: "Multimovies"
         return if (hindi) "$server (Hindi)" else server
+    }
+
+    /**
+     * Collapse a duplicated resolution token inside a server label so the player
+     * never shows e.g. "VidSrc 1080p 1080p". Keeps the first occurrence of each
+     * token ("1080p", "4K", "2160p", …) and drops later repeats.
+     */
+    private fun String.dedupeResolution(): String {
+        val token = Regex("""\d{3,4}p|4K|2160p""", RegexOption.IGNORE_CASE)
+        val seen = mutableSetOf<String>()
+        val out = token.replace(this) { m ->
+            val k = m.value.lowercase()
+            if (!seen.add(k)) "" else m.value
+        }
+        return out.replace(Regex("""\s{2,}"""), " ").trim()
     }
 
     /** Build the header set for a request to [url]. The Cineverse CDN requires

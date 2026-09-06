@@ -29,7 +29,11 @@ class ServerFarmHindiTest {
     fun vidlink_presentAndFlaggedHindi() {
         assertEquals("VidLink", vidlink.name)
         assertEquals(ServerIdType.TMDB, vidlink.idType)
-        assertTrue(vidlink.hindi, "VidLink must be flagged Hindi (multiLang=1 carries dubs)")
+        // VidLink is multi-audio (Hindi + English dubs), NOT a Hindi-only host.
+        // The blanket `hindi` flag would force every stream to label "Hindi" even
+        // when the played track is English — so it must stay false and let the
+        // per-master audio probe report the real language.
+        assertTrue(!vidlink.hindi, "VidLink is multi-audio, not Hindi-only — flagging it Hindi mislabels English playback")
         assertEquals(1080, vidlink.maxQuality)
         assertTrue(vidlink.hasSubtitles)
     }
@@ -73,13 +77,10 @@ class ServerFarmHindiTest {
 
     @Test
     fun videm_presentAndImdbKeyed() {
-        val s = ServerFarm.allServers.first { it.id == "videm" }
-        assertEquals("VidEm", s.name)
-        assertEquals(ServerIdType.IMDB, s.idType)
-        val m = ServerFarm.buildMovieUrl(s, "tt0137523")
-        assertEquals("https://videm.xyz/embed/movie/tt0137523", m)
-        val tv = ServerFarm.buildTvUrl(s, "tt0944947", 1, 1)
-        assertEquals("https://videm.xyz/embed/tv/tt0944947/1/1", tv)
+        val s = ServerFarm.allServers.firstOrNull { it.id == "videm" }
+        // Disabled Sept 2026 (links resolve but playback errors) — assert the
+        // DISABLED state so a re-enable is a conscious act.
+        assertEquals(null, s)
     }
 
     // NHD disabled Sept 2026 (service broken, no streams + delays).
@@ -93,13 +94,10 @@ class ServerFarmHindiTest {
 
     @Test
     fun myflixerHindi_presentAndImdbKeyed() {
-        val s = ServerFarm.allServers.first { it.id == "myflixer-hindi" }
-        assertEquals("MyFlixer Hindi", s.name)
-        assertEquals(ServerIdType.IMDB, s.idType)
-        assertTrue(s.hindi, "MyFlixer Hindi must be flagged Hindi (whole host serves Hindi audio)")
-        val m = ServerFarm.buildMovieUrl(s, "tt5433140")
-        assertEquals("https://hindi.myflixerapi.com/embed/tt5433140", m,
-            "embed url must carry the IMDB id in the path (verified Sept 2026)")
+        val s = ServerFarm.allServers.firstOrNull { it.id == "myflixer-hindi" }
+        // Disabled Sept 2026 (captcha-walled embed + 404 ajax) — assert the
+        // DISABLED state so a re-enable is a conscious act.
+        assertEquals(null, s)
     }
 
     @Test
@@ -115,14 +113,10 @@ class ServerFarmHindiTest {
 
     @Test
     fun primesrc_presentAndImdbKeyed() {
-        val s = ServerFarm.allServers.first { it.id == "primesrc" }
-        assertEquals("PrimeSrc", s.name)
-        assertEquals(ServerIdType.IMDB, s.idType)
-        assertEquals(1080, s.maxQuality)
-        val m = ServerFarm.buildMovieUrl(s, "tt0137523")
-        assertEquals("https://primesrc.me/api/v1/s?imdb=tt0137523&type=movie", m)
-        val tv = ServerFarm.buildTvUrl(s, "tt0944947", 2, 5)
-        assertEquals("https://primesrc.me/api/v1/s?imdb=tt0944947&type=tv&season=2&episode=5", tv)
+        val s = ServerFarm.allServers.firstOrNull { it.id == "primesrc" }
+        // Disabled Sept 2026 (API returns no streams) — assert the DISABLED
+        // state so a re-enable is a conscious act.
+        assertEquals(null, s)
     }
 
     @Test
@@ -133,8 +127,21 @@ class ServerFarmHindiTest {
 
     @Test
     fun farm_withinServerCap() {
-        assertTrue(ServerFarm.allServers.size <= 12, "farm must stay within MAX_SERVERS cap")
+        assertTrue(ServerFarm.allServers.size <= 16, "farm must stay within MAX_SERVERS cap")
         assertTrue(ServerFarm.allServers.isNotEmpty())
         assertNotNull(ServerFarm.allServers.firstOrNull { it.id == "vidlink" })
+    }
+
+    @Test
+    fun bulletTrainServers_present() {
+        // The 5 fast direct-API servers (user spec Sept 2026: "click and play
+        // like bullet train" — Hindi/multi-audio, no embed chain).
+        val ids = setOf("8stream", "mp4hydra", "vidzee", "vixsrc", "streamprovider")
+        for (id in ids) {
+            assertNotNull(
+                ServerFarm.allServers.firstOrNull { it.id == id },
+                "$id must be in the farm",
+            )
+        }
     }
 }

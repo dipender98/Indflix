@@ -107,12 +107,17 @@ object LinkNaming {
             Regex("\\b${Regex.escape(tag)}\\b", RegexOption.IGNORE_CASE).containsMatchIn(nameWithSub)
         ) "" else "($tag)"
 
-        // Spec: if the server name already shows a resolution, drop the extra one.
-        val res = if (hasResolution(nameWithSub)) "" else qualityLabel(qualityHint)
+        // Spec: if the server name already shows the SAME resolution token, drop
+        // the extra one. Compare the exact output token (e.g. "1080p", "4K") rather
+        // than a loose \d{3,4}p regex, so glued forms like "Server1080p"/"x1080p"
+        // and alt tokens like "4K" are detected and not appended a second time
+        // (otherwise the label renders as "… 1080p 1080p").
+        val res = qualityLabel(qualityHint)
+        val resPart = if (res.isNotEmpty() && nameWithSub.contains(res, ignoreCase = true)) "" else res
         val parts = listOfNotNull(
             serverPart,
             tagPart.takeIf { it.isNotBlank() },
-            res.takeIf { it.isNotBlank() },
+            resPart.takeIf { it.isNotBlank() },
         )
         return parts.joinToString(" ")
     }

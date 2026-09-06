@@ -111,6 +111,25 @@ class LinkNamingTest {
         assertEquals("VidLink (Multi) 1080p", name)
     }
 
+    @Test
+    fun displayName_resolutionGluedNoDuplicate() {
+        // Resolution glued to a word ("Server1080p") must still be detected so the
+        // quality is NOT appended a second time → no "1080p 1080p".
+        val name = LinkNaming.displayName(
+            serverName = "Server1080p", audioLabel = "Hindi", qualityHint = 1080,
+        )
+        assertEquals("Server1080p (Hindi)", name)
+    }
+
+    @Test
+    fun displayName_fourKNoDuplicate() {
+        // "4K" is not a \d{3,4}p token, so it must be detected by exact-match too.
+        val name = LinkNaming.displayName(
+            serverName = "MovieBox 4K", audioLabel = "English", qualityHint = 2160,
+        )
+        assertEquals("MovieBox 4K (English)", name)
+    }
+
     // ── numbering: unique → no number ────────────────────────────
 
     @Test
