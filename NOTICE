@@ -1,0 +1,63 @@
+Indflix
+Copyright (C) 2026 dipender98
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+==============================================================================
+Third-party components and their licenses
+==============================================================================
+
+This project includes code derived from, or inspired by, the following
+third-party open-source projects. Each component's license is honored and
+attributed below. The full text of every license is available from the
+project repository linked beside it.
+
+------------------------------------------------------------------------------
+1. CSX CineStream — SaurabhKaperwan
+   Repository: https://github.com/SaurabhKaperwan/CSX
+   License:    GPL-3.0 (https://github.com/SaurabhKaperwan/CSX/blob/master/LICENSE)
+
+   Files derived from CSX's `invokeMoviebox` (aoneroom wefeed-h5api-bff
+   app API: x-user bearer token, subject search, download/play endpoints,
+   fmoviesunblocked playback headers):
+     - IndStream/src/main/kotlin/com/indstream/StreamEngine.kt
+       (the `resolveMovieBox` function)
+
+   The x-user token cache and concurrent subject processing in
+   `resolveMovieBox` are CSX-inspired structural choices; the
+   Kotlin/coroutine wiring is original to this project.
+
+------------------------------------------------------------------------------
+2. CloudstreamExtensions — phisher98
+   Repository: https://github.com/phisher98/CloudstreamExtensions
+   License:    GPL-3.0 (typically — see upstream repo for the exact file)
+
+   Used as a reference for extractor conventions and provider API shapes
+   when vetting live hosts (VaPlayer, VidRock, PrimeSrc) and their header
+   requirements. No verbatim code was copied; resolver implementations in
+   this project are original.
+
+------------------------------------------------------------------------------
+3. CloudStream — recloudstream (Lagradost)
+   Repository: https://github.com/recloudstream/cloudstream
+   License:    GPL-3.0 (https://github.com/recloudstream/cloudstream/blob/main/LICENSE)
+
+   The CloudStream app, Gradle plugin (`com.lagradost.cloudstream3.gradle`),
+   and the extractor registry (`loadExtractor`, `M3u8Helper.generateM3u8`)
+   that IndStream/Multimovies are built on. Dependency declared in
+   `build.gradle.kts` files.
+
+==============================================================================
+End of NOTICE
+==============================================================================
