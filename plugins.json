@@ -18,7 +18,7 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/dipender98/Indflix/main/IndStream/icon.png",
         "apiVersion": 1,
-        "fileHash": "sha256-0d8491c009d72c089f608f6f869a5bcb13e9caf716733590d9a71036a65a4e36"
+        "fileHash": "sha256-fd8d5ef6702e12554c503607a047ecf5b0db03f56173736c2cb9ecc9de51e1ff"
     },
     {
         "url": "https://raw.githubusercontent.com/dipender98/Indflix/builds/Multimovies.cs3",
@@ -42,6 +42,6 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/dipender98/Indflix/main/Multimovies/icon.png",
         "apiVersion": 1,
-        "fileHash": "sha256-a2ba3d4205dcf11e87268f5434050596d3b9c4fdab0515b77f8e7c0fcc21f06e"
+        "fileHash": "sha256-f0a98324c1d36e7f9e231aeb5b2a565706dcdba9b8050ed77ebdd726acb6e009"
     }
 ]
