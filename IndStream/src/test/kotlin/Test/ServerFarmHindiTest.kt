@@ -18,6 +18,7 @@ import com.indstream.VideasySource
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class ServerFarmHindiTest {
@@ -134,13 +135,24 @@ class ServerFarmHindiTest {
 
     @Test
     fun bulletTrainServers_present() {
-        // The 5 fast direct-API servers (user spec Sept 2026: "click and play
-        // like bullet train" — Hindi/multi-audio, no embed chain).
-        val ids = setOf("8stream", "mp4hydra", "vidzee", "vixsrc", "streamprovider")
+        // The fast direct-API servers (user spec Sept 2026: "click and play
+        // like bullet train" — Hindi/multi-audio, no embed chain). mp4hydra,
+        // vidzee, vixsrc and streamprovider are disabled (verified dead Sept
+        // 2026: maintenance page / 404 / 403 / 502) — kept out of the farm so
+        // they don't trip their breakers and blank the whole result set.
+        val ids = setOf("vidlink", "vaplayer", "vidrock", "videasy-hindi", "moviebox", "8stream")
         for (id in ids) {
             assertNotNull(
                 ServerFarm.allServers.firstOrNull { it.id == id },
                 "$id must be in the farm",
+            )
+        }
+        // Disabled/dead servers must NOT be in the live farm.
+        val disabled = setOf("mp4hydra", "vidzee", "vixsrc", "streamprovider", "nhd", "primesrc", "myflixer-hindi", "videm")
+        for (id in disabled) {
+            assertNull(
+                ServerFarm.allServers.firstOrNull { it.id == id },
+                "$id is dead/disabled and must not be in the farm",
             )
         }
     }

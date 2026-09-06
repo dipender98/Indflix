@@ -313,10 +313,12 @@ class IndStreamProvider : MainAPI() {
         val imdbDeferred = fastStartScope.async {
             if (needsImdb) metaDeferred.await()?.imdbId else null
         }
-        // Buffer every server's streams here instead of emitting them the instant
-        // they resolve. A server that resolves first is NOT necessarily the one
-        // that starts the video fastest, so we collect candidates across the settle
-        // window and let emit() pick the best-starting one as the FIRST link.
+        // Buffer arrivals per batch. INSTANT-PLAY model (user spec): the video
+        // starts on the FIRST server that resolves — frame 1 beats everything —
+        // and the remaining servers keep arriving afterwards, pushing their
+        // links into the player while it plays (the server list grows in the
+        // background). Trickle batches are capped and staggered so background
+        // arrival never steals bandwidth from the running stream.
         val buffered = Collections.synchronizedList(mutableListOf<StreamEngine.RawStream>())
         fastStartScope.launch {
             try {
@@ -324,7 +326,9 @@ class IndStreamProvider : MainAPI() {
                     if (streams.isNotEmpty()) {
                         buffered.addAll(streams)
                         StreamEngine.FastStartCache.put(cacheKey, buffered.toList())
-                        // Signal "we have something to pick" so the settle window can begin.
+                        // Signal "we have something to play" the instant the
+                        // first server lands — the main thread starts playback
+                        // immediately, long before the rest of the farm.
                         if (linksAccepted.get() && emitted.get() == 0) firstReady.complete(Unit)
                     }
                 }
@@ -335,23 +339,23 @@ class IndStreamProvider : MainAPI() {
             }
         }
 
-        // Settle briefly so a few genuinely-fast servers (MovieBox, VidLink, …) can
-        // report before we commit to a link. We do NOT emit-on-first-arrival: the
-        // link chosen is the highest startupScore one from everything gathered.
-        // The hard cap guarantees we never hang past FAST_START_MAX_MS even if the
-        // whole farm is slow/dead.
-        withTimeoutOrNull(StreamEngine.FAST_START_MAX_MS) {
-            firstReady.await()
-            if (linksAccepted.get()) delay(StreamEngine.FAST_START_FILL_MS)
-        }
+        // PHASE 1 — first frame: wait only for the FIRST server's batch (the
+        // fastest host normally answers in well under a second; the hard cap
+        // exists only so a dead farm surfaces "no link found" instead of
+        // hanging). No settle delay before playback.
+        withTimeoutOrNull(StreamEngine.FAST_START_MAX_MS) { firstReady.await() }
         linksAccepted.set(false)
 
-        // Emit the gathered streams ranked best-first. emit() orders by startupScore
-        // (history + fresh probe + soft language), so the player's first/auto-played
-        // link is the one that actually begins playback soonest.
+        // Snapshot of everything the farm produced before phase 1 ends — the
+        // first-frame batch AND the trickle slice point.
+        val firstBatch = buffered.toList()
         val started = if (buffered.isNotEmpty()) {
+            // Emit the first batch ranked best-start-first (startupScore:
+            // adaptive/720p start fastest, history breaks ties). This call is
+            // the ONLY one that carries subtitles + manifest-probed labels —
+            // the video isn't running yet, so its bytes cost nothing.
             val langs = StreamEngine.emit(
-                buffered.toList(),
+                firstBatch,
                 { emitted.incrementAndGet(); callback(it) },
                 subtitleCallback,
                 originalLangNow(),
@@ -360,11 +364,45 @@ class IndStreamProvider : MainAPI() {
             true
         } else false
 
-        android.util.Log.i("IndStream", "loadLinks: tmdb=$tmdbId/$type s=$season e=$episode -> started=$started, $emitted links emitted")
+        // PHASE 2 — background trickle: the stream is now warming up, but the
+        // farm keeps resolving and each later batch is pushed to the player
+        // for FAST_START_TRICKLE_MS (server list keeps growing). Trickle mode:
+        // NO master re-fetches (bytes belong to the video), no subtitle
+        // re-emission, one link every TRICKLE_EMIT_GAP_MS so nothing bursts.
         if (started) {
+            val trickleEnd = System.currentTimeMillis() + StreamEngine.FAST_START_TRICKLE_MS
+            // Phase 1 already handed everything buffered at that moment to the
+            // player; trickle only slices arrivals AFTER that point.
+            var lastEmittedCount = firstBatch.size
+            fastStartScope.launch {
+                try {
+                    while (System.currentTimeMillis() < trickleEnd) {
+                        val total = buffered.size
+                        if (total > lastEmittedCount) {
+                            val next = buffered.toList().drop(lastEmittedCount)
+                            lastEmittedCount = total
+                            StreamEngine.emit(
+                                next,
+                                { emitted.incrementAndGet(); callback(it) },
+                                subtitleCallback,
+                                originalLangNow(),
+                                probeManifests = false,
+                                emitSubtitles = false,
+                                emitGapMs = StreamEngine.TRICKLE_EMIT_GAP_MS,
+                            )
+                        } else {
+                            kotlinx.coroutines.delay(120)
+                        }
+                    }
+                } catch (t: Throwable) {
+                    android.util.Log.w("IndStream", "trickle emit stopped: ${t.message}")
+                }
+            }
             // Awaiting is safe: metaDeferred is bounded by its own 3s timeout.
             topUpSubtitles(imdbDeferred.await(), season, episode, originalLangNow(), coveredSubLangs, subtitleCallback)
         }
+
+        android.util.Log.i("IndStream", "loadLinks: tmdb=$tmdbId/$type s=$season e=$episode -> started=$started, $emitted links emitted (first-frame)")
         return started
     }
 

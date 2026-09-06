@@ -25,6 +25,7 @@ import kotlin.math.min
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.withTimeoutOrNull
 import org.jsoup.Jsoup
@@ -195,30 +196,41 @@ object StreamEngine {
 
     /**
      * Composite score for instant-play ranking. Higher = the stream is expected
-     * to begin playback sooner. Signal weights (user spec: real startup speed
-     * beats everything else):
+     * to begin playback sooner. The model is "start low, climb high": the first
+     * emitted link must produce frame 1 in the fewest possible bytes/round-trips,
+     * and once playback is running the player (or a manual tap) climbs to max
+     * resolution. Signal weights:
      *  - History (55%): [HealthMonitor.speedScore] — EMA of past throughput +
      *    latency for this exact server. A host that has proven fast keeps being
      *    fast, so this dominates and lets a known-fast source (e.g. MovieBox)
      *    win even when another server happens to resolve a hair earlier.
      *  - Fresh probe (35%): this session's per-link speed probe (KB/s).
-     *  - Quality (≤6%): mild preference for higher resolution.
-     *  - Audio (≤4%): SOFT language preference only — Hindi/dual get a small edge
-     *    that can never overcome a meaningful speed difference.
+     *  - Cold-start shape (≤10%): a direct 720p file starts in ~1 quality head;
+     *    an adaptive HLS master starts at its LOWEST rung and ABRs up; a direct
+     *    1080p/4K file must buffer megabytes before frame 1 (the VidLink
+     *    "fast host, slow start" effect). So within one server the first link
+     *    is the adaptive master, else the 720p file, else the highest res.
+     *  - Audio (≤4%): SOFT language preference only — Hindi/dual get a small
+     *    edge that can never overcome a meaningful speed difference.
      */
     private fun startupScore(s: RawStream): Double {
         val hist = HealthMonitor.speedScore(s.serverId) // 0..1
         val fresh = if ((s.measuredKbps ?: 0L) > 0L)
             min(1.0, (s.measuredKbps ?: 0L).toDouble() / 5000.0) else 0.5
-        val qualityBonus = when {
-            s.qualityHint >= 1080 -> 0.06
-            s.qualityHint >= 720 -> 0.04
-            else -> 0.0 // adaptive master (0) neutral — player starts at low rendition
+        // Cold-start shape: adaptive master = best (start at low rung, ramp up
+        // via ABR — the "720p first, climb to max" behaviour the player gets
+        // for free); direct 720p = next best; big direct files = worst.
+        val coldStart = when {
+            s.isM3u8 && s.qualityHint == 0 -> 0.10        // true adaptive master
+            s.isM3u8 -> 0.08                              // HLS (multi-rung master)
+            s.qualityHint in 480..720 -> 0.08             // direct 480-720p MP4
+            s.qualityHint >= 1080 -> 0.02                 // direct big file
+            else -> 0.04
         }
         val audioBonus = when (s.audioPriority) {
             4 -> 0.04; 3 -> 0.03; 2 -> 0.02; 1 -> 0.01; else -> 0.0
         }
-        return hist * 0.55 + fresh * 0.35 + qualityBonus + audioBonus
+        return hist * 0.55 + fresh * 0.35 + coldStart + audioBonus
     }
 
     /**
@@ -242,6 +254,18 @@ object StreamEngine {
          *  "Original" carries this language, so "VidLink (Japanese)" is shown
          *  instead of "VidLink (Original)". */
         originalLang: String? = null,
+        /** Trickle mode (background server arrival AFTER the first frame):
+         *  true = skip the master-manifest re-fetch (zero extra bandwidth given
+         *  to the already-running video) and don't re-emit subtitles heights.
+         *  Labels fall back to the RawStream's own qualityHint. */
+        probeManifests: Boolean = true,
+        /** Subtitle pass — only the FIRST emit call after the first frame
+         *  carries subtitle tracks; trickle batches never re-emit them. */
+        emitSubtitles: Boolean = true,
+        /** Sleep before emitting each link (trickle pacing: keeps background
+         *  arrivals from burstingmegabytes of manifest fetches / player
+         *  channel traffic while the stream is warming up). */
+        emitGapMs: Long = 0L,
     ): Set<String> {
         if (streams.isEmpty()) return emptySet()
         val emitted = java.util.Collections.synchronizedSet(HashSet<String>())
@@ -276,8 +300,12 @@ object StreamEngine {
         // Subtitle pass FIRST, over every stream including subtitle-only ones:
         // each server's OWN caption tracks are taken here (user spec: "servers
         // give their own subtitles - take them"). The fallback provider later
-        // tops up whatever language none of the servers carried.
-        ranked.forEach { raw -> raw.subtitles.forEach { (lang, subUrl) -> emitSub(lang, subUrl) } }
+        // tops up whatever language none of the servers carried. Trickle
+        // batches skip this — subtitle dedupe lives in this call's local set,
+        // so re-running it per batch would duplicate every track.
+        if (emitSubtitles) {
+            ranked.forEach { raw -> raw.subtitles.forEach { (lang, subUrl) -> emitSub(lang, subUrl) } }
+        }
 
         // Link pass: only gated, url-bearing streams become ExtractorLinks.
         val eligible = ranked.filter { raw ->
@@ -310,13 +338,14 @@ object StreamEngine {
             if (raw.isM3u8) {
                 // Fast-start tier: SKIP the master re-fetch when resolution
                 // already probed this URL (probeAudio fetched the identical
-                // master to rank audio) or when the label needs nothing the
-                // master would add. The zero-effort path emits immediately —
-                // the player fetches the master itself for ABR — and removes
-                // a duplicate network round-trip from the first frame.
+                // master to rank audio), when the label needs nothing the
+                // master would add — or in trickle mode, where the video is
+                // already running and bytes belong to it. The zero-effort
+                // path emits immediately — the player fetches the master
+                // itself for ABR.
                 val alreadyKnown = (raw.audioPriority > 0 || raw.measuredKbps != null) &&
                     !raw.subtitles.any { it.second.startsWith("/") }
-                val master = if (alreadyKnown) null else {
+                val master = if (alreadyKnown || !probeManifests) null else {
                     val masterText = raw.inlineManifest ?: withTimeoutOrNull(4000L) {
                         runCatching {
                             app.get(raw.url, timeout = 4, headers = linkHeaders).text
@@ -356,6 +385,7 @@ object StreamEngine {
                     quality = fullHeight,
                     headers = linkHeaders, type = ExtractorLinkType.M3U8,
                 ))
+                if (emitGapMs > 0) delay(emitGapMs)
                 // Server-owned subtitle renditions declared in the master.
                 master?.subtitles?.forEach { r ->
                     r.uri?.let { emitSub(r.language ?: r.name, ManifestKit.resolveUrl(raw.url, it)) }
@@ -374,6 +404,7 @@ object StreamEngine {
                     url = raw.url, referer = raw.referer ?: "", quality = raw.qualityHint,
                     headers = linkHeaders, type = ExtractorLinkType.VIDEO,
                 ))
+                if (emitGapMs > 0) delay(emitGapMs)
             }
         }
         return subLangs.toSet()
@@ -465,30 +496,6 @@ object StreamEngine {
             val result = resolve8Stream(spec, imdbId, type)
             if (result.isNotEmpty()) { okServer(spec, start, "8stream api", result.size); return result }
             failServer(spec, "8stream returned no streams")
-            return emptyList()
-        }
-        if (spec.id == "mp4hydra") {
-            val result = resolveMp4Hydra(spec, tmdbId, type, season, episode)
-            if (result.isNotEmpty()) { okServer(spec, start, "mp4hydra api", result.size); return result }
-            failServer(spec, "mp4hydra returned no streams")
-            return emptyList()
-        }
-        if (spec.id == "vidzee") {
-            val result = resolveVidZee(spec, tmdbId, type, season, episode)
-            if (result.isNotEmpty()) { okServer(spec, start, "vidzee api", result.size); return result }
-            failServer(spec, "vidzee returned no streams")
-            return emptyList()
-        }
-        if (spec.id == "vixsrc") {
-            val result = resolveVixSrc(spec, tmdbId, type, season, episode)
-            if (result.isNotEmpty()) { okServer(spec, start, "vixsrc embed", result.size); return result }
-            failServer(spec, "vixsrc returned no streams")
-            return emptyList()
-        }
-        if (spec.id == "streamprovider") {
-            val result = resolveStreamProvider(spec, tmdbId, type, season, episode)
-            if (result.isNotEmpty()) { okServer(spec, start, "streamprovider api", result.size); return result }
-            failServer(spec, "streamprovider returned no streams")
             return emptyList()
         }
 
@@ -1532,6 +1539,15 @@ object StreamEngine {
         }
         val data = root.optJSONObject("data") ?: return emptyList()
         val urls = data.optJSONArray("stream_urls") ?: return emptyList()
+        // The file_name carries the real height ("Inception (2010) [1080p]/…").
+        // VaPlayer returns several masters (one per CDN/height); without a real
+        // height they all share qualityHint=0 and collapse in dedupeNames into a
+        // single numbered group ("VaPlayer-1 … -3"), which reads as the server
+        // appearing multiple times. Seed each URL with its height so they stay
+        // distinct (the emit() master re-parse refines it further).
+        val fileName = data.optString("file_name", "")
+        val fileNameHeight = Regex("""\[(\d{3,4})p\]""", RegexOption.IGNORE_CASE)
+            .find(fileName)?.groupValues?.get(1)?.toIntOrNull() ?: 1080
         val subs = data.optJSONArray("default_subs")?.let { arr ->
             (0 until arr.length()).mapNotNull { i ->
                 val s = arr.optJSONObject(i) ?: return@mapNotNull null
@@ -1546,7 +1562,7 @@ object StreamEngine {
             out += RawStream(
                 serverId = spec.id, serverName = spec.name,
                 url = u, isM3u8 = true, referer = referer,
-                qualityHint = 0, subtitles = subs,
+                qualityHint = fileNameHeight, subtitles = subs,
             )
         }
         Log.d("VaPlayer", "got ${out.size} master playlists")
@@ -1833,350 +1849,9 @@ object StreamEngine {
     }
 
     /**
-     * MP4Hydra resolver (mp4hydra.org info2 API): a multipart POST keyed by a
-     * title slug (movies append the year) returns
-     * {playlist:[{src,title,quality,subs[]}], servers:{Beta: base,…}} —
-     * stream URL = server base + src, Referer https://mp4hydra.org/ required.
-     * TV rows match "S01E01". Rows labelled Hindi are Hindi duals (priority 4).
-     */
-    private suspend fun resolveMp4Hydra(
-        spec: ServerSpec,
-        tmdbId: Int?,
-        type: String,
-        season: Int,
-        episode: Int,
-    ): List<RawStream> {
-        val meta = runCatching { TmdbService.fetchMeta(tmdbId ?: 0, type) }.getOrNull()
-        val title = meta?.name ?: run { Log.w("MP4Hydra", "no title for tmdb=$tmdbId"); return emptyList() }
-        val year = meta.year?.take(4)
-        if (type != "movie" && (season <= 0 || episode <= 0)) {
-            Log.w("MP4Hydra", "tv request without season/episode"); return emptyList()
-        }
-
-        fun slugify(t: String) = t.lowercase()
-            .replace(Regex("""[^\w\s-]"""), "")
-            .trim()
-            .replace(Regex("""[\s_]+"""), "-")
-            .replace(Regex("""-+"""), "-")
-
-        val baseSlug = slugify(title)
-        val slugs = buildList {
-            if (type == "movie" && !year.isNullOrBlank()) add("$baseSlug-$year")
-            add(baseSlug)
-        }.distinct()
-
-        for (slug in slugs) {
-            val z = org.json.JSONArray().put(
-                org.json.JSONObject()
-                    .put("s", slug).put("t", type)
-                    .put("se", if (type == "tv") season else org.json.JSONObject.NULL)
-                    .put("ep", if (type == "tv") episode else org.json.JSONObject.NULL)
-            ).toString()
-            val body = httpPostMultipart(
-                "https://mp4hydra.org/info2?v=8",
-                linkedMapOf("v" to "8", "z" to z),
-                mapOf(
-                    "User-Agent" to HttpKit.userAgent,
-                    "Accept" to "*/*",
-                    "Origin" to "https://mp4hydra.org",
-                    "Referer" to "https://mp4hydra.org/$type/$slug",
-                ),
-            ) ?: continue
-            val root = runCatching { org.json.JSONObject(body) }.getOrNull() ?: continue
-            val playlist = root.optJSONArray("playlist") ?: continue
-            val servers = root.optJSONObject("servers") ?: continue
-            if (playlist.length() == 0) continue
-
-            val items = if (type == "tv") {
-                val seKey = "S%02dE%02d".format(season, episode)
-                (0 until playlist.length()).mapNotNull { playlist.optJSONObject(it) }
-                    .filter { it.optString("title", "").uppercase() == seKey }
-            } else {
-                (0 until playlist.length()).mapNotNull { playlist.optJSONObject(it) }
-            }
-            if (items.isEmpty()) continue
-
-            val out = mutableListOf<RawStream>()
-            val seenUrls = mutableSetOf<String>()
-            for (name in servers.keys()) {
-                val serverBase = servers.optString(name).takeIf { it.startsWith("http") } ?: continue
-                for (item in items) {
-                    val src = item.optString("src").takeIf { it.isNotBlank() } ?: continue
-                    val url = serverBase + src
-                    if (!seenUrls.add(url)) continue
-                    val label = item.optString("quality").ifBlank { item.optString("label") }
-                    val textLabel = (item.optString("show_title") + " " + item.optString("title") + " " + label)
-                    val qualityHint = when {
-                        label.contains("4k", ignoreCase = true) -> 2160
-                        else -> Regex("""(\d{3,4})p""").find(label)?.groupValues?.get(1)?.toIntOrNull() ?: 0
-                    }
-                    val subs = item.optJSONArray("subs")?.let { arr ->
-                        (0 until arr.length()).mapNotNull { j ->
-                            val sub = arr.optJSONObject(j) ?: return@mapNotNull null
-                            val subUrl = sub.optString("src").takeIf { it.isNotBlank() } ?: return@mapNotNull null
-                            (sub.optString("label").ifBlank { "English" }) to (serverBase + subUrl)
-                        }
-                    } ?: emptyList()
-                    val isHindi = textLabel.contains("hindi", ignoreCase = true)
-                    out += RawStream(
-                        serverId = spec.id, serverName = spec.name,
-                        url = url, isM3u8 = url.contains(".m3u8", ignoreCase = true),
-                        referer = "https://mp4hydra.org/", qualityHint = qualityHint,
-                        subtitles = subs,
-                        audioPriority = if (isHindi) 4 else 2,
-                        audioLabel = if (isHindi) "Hindi" else "Original",
-                    )
-                }
-            }
-            if (out.isNotEmpty()) {
-                Log.d("MP4Hydra", "got ${out.size} streams for slug '$slug'")
-                return out
-            }
-        }
-        Log.w("MP4Hydra", "no playlist rows for any slug of '$title'")
-        return emptyList()
-    }
-
-    /**
-     * VidZee resolver (player.vidzee.wtf multi-server API): sr=1..10 each
-     * return {url:[{link,name,language}]} or {link}; some links are
-     * AES-256-CBC tokens (base64 "iv:cipher", static key — see
-     * [decodeVidZeeToken]). `language` labels the audio; playback requires
-     * Referer https://core.vidzee.wtf/.
-     */
-    private suspend fun resolveVidZee(
-        spec: ServerSpec,
-        tmdbId: Int?,
-        type: String,
-        season: Int,
-        episode: Int,
-    ): List<RawStream> {
-        val tmdb = tmdbId ?: return emptyList()
-        if (type != "movie" && (season <= 0 || episode <= 0)) {
-            Log.w("VidZee", "tv request without season/episode"); return emptyList()
-        }
-        val embedReferer = "https://player.vidzee.wtf/embed/movie/$tmdb"
-        val out = mutableListOf<RawStream>()
-        val seenUrls = java.util.Collections.synchronizedSet(mutableSetOf<String>())
-        kotlinx.coroutines.coroutineScope {
-            (1..10).map { sr ->
-                async {
-                    var apiUrl = "https://player.vidzee.wtf/api/server?id=$tmdb&sr=$sr"
-                    if (type == "tv") apiUrl += "&ss=$season&ep=$episode"
-                    val text = withTimeoutOrNull(7_000L) {
-                        runCatching { app.get(apiUrl, timeout = 7, headers = okHeaders(embedReferer)).text }.getOrNull()
-                    } ?: return@async
-                    val root = runCatching { org.json.JSONObject(text) }.getOrNull() ?: return@async
-                    val urlArr = root.optJSONArray("url")
-                    val sources = if (urlArr != null) {
-                        (0 until urlArr.length()).mapNotNull { urlArr.optJSONObject(it) }
-                    } else if (root.optString("link").isNotBlank()) listOf(root) else emptyList()
-
-                    for (s in sources) {
-                        val rawLink = s.optString("link").takeIf { it.isNotBlank() } ?: continue
-                        val url = decodeVidZeeToken(rawLink) ?: continue
-                        if (!seenUrls.add(url)) continue
-                        val lang = s.optString("language").ifBlank { s.optString("lang") }
-                        val rawLabel = s.optString("name").ifBlank { s.optString("label") }.ifBlank { s.optString("type") }
-                        val quality = when {
-                            Regex("""^\d+$""").matches(rawLabel.trim()) -> rawLabel.trim().toIntOrNull() ?: 1080
-                            else -> Regex("""(\d{3,4})""").find(rawLabel)?.groupValues?.get(1)?.toIntOrNull() ?: 1080
-                        }
-                        synchronized(out) {
-                            out += RawStream(
-                                serverId = spec.id, serverName = spec.name,
-                                url = url, isM3u8 = url.contains(".m3u8", ignoreCase = true),
-                                referer = null, qualityHint = quality,
-                                audioPriority = when {
-                                    lang.contains("hindi", ignoreCase = true) -> 4
-                                    lang.isBlank() -> 2
-                                    else -> 1
-                                },
-                                audioLabel = lang,
-                                extraHeaders = mapOf("Referer" to "https://core.vidzee.wtf/"),
-                            )
-                        }
-                    }
-                }
-            }.awaitAll()
-        }
-        Log.d("VidZee", "got ${out.size} streams")
-        return out
-    }
-
-    /**
-     * VixSrc resolver (vixsrc.to): the embed page embeds window.masterPlaylist
-     * {url, token, expires}; appending them (+&h=1) yields a signed adaptive
-     * HLS master. The page URL is the playback Referer; subtitles come from
-     * the wyzie.ru search API (English + Hindi when present).
-     */
-    private suspend fun resolveVixSrc(
-        spec: ServerSpec,
-        tmdbId: Int?,
-        type: String,
-        season: Int,
-        episode: Int,
-    ): List<RawStream> {
-        val tmdb = tmdbId ?: return emptyList()
-        if (type != "movie" && (season <= 0 || episode <= 0)) {
-            Log.w("VixSrc", "tv request without season/episode"); return emptyList()
-        }
-        val pageUrl = if (type == "movie") "https://vixsrc.to/movie/$tmdb"
-        else "https://vixsrc.to/tv/$tmdb/$season/$episode"
-        val html = withTimeoutOrNull(8_000L) {
-            runCatching {
-                app.get(pageUrl, timeout = 8,
-                    headers = okHeaders(pageUrl) + mapOf("Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-                ).text
-            }.getOrNull()
-        } ?: run { Log.w("VixSrc", "embed page fetch failed"); return emptyList() }
-
-        val urlMatch = Regex("""url:\s*['"]([^'"]+)['"]""").find(html)
-        val tokenMatch = Regex("""['"]?token['"]?\s*:\s*['"]([^'"]+)['"]""").find(html)
-        val expiresMatch = Regex("""['"]?expires['"]?\s*:\s*['"]([^'"]+)['"]""").find(html)
-        val master = if (urlMatch != null && tokenMatch != null && expiresMatch != null) {
-            val sep = if (urlMatch.groupValues[1].contains("?")) "&" else "?"
-            urlMatch.groupValues[1] + sep + "token=" + tokenMatch.groupValues[1] +
-                "&expires=" + expiresMatch.groupValues[1] + "&h=1&lang=en"
-        } else {
-            Regex("""(https?://[^'"\s]+\.m3u8[^'"\s]*)""").find(html)?.groupValues?.get(1)
-        }
-        if (master.isNullOrBlank()) {
-            Log.w("VixSrc", "no master playlist in page (${html.length}B)")
-            return emptyList()
-        }
-
-        val subs = runCatching {
-            val apiUrl = if (type == "movie") "https://sub.wyzie.ru/search?id=$tmdb"
-            else "https://sub.wyzie.ru/search?id=$tmdb&season=$season&episode=$episode"
-            val text = withTimeoutOrNull(4_000L) {
-                runCatching { app.get(apiUrl, timeout = 4, headers = okHeaders()).text }.getOrNull()
-            } ?: "[]"
-            val arr = org.json.JSONArray(text)
-            (0 until arr.length()).mapNotNull { i ->
-                val t = arr.optJSONObject(i) ?: return@mapNotNull null
-                val display = t.optString("display")
-                val u = t.optString("url").takeIf { it.startsWith("http") } ?: return@mapNotNull null
-                when {
-                    display.contains("English", ignoreCase = true) -> "English" to u
-                    display.contains("Hindi", ignoreCase = true) -> "Hindi" to u
-                    else -> null
-                }
-            }.distinctBy { it.first }
-        }.getOrDefault(emptyList())
-
-        val pri = probeAudio(master, pageUrl)
-        return listOf(
-            RawStream(
-                serverId = spec.id, serverName = spec.name,
-                url = master, isM3u8 = true,
-                referer = pageUrl, qualityHint = 1080,
-                subtitles = subs,
-                audioPriority = pri, audioLabel = audioLabelFor(pri),
-            )
-        )
-    }
-
-    /**
-     * StreamProvider resolver (streamprovider.byteful.me): one GET per title
-     * returns a direct cached m3u8 URL (plain text or {url}/{stream} JSON).
-     * Adaptive master — audio is probed from the manifest itself.
-     */
-    private suspend fun resolveStreamProvider(
-        spec: ServerSpec,
-        tmdbId: Int?,
-        type: String,
-        season: Int,
-        episode: Int,
-    ): List<RawStream> {
-        val tmdb = tmdbId ?: return emptyList()
-        if (type != "movie" && (season <= 0 || episode <= 0)) {
-            Log.w("StreamProvider", "tv request without season/episode"); return emptyList()
-        }
-        var apiUrl = "https://streamprovider.byteful.me/?tmdbId=$tmdb"
-        if (type == "tv") apiUrl += "&season=$season&episode=$episode"
-        val text = withTimeoutOrNull(6_000L) {
-            runCatching {
-                app.get(apiUrl, timeout = 6, headers = okHeaders("https://streamprovider.byteful.me/")).text
-            }.getOrNull()
-        } ?: run { Log.w("StreamProvider", "no response"); return emptyList() }
-        val trimmed = text.trim()
-        val url = if (trimmed.startsWith("http")) trimmed
-        else runCatching { org.json.JSONObject(trimmed) }.getOrNull()?.let {
-            it.optString("url").takeIf { u -> u.startsWith("http") }
-                ?: it.optString("stream").takeIf { u -> u.startsWith("http") }
-        } ?: run { Log.w("StreamProvider", "unexpected response: ${safeSnippet(trimmed)}"); return emptyList() }
-
-        val pri = probeAudio(url, null)
-        return listOf(
-            RawStream(
-                serverId = spec.id, serverName = spec.name,
-                url = url, isM3u8 = url.contains(".m3u8", ignoreCase = true),
-                referer = null, qualityHint = 1080,
-                audioPriority = pri, audioLabel = audioLabelFor(pri),
-            )
-        )
-    }
-
-    /** Decode a VidZee AES-256-CBC stream token: base64("ivB64:cipherB64"),
-     *  static key "qrincywincyspider" null-padded to 32 bytes, PKCS7 padding.
-     *  Plain URLs pass through; anything undecryptable returns null. */
-    private fun decodeVidZeeToken(token: String): String? {
-        if (token.startsWith("http", ignoreCase = true)) return token
-        val raw = runCatching {
-            String(android.util.Base64.decode(token, android.util.Base64.DEFAULT), Charsets.UTF_8)
-        }.getOrNull() ?: return null
-        val sep = raw.indexOf(':')
-        if (sep <= 0) return null
-        return runCatching {
-            val iv = android.util.Base64.decode(raw.substring(0, sep).trim(), android.util.Base64.DEFAULT)
-            val cipherText = android.util.Base64.decode(raw.substring(sep + 1).trim(), android.util.Base64.DEFAULT)
-            val keyBytes = ByteArray(32)
-            "qrincywincyspider".toByteArray(Charsets.UTF_8).copyInto(keyBytes)
-            val cipher = javax.crypto.Cipher.getInstance("AES/CBC/PKCS5Padding")
-            cipher.init(
-                javax.crypto.Cipher.DECRYPT_MODE,
-                javax.crypto.spec.SecretKeySpec(keyBytes, "AES"),
-                javax.crypto.spec.IvParameterSpec(iv),
-            )
-            String(cipher.doFinal(cipherText), Charsets.UTF_8)
-        }.getOrNull()?.takeIf { it.startsWith("http") }
-    }
-
-    /** Minimal multipart/form-data POST (the shared client has no multipart
-     *  shape). Returns the response body text, or null on any failure. */
-    private fun httpPostMultipart(
-        url: String,
-        fields: Map<String, String>,
-        headers: Map<String, String>,
-    ): String? = runCatching {
-        val boundary = "----IndStream" + System.currentTimeMillis()
-        val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
-        conn.requestMethod = "POST"
-        conn.doOutput = true
-        conn.connectTimeout = 10_000
-        conn.readTimeout = 10_000
-        for ((k, v) in headers) conn.setRequestProperty(k, v)
-        conn.setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
-        conn.outputStream.use { out ->
-            for ((name, value) in fields) {
-                out.write((
-                    "--$boundary\r\n" +
-                    "Content-Disposition: form-data; name=\"$name\"\r\n\r\n" +
-                    "$value\r\n"
-                ).toByteArray(Charsets.UTF_8))
-            }
-            out.write("--$boundary--\r\n".toByteArray(Charsets.UTF_8))
-        }
-        val code = conn.responseCode
-        val stream = if (code in 200..299) conn.inputStream else conn.errorStream ?: return null
-        stream.bufferedReader(Charsets.UTF_8).use { it.readText() }
-    }.getOrNull()
-
-    /**
      * JSON API resolver (api.shows.st / 111Movies shape):
      * `{ "source": { "url": ..., "qualities": [{"quality","url"}] }, "subtitles": [...] }`
-     * The signed stream URLs carry no file extension ï¿½ JSON parsing is mandatory.
+     * The signed stream URLs carry no file extension — JSON parsing is mandatory.
      */
     private suspend fun resolveJsonApi(
         spec: ServerSpec,
@@ -2394,16 +2069,31 @@ object StreamEngine {
         fun clear() = map.clear()
     }
 
-    /** Fill window: after the first server's link is emitted, keep pulling fast
+    /** Fill window (legacy): after the first server's link is emitted, keep pulling fast
      *  servers for this long so the player gets a few alternates, then return so
      *  playback starts. The remaining (slower) servers keep resolving in the
      *  background and land in [FastStartCache] for instant replay. */
     const val FAST_START_FILL_MS: Long = 2_500L
 
-    /** Hard cap on how long [IndStreamProvider.loadLinks] waits before returning,
-     *  regardless of whether the farm has finished. Safety net so a totally dead
-     *  farm still surfaces "no link found" instead of hanging. */
+    /** Hard cap on how long [IndStreamProvider.loadLinks] waits for the FIRST
+     *  batch before returning, regardless of whether the farm has finished.
+     *  Safety net so a totally dead farm still surfaces "no link found"
+     *  instead of hanging. */
     const val FAST_START_MAX_MS: Long = 45_000L
+
+    /** Trickle window (instant-play model): frame 1 starts the moment the
+     *  FIRST server resolves (the fastest host normally answers in well under
+     *  a second). After that, the remaining servers keep resolving and their
+     *  links are pushed to the player for up to this long — the server list
+     *  keeps growing in the background — while capped/staggered so the
+     *  running stream keeps the bandwidth. Past this window arrivals land in
+     *  [FastStartCache] only (instant replay on the next tap). */
+    const val FAST_START_TRICKLE_MS: Long = 4_000L
+
+    /** Pacing between links pushed during the trickle window: a link every
+     *  ~150ms is plenty for the UI and guarantees no burst of manifest fetches
+     *  (or player-channel traffic) competes with the first second of playback. */
+    const val TRICKLE_EMIT_GAP_MS: Long = 150L
 }
 
 

@@ -195,48 +195,57 @@ object ServerFarm {
         // returns per-quality HLS sources across Beta servers with embedded
         // subtitle tracks. Hindi duals appear as rows labelled Hindi; the slug
         // falls back title+year → title. Referer required at playback.
-        ServerSpec(
-            id = "mp4hydra", name = "MP4Hydra",
-            idType = ServerIdType.TMDB,
-            movieUrl = "https://mp4hydra.org/info2?v=8",
-            tvUrl = "https://mp4hydra.org/info2?v=8",
-            isJsonApi = true, referer = "https://mp4hydra.org/",
-            hasSubtitles = true, maxQuality = 2160, timeoutSec = 12,
-        ),
+        // DISABLED Sept 2026 (verified live: host serves a "Back soon"
+        // maintenance page — no API response) — re-enable alongside
+        // resolveMp4Hydra when the service returns.
+        // ServerSpec(
+        //     id = "mp4hydra", name = "MP4Hydra",
+        //     idType = ServerIdType.TMDB,
+        //     movieUrl = "https://mp4hydra.org/info2?v=8",
+        //     tvUrl = "https://mp4hydra.org/info2?v=8",
+        //     isJsonApi = true, referer = "https://mp4hydra.org/",
+        //     hasSubtitles = true, maxQuality = 2160, timeoutSec = 12,
+        // ),
         // VidZee (player.vidzee.wtf): TMDB-keyed multi-server JSON API —
         // sr=1..10 return per-language sources ({link,name,language}); some
         // links are AES-256-CBC tokens decrypted locally (static key, see
         // decodeVidZeeToken). Playback needs Referer core.vidzee.wtf.
-        ServerSpec(
-            id = "vidzee", name = "VidZee",
-            idType = ServerIdType.TMDB,
-            movieUrl = "https://player.vidzee.wtf/api/server?id={id}",
-            tvUrl = "https://player.vidzee.wtf/api/server?id={id}&ss={season}&ep={episode}",
-            isJsonApi = true, referer = "https://player.vidzee.wtf/",
-            hasSubtitles = false, maxQuality = 2160, timeoutSec = 15,
-        ),
+        // DISABLED Sept 2026 (verified live: /api/server returns 404 for every
+        // id) — re-enable alongside resolveVidZee when the API returns.
+        // ServerSpec(
+        //     id = "vidzee", name = "VidZee",
+        //     idType = ServerIdType.TMDB,
+        //     movieUrl = "https://player.vidzee.wtf/api/server?id={id}",
+        //     tvUrl = "https://player.vidzee.wtf/api/server?id={id}&ss={season}&ep={episode}",
+        //     isJsonApi = true, referer = "https://player.vidzee.wtf/",
+        //     hasSubtitles = false, maxQuality = 2160, timeoutSec = 15,
+        // ),
         // VixSrc (vixsrc.to): TMDB-keyed embed page whose window.masterPlaylist
         // {url, token, expires} assembles a signed adaptive HLS master. The
         // page URL is the playback Referer; wyzie.ru serves the subtitles.
-        ServerSpec(
-            id = "vixsrc", name = "VixSrc",
-            idType = ServerIdType.TMDB,
-            movieUrl = "https://vixsrc.to/movie/{id}",
-            tvUrl = "https://vixsrc.to/tv/{id}/{season}/{episode}",
-            isJsonApi = true, referer = "https://vixsrc.to/",
-            hasSubtitles = true, maxQuality = 2160, timeoutSec = 12,
-        ),
+        // DISABLED Sept 2026 (verified live: /movie/{id} → 403 Cloudflare
+        // zone block) — re-enable alongside resolveVixSrc when it unblocks.
+        // ServerSpec(
+        //     id = "vixsrc", name = "VixSrc",
+        //     idType = ServerIdType.TMDB,
+        //     movieUrl = "https://vixsrc.to/movie/{id}",
+        //     tvUrl = "https://vixsrc.to/tv/{id}/{season}/{episode}",
+        //     isJsonApi = true, referer = "https://vixsrc.to/",
+        //     hasSubtitles = true, maxQuality = 2160, timeoutSec = 12,
+        // ),
         // StreamProvider (byteful): TMDB-keyed one-shot GET returning a direct
         // cached m3u8 (plain text or {url} JSON) — the simplest fast server in
         // the farm; audio is probed from the master itself.
-        ServerSpec(
-            id = "streamprovider", name = "StreamProvider",
-            idType = ServerIdType.TMDB,
-            movieUrl = "https://streamprovider.byteful.me/?tmdbId={id}",
-            tvUrl = "https://streamprovider.byteful.me/?tmdbId={id}&season={season}&episode={episode}",
-            isJsonApi = true, referer = "https://streamprovider.byteful.me/",
-            hasSubtitles = false, maxQuality = 1080, timeoutSec = 10,
-        ),
+        // DISABLED Sept 2026 (verified live: host returns 502 Bad Gateway) —
+        // re-enable alongside resolveStreamProvider when it comes back.
+        // ServerSpec(
+        //     id = "streamprovider", name = "StreamProvider",
+        //     idType = ServerIdType.TMDB,
+        //     movieUrl = "https://streamprovider.byteful.me/?tmdbId={id}",
+        //     tvUrl = "https://streamprovider.byteful.me/?tmdbId={id}&season={season}&episode={episode}",
+        //     isJsonApi = true, referer = "https://streamprovider.byteful.me/",
+        //     hasSubtitles = false, maxQuality = 1080, timeoutSec = 10,
+        // ),
         // NHD API: TMDB-keyed. Temporarily disabled because the service is broken
         // (returns no streams and causes delays). Uncomment if it comes back.
         // ServerSpec(
