@@ -1,8 +1,16 @@
-package com.ottmirror.stream
+﻿package Test
+
+import com.indstream.ManifestKit
+import com.indstream.TitleMatch
+import com.indstream.ServerFarm
+import com.indstream.ServerIdType
+import com.indstream.ServerSpec
+import com.indstream.VidlinkSource
+import com.indstream.VideasySource
 
 /**
- * FILE: ServerFarmHindiTest.kt — guards ServerRegistry.kt for the Hindi
- * MyFlixerAPI entry. Verifies the Seedspéc + URL builders emit the expected
+ * FILE: ServerFarmHindiTest.kt â€” guards ServerRegistry.kt for the Hindi
+ * MyFlixerAPI entry. Verifies the SeedspÃ©c + URL builders emit the expected
  * Hindi MyFlixerAPI URLs and that the `hindi` flag is set so [StreamEngine]
  * biases it to priority 4.
  */

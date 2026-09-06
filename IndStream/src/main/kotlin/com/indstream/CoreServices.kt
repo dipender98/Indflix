@@ -1,7 +1,7 @@
-﻿package com.ottmirror.core
+﻿package com.indstream
 /**
 
- * FILE: CoreServices.kt â€” shared OTTMirror primitives.
+ * FILE: CoreServices.kt â€” shared IndStream primitives.
  *
  *  - [HttpKit]       shared HTTP helpers (speed probing, common headers).
  *  - [TmdbService]   TMDB search / metadata / season data.
@@ -10,8 +10,8 @@
  *  - [TitleMatch]    fuzzy title matching (normalize, levenshtein, year
  *                    tolerance) used to verify search results.
  *
- * The resolution orchestration lives in stream/StreamEngine.kt; the VidLink
- * source lives in sources/VidLinkSource.kt.
+ * The resolution orchestration lives in StreamEngine.kt; the VidLink
+ * source lives in VidLinkSource.kt.
  */
 
 import com.lagradost.cloudstream3.Actor
@@ -33,9 +33,9 @@ import org.json.JSONObject
 import org.jsoup.nodes.Document
 
 /**
- * Lean HTTP helpers for the OTTMirror module.
+ * Lean HTTP helpers for the IndStream module.
  * Shares the CloudStream app client (with its cookie jar) but keeps
- * OTTMirror-specific timeouts and header logic in one place.
+ * IndStream-specific timeouts and header logic in one place.
  */
 object HttpKit {
 
@@ -108,7 +108,7 @@ object HttpKit {
 }
 
 /**
- * TMDB metadata engine for OTTMirror. Search, detail, episodes, IMDB→TMDB lookup.
+ * TMDB metadata engine for IndStream. Search, detail, episodes, IMDB→TMDB lookup.
  * Embedded public API key (same approach as Multimovies — no settings hook in pinned lib).
  */
 object TmdbService {

@@ -1,21 +1,18 @@
-﻿package com.ottmirror.plugin
+﻿package com.indstream
 
-import com.ottmirror.core.TmdbService
-import com.ottmirror.stream.StreamEngine
-import com.ottmirror.stream.ServerFarm
-import com.ottmirror.stream.ServerIdType
+import com.lagradost.cloudstream3.*
 /**
 
- * FILE: OTTMirror.kt — the OTTMirror plugin (entry + TMDB catalog provider).
+ * FILE: IndStreamPlugin.kt — the IndStream plugin (entry + TMDB catalog provider).
  *
- *  - [OTTMirror]          plugin entrypoint (@CloudstreamPlugin).
- *  - [OTTMirrorProvider]  TMDB-keyed MainAPI: no catalog of its own — every
+ *  - [IndStream]          plugin entrypoint (@CloudstreamPlugin).
+ *  - [IndStreamProvider]  TMDB-keyed MainAPI: no catalog of its own — every
  *                         title is resolved on demand against TMDB metadata,
  *                         then handed to the resolution engine in
- *                         stream/StreamEngine.kt.
+ *                         StreamEngine.kt.
  *
- * Shared services live in core/CoreServices.kt; the VidLink stream source in
- * sources/VidLinkSource.kt.
+ * Shared services live in CoreServices.kt; the VidLink stream source in
+ * VidLinkSource.kt.
  */
 
 import android.content.Context
@@ -31,17 +28,17 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
- * Registers the OTTMirror provider with CloudStream.
+ * Registers the IndStream provider with CloudStream.
  */
 @CloudstreamPlugin
-class OTTMirror : Plugin() {
+class IndStream : Plugin() {
     override fun load(context: Context) {
-        registerMainAPI(OTTMirrorProvider())
+        registerMainAPI(IndStreamProvider())
     }
 }
 
 /**
- * Pure TMDB URL parser, extractable from [OTTMirrorProvider] for unit testing.
+ * Pure TMDB URL parser, extractable from [IndStreamProvider] for unit testing.
  * No CloudStream dependency — safe for JVM unit tests.
  */
 object TmdbUrlParser {
@@ -57,7 +54,7 @@ object TmdbUrlParser {
 }
 
 /**
- * OTTMirror — a federated embed-server resolver keyed by TMDB/IMDB id.
+ * IndStream — a federated embed-server resolver keyed by TMDB/IMDB id.
  *
  * The plugin has no catalog of its own: search and metadata come from TMDB, and
  * every title is resolved on demand by racing dozens of independent HLS/DASH
@@ -65,10 +62,10 @@ object TmdbUrlParser {
  * measures real stream throughput and emits links fastest-first, so playback
  * feels like an official OTT app without depending on any single backend.
  */
-class OTTMirrorProvider : MainAPI() {
+class IndStreamProvider : MainAPI() {
 
     override var mainUrl = "https://www.themoviedb.org"
-    override var name = "OTTMirror"
+    override var name = "IndStream"
     override val hasMainPage = true
     override val hasQuickSearch = true
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
@@ -223,7 +220,7 @@ class OTTMirrorProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val tmdb = TmdbUrlParser.parseTmdbUrl(data) ?: run {
-            android.util.Log.w("OTTMirror", "loadLinks: not a TMDB url: $data")
+            android.util.Log.w("IndStream", "loadLinks: not a TMDB url: $data")
             return false
         }
         val (tmdbId, type) = tmdb
@@ -240,13 +237,13 @@ class OTTMirrorProvider : MainAPI() {
         }.orEmpty()
 
         if (streams.isEmpty()) {
-            android.util.Log.w("OTTMirror", "loadLinks: zero streams for tmdb=$tmdbId/$type -> CloudStream shows \"no link found\"")
+            android.util.Log.w("IndStream", "loadLinks: zero streams for tmdb=$tmdbId/$type -> CloudStream shows \"no link found\"")
             return false
         }
 
         var emitted = 0
         StreamEngine.emit(streams, { emitted++; callback(it) }, subtitleCallback)
-        android.util.Log.i("OTTMirror", "loadLinks: tmdb=$tmdbId/$type s=$season e=$episode -> ${streams.size} streams, $emitted links emitted")
+        android.util.Log.i("IndStream", "loadLinks: tmdb=$tmdbId/$type s=$season e=$episode -> ${streams.size} streams, $emitted links emitted")
         return emitted > 0
     }
 }

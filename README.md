@@ -9,9 +9,10 @@ https://raw.githubusercontent.com/dipender98/Indflix/builds/repo.json
 ## Project structure
 
 This repository contains two separate CloudStream plugins: `Multimovies` and
-`OTTMirror`. Each module is organized by responsibility under `plugin/`,
-`core/`, and `sources/` (with `stream/` in OTTMirror). See
-[ARCHITECTURE.md](ARCHITECTURE.md) before adding new files.
+`IndStream`. Multimovies is organized by responsibility under `plugin/`,
+`core/`, and `sources/`; IndStream uses a single flat package
+(`com.indstream`). See [ARCHITECTURE.md](ARCHITECTURE.md) before adding new
+files.
 
 ## License
 

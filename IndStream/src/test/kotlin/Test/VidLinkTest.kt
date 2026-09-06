@@ -1,4 +1,13 @@
-﻿package com.ottmirror.sources
+﻿package Test
+
+import com.indstream.ManifestKit
+import com.indstream.NaCl
+import com.indstream.TitleMatch
+import com.indstream.ServerFarm
+import com.indstream.ServerIdType
+import com.indstream.ServerSpec
+import com.indstream.VidlinkSource
+import com.indstream.VideasySource
 /**
 
  * FILE: VidLinkTest.kt â€” guards VidLinkSource.kt (delete-safe rename-proof

@@ -1,6 +1,5 @@
-﻿package com.ottmirror.sources
+﻿package com.indstream
 
-import com.ottmirror.core.HttpKit
 /**
 
  * FILE: VidLinkSource.kt â€” the VidLink third-party stream source
@@ -16,7 +15,7 @@ import com.ottmirror.core.HttpKit
  *                     VidlinkTest.kt).
  *
  * Role: a stream source â€” same category as the entries in Multimovies'
- * sources/ExternalSources.kt, self-contained because it carries its own crypto. If
+ * ExternalSources.kt (Multimovies), self-contained because it carries its own crypto. If
  * VidLink rotates its key, only [VidlinkSource.KEY_HEX] needs updating.
  */
 
