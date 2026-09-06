@@ -47,6 +47,12 @@ object StreamEngine {
     private const val MAX_UNWRAP = 4
     /** Minimum stream height to emit (user spec: 720p and above only). */
     private const val MIN_QUALITY_P = 720
+
+    /** MovieBox bearer token cache (CSX parity): the x-user token lives for
+     *  hours; caching it removes one serial round-trip from every resolve. */
+    @Volatile private var movieBoxToken: String? = null
+    @Volatile private var movieBoxTokenAt: Long = 0L
+    private const val MOVIEBOX_TOKEN_TTL_MS = 6 * 60 * 60 * 1000L
     private val STREAM_REGEX = listOf(
         Regex("""https?://[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*"""),
         Regex("""https?://[^\s"'<>\\]+\.mp4[^\s"'<>\\]*"""),
@@ -677,6 +683,7 @@ object StreamEngine {
         spec: ServerSpec,
         tmdbId: Int?,
         imdbId: String?,
+
         type: String,
         season: Int,
         episode: Int,
@@ -724,35 +731,58 @@ object StreamEngine {
         }
         Log.d("MyFlixerHindi", "$id in library — attempting embed chain")
 
-        // ── 2. Embed page (cookie warm-up + mobile UA to pass the wall) ────
-        // Series episodes use the documented /embed/series?imdb=&sea=&epi= form.
-        val embedUrl = if (isMovie || season <= 0) "https://hindi.myflixerapi.com/embed/$id"
-        else "https://hindi.myflixerapi.com/embed/series?imdb=$id&sea=$season&epi=$episode"
-        // Warm-up: the anti-bot wall is cookie-gated; a homepage GET seeds the
-        // app's shared cookie jar before the embed request.
-        runCatching {
-            withTimeoutOrNull(5_000L) { app.get(referer, timeout = 5, headers = okHeaders(referer)) }
-        }
+        // ── 2. Embed page, both domains ────────────────────────────────────
+        // The hindi. subdomain is robot-walled for plain clients (verified
+        // Sept 2026) but the MAIN myflixerapi.com renders the same embed
+        // chain without a wall — same library, same data-movie-id/AJAX
+        // shapes. Try hindi. first (canonical Hindi host), fall back to the
+        // main domain on a wall. Series episodes use /embed/series?imdb=….
+        // Warm-up: the anti-bot wall is cookie-gated; a homepage GET seeds
+        // the app's shared cookie jar before the embed request.
         val mobileHeaders = mapOf(
             "User-Agent" to "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
-            "Referer" to referer,
+            "Referer" to "https://myflixerapi.com/",
         )
-        Log.d("MyFlixerHindi", "Fetching $embedUrl")
-        val rawText = withTimeoutOrNull(8_000L) {
-            runCatching { app.get(embedUrl, timeout = 8, headers = mobileHeaders).text }.getOrNull()
-        } ?: run { failServer(spec, "embed fetch failed: $embedUrl"); return emptyList() }
+        val domains = listOf("hindi.myflixerapi.com", "myflixerapi.com")
+        val embedPaths = if (isMovie || season <= 0)
+            listOf("/embed/$id")
+        else listOf("/embed/series?imdb=$id&sea=$season&epi=$episode", "/embed/$id/$season/$episode")
+        runCatching {
+            withTimeoutOrNull(5_000L) { app.get("https://myflixerapi.com/", timeout = 5, headers = okHeaders()) }
+        }
 
-        // Genuine library miss page (checked BEFORE the wall — the miss page
-        // also carries the robot banner in its footer).
-        if (rawText.contains("movie-not-found") || rawText.contains("Movie or Episode Not Found", ignoreCase = true)) {
-            Log.d("MyFlixerHindi", "$id not in library (embed page miss)")
+        var embedDomain: String? = null
+        var embedText: String? = null
+        outer@ for (domain in domains) {
+            for (path in embedPaths) {
+                val url = "https://$domain$path"
+                Log.d("MyFlixerHindi", "Fetching $url")
+                val text = withTimeoutOrNull(8_000L) {
+                    runCatching { app.get(url, timeout = 8, headers = mobileHeaders).text }.getOrNull()
+                } ?: continue
+                // Genuine library miss page (checked BEFORE the wall — the
+                // miss page also carries the robot banner in its footer).
+                if (text.contains("movie-not-found") || text.contains("Movie or Episode Not Found", ignoreCase = true)) {
+                    Log.d("MyFlixerHindi", "$id not in library (embed page miss)")
+                    return emptyList()
+                }
+                if (text.contains("not a robot", ignoreCase = true)) {
+                    Log.d("MyFlixerHindi", "$domain walled — trying next domain/path")
+                    continue
+                }
+                if (Regex("""data-movie-id="([^"]+)"""").containsMatchIn(text)) {
+                    embedDomain = domain
+                    embedText = text
+                    break@outer
+                }
+                Log.d("MyFlixerHindi", "$domain$path: no data-movie-id (${text.length}B)")
+            }
+        }
+        val rawText = embedText ?: run {
+            failServer(spec, "embed blocked on all domains (wall) or no data-movie-id")
             return emptyList()
         }
-        // Anti-bot wall — the page never renders data-movie-id behind it.
-        if (rawText.contains("not a robot", ignoreCase = true) || rawText.contains("CONFIRM YOU ARE NOT A ROBOT", ignoreCase = true)) {
-            failServer(spec, "embed page behind anti-bot wall (${rawText.length}B) — cookie warm-up did not pass")
-            return emptyList()
-        }
+        val embedBase = "https://$embedDomain"
 
         val movieId = Regex("""data-movie-id="([^"]+)"""").find(rawText)?.groupValues?.get(1)
         if (movieId.isNullOrBlank()) {
@@ -779,15 +809,14 @@ object StreamEngine {
         }
         Log.d("MyFlixerHindi", "movieId=$movieId servers=$serverIds labels=$labeledServers")
 
-        // ── 3. AJAX chain (unchanged shape; endpoint may return if the wall
-        //       was transient — it 404s cleanly otherwise) ──────────────────
+        // ── 3. AJAX chain on the domain that rendered the embed page ──────
         val ajaxHeaders = mobileHeaders.toMutableMap().apply {
             put("X-Requested-With", "XMLHttpRequest")
         }
         data class FlixerLink(val url: String, val label: String?)
         val links = mutableListOf<FlixerLink>()
         for (sid in serverIds) {
-            val ajaxUrl = "https://hindi.myflixerapi.com/ajax/get_stream_link?id=$sid&movie=$movieId&is_init=false&captcha="
+            val ajaxUrl = "$embedBase/ajax/get_stream_link?id=$sid&movie=$movieId&is_init=false&captcha="
             val jsonText = withTimeoutOrNull(6_000L) {
                 runCatching { app.get(ajaxUrl, timeout = 6, headers = ajaxHeaders).text }.getOrNull()
             } ?: continue
@@ -903,16 +932,24 @@ object StreamEngine {
         val host = "h5-api.aoneroom.com"
         val base = "https://$host"
 
-        // 1. Bearer token from the x-user response header.
-        val xUser = withTimeoutOrNull(8_000L) {
-            runCatching {
-                app.get("$base/wefeed-h5api-bff/app/get-latest-app-pkgs?app_name=moviebox",
-                    timeout = 8, headers = okHeaders())
-            }.getOrNull()
-        }?.headers?.get("x-user") ?: run { Log.w("MovieBox", "no x-user header"); return emptyList() }
-        val token = runCatching { org.json.JSONObject(xUser).optString("token", "") }
-            .getOrNull()?.takeIf { it.isNotBlank() }
-            ?: run { Log.w("MovieBox", "no token in x-user"); return emptyList() }
+        // 1. Bearer token from the x-user response header (cached ~6h —
+        //    CSX parity; saves a serial round-trip per resolve).
+        val token = movieBoxToken
+            ?.takeIf { System.currentTimeMillis() - movieBoxTokenAt < MOVIEBOX_TOKEN_TTL_MS }
+            ?: run {
+                val xUser = withTimeoutOrNull(8_000L) {
+                    runCatching {
+                        app.get("$base/wefeed-h5api-bff/app/get-latest-app-pkgs?app_name=moviebox",
+                            timeout = 8, headers = okHeaders())
+                    }.getOrNull()
+                }?.headers?.get("x-user") ?: run { Log.w("MovieBox", "no x-user header"); return emptyList() }
+                val t = runCatching { org.json.JSONObject(xUser).optString("token", "") }
+                    .getOrNull()?.takeIf { it.isNotBlank() }
+                    ?: run { Log.w("MovieBox", "no token in x-user"); return emptyList() }
+                movieBoxToken = t
+                movieBoxTokenAt = System.currentTimeMillis()
+                t
+            }
 
         val baseHeaders = mapOf(
             "X-Client-Info" to "{\"timezone\":\"Asia/Kolkata\"}",
@@ -946,11 +983,19 @@ object StreamEngine {
         val items = unwrapData(searchObj).optJSONArray("items")
             ?: run { Log.w("MovieBox", "no search items"); return emptyList() }
 
-        // "Title [Hindi]" → audio; "Title S1-S3" trailing suffix is season
-        // coverage, stripped before matching. Clean title must equal the TMDB
-        // title exactly (case-insensitive) to avoid wrong-title matches.
+        // "Title [Hindi]" / "Title (Hindi Dubbed)" → audio; "Title S1-S3"
+        // trailing suffix is season coverage, stripped before matching. Clean
+        // title must equal the TMDB title exactly (case-insensitive) to avoid
+        // wrong-title matches. Both bracket styles carry the audio tag.
         val seasonSuffix = Regex("""\s+S\d+(?:\s*-\s*S?\d+)?$""", RegexOption.IGNORE_CASE)
-        val titleRegex = Regex("""^${Regex.escape(title)}(?:\s+\[([^\]]+)])?$""", RegexOption.IGNORE_CASE)
+        val titleRegex = Regex(
+            """^${Regex.escape(title)}\s*(?:[\[(][^\])]+[\])])?$""",
+            RegexOption.IGNORE_CASE,
+        )
+        val audioTagRegex = Regex(
+            """^${Regex.escape(title)}\s*[\[(]([^\])]+)[\])]$""",
+            RegexOption.IGNORE_CASE,
+        )
         val subjects = mutableListOf<Triple<String, Int, String?>>() // id, seasonEnd, language
         for (i in 0 until items.length()) {
             val item = items.optJSONObject(i) ?: continue
@@ -960,7 +1005,8 @@ object StreamEngine {
             val m = titleRegex.find(clean) ?: continue
             val seasonEnd = seasonSuffix.find(rawTitle)?.value
                 ?.filter { it.isDigit() }?.takeIf { it.isNotBlank() }?.toIntOrNull()
-            subjects += Triple(id, seasonEnd ?: 1, m.groupValues[1])
+            val audioTag = audioTagRegex.find(clean)?.groupValues?.get(1)
+            subjects += Triple(id, seasonEnd ?: 1, audioTag)
         }
         if (subjects.isEmpty()) {
             Log.d("MovieBox", "no exact title match for '$title'")
@@ -970,83 +1016,96 @@ object StreamEngine {
 
         val refererBase = "https://fmoviesunblocked.net/"
         val out = mutableListOf<RawStream>()
-        val seenUrls = mutableSetOf<String>()
+        val seenUrls = java.util.Collections.synchronizedSet(mutableSetOf<String>())
 
-        for ((subjectId, seasonEnd, language) in subjects) {
-            // Series entry covering fewer seasons than requested can't serve
-            // this episode (their library splits long shows into S1-S3 / S4-…).
-            if (type != "movie" && season > seasonEnd) continue
+        // Subjects resolve concurrently (CSX parity — the serial loop was the
+        // main speed gap: token+search+detail+download+play per subject).
+        val subjectResults = kotlinx.coroutines.coroutineScope {
+            subjects.map { (subjectId, seasonEnd, language) ->
+                async {
+                    // Series entry covering fewer seasons than requested can't
+                    // serve this episode (library splits shows into S1-S3 / S4-…).
+                    if (type != "movie" && season > seasonEnd) return@async emptyList<RawStream>()
 
-            // 3. detailPath lookup.
-            val detailText = withTimeoutOrNull(8_000L) {
-                runCatching {
-                    app.get("https://h5.aoneroom.com/wefeed-h5-bff/web/post/list/subject?id=$subjectId",
-                        timeout = 8, headers = okHeaders()).text
-                }.getOrNull()
-            } ?: continue
-            val detailPath = runCatching { org.json.JSONObject(detailText) }.getOrNull()
-                ?.optJSONObject("data")
-                ?.optJSONArray("items")?.optJSONObject(0)
-                ?.optJSONObject("subject")
-                ?.optString("detailPath", "").orEmpty()
-            if (detailPath.isBlank()) continue
-
-            val reqHeaders = baseHeaders + mapOf(
-                "Referer" to "$refererBase/spa/videoPlayPage/movies/$detailPath?id=$subjectId&type=/movie/detail",
-                "Origin" to refererBase.trimEnd('/'),
-            )
-            val params = buildString {
-                append("subjectId=$subjectId")
-                if (type != "movie") append("&se=$seasonKey&ep=$episodeKey")
-                append("&detailPath=$detailPath")
-            }
-
-            // 4. download + play endpoints in parallel.
-            val (downloadObj, playObj) = kotlinx.coroutines.coroutineScope {
-                val d = async {
-                    withTimeoutOrNull(8_000L) {
+                    // 3. detailPath lookup.
+                    val detailText = withTimeoutOrNull(8_000L) {
                         runCatching {
-                            app.get("$base/wefeed-h5api-bff/subject/download?$params",
-                                timeout = 8, headers = reqHeaders).text
+                            app.get("https://h5.aoneroom.com/wefeed-h5-bff/web/post/list/subject?id=$subjectId",
+                                timeout = 8, headers = okHeaders()).text
                         }.getOrNull()
-                    }?.let { t -> runCatching { org.json.JSONObject(t) }.getOrNull() }
-                }
-                val p = async {
-                    withTimeoutOrNull(8_000L) {
-                        runCatching {
-                            app.get("$base/wefeed-h5api-bff/subject/play?$params",
-                                timeout = 8, headers = reqHeaders).text
-                        }.getOrNull()
-                    }?.let { t -> runCatching { org.json.JSONObject(t) }.getOrNull() }
-                }
-                (d.await() ?: org.json.JSONObject()) to (p.await() ?: org.json.JSONObject())
-            }
+                    } ?: return@async emptyList<RawStream>()
+                    val detailPath = runCatching { org.json.JSONObject(detailText) }.getOrNull()
+                        ?.optJSONObject("data")
+                        ?.optJSONArray("items")?.optJSONObject(0)
+                        ?.optJSONObject("subject")
+                        ?.optString("detailPath", "").orEmpty()
+                    if (detailPath.isBlank()) return@async emptyList<RawStream>()
 
-            fun addStreams(arr: org.json.JSONArray?, dash: Boolean) {
-                if (arr == null) return
-                for (i in 0 until arr.length()) {
-                    val s = arr.optJSONObject(i) ?: continue
-                    if (s.optBoolean("vipLocked", false)) continue
-                    val url = s.optString("url").takeIf { it.isNotBlank() } ?: continue
-                    if (!seenUrls.add(url)) continue
-                    val resolution = s.optString("resolutions", "").toIntOrNull()
-                        ?: s.optInt("resolution", 0)
-                    out += RawStream(
-                        serverId = spec.id,
-                        serverName = spec.name + if (dash) " Auto" else "",
-                        url = url,
-                        isM3u8 = url.contains(".m3u8", ignoreCase = true) || dash,
-                        referer = refererBase,
-                        qualityHint = resolution,
-                        audioPriority = if (language?.contains("hindi", ignoreCase = true) == true) 4 else 2,
-                        audioLabel = language ?: "",
+                    val reqHeaders = baseHeaders + mapOf(
+                        "Referer" to "$refererBase/spa/videoPlayPage/movies/$detailPath?id=$subjectId&type=/movie/detail",
+                        "Origin" to refererBase.trimEnd('/'),
                     )
+                    val params = buildString {
+                        append("subjectId=$subjectId")
+                        if (type != "movie") append("&se=$seasonKey&ep=$episodeKey")
+                        append("&detailPath=$detailPath")
+                    }
+
+                    // 4. download + play endpoints in parallel.
+                    val (downloadObj, playObj) = kotlinx.coroutines.coroutineScope {
+                        val d = async {
+                            withTimeoutOrNull(8_000L) {
+                                runCatching {
+                                    app.get("$base/wefeed-h5api-bff/subject/download?$params",
+                                        timeout = 8, headers = reqHeaders).text
+                                }.getOrNull()
+                            }?.let { t -> runCatching { org.json.JSONObject(t) }.getOrNull() }
+                        }
+                        val p = async {
+                            withTimeoutOrNull(8_000L) {
+                                runCatching {
+                                    app.get("$base/wefeed-h5api-bff/subject/play?$params",
+                                        timeout = 8, headers = reqHeaders).text
+                                }.getOrNull()
+                            }?.let { t -> runCatching { org.json.JSONObject(t) }.getOrNull() }
+                        }
+                        (d.await() ?: org.json.JSONObject()) to (p.await() ?: org.json.JSONObject())
+                    }
+
+                    fun addStreams(arr: org.json.JSONArray?, dash: Boolean): List<RawStream> {
+                        if (arr == null) return emptyList()
+                        val added = mutableListOf<RawStream>()
+                        for (i in 0 until arr.length()) {
+                            val s = arr.optJSONObject(i) ?: continue
+                            if (s.optBoolean("vipLocked", false)) continue
+                            val url = s.optString("url").takeIf { it.isNotBlank() } ?: continue
+                            if (!seenUrls.add(url)) continue
+                            val resolution = s.optString("resolutions", "").toIntOrNull()
+                                ?: s.optInt("resolution", 0)
+                            // Audio tag may be "Hindi", "Hindi Dubbed",
+                            // "Dual Audio [Hindi-English]" etc — any mention
+                            // of Hindi ranks as Hindi (priority 4).
+                            val isHindi = language?.contains("hindi", ignoreCase = true) == true
+                            added += RawStream(
+                                serverId = spec.id,
+                                serverName = spec.name + if (dash) " Auto" else "",
+                                url = url,
+                                isM3u8 = url.contains(".m3u8", ignoreCase = true) || dash,
+                                referer = refererBase,
+                                qualityHint = resolution,
+                                audioPriority = if (isHindi) 4 else 2,
+                                audioLabel = language ?: "",
+                            )
+                        }
+                        return added
+                    }
+                    addStreams(unwrapData(downloadObj).optJSONArray("downloads"), dash = false) +
+                        addStreams(unwrapData(playObj).optJSONArray("streams"), dash = false) +
+                        addStreams(unwrapData(playObj).optJSONArray("dash"), dash = true)
                 }
-            }
-            addStreams(unwrapData(downloadObj).optJSONArray("downloads"), dash = false)
-            addStreams(unwrapData(playObj).optJSONArray("streams"), dash = false)
-            addStreams(unwrapData(playObj).optJSONArray("dash"), dash = true)
+            }.awaitAll()
         }
+        subjectResults.forEach { out += it }
 
         Log.d("MovieBox", "got ${out.size} streams from ${subjects.size} subjects")
         return out

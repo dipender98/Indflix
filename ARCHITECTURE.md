@@ -43,3 +43,24 @@ Indflix/
 ./gradlew :IndStream:testDebugUnitTest
 ./gradlew :IndStream:make
 ```
+
+## Contributions & acknowledgements
+
+Parts of IndStream's server farm are ports or adaptations of reverse-engineering
+work published by the CloudStream community. Grateful credit where it belongs:
+
+- **SaurabhKaperwan (CSX CineStream)** — [SaurabhKaperwan/CSX](https://github.com/SaurabhKaperwan/CSX).
+  The MovieBox resolver (`resolveMovieBox`) is a port of CSX's `invokeMoviebox`
+  (aoneroom `wefeed-h5api-bff` app API: x-user bearer token, subject search,
+  download/play endpoints, fmoviesunblocked playback headers). CSX's
+  `ProviderRegistry`/`ApiConstants` also served as the reference catalog when
+  vetting live hosts (VaPlayer, VidRock, PrimeSrc) and their header
+  requirements. The dynamic `urls.json` mirror-list pattern is CSX's.
+- **phisher98 (CloudstreamExtensions)** — [phisher98/CloudstreamExtensions](https://github.com/phisher98/CloudstreamExtensions).
+  Reference for extractor conventions and additional provider API shapes used
+  when cross-checking the farm's JSON APIs.
+- **recloudstream** — the CloudStream app, gradle plugin, and extractor
+  registry (`loadExtractor`) that IndStream is built on:
+  [recloudstream/cloudstream](https://github.com/recloudstream/cloudstream).
+
+If you reuse this repository's resolvers, please keep these attributions intact.
