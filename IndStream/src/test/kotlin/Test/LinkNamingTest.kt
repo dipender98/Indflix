@@ -46,18 +46,23 @@ class LinkNamingTest {
     }
 
     @Test
-    fun languageTag_blankDefaultsToMulti() {
-        assertEquals("Multi", LinkNaming.languageTag(""))
-        assertEquals("Multi", LinkNaming.languageTag(null))
+    fun languageTag_blankIsUnknown() {
+        // User spec Sept 2026: an audio we can't determine must read "Unknown",
+        // never a guessed "Multi"/"English".
+        assertEquals("Unknown", LinkNaming.languageTag(""))
+        assertEquals("Unknown", LinkNaming.languageTag(null))
     }
 
     // ── languageTagFor ───────────────────────────────────────────
 
     @Test
     fun languageTagFor_originalUsesTmdbCode() {
+        // EXPLICIT "Original" from a resolver maps to the title's language.
         assertEquals("Japanese", LinkNaming.languageTagFor("Original", "ja"))
-        assertEquals("Hindi", LinkNaming.languageTagFor("", "hi"))
-        assertEquals("English", LinkNaming.languageTagFor(null, "en"))
+        // BLANK is a genuine unknown — never inferred from TMDB (a blank stream of a
+        // Telugu title may be a Hindi dub; guessing would mismatch it).
+        assertEquals("Unknown", LinkNaming.languageTagFor("", "hi"))
+        assertEquals("Unknown", LinkNaming.languageTagFor(null, "en"))
     }
 
     @Test
@@ -258,6 +263,16 @@ class LinkNamingTest {
         assertEquals("1080p", LinkNaming.qualityLabel(1080))
         assertEquals("720p", LinkNaming.qualityLabel(720))
         assertEquals("", LinkNaming.qualityLabel(0))
+        // -1 sentinel: a DIRECT file whose real height could not be measured → "Auto"
+        // (never a guessed 1080p). 0 stays blank (adaptive HLS).
+        assertEquals("Auto", LinkNaming.qualityLabel(-1))
+    }
+
+    @Test
+    fun displayName_directUnknownShowsAutoNot1080() {
+        // Regression: a measured-unknown direct file must not be labelled 1080p.
+        val name = LinkNaming.displayName("VidRock", "Hindi", qualityHint = -1)
+        assertEquals("VidRock (Hindi) Auto", name)
     }
 
     // ── helpers ──────────────────────────────────────────────────

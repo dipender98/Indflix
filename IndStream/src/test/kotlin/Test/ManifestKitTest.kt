@@ -183,6 +183,45 @@ class ManifestKitTest {
     }
 
     @Test
+    fun audioPriority_defaultHindiWinsWhenEnglishAlsoPresent() {
+        // RRR-on-VaPlayer style: Hindi is the DEFAULT track, an English track also
+        // exists. The label must be "Hindi" (4), never "English" (1) or dual (3).
+        val master = """
+        #EXTM3U
+        #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="Hindi",LANGUAGE="hi",URI="hi.m3u8",DEFAULT=YES
+        #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="English",LANGUAGE="en",URI="en.m3u8"
+        #EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080,AUDIO="a"
+        1080p.m3u8
+        """.trimIndent()
+        val result = ManifestKit.parseMaster(master, "https://cdn.example.com/")
+        assertNotNull(result)
+        assertEquals(4, ManifestKit.audioPriority(result))
+    }
+
+    @Test
+    fun audioPriority_defaultEnglishWinsWhenHindiAlsoPresent() {
+        // The DEFAULT track is English even though Hindi exists — trust the played track.
+        val master = """
+        #EXTM3U
+        #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="English",LANGUAGE="en",URI="en.m3u8",DEFAULT=YES
+        #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="Hindi",LANGUAGE="hi",URI="hi.m3u8"
+        #EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080,AUDIO="a"
+        1080p.m3u8
+        """.trimIndent()
+        val result = ManifestKit.parseMaster(master, "https://cdn.example.com/")
+        assertNotNull(result)
+        assertEquals(1, ManifestKit.audioPriority(result))
+    }
+
+    @Test
+    fun resolutionFromUrl_picksHeight() {
+        assertEquals(1080, ManifestKit.resolutionFromUrl("https://cdn.x/foo/1080p/movie.m3u8"))
+        assertEquals(720, ManifestKit.resolutionFromUrl("https://cdn.x/video_720p.mp4"))
+        assertEquals(0, ManifestKit.resolutionFromUrl("https://cdn.x/video/playlist/index.m3u8"))
+        assertEquals(0, ManifestKit.resolutionFromUrl(null))
+    }
+
+    @Test
     fun isMaster_detectsMaster() {
         assertTrue(ManifestKit.isMaster("#EXT-X-STREAM-INF:BANDWIDTH=1000\nfile.m3u8"))
         assertFalse(ManifestKit.isMaster("#EXTM3U\n#EXTINF:5\nfile.ts"))

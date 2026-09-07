@@ -34,7 +34,10 @@ object LinkNaming {
      * streams), never empty.
      */
     fun languageTag(raw: String?): String {
-        if (raw.isNullOrBlank()) return "Multi"
+        // Truly unknown audio (the server gave no language signal at all) is labelled
+        // "Unknown" — never guessed as "Multi"/"Original"/"English" (user spec Sept 2026:
+        // if we don't know the audio, say so instead of mismatching it).
+        if (raw.isNullOrBlank()) return "Unknown"
         val s = raw.trim().lowercase()
         // Dual/multi audio FIRST: duo wording or the "a+b" combo form must
         // win over the single-language checks below (a string like
@@ -49,12 +52,15 @@ object LinkNaming {
 
     /**
      * Map a raw audio label to the tag for a stream of a title whose original
-     * language is [originalLang] (TMDB code, e.g. "ja"). "Original"/blank
-     * labels become the actual language of the title.
+     * language is [originalLang] (TMDB code, e.g. "ja"). An EXPLICIT "Original"
+     * label from a resolver maps to the title's actual language; a BLANK label
+     * is a genuine unknown and stays "Unknown" (user spec Sept 2026: a blank
+     * stream of a Telugu title may be a Hindi dub — never guess from TMDB).
      */
     fun languageTagFor(raw: String?, originalLang: String? = null): String {
         val s = raw?.trim()?.lowercase().orEmpty()
-        if (s.isEmpty() || s == "original" || s == "orig" || s == "org") {
+        if (s.isEmpty()) return "Unknown"
+        if (s == "original" || s == "orig" || s == "org") {
             return originalLang?.let { languageTag(it) } ?: "Original"
         }
         return languageTag(s)
@@ -127,7 +133,9 @@ object LinkNaming {
     fun displayName(base: String, audioLabel: String?, qualityHint: Int): String =
         displayName(base, audioLabel, qualityHint, subIndicator = null, duplicateIndex = 0)
 
-    /** Height → display token ("4K", "1080p", "720p"). Mirrors ManifestKit. */
+    /** Height → display token ("4K", "1080p", "720p"). Mirrors ManifestKit.
+     *  [height] < 0 is the sentinel for a DIRECT file whose real resolution could not
+     *  be measured (renders as "Auto"); 0 stays blank (adaptive HLS). */
     fun qualityLabel(height: Int): String = when {
         height >= 2160 -> "4K"
         height >= 1440 -> "1440p"
@@ -136,6 +144,7 @@ object LinkNaming {
         height >= 480 -> "480p"
         height >= 360 -> "360p"
         height > 0 -> "${height}p"
+        height < 0 -> "Auto"
         else -> ""
     }
 

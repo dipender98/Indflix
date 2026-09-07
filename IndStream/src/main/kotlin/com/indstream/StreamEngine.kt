@@ -531,29 +531,48 @@ object StreamEngine {
         val preResolved = coroutineScope {
             eligible.map { raw ->
                 async {
-                    if (!raw.isM3u8 || !probeManifests) {
-                        ResolvedEmit(raw, raw.qualityHint, raw.audioLabel, null)
-                    } else {
-                        val alreadyKnown = (raw.audioPriority > 0 || raw.measuredKbps != null) &&
-                            !raw.subtitles.any { it.second.startsWith("/") }
-                        if (alreadyKnown) {
-                            ResolvedEmit(raw, raw.qualityHint, raw.audioLabel, null)
-                        } else {
-                            val lh = LinkedHashMap<String, String>()
-                            lh.putAll(raw.extraHeaders)
-                            if (!lh.containsKey("Referer") && !raw.referer.isNullOrBlank()) lh["Referer"] = raw.referer!!
-                            val masterText = raw.inlineManifest ?: withTimeoutOrNull(3000L) {
-                                runCatching { app.get(raw.url, timeout = 3, headers = lh).text }.getOrNull()
+                    when {
+                        // HLS master: re-parse for real height + audio (skip when trickle/off or already known).
+                        raw.isM3u8 && probeManifests -> {
+                            val alreadyKnown = (raw.audioPriority > 0 || raw.measuredKbps != null) &&
+                                !raw.subtitles.any { it.second.startsWith("/") }
+                            if (alreadyKnown) {
+                                ResolvedEmit(raw, raw.qualityHint, raw.audioLabel, null)
+                            } else {
+                                val lh = LinkedHashMap<String, String>()
+                                lh.putAll(raw.extraHeaders)
+                                if (!lh.containsKey("Referer") && !raw.referer.isNullOrBlank()) lh["Referer"] = raw.referer!!
+                                val masterText = raw.inlineManifest ?: withTimeoutOrNull(3000L) {
+                                    runCatching { app.get(raw.url, timeout = 3, headers = lh).text }.getOrNull()
+                                }
+                                val master = ManifestKit.parseMaster(masterText, raw.url)
+                                val h = master?.let { ManifestKit.bestHeight(it.variants) }?.takeIf { it > 0 } ?: raw.qualityHint
+                                // Audio label: explicit server label wins; else the REAL track the
+                                // player auto-selects (multi-audio → "Multi", single track → its language).
+                                val tag = if (raw.audioLabel.isNotBlank()) raw.audioLabel
+                                else if (master != null && master.isMultiAudio) "Multi"
+                                else if (master != null) audioLabelFor(ManifestKit.audioPriority(master))
+                                else raw.audioLabel
+                                master?.let { m ->
+                                    val langs = m.audio.map { r -> "lang=${r.language ?: "none"} name=${r.name} group=${r.groupId} default=${r.default}" }
+                                    Log.d("IndStream", "audioTracks server=${raw.serverName} multiAudio=${m.isMultiAudio} renditions=$langs")
+                                }
+                                ResolvedEmit(raw, h, tag, master)
                             }
-                            val master = ManifestKit.parseMaster(masterText, raw.url)
-                            val h = master?.let { ManifestKit.bestHeight(it.variants) }?.takeIf { it > 0 } ?: raw.qualityHint
-                            val tag = if (master?.isMultiAudio == true) "Multi" else raw.audioLabel
-                            master?.let { m ->
-                                val langs = m.audio.map { r -> "lang=${r.language ?: "none"} name=${r.name} group=${r.groupId}" }
-                                Log.d("IndStream", "audioTracks server=${raw.serverName} multiAudio=${m.isMultiAudio} renditions=$langs")
-                            }
-                            ResolvedEmit(raw, h, tag, master)
                         }
+                        // Direct file: measure the REAL height (moov parse → URL token → "Auto").
+                        !raw.isM3u8 && probeManifests -> {
+                            val measured = HttpKit.resolveHeight(raw.url, raw.referer, raw.extraHeaders)
+                            val h = if (measured > 0) measured
+                            else if (raw.qualityHint > 0) raw.qualityHint
+                            else {
+                                val fromUrl = ManifestKit.resolutionFromUrl(raw.url)
+                                if (fromUrl > 0) fromUrl else -1   // -1 = Auto (unknown direct file)
+                            }
+                            ResolvedEmit(raw, h, raw.audioLabel, null)
+                        }
+                        // Trickle/off path: trust the RawStream's own qualityHint (no new probes).
+                        else -> ResolvedEmit(raw, raw.qualityHint, raw.audioLabel, null)
                     }
                 }
             }.awaitAll()
@@ -1768,7 +1787,7 @@ object StreamEngine {
                 out += RawStream(
                     serverId = spec.id, serverName = spec.name,
                     url = url, isM3u8 = url.contains(".m3u8", true) || kind == "hls",
-                    referer = null, qualityHint = 1080, subtitles = subs,
+                    referer = null, qualityHint = 0, subtitles = subs,
                     audioPriority = if (isHindi) 4 else 1,
                     audioLabel = if (isHindi) "Hindi" else label,
                     extraHeaders = mapOf("User-Agent" to NHD_UA),
@@ -1778,7 +1797,7 @@ object StreamEngine {
             out += RawStream(
                 serverId = spec.id, serverName = spec.name,
                 url = playUrl, isM3u8 = kind != "mp4",
-                referer = null, qualityHint = 1080, subtitles = subs,
+                referer = null, qualityHint = 0, subtitles = subs,
                 extraHeaders = mapOf("User-Agent" to NHD_UA),
             )
         }
@@ -1833,8 +1852,10 @@ object StreamEngine {
         // appearing multiple times. Seed each URL with its height so they stay
         // distinct (the emit() master re-parse refines it further).
         val fileName = data.optString("file_name", "")
+        // Server-provided height hint from file_name; fall back to 0 (adaptive) so emit()
+        // measures the real master height instead of falsely claiming 1080p.
         val fileNameHeight = Regex("""\[(\d{3,4})p\]""", RegexOption.IGNORE_CASE)
-            .find(fileName)?.groupValues?.get(1)?.toIntOrNull() ?: 1080
+            .find(fileName)?.groupValues?.get(1)?.toIntOrNull() ?: 0
         val subs = data.optJSONArray("default_subs")?.let { arr ->
             (0 until arr.length()).mapNotNull { i ->
                 val s = arr.optJSONObject(i) ?: return@mapNotNull null
@@ -1904,7 +1925,7 @@ object StreamEngine {
                 url = decrypted,
                 isM3u8 = decrypted.contains(".m3u8", true) || sd.optString("type") == "hls",
                 referer = "https://vidrock.ru/",
-                qualityHint = 1080, subtitles = emptyList(),
+                qualityHint = 0, subtitles = emptyList(),
                 audioPriority = if (isHindi) 4 else 1,
                 audioLabel = lang.ifBlank { "" },
             )
@@ -1996,7 +2017,7 @@ object StreamEngine {
                 serverId = spec.id, serverName = "${spec.name} ${svName.substringAfter("Server ")}".trim(),
                 url = streamUrl,
                 isM3u8 = playJson.optString("type") == "hls" || streamUrl.contains(".m3u8", true),
-                referer = null, qualityHint = 1080, subtitles = emptyList(),
+                referer = null, qualityHint = 0, subtitles = emptyList(),
                 audioPriority = if (isHindi) 4 else 1,
                 audioLabel = lang,
             )
@@ -2125,7 +2146,7 @@ object StreamEngine {
                         out += RawStream(
                             serverId = spec.id, serverName = spec.name,
                             url = link, isM3u8 = link.contains(".m3u8", ignoreCase = true),
-                            referer = "$base/", qualityHint = 1080,
+                            referer = "$base/", qualityHint = 0,
                             audioPriority = if (lang.contains("hindi", ignoreCase = true)) 4 else 1,
                             audioLabel = lang,
                         )
@@ -2242,7 +2263,7 @@ object StreamEngine {
                 serverId = spec.id,
                 serverName = "${spec.name} $srvName",
                 url = m3u8, isM3u8 = true, referer = referer,
-                qualityHint = if (is4k) 2160 else 1080,
+                qualityHint = 0, // adaptive: emit() measures the real master height
                 subtitles = subTracks,
                 audioPriority = 0, // muxed audio — no EXT-X-MEDIA tracks to probe
                 audioLabel = "",
@@ -2392,7 +2413,7 @@ object StreamEngine {
                 serverId = spec.id,
                 serverName = spec.name,
                 url = m3u8, isM3u8 = true, referer = playUrl,
-                qualityHint = 1080,
+                qualityHint = 0,
                 audioPriority = if (isHindi) 4 else 2,
                 audioLabel = langTitle,
             )

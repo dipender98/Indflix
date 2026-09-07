@@ -19,6 +19,7 @@ import com.lagradost.cloudstream3.ActorData
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.*
 import java.net.URLEncoder
+import java.util.LinkedHashMap
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.abs
 import kotlin.math.max
@@ -142,6 +143,106 @@ object HttpKit {
             }.getOrNull() ?: ProbeResult(null, null)
         } ?: ProbeResult(null, null)
     }
+
+    /**
+     * Measure the REAL pixel height of a direct (non-HLS) media file by parsing its
+     * ISO-BMFF (MP4/MOV) container. Fetches the `moov` box — front for faststart,
+     * tail otherwise — and reads the first video `tkhd` width/height. Returns 0 when
+     * the height can't be determined, so callers fall back to a server token or "Auto"
+     * rather than claiming a guessed resolution (the old 1080p-hardcode bug).
+     * HLS masters are measured elsewhere via the master playlist; they return 0 here.
+     */
+    suspend fun resolveHeight(
+        url: String,
+        referer: String? = null,
+        extraHeaders: Map<String, String> = emptyMap(),
+    ): Int {
+        if (url.isBlank() || url.contains(".m3u8", ignoreCase = true)) return 0
+        val hdrs = LinkedHashMap<String, String>().apply {
+            put("User-Agent", userAgent)
+            if (!referer.isNullOrBlank()) put("Referer", referer)
+            putAll(extraHeaders)
+        }
+        val front = fetchRange(url, "0-262143", hdrs)
+        val moov = front?.let { findMoov(it) } ?: run {
+            val total = contentLength(url, hdrs) ?: return 0
+            if (total <= 262_144) return 0
+            val start = (total - 524_288).coerceAtLeast(0)
+            fetchRange(url, "$start-${total - 1}", hdrs)?.let { findMoov(it) } ?: return 0
+        }
+        return heightFromMoov(moov)
+    }
+
+    /** Ranged GET returning raw bytes, or null on any failure/timeout. */
+    private suspend fun fetchRange(url: String, range: String, hdrs: Map<String, String>): ByteArray? {
+        return withTimeoutOrNull(3000L) {
+            runCatching {
+                app.get(url, timeout = 3, headers = hdrs + mapOf("Range" to "bytes=$range"))
+                    .body.bytes()
+            }.getOrNull()
+        }
+    }
+
+    /** Total file size (bytes) via a 0-byte ranged GET, or null. */
+    private suspend fun contentLength(url: String, hdrs: Map<String, String>): Long? {
+        return withTimeoutOrNull(3000L) {
+            runCatching {
+                val r = app.get(url, timeout = 3, headers = hdrs + mapOf("Range" to "bytes=0-0"))
+                val cr = r.headers["Content-Range"]
+                cr?.substringAfterLast('/')?.toLongOrNull()
+                    ?: r.headers["Content-Length"]?.toLongOrNull()
+            }.getOrNull()
+        }
+    }
+
+    /** Locate the `moov` top-level box bytes, or null. */
+    private fun findMoov(data: ByteArray): ByteArray? {
+        var i = 0
+        while (i + 8 <= data.size) {
+            val size = read32(data, i)
+            if (size < 8 || i + size > data.size) return null
+            if (String(data, i + 4, 4, Charsets.ISO_8859_1) == "moov") return data.copyOfRange(i, i + size)
+            i += size
+        }
+        return null
+    }
+
+    /** First non-zero video track height from a moov box (16.16 fixed point). */
+    private fun heightFromMoov(moov: ByteArray): Int {
+        fun walk(start: Int, end: Int): Int {
+            var i = start
+            while (i + 8 <= end) {
+                val size = read32(moov, i)
+                if (size < 8 || i + size > end) return 0
+                val type = String(moov, i + 4, 4, Charsets.ISO_8859_1)
+                if (type == "tkhd") {
+                    val h = parseTkhdHeight(moov, i, size)
+                    if (h > 0) return h
+                } else if (type == "trak" || type == "mdia" || type == "minf" || type == "stbl") {
+                    val h = walk(i + 8, i + size)
+                    if (h > 0) return h
+                }
+                i += size
+            }
+            return 0
+        }
+        return walk(0, moov.size)
+    }
+
+    /** Height (px) from a tkhd box: version 0 → +84, version 1 → +96; top 16 bits of a 16.16 value. */
+    private fun parseTkhdHeight(b: ByteArray, off: Int, size: Int): Int {
+        if (size < 12) return 0
+        val version = b[off + 8].toInt() and 0xFF
+        val base = if (version == 1) 96 else 84
+        if (off + base + 4 > b.size) return 0
+        val raw = read32(b, off + base + 4).toLong() and 0xFFFFFFFFL
+        return (raw ushr 16).toInt().coerceAtLeast(0)
+    }
+
+    /** Big-endian uint32. */
+    private fun read32(b: ByteArray, off: Int): Int =
+        ((b[off].toInt() and 0xFF) shl 24) or ((b[off + 1].toInt() and 0xFF) shl 16) or
+            ((b[off + 2].toInt() and 0xFF) shl 8) or (b[off + 3].toInt() and 0xFF)
 }
 
 /**
@@ -631,22 +732,36 @@ object ManifestKit {
     /** Max of two, but treats 0 (unknown) as -inf so known quality wins. */
     fun maxQuality(a: Int, b: Int): Int = if (a <= 0) b else if (b <= 0) a else max(a, b)
 
+    /** Best resolution token (height) embedded in a URL/filename like ".../1080p/..."
+     *  → 1080, else 0. Used as the server-provided fallback when a real probe fails. */
+    fun resolutionFromUrl(url: String?): Int {
+        if (url.isNullOrBlank()) return 0
+        return Regex("""(?<!\d)(\d{3,4})p(?!\d)""", RegexOption.IGNORE_CASE).findAll(url).maxOfOrNull {
+            it.groupValues[1].toIntOrNull() ?: 0
+        } ?: 0
+    }
+
     // ── Language detection ──────────────────────────────────
 
     /** Language codes we know. */
     private val LANG_HINDI = setOf("hi", "hin")
     private val LANG_ENGLISH = setOf("en", "eng")
 
-    /** True if a rendition's language is Hindi. */
-    fun isHindi(rendition: MediaRendition): Boolean =
-        rendition.language?.lowercase()?.let { it in LANG_HINDI } == true ||
-            rendition.name.contains("hindi", ignoreCase = true) ||
-            rendition.name.contains("हिन्दी", ignoreCase = true)
+    /** True if a rendition's language is Hindi (handles hi, hin, hi-IN, hindi, हिन्दी). */
+    fun isHindi(rendition: MediaRendition): Boolean {
+        val lang = rendition.language?.lowercase()
+        if (lang != null && (lang in LANG_HINDI || lang.startsWith("hi"))) return true
+        return rendition.name.contains("hindi", ignoreCase = true) ||
+            rendition.name.contains("हिन्दी", ignoreCase = true) ||
+            rendition.name.contains("हिंदी", ignoreCase = true)
+    }
 
-    /** True if a rendition's language is English. */
-    fun isEnglish(rendition: MediaRendition): Boolean =
-        rendition.language?.lowercase()?.let { it in LANG_ENGLISH } == true ||
-            rendition.name.contains("english", ignoreCase = true)
+    /** True if a rendition's language is English (handles en, eng, en-US, english). */
+    fun isEnglish(rendition: MediaRendition): Boolean {
+        val lang = rendition.language?.lowercase()
+        if (lang != null && (lang in LANG_ENGLISH || lang.startsWith("en"))) return true
+        return rendition.name.contains("english", ignoreCase = true)
+    }
 
     /** True if a master playlist has at least Hindi + English audio tracks. */
     fun hasHindiEnglishAudio(master: MasterPlaylist): Boolean {
@@ -674,15 +789,41 @@ object ManifestKit {
         return hay.contains("english") || hay.contains("eng") || hay.contains("english")
     }
 
-    /** True if rendition is likely the original/default track (no language attr, default=YES, or name "original"). */
+    /** True if rendition is likely the original/default track (default=YES or name
+     *  "original"). A rendition with NO language attribute is NOT "original" — it is
+     *  an unknown (user spec Sept 2026: don't guess a language we were never given). */
     fun isOriginal(rendition: MediaRendition): Boolean =
-        rendition.language == null ||
-            rendition.default ||
+        rendition.default ||
             rendition.name.contains("original", ignoreCase = true)
 
-    /** Returns priority 4(Hindi) > 3(Hindi+English) > 2(Original) > 1(English) > 0(Other). */
+    /** Returns priority 4(Hindi) > 3(Hindi+English) > 2(Original) > 1(English) > 0(Other).
+     *  Prefers the track the player actually auto-selects — the EXT-X-MEDIA with
+     *  DEFAULT=YES, or the single track when a master carries exactly one audio
+     *  rendition/group — so a Hindi-dub master whose primary track is defaulted is
+     *  labelled "Hindi", not "English". Genuine multi-audio (several tracks, no
+     *  default) aggregates to dual "Hindi+English" rather than mislabeling. */
     fun audioPriority(master: MasterPlaylist): Int {
         if (master.audio.isEmpty()) return 0
+        val defaultTrack = master.audio.firstOrNull { it.default }
+        if (defaultTrack != null) {
+            return when {
+                isHindi(defaultTrack) -> 4
+                isEnglish(defaultTrack) -> 1
+                isOriginal(defaultTrack) -> 2
+                else -> 0
+            }
+        }
+        // No explicit DEFAULT: a single audio rendition IS what plays — label it
+        // precisely. Several renditions with no default = true dual/multi audio.
+        if (master.audio.size == 1) {
+            val t = master.audio.first()
+            return when {
+                isHindi(t) -> 4
+                isEnglish(t) -> 1
+                isOriginal(t) -> 2
+                else -> 0
+            }
+        }
         val hasHindi = master.audio.any { isHindi(it) }
         val hasEnglish = master.audio.any { isEnglish(it) }
         val hasOriginal = master.audio.any { isOriginal(it) }
