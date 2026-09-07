@@ -316,12 +316,14 @@ class IndStreamProvider : MainAPI() {
             val rest = if (winUrl != null) cached.filter { it.url != winUrl } else cached
             if (winner != null) {
                 val langs = StreamEngine.emit(listOf(winner), { emitted.incrementAndGet(); callback(it) },
-                    subtitleCallback, originalLangNow(), subDedupeKeys = sharedSubKeys)
+                    subtitleCallback, originalLangNow(), subDedupeKeys = sharedSubKeys,
+                    subsOnlyForServerId = winner.serverId)
                 coveredSubLangs.addAll(langs)
             }
             if (rest.isNotEmpty()) {
                 val langs = StreamEngine.emit(rest, { emitted.incrementAndGet(); callback(it) },
-                    subtitleCallback, originalLangNow(), subDedupeKeys = sharedSubKeys)
+                    subtitleCallback, originalLangNow(), subDedupeKeys = sharedSubKeys,
+                    subsOnlyForServerId = winner?.serverId)
                 coveredSubLangs.addAll(langs)
             }
             android.util.Log.i("IndStream", "loadLinks: instant replay from cache, ${cached.size} streams for tmdb=$tmdbId/$type")
@@ -427,6 +429,10 @@ class IndStreamProvider : MainAPI() {
                 subtitleCallback,
                 originalLangNow(),
                 subDedupeKeys = sharedSubKeys,
+                // Sync-safe subs (user plan Sept 2026): only the played
+                // server's own caption tracks — other servers' files are cut
+                // for a different release and go async on this video.
+                subsOnlyForServerId = winner.serverId,
             )
             coveredSubLangs.addAll(langs)
         } else if (probed.isNotEmpty()) {
@@ -462,19 +468,23 @@ class IndStreamProvider : MainAPI() {
         // their own captions instead of playing mute.
         if (started) {
             val trickleEnd = System.currentTimeMillis() + StreamEngine.FAST_START_TRICKLE_MS
+
             // Per-server subtitle rule (user spec Sept 2026): the fallback
-            // provider fills whatever the ACTIVE server's tracks didn't cover
-            // by settle end (~1.5s after first arrival, inside the user's
-            // 1–2s budget) — PER LANGUAGE, not only when nothing at all was
-            // covered (VidLink's English must not block the Hindi fallback).
-            // Fire-and-forget: never blocks link emission; SubtitleFallback
-            // is budget-capped (6.5s) and dedupes against server tracks via
-            // sharedSubKeys. The end-of-trickle top-up below stays as the
-            // residual pass for languages only late servers failed to cover —
-            // it's a no-op when the early pass already filled everything.
+            // provider fills whatever the PLAYED server's tracks didn't cover —
+            // PER LANGUAGE, not only when nothing at all was covered. It fires
+            // SUB_FALLBACK_WAIT_MS (2s) after first arrival — ~0.5s after the
+            // winner emit — so the winner's own tracks land first and the
+            // fallback fills only their gaps (fallback files are title-keyed
+            // to a standard cut, so they stay sync-safe even after an
+            // in-player server switch). Fire-and-forget: never blocks link
+            // emission; SubtitleFallback is budget-capped (6.5s) and dedupes
+            // against server tracks via sharedSubKeys. The end-of-trickle
+            // top-up below stays as the residual pass for languages only late
+            // servers failed to cover — it's a no-op when the 2s pass already
+            // filled everything.
             val settleFallbackDelay =
-                (firstArrivalMs.get() + StreamEngine.FAST_START_SETTLE_MS - System.currentTimeMillis())
-                    .coerceIn(0L, StreamEngine.FAST_START_SETTLE_MS)
+                ((firstArrivalMs.get() + StreamEngine.SUB_FALLBACK_WAIT_MS) - System.currentTimeMillis())
+                    .coerceIn(0L, StreamEngine.SUB_FALLBACK_WAIT_MS)
             fastStartScope.launch {
                 try {
                     kotlinx.coroutines.delay(settleFallbackDelay)
@@ -502,6 +512,9 @@ class IndStreamProvider : MainAPI() {
                                 probeManifests = false,
                                 emitGapMs = StreamEngine.TRICKLE_EMIT_GAP_MS,
                                 subDedupeKeys = sharedSubKeys,
+                                // Late servers' own subs are suppressed (async
+                                // on the winner's cut) — only their links flow.
+                                subsOnlyForServerId = winner?.serverId,
                             )
                             coveredSubLangs.addAll(langs)
                         } else {

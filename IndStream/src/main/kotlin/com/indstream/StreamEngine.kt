@@ -458,6 +458,14 @@ object StreamEngine {
          *  (first batch + all trickle batches). When null a per-call set is
          *  used (old behaviour: safe but trickle batches can't emit subs). */
         subDedupeKeys: MutableSet<String>? = null,
+        /** Sync-safe subtitles (user plan Sept 2026): when set, ONLY the named
+         *  server's own caption tracks are emitted — other servers' sub files
+         *  are cut for a different video release and go out of sync on this
+         *  server's video. Subtitle-only carriers filter the same way. The
+         *  [SubtitleFallback] top-up fills the remaining language gaps (it is
+         *  title-keyed to a standard cut, so it stays sync-safe). Null = old
+         *  behaviour (no filter). */
+        subsOnlyForServerId: String? = null,
     ): Set<String> {
         if (streams.isEmpty()) return emptySet()
         val emitted = java.util.Collections.synchronizedSet(HashSet<String>())
@@ -502,7 +510,11 @@ object StreamEngine {
         // the servers carried. Safe on every batch now that dedupe is shared
         // (URL-primary) — late servers' tracks are emitted exactly once.
         if (emitSubtitles) {
-            ranked.forEach { raw -> raw.subtitles.forEach { (lang, subUrl) -> emitSub(lang, subUrl, raw.serverName) } }
+            ranked.forEach { raw ->
+                if (subsOnlyForServerId == null || raw.serverId == subsOnlyForServerId) {
+                    raw.subtitles.forEach { (lang, subUrl) -> emitSub(lang, subUrl, raw.serverName) }
+                }
+            }
         }
 
         // Link pass: every url-bearing stream becomes a link (list is
@@ -612,8 +624,10 @@ object StreamEngine {
                     headers = linkHeaders, type = ExtractorLinkType.M3U8,
                 ))
                 if (emitGapMs > 0) delay(emitGapMs)
-                r.master?.subtitles?.forEach { sub ->
-                    sub.uri?.let { emitSub(sub.language ?: sub.name, ManifestKit.resolveUrl(raw.url, it), raw.serverName) }
+                if (subsOnlyForServerId == null || raw.serverId == subsOnlyForServerId) {
+                    r.master?.subtitles?.forEach { sub ->
+                        sub.uri?.let { emitSub(sub.language ?: sub.name, ManifestKit.resolveUrl(raw.url, it), raw.serverName) }
+                    }
                 }
             } else {
                 onLink(ExtractorLink(
@@ -2690,6 +2704,15 @@ object StreamEngine {
      *  1–2s; 1.5s is the sweet spot between "first frame speed" and
      *  "enough samples to rank honestly". Hard-capped by [FAST_START_MAX_MS]. */
     const val FAST_START_SETTLE_MS: Long = 1_500L
+
+    /** Sync-safe subtitle fallback wait (user plan Sept 2026): the
+     *  [SubtitleFallback] top-up fires this long after the FIRST stream
+     *  arrival — ~0.5s after the settle-window winner emit — so the played
+     *  server's own caption tracks (if any) reach the player first and the
+     *  fallback fills only their language gaps. Fallback tracks are
+     *  title-keyed to a standard cut and stay sync-safe after any in-player
+     *  server switch. */
+    const val SUB_FALLBACK_WAIT_MS: Long = 2_000L
 
     /** Live-probe budget per candidate during the settle window. One round
      *  trip per stream; tight enough that 16 candidates complete inside the
