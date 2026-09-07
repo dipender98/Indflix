@@ -468,12 +468,17 @@ object StreamEngine {
         // SHARED set when the caller provides one, so dedupe spans batches.
         val emittedSubs = subDedupeKeys ?: java.util.Collections.synchronizedSet(HashSet<String>())
         val subLangs = java.util.Collections.synchronizedSet(HashSet<String>())
-        fun emitSub(rawLang: String?, url: String) {
+        // Per-server provenance (user spec Sept 2026): tracks are tagged with the
+        // server that sent them — "Hindi (VidLink)" — and the fallback top-up tags
+        // "Hindi (Fallback)". Dedupe is URL-PRIMARY so the same VTT file reaching
+        // the player through several servers (or a later re-emit) appears exactly
+        // once, under the first source that delivered it.
+        fun emitSub(rawLang: String?, url: String, source: String?) {
             if (url.isBlank()) return
+            if (!emittedSubs.add("url|$url")) return
             val canonical = LinkNaming.canonicalSubtitleName(rawLang)
-            if (!emittedSubs.add("$canonical|$url")) return
             subLangs.add(canonical)
-            onSubtitle(SubtitleFile(canonical, url))
+            onSubtitle(SubtitleFile(LinkNaming.taggedSubtitleName(canonical, source), url))
         }
 
         // Quality gate before numbering (user spec: 720p minimum) so the
@@ -492,12 +497,12 @@ object StreamEngine {
 
         // Subtitle pass FIRST, over every stream including subtitle-only ones:
         // each server's OWN caption tracks are taken here (user spec: "servers
-        // give their own subtitles - take them"). The fallback provider later
-        // tops up whatever language none of the servers carried. Safe on every
-        // batch now that dedupe is shared — late servers' tracks are emitted
-        // exactly once.
+        // give their own subtitles - take them"), tagged with that server's
+        // name. The fallback provider later tops up whatever language none of
+        // the servers carried. Safe on every batch now that dedupe is shared
+        // (URL-primary) — late servers' tracks are emitted exactly once.
         if (emitSubtitles) {
-            ranked.forEach { raw -> raw.subtitles.forEach { (lang, subUrl) -> emitSub(lang, subUrl) } }
+            ranked.forEach { raw -> raw.subtitles.forEach { (lang, subUrl) -> emitSub(lang, subUrl, raw.serverName) } }
         }
 
         // Link pass: every url-bearing stream becomes a link (list is
@@ -608,7 +613,7 @@ object StreamEngine {
                 ))
                 if (emitGapMs > 0) delay(emitGapMs)
                 r.master?.subtitles?.forEach { sub ->
-                    sub.uri?.let { emitSub(sub.language ?: sub.name, ManifestKit.resolveUrl(raw.url, it)) }
+                    sub.uri?.let { emitSub(sub.language ?: sub.name, ManifestKit.resolveUrl(raw.url, it), raw.serverName) }
                 }
             } else {
                 onLink(ExtractorLink(

@@ -179,6 +179,23 @@ object LinkNaming {
         }
     }
 
+    /**
+     * Subtitle provenance tag (user spec Sept 2026, per-server subs): the
+     * player's subtitle menu is a single global list, so every track carries
+     * its source — "Hindi (VidLink)" for server-owned tracks, "Hindi
+     * (Fallback)" for OpenSubtitles top-ups. A blank/unknown source returns
+     * the canonical name unchanged. When the source token is already inside
+     * the canonical name it is not duplicated.
+     */
+    fun taggedSubtitleName(canonical: String, source: String?): String {
+        val c = canonical.trim()
+        val src = source?.trim().orEmpty()
+        if (src.isEmpty() || c.isEmpty()) return c
+        // Don't double-tag ("Hindi (VidLink)" + "VidLink" stays as-is).
+        if (c.endsWith("($src)", ignoreCase = true)) return c
+        return "$c ($src)"
+    }
+
     /** Native-script / code subtitle names -> canonical English names, so the
      *  subtitle menu shows "Urdu", "Bengali", "Arabic" … instead of a dozen
      *  identical fallback labels (verified live: VidLink captions carry

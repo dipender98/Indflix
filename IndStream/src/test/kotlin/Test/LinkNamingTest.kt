@@ -275,6 +275,29 @@ class LinkNamingTest {
         assertEquals("VidRock (Hindi) Auto", name)
     }
 
+    // ── taggedSubtitleName ───────────────────────────────────────
+
+    @Test
+    fun taggedSubtitleName_tagsSource() {
+        assertEquals("Hindi (VidLink)", LinkNaming.taggedSubtitleName("Hindi", "VidLink"))
+        assertEquals("English (MovieBox)", LinkNaming.taggedSubtitleName("English", "MovieBox"))
+        // Fallback provenance tag.
+        assertEquals("Hindi (Fallback)", LinkNaming.taggedSubtitleName("Hindi", "Fallback"))
+    }
+
+    @Test
+    fun taggedSubtitleName_blankSourceUnchanged() {
+        assertEquals("Hindi", LinkNaming.taggedSubtitleName("Hindi", null))
+        assertEquals("Hindi", LinkNaming.taggedSubtitleName("Hindi", ""))
+        assertEquals("Hindi", LinkNaming.taggedSubtitleName("Hindi", "  "))
+    }
+
+    @Test
+    fun taggedSubtitleName_neverDuplicatesSource() {
+        // Already-tagged canonical name is not double-tagged.
+        assertEquals("Hindi (VidLink)", LinkNaming.taggedSubtitleName("Hindi (VidLink)", "VidLink"))
+    }
+
     // ── helpers ──────────────────────────────────────────────────
 
     /** Minimal RawStream for naming tests — url/quality are irrelevant. */

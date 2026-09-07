@@ -462,18 +462,34 @@ class IndStreamProvider : MainAPI() {
         // their own captions instead of playing mute.
         if (started) {
             val trickleEnd = System.currentTimeMillis() + StreamEngine.FAST_START_TRICKLE_MS
+            // Per-server subtitle rule (user spec Sept 2026): the fallback
+            // provider fills whatever the ACTIVE server's tracks didn't cover
+            // by settle end (~1.5s after first arrival, inside the user's
+            // 1–2s budget) — PER LANGUAGE, not only when nothing at all was
+            // covered (VidLink's English must not block the Hindi fallback).
+            // Fire-and-forget: never blocks link emission; SubtitleFallback
+            // is budget-capped (6.5s) and dedupes against server tracks via
+            // sharedSubKeys. The end-of-trickle top-up below stays as the
+            // residual pass for languages only late servers failed to cover —
+            // it's a no-op when the early pass already filled everything.
+            val settleFallbackDelay =
+                (firstArrivalMs.get() + StreamEngine.FAST_START_SETTLE_MS - System.currentTimeMillis())
+                    .coerceIn(0L, StreamEngine.FAST_START_SETTLE_MS)
+            fastStartScope.launch {
+                try {
+                    kotlinx.coroutines.delay(settleFallbackDelay)
+                    topUpSubtitles(imdbDeferred.await(), season, episode, originalLangNow(),
+                        coveredSubLangs, sharedSubKeys, subtitleCallback)
+                } catch (t: Throwable) {
+                    android.util.Log.w("IndStream", "settle fallback failed: ${t.message}")
+                }
+            }
             // Drain everything that's already buffered (minus the winner
             // url) and then keep filling the list with later arrivals until
             // the 25s window closes. emittedUrls is the single source of
             // truth for "already pushed to the player".
             fastStartScope.launch {
                 try {
-                    if (coveredSubLangs.isEmpty()) {
-                        launch {
-                            topUpSubtitles(imdbDeferred.await(), season, episode, originalLangNow(),
-                                coveredSubLangs, sharedSubKeys, subtitleCallback)
-                        }
-                    }
                     while (System.currentTimeMillis() < trickleEnd) {
                         val slice = synchronized(buffered) { buffered.toList() }
                         val next = slice.filter { emittedUrls.add(dedupeKey(it)) }
@@ -526,9 +542,11 @@ class IndStreamProvider : MainAPI() {
      *  wanted language (Hindi/English/original) is missing, fetch it from the
      *  OpenSubtitles fallback — budgeted so it can never hold up playback, and
      *  dropped silently when it takes too long. Shared by the instant-replay and
-     *  fast-start paths. [sharedSubKeys] dedupes fallback tracks against
-     *  everything already emitted (server tracks + any earlier fallback pass),
-     *  so running the top-up twice (early + end-of-trickle) never duplicates. */
+     *  fast-start paths. Tracks are tagged "(Fallback)" so the menu shows each
+     *  track's provenance ("Hindi (VidLink)" vs "Hindi (Fallback)"); dedupe is
+     *  URL-primary via [sharedSubKeys], which also spans the server-track pass
+     *  in [StreamEngine.emit], so running the top-up twice (settle-end +
+     *  end-of-trickle) never duplicates. */
     private suspend fun topUpSubtitles(
         imdbId: String?,
         season: Int,
@@ -543,8 +561,8 @@ class IndStreamProvider : MainAPI() {
         )
         if (missing.isNotEmpty()) {
             SubtitleFallback.fetch(imdbId, season, episode, missing)
-                .filter { sharedSubKeys.add("${it.lang}|${it.url}") }
-                .forEach { subtitleCallback(it) }
+                .filter { sharedSubKeys.add("url|${it.url}") }
+                .forEach { subtitleCallback(SubtitleFile(LinkNaming.taggedSubtitleName(it.lang, "Fallback"), it.url)) }
         }
     }
 }
