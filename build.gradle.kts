@@ -95,6 +95,10 @@ subprojects {
         // android.jar stubs org.json; the real implementation is needed so
         // NxshaProtocol's envelope/parsing logic runs in unit tests.
         testImplementation("org.json:json:20240303")
+        // The CloudStream classes jar (added per-module for tests) initializes
+        // ExtractorLink's companion via kotlinx-serialization at class-load
+        // time — needed on the unit-test runtime classpath.
+        testImplementation("org.jetbrains.kotlinx:kotlinx-serialization-core:1.6.3")
     }
 }
 

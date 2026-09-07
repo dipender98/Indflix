@@ -23,11 +23,27 @@ cloudstream {
 
 android {
     namespace = "com.multimovies"
+    // JVM unit tests (AutoPlayPickMmTest etc.) exercise engine code that logs
+    // via android.util.Log — return no-op defaults instead of "not mocked".
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+    }
 }
 
 dependencies {
     val cloudstream by configurations
     cloudstream("com.lagradost:cloudstream3:pre-release")
+
+    // The recloudstream gradle plugin materializes the CloudStream classes jar
+    // at <gradle home>/caches/cloudstream/... and wires it into `compileOnly`
+    // via a file dependency — which is why `cloudstream3:pre-release` shows
+    // FAILED in dependency reports yet compilation works. Unit tests need the
+    // SAME jar on the test classpath (AutoPlayPickMmTest constructs
+    // ExtractorLink directly). Run any compile task once to materialize it.
+    val csJar = File(project.gradle.gradleUserHomeDir, "caches/cloudstream/cloudstream/cloudstream.jar")
+    if (csJar.exists()) {
+        testImplementation(files(csJar))
+    }
 }
 
 // The CloudStream gradle plugin's `make` dexes the unshrunk classes with plain
