@@ -57,6 +57,11 @@ object StreamEngine {
      *  the ≥720 gate moved here from emit() — the server LIST stays
      *  unrestricted so every successful host is visible). */
     private const val MIN_AUTO_HEIGHT = 720
+    /** PREFERRED auto-play starter height (user Sept 2026 refinement): when a
+     *  1080p candidate exists (direct file OR adaptive master whose probed
+     *  bestHeight ≥1080) it is auto-played FIRST; ≥720 / adaptive-that-climbs
+     *  is the fallback. ≥720 stays the floor, not the target. */
+    private const val PREFERRED_HEIGHT = 1080
 
     /** MovieBox bearer token cache (CSX parity): the x-user token lives for
      *  hours; caching it removes one serial round-trip from every resolve. */
@@ -312,29 +317,33 @@ object StreamEngine {
     }
 
     /**
-     * Auto-play pick (user spec Phase 2, strict eligibility order):
-     *  1. Streams with KNOWN height ≥720 (direct file or probed master
-     *     bestHeight) — a direct ≥720 file beats adaptive-unknown because
-     *     ExoPlayer ABR climbing is unreliable (user report Sept 2026).
-     *  2. Adaptive (m3u8) with unknown height — only if no ≥720 candidate exists.
-     *  3. Everything else (sub-720 only) — start the best available rather
-     *     than stall; late ≥720 arrivals still join the server list.
-     * Within the winning pool the highest [startupScore] (live probes) wins.
-     * Pure JVM logic (HealthMonitor is plain Kotlin) — unit-tested in
+     * Auto-play pick (user spec Phase 2, **1080p-first** eligibility order):
+     *  1. 1080p pool — KNOWN height ≥1080 (direct 1080p file OR adaptive master
+     *     whose probed bestHeight ≥1080). This is the preferred starter.
+     *  2. 720p pool — KNOWN height ≥720 to <1080. Fallback when no 1080p exists.
+     *  3. Adaptive-unknown pool — m3u8 with unknown height (the player starts
+     *     ~720 and ABR-climbs; user-accepted). Only if no known ≥720 exists.
+     *  4. Everything else (sub-720 only) — start the best available rather
+     *     than stall; late ≥720+ arrivals still join the server list.
+     * Within the first non-empty pool, the highest [startupScore] (live probes)
+     * wins. Pure JVM logic (HealthMonitor is plain Kotlin) — unit-tested in
      * Test/AutoPlayPickTest.kt.
      */
     fun pickAutoPlay(streams: List<RawStream>): RawStream? {
         if (streams.isEmpty()) return null
         val candidates = streams.filter { it.url.isNotBlank() }
         if (candidates.isEmpty()) return null
-        // Strict pool order — adaptive-unknown competes ONLY when no known
-        // ≥720 candidate exists (it must not outrank a direct 720p file on
-        // raw TTFB, because ExoPlayer ABR climbing is unreliable).
-        val hd = candidates.filter { it.qualityHint >= MIN_AUTO_HEIGHT }
+        // Strict 1080-first pool order. `qualityHint` is 0 for adaptive masters
+        // until probeCandidates stamps the probed bestHeight — so a 1080p
+        // adaptive master lands in pool1 only after the 1.5s settle probes run.
+        val p1080 = candidates.filter { it.qualityHint >= PREFERRED_HEIGHT }
+        val p720 = candidates.filter { it.qualityHint >= MIN_AUTO_HEIGHT }
+        val adaptiveUnknown = candidates.filter { it.isM3u8 && it.qualityHint <= 0 }
         val pool = when {
-            hd.isNotEmpty() -> hd
-            else -> candidates.filter { it.isM3u8 && it.qualityHint <= 0 }
-                .ifEmpty { candidates }
+            p1080.isNotEmpty() -> p1080
+            p720.isNotEmpty() -> p720
+            adaptiveUnknown.isNotEmpty() -> adaptiveUnknown
+            else -> candidates
         }
         val winner = pool.maxByOrNull { startupScore(it) }
         Log.d("IndStream", "pickAutoPlay: pool=${pool.size}/${candidates.size} " +
