@@ -43,7 +43,12 @@ import org.jsoup.Jsoup
  */
 object StreamEngine {
 
-    private const val MAX_CONCURRENT = 5
+    // One slot per host: the live farm is ≤10 servers, so a smaller cap only
+    // made fast resolvers QUEUE behind slow multi-chain hosts (MovieBox /
+    // Allmovieland hold their slot 10-20s) and pushed the first frame out to
+    // 5-7s. Full-parallel launch = every host starts the instant the tap
+    // lands (user spec: instant play + all servers pulled).
+    private const val MAX_CONCURRENT = 10
     private const val MAX_SERVERS = 16
     private const val MAX_UNWRAP = 4
     /** Minimum stream height to emit (user spec: 720p and above only). */
@@ -77,6 +82,18 @@ object StreamEngine {
          *  into the ExtractorLink headers at emission time. */
         val extraHeaders: Map<String, String> = emptyMap(),
     )
+
+    /**
+     * A resolver throws this when the host legitimately carries no source for
+     * this title/episode: library miss, unsupported media type, no Hindi dub,
+     * season range not covered. Unlike a network failure or a timeout it must
+     * NOT feed the circuit breaker — otherwise three unlucky taps (an
+     * English-only title hitting Videasy Hindi, a MovieBox title-match miss,
+     * a series episode on 8Stream) trip the breaker and a working server
+     * silently vanishes from the farm for 5 minutes. This is exactly what
+     * made MovieBox "appear in some episodes but not others".
+     */
+    class CleanMissException(message: String) : Exception(message)
 
     /**
      * Pick the servers to query for this title, in the order they should be hit:
@@ -153,7 +170,13 @@ object StreamEngine {
                         // servers never wait for (or trigger) the lookup.
                         val imdbId = if (spec.idType == ServerIdType.IMDB) imdbIdProvider?.invoke() else null
                         val outcome = withTimeoutOrNull(spec.timeoutSec * 1000L) {
-                            runCatching { resolveOne(spec, tmdbId, imdbId, type, season, episode) }.getOrNull()
+                            runCatching { resolveOne(spec, tmdbId, imdbId, type, season, episode) }
+                                .recover { t ->
+                                    if (t is CleanMissException) {
+                                        Log.i("IndStream", "${spec.id}: clean miss — ${t.message} (no breaker trip)")
+                                        emptyList<RawStream>()
+                                    } else throw t
+                                }.getOrNull()
                         }
                         if (outcome == null) {
                             // resolveOne was cut off (hang/black-hole) or crashed before it could
@@ -259,21 +282,28 @@ object StreamEngine {
          *  to the already-running video) and don't re-emit subtitles heights.
          *  Labels fall back to the RawStream's own qualityHint. */
         probeManifests: Boolean = true,
-        /** Subtitle pass — only the FIRST emit call after the first frame
-         *  carries subtitle tracks; trickle batches never re-emit them. */
+        /** Subtitle pass — with the SHARED [subDedupeKeys] set this is safe on
+         *  every batch: each (canonicalLang, url) pair is emitted exactly once
+         *  across the whole loadLinks call, so late servers' caption tracks
+         *  reach the player too instead of being dropped. */
         emitSubtitles: Boolean = true,
         /** Sleep before emitting each link (trickle pacing: keeps background
          *  arrivals from burstingmegabytes of manifest fetches / player
          *  channel traffic while the stream is warming up). */
         emitGapMs: Long = 0L,
+        /** Subtitle dedupe keys SHARED across every emit call of one loadLinks
+         *  (first batch + all trickle batches). When null a per-call set is
+         *  used (old behaviour: safe but trickle batches can't emit subs). */
+        subDedupeKeys: MutableSet<String>? = null,
     ): Set<String> {
         if (streams.isEmpty()) return emptySet()
         val emitted = java.util.Collections.synchronizedSet(HashSet<String>())
         // Subtitle dedupe: per-quality RawStreams (VidLink qualities[]) and
         // multi-master servers (VaPlayer) repeat the SAME caption list per
         // stream, which made every subtitle show up 2-3 times (user-reported
-        // Sept 2026). One emission per (canonicalLang, url).
-        val emittedSubs = java.util.Collections.synchronizedSet(HashSet<String>())
+        // Sept 2026). One emission per (canonicalLang, url) — keyed on the
+        // SHARED set when the caller provides one, so dedupe spans batches.
+        val emittedSubs = subDedupeKeys ?: java.util.Collections.synchronizedSet(HashSet<String>())
         val subLangs = java.util.Collections.synchronizedSet(HashSet<String>())
         fun emitSub(rawLang: String?, url: String) {
             if (url.isBlank()) return
@@ -300,9 +330,9 @@ object StreamEngine {
         // Subtitle pass FIRST, over every stream including subtitle-only ones:
         // each server's OWN caption tracks are taken here (user spec: "servers
         // give their own subtitles - take them"). The fallback provider later
-        // tops up whatever language none of the servers carried. Trickle
-        // batches skip this — subtitle dedupe lives in this call's local set,
-        // so re-running it per batch would duplicate every track.
+        // tops up whatever language none of the servers carried. Safe on every
+        // batch now that dedupe is shared — late servers' tracks are emitted
+        // exactly once.
         if (emitSubtitles) {
             ranked.forEach { raw -> raw.subtitles.forEach { (lang, subUrl) -> emitSub(lang, subUrl) } }
         }
@@ -329,31 +359,40 @@ object StreamEngine {
             val tagLabel: String,
             val master: ManifestKit.MasterPlaylist?,
         )
-        val preResolved = eligible.map { raw ->
-            if (!raw.isM3u8 || !probeManifests) {
-                ResolvedEmit(raw, raw.qualityHint, raw.audioLabel, null)
-            } else {
-                val alreadyKnown = (raw.audioPriority > 0 || raw.measuredKbps != null) &&
-                    !raw.subtitles.any { it.second.startsWith("/") }
-                if (alreadyKnown) {
-                    ResolvedEmit(raw, raw.qualityHint, raw.audioLabel, null)
-                } else {
-                    val lh = LinkedHashMap<String, String>()
-                    lh.putAll(raw.extraHeaders)
-                    if (!lh.containsKey("Referer") && !raw.referer.isNullOrBlank()) lh["Referer"] = raw.referer!!
-                    val masterText = raw.inlineManifest ?: withTimeoutOrNull(4000L) {
-                        runCatching { app.get(raw.url, timeout = 4, headers = lh).text }.getOrNull()
+        // Pre-resolve CONCURRENTLY: the old serial map added up to 4s PER
+        // unprobed HLS master (VaPlayer/VidUp/VidCore arrive without height or
+        // audio probes) BEFORE the first link reached the player — the single
+        // biggest chunk of the old 5-7s startup. Parallel fetches cap that
+        // head at one master timeout (~4s worst case, usually <1s).
+        val preResolved = coroutineScope {
+            eligible.map { raw ->
+                async {
+                    if (!raw.isM3u8 || !probeManifests) {
+                        ResolvedEmit(raw, raw.qualityHint, raw.audioLabel, null)
+                    } else {
+                        val alreadyKnown = (raw.audioPriority > 0 || raw.measuredKbps != null) &&
+                            !raw.subtitles.any { it.second.startsWith("/") }
+                        if (alreadyKnown) {
+                            ResolvedEmit(raw, raw.qualityHint, raw.audioLabel, null)
+                        } else {
+                            val lh = LinkedHashMap<String, String>()
+                            lh.putAll(raw.extraHeaders)
+                            if (!lh.containsKey("Referer") && !raw.referer.isNullOrBlank()) lh["Referer"] = raw.referer!!
+                            val masterText = raw.inlineManifest ?: withTimeoutOrNull(3000L) {
+                                runCatching { app.get(raw.url, timeout = 3, headers = lh).text }.getOrNull()
+                            }
+                            val master = ManifestKit.parseMaster(masterText, raw.url)
+                            val h = master?.let { ManifestKit.bestHeight(it.variants) }?.takeIf { it > 0 } ?: raw.qualityHint
+                            val tag = if (master?.isMultiAudio == true) "Multi" else raw.audioLabel
+                            master?.let { m ->
+                                val langs = m.audio.map { r -> "lang=${r.language ?: "none"} name=${r.name} group=${r.groupId}" }
+                                Log.d("IndStream", "audioTracks server=${raw.serverName} multiAudio=${m.isMultiAudio} renditions=$langs")
+                            }
+                            ResolvedEmit(raw, h, tag, master)
+                        }
                     }
-                    val master = ManifestKit.parseMaster(masterText, raw.url)
-                    val h = master?.let { ManifestKit.bestHeight(it.variants) }?.takeIf { it > 0 } ?: raw.qualityHint
-                    val tag = if (master?.isMultiAudio == true) "Multi" else raw.audioLabel
-                    master?.let { m ->
-                        val langs = m.audio.map { r -> "lang=${r.language ?: "none"} name=${r.name} group=${r.groupId}" }
-                        Log.d("IndStream", "audioTracks server=${raw.serverName} multiAudio=${m.isMultiAudio} renditions=$langs")
-                    }
-                    ResolvedEmit(raw, h, tag, master)
                 }
-            }
+            }.awaitAll()
         }
         val resolvedForKey = preResolved.map { it.raw.copy(qualityHint = it.fullHeight) }
         val numbers = LinkNaming.dedupeNames(resolvedForKey, originalLang)
@@ -621,10 +660,17 @@ object StreamEngine {
         return emptyList()
     }
 
-    /** Log + trip a server. Single choke point so every failure names its reason. */
-    private fun failServer(spec: ServerSpec, reason: String) {
-        Log.w("IndStream", "${spec.id}: $reason")
-        HealthMonitor.recordFailure(spec.id)
+    /** Log + trip a server. Single choke point so every failure names its reason.
+     *  A [CleanMissException] (library miss / unsupported media / no Hindi dub)
+     *  is logged as a clean miss WITHOUT tripping the breaker — the host is up,
+     *  this title just isn't in it. */
+    private fun failServer(spec: ServerSpec, reason: String, isCleanMiss: Boolean = false) {
+        if (isCleanMiss) {
+            Log.i("IndStream", "${spec.id}: clean miss — $reason (no breaker trip)")
+        } else {
+            Log.w("IndStream", "${spec.id}: $reason")
+            HealthMonitor.recordFailure(spec.id)
+        }
     }
 
     /** Log + record a successful resolution for a server. */
@@ -1054,9 +1100,42 @@ object StreamEngine {
                     extraHeaders = VideasySource.apiHeaders(),
                 )
             }
-        if (out.isEmpty()) Log.d("VideasyHindi", "sources present but no Hindi label: ${fetched.sources.map { it.quality }}")
+        // The host exists only for Hindi: an English-only title is a CLEAN miss
+        // (no breaker trip), otherwise three straight taps on English-only
+        // content tripped the breaker and Videasy Hindi vanished from the farm.
+        if (out.isEmpty()) {
+            throw CleanMissException("sources present but no Hindi label: ${fetched.sources.map { it.quality }}")
+        }
         return out
     }
+
+    /** Fetch (and cache) the MovieBox bearer token from the app-pkgs response's
+     *  `x-user` header. The token lives for hours (MOVIEBOX_TOKEN_TTL_MS). */
+    private suspend fun fetchMovieBoxBearer(forceRefresh: Boolean): String? {
+        if (!forceRefresh) {
+            movieBoxToken?.takeIf {
+                System.currentTimeMillis() - movieBoxTokenAt < MOVIEBOX_TOKEN_TTL_MS
+            }?.let { return it }
+        }
+        val base = "https://h5-api.aoneroom.com"
+        val xUser = withTimeoutOrNull(8_000L) {
+            runCatching {
+                app.get("$base/wefeed-h5api-bff/app/get-latest-app-pkgs?app_name=moviebox",
+                    timeout = 8, headers = okHeaders())
+            }.getOrNull()
+        }?.headers?.get("x-user") ?: run { Log.w("MovieBox", "no x-user header"); return null }
+        val t = runCatching { org.json.JSONObject(xUser).optString("token", "") }
+            .getOrNull()?.takeIf { it.isNotBlank() }
+            ?: run { Log.w("MovieBox", "no token in x-user"); return null }
+        movieBoxToken = t
+        movieBoxTokenAt = System.currentTimeMillis()
+        return t
+    }
+
+    /** Public pre-warm, called once at plugin load: the token lives for hours,
+     *  so one background GET at app start removes a serial round-trip
+     *  (~0.5-1s) from the first MovieBox resolve of the session. */
+    suspend fun prewarmMovieBoxToken(): String? = fetchMovieBoxBearer(forceRefresh = false)
 
     /**
      * MovieBox resolver (h5-api.aoneroom.com app API, ported from CSX
@@ -1085,8 +1164,9 @@ object StreamEngine {
     ): List<RawStream> {
         val meta = runCatching { TmdbService.fetchMeta(tmdbId ?: 0, type) }.getOrNull()
         val title = meta?.name ?: run {
-            Log.w("MovieBox", "no title for tmdb=$tmdbId (title-keyed API)")
-            return emptyList()
+            // Title-keyed API without a title = nothing to search; the host is
+            // fine, so a clean miss (no breaker trip) keeps MovieBox visible.
+            throw CleanMissException("no title for tmdb=$tmdbId (title-keyed API)")
         }
         val seasonKey = if (season > 0) season else 1
         val episodeKey = if (episode > 0) episode else 1
@@ -1098,26 +1178,10 @@ object StreamEngine {
         // 2026: MovieBox works, then vanishes, then works — the aoneroom host
         // flaps, and a stale bearer token blanks the search even though a
         // fresh token resolves it). A failed/empty search drops the cached
-        // token and retries once before giving up.
-        suspend fun movieBoxBearer(forceRefresh: Boolean): String? {
-            if (!forceRefresh) {
-                movieBoxToken?.takeIf {
-                    System.currentTimeMillis() - movieBoxTokenAt < MOVIEBOX_TOKEN_TTL_MS
-                }?.let { return it }
-            }
-            val xUser = withTimeoutOrNull(8_000L) {
-                runCatching {
-                    app.get("$base/wefeed-h5api-bff/app/get-latest-app-pkgs?app_name=moviebox",
-                        timeout = 8, headers = okHeaders())
-                }.getOrNull()
-            }?.headers?.get("x-user") ?: run { Log.w("MovieBox", "no x-user header"); return null }
-            val t = runCatching { org.json.JSONObject(xUser).optString("token", "") }
-                .getOrNull()?.takeIf { it.isNotBlank() }
-                ?: run { Log.w("MovieBox", "no token in x-user"); return null }
-            movieBoxToken = t
-            movieBoxTokenAt = System.currentTimeMillis()
-            return t
-        }
+        // token and retries once before giving up. The prewarmed token
+        // (prewarmMovieBoxToken) usually makes the first attempt instant.
+        suspend fun movieBoxBearer(forceRefresh: Boolean): String? =
+            fetchMovieBoxBearer(forceRefresh)
 
         val subjectType = if (type == "movie") 1 else 2
         fun unwrapData(json: org.json.JSONObject): org.json.JSONObject {
@@ -1190,11 +1254,14 @@ object StreamEngine {
             val matched = cleanNorm == titleNorm ||
                 (titleNorm.length >= 4 && cleanNorm.startsWith(titleNorm))
             if (!matched) continue
-            subjects += Triple(id, seasonEnd ?: 1, audioTag)
+            // 0 = no explicit "S1-S3" coverage marker: the subject is presumed
+            // to cover every season (the play/download APIs take se/ep
+            // directly). Treating a marker-less subject as S1-only is what
+            // silently hid MovieBox on later-season episodes.
+            subjects += Triple(id, seasonEnd ?: 0, audioTag)
         }
         if (subjects.isEmpty()) {
-            Log.d("MovieBox", "no exact title match for '$title'")
-            return emptyList()
+            throw CleanMissException("no exact title match for '$title' in ${items.length()} search rows")
         }
         Log.d("MovieBox", "subjects=${subjects.map { it.first + ":" + (it.third ?: "orig") }}")
 
@@ -1207,9 +1274,10 @@ object StreamEngine {
         val subjectResults = kotlinx.coroutines.coroutineScope {
             subjects.map { (subjectId, seasonEnd, language) ->
                 async {
-                    // Series entry covering fewer seasons than requested can't
-                    // serve this episode (library splits shows into S1-S3 / S4-…).
-                    if (type != "movie" && season > seasonEnd) return@async emptyList<RawStream>()
+                    // Series entry EXPLICITLY covering fewer seasons than
+                    // requested can't serve this episode (library splits shows
+                    // into S1-S3 / S4-…). seasonEnd==0 (no marker) never skips.
+                    if (type != "movie" && seasonEnd in 1 until season) return@async emptyList<RawStream>()
 
                     // 3. detailPath lookup.
                     val detailText = withTimeoutOrNull(8_000L) {
@@ -1304,6 +1372,14 @@ object StreamEngine {
             }.awaitAll()
         }
         subjectResults.forEach { out += it }
+        // Every matched subject explicitly covers fewer seasons than requested
+        // ("S1-S3" markers only) — the episode is a library miss, not a host
+        // failure: clean miss keeps MovieBox in the farm for other episodes.
+        if (out.isEmpty() && type != "movie" && subjects.isNotEmpty() &&
+            subjects.all { it.second in 1 until season }
+        ) {
+            throw CleanMissException("subjects cover up to S${subjects.maxOf { it.second }}, requested S$season")
+        }
 
         Log.d("MovieBox", "got ${out.size} streams from ${subjects.size} subjects")
         return out
@@ -1542,8 +1618,12 @@ object StreamEngine {
             Log.w("VaPlayer", "non-JSON response: ${safeSnippet(jsonText)}")
             return emptyList()
         }
-        if (root.optInt("status_code", 0) != 200) {
-            Log.w("VaPlayer", "status_code=${root.optInt("status_code", -1)} (404 = not in catalog)")
+        val statusCode = root.optInt("status_code", 0)
+        if (statusCode != 200) {
+            // 404 = title not in the VaPlayer catalog: clean miss (no breaker
+            // trip) — the host is up, this title just isn't in it.
+            if (statusCode == 404) throw CleanMissException("not in VaPlayer catalog (404)")
+            Log.w("VaPlayer", "status_code=$statusCode")
             return emptyList()
         }
         val data = root.optJSONObject("data") ?: return emptyList()
@@ -1810,8 +1890,10 @@ object StreamEngine {
     ): List<RawStream> {
         val imdb = imdbId?.takeIf { it.isNotBlank() } ?: return emptyList()
         if (type != "movie") {
-            Log.d("8Stream", "tv not supported (no episode targeting in the API)")
-            return emptyList()
+            // The API has no episode targeting: a series tap is a known
+            // non-capability, not a host failure — clean miss (no breaker trip)
+            // keeps the server alive for movie taps.
+            throw CleanMissException("tv not supported (no episode targeting in the API)")
         }
         val base = "https://8-stream-api.vercel.app"
         val headers = okHeaders("$base/")
@@ -1903,11 +1985,15 @@ object StreamEngine {
         val encResult = encRoot.optJSONObject("result") ?: return emptyList()
         val serversUrl = encResult.optString("servers").takeIf { it.isNotBlank() } ?: return emptyList()
         val streamBase = encResult.optString("stream").takeIf { it.isNotBlank() } ?: return emptyList()
-        val csrfToken = encResult.optString("token").takeIf { it.isNotBlank() } ?: return emptyList()
+        // enc-dec.app (live probe Sept 2026): the `token`/CSRF field is now
+        // often EMPTY and the servers endpoint no longer validates it —
+        // requiring a non-blank token here killed VidUp/VidCore for every
+        // title. Send the header only when present.
+        val csrfToken = encResult.optString("token", "")
 
         // 3. POST servers → encrypted sub-server list
         val srvHeaders = okHeaders(referer).toMutableMap()
-        srvHeaders["X-CSRF-Token"] = csrfToken
+        if (csrfToken.isNotBlank()) srvHeaders["X-CSRF-Token"] = csrfToken
         val srvEnc = withTimeoutOrNull(8_000L) {
             runCatching { app.post(serversUrl, timeout = 8, headers = srvHeaders).text }.getOrNull()
         } ?: return emptyList()
@@ -1998,7 +2084,7 @@ object StreamEngine {
         // Cards link to allmovieland.{art|one}/NNN-slug.html
         val cardUrl = Regex("""href="(https?://allmovieland\.[a-z]+/[^"]+\.html)"\s*>\s*<h3 class="new-short__title""")
             .find(searchHtml)?.groupValues?.get(1)
-            ?: run { Log.w("Allmovieland", "no card found for $imdb"); return emptyList() }
+            ?: run { throw CleanMissException("no card found for $imdb (title not in library)") }
 
         // 2. Card page → player domain + IMDB src
         val cardHtml = withTimeoutOrNull(12_000L) {
@@ -2011,21 +2097,30 @@ object StreamEngine {
             .find(cardHtml)?.groupValues?.get(1)
             ?: run { Log.w("Allmovieland", "no src in player config"); return emptyList() }
 
-        // 3. Play page → file + key
+        // 3. Play page → file + key. The page serves the file URL inside an
+        // ESCAPED JSON string ("https:\/\/cdn...\/playlist\/...") — captured
+        // raw it breaks both startsWith("http") (passes: "https:\..." starts
+        // with "http") and substringBefore("/playlist/") (the literal
+        // "/playlist/" never appears in "\/playlist\/"). Unescape first.
         val playUrl = "$playerDomain/play/$playSrc"
         val playHtml = withTimeoutOrNull(10_000L) {
             runCatching { app.get(playUrl, timeout = 10, headers = okHeaders(cardUrl)).text }.getOrNull()
         } ?: return emptyList()
         val file = Regex("""["']?file["']?\s*[:=]\s*["']([^"']+)["']""")
-            .find(playHtml)?.groupValues?.get(1)
+            .find(playHtml)?.groupValues?.get(1)?.replace("\\/", "/")
             ?: run { Log.w("Allmovieland", "no file in play page"); return emptyList() }
         val key = Regex("""["']?key["']?\s*[:=]\s*["']([^"']+)["']""")
             .find(playHtml)?.groupValues?.get(1)
             ?: run { Log.w("Allmovieland", "no key in play page"); return emptyList() }
 
-        // file looks like "https://cdn.example.com/playlist/BASE64.txt"
-        // but may also be a relative path. Resolve to full URL.
-        val fileUrl = if (file.startsWith("http")) file else "$playerDomain/playlist/$file"
+        // file may be: an absolute URL (movies) OR a path that already starts
+        // with "/playlist/" (series) — the naive "$playerDomain/playlist/$file"
+        // doubled the prefix on series and 404'd the fetch.
+        val fileUrl = when {
+            file.startsWith("http") -> file
+            file.startsWith("/playlist/") -> "$playerDomain$file"
+            else -> "$playerDomain/playlist/$file"
+        }
         val cdnBase = fileUrl.substringBefore("/playlist/")
 
         // 4. Language playlist (file = encrypted path like "B64hash.txt")
@@ -2037,17 +2132,63 @@ object StreamEngine {
         val playlist = runCatching { org.json.JSONArray(playlistText) }.getOrElse {
             Log.w("Allmovieland", "playlist not JSON array"); return emptyList() }
 
+        // Series shape (verified live Sept 2026): each top entry is a SEASON
+        // ("title":"Season 1") whose folder[] holds EPISODES, each holding a
+        // folder[] of per-language leaves {file, title:"Hindi"}. Movies have
+        // the flat shape {title:"Hindi", file}. Pick the requested episode
+        // (season/episode > 0) or fall back to the first episode of the
+        // season; leaves from the matched episode keep the movie loop below.
+        data class LangLeaf(val lang: String, val file: String)
+        fun collectLeaves(arr: org.json.JSONArray, depth: Int): List<LangLeaf> {
+            val leaves = mutableListOf<LangLeaf>()
+            for (i in 0 until arr.length()) {
+                val e = arr.optJSONObject(i) ?: continue
+                val nested = e.optJSONArray("folder")
+                if (nested != null && depth < 2) {
+                    leaves += collectLeaves(nested, depth + 1)
+                } else if (!e.optString("file").isNullOrBlank()) {
+                    leaves += LangLeaf(e.optString("title").ifBlank { "Multi" }, e.optString("file"))
+                }
+            }
+            return leaves
+        }
+        val leaves: List<LangLeaf> = if (type != "movie" && season > 0) {
+            val seasonObj = (0 until playlist.length())
+                .mapNotNull { playlist.optJSONObject(it) }
+                .firstOrNull {
+                    // "Season 1" / "S1" style titles, or id match.
+                    it.optString("title").contains(Regex("""\b$season\b""")) ||
+                        it.optString("id") == season.toString()
+                } ?: playlist.optJSONObject(0)
+            val seasonFolder = seasonObj?.optJSONArray("folder")
+            if (seasonFolder == null) emptyList()
+            else {
+                val episodeObj = (0 until seasonFolder.length())
+                    .mapNotNull { seasonFolder.optJSONObject(it) }
+                    .firstOrNull {
+                        it.optString("episode") == episode.toString() ||
+                            it.optString("id") == "$season-$episode"
+                    } ?: seasonFolder.optJSONObject(0)
+                episodeObj?.optJSONArray("folder")?.let { collectLeaves(it, 0) } ?: emptyList()
+            }
+        } else emptyList()
+
         // 5. Per-language: fetch each language's playlist → m3u8 URL
         val out = mutableListOf<RawStream>()
-        for (i in 0 until playlist.length()) {
-            val entry = playlist.optJSONObject(i) ?: continue
-            val langTitle = entry.optString("title").ifBlank { "Multi" }
-            val langFile = entry.optString("file").takeIf { it.isNotBlank() } ?: continue
-            val langUrl = "$cdnBase/playlist/$langFile.txt"
+        val langEntries = leaves.ifEmpty {
+            (0 until playlist.length()).mapNotNull { playlist.optJSONObject(it) }
+                .filter { !it.optString("file").isNullOrBlank() }
+                .map { LangLeaf(it.optString("title").ifBlank { "Multi" }, it.optString("file")) }
+        }
+        for (leaf in langEntries) {
+            val langTitle = leaf.lang
+            val langFile = leaf.file.replace("\\/", "/")
+            val langUrl = if (langFile.startsWith("http")) langFile
+            else "$cdnBase/playlist/$langFile.txt"
             val m3u8Text = withTimeoutOrNull(8_000L) {
                 runCatching { app.get(langUrl, timeout = 8, headers = playlistHeaders).text }.getOrNull()
             } ?: continue
-            val m3u8 = m3u8Text.trim().takeIf { it.startsWith("http") } ?: continue
+            val m3u8 = m3u8Text.trim().replace("\\/", "/").takeIf { it.startsWith("http") } ?: continue
             val isHindi = langTitle.contains("hindi", ignoreCase = true)
             out += RawStream(
                 serverId = spec.id,
@@ -2058,7 +2199,8 @@ object StreamEngine {
                 audioLabel = langTitle,
             )
         }
-        Log.d("Allmovieland", "got ${out.size} language streams from ${playlist.length()} entries")
+        Log.d("Allmovieland", "got ${out.size} language streams from ${langEntries.size} entries " +
+            "(series tree: ${leaves.isNotEmpty()})")
         return out
     }
 
@@ -2300,9 +2442,17 @@ object StreamEngine {
      *  a second). After that, the remaining servers keep resolving and their
      *  links are pushed to the player for up to this long — the server list
      *  keeps growing in the background — while capped/staggered so the
-     *  running stream keeps the bandwidth. Past this window arrivals land in
-     *  [FastStartCache] only (instant replay on the next tap). */
-    const val FAST_START_TRICKLE_MS: Long = 4_000L
+     *  running stream keeps the bandwidth. 4s was too short: slow multi-chain
+     *  Hindi hosts (MovieBox detail+download+play chain, Allmovieland search →
+     *  card → play → playlist chain) resolve in 4-12s+ and only ever landed in
+     *  [FastStartCache], never in the CURRENT episode's server list (user
+     *  report: "many servers do not come in background … keep pulling all
+     *  servers, specially Hindi"). 25s covers every server's timeoutSec
+     *  (longest = 20s + the IMDB lookup the IMDB-keyed hosts wait on) while
+     *  staggered emission keeps the running stream's bandwidth free. Past
+     *  this window arrivals land in [FastStartCache] only (instant replay on
+     *  the next tap). */
+    const val FAST_START_TRICKLE_MS: Long = 25_000L
 
     /** Pacing between links pushed during the trickle window: a link every
      *  ~150ms is plenty for the UI and guarantees no burst of manifest fetches

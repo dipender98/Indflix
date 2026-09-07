@@ -105,7 +105,9 @@ class ServerFarmHindiTest {
     fun moviebox_presentAndTitled() {
         val s = ServerFarm.allServers.first { it.id == "moviebox" }
         assertEquals("MovieBox", s.name)
-        assertEquals(ServerIdType.IMDB, s.idType)
+        // TMDB-keyed: the resolver is title-keyed and never reads the IMDB id,
+        // so IMDB keying only delayed its start behind the id lookup.
+        assertEquals(ServerIdType.TMDB, s.idType)
         // DASH ladders reach 2160p; nothing downstream may clamp quality.
         assertEquals(2160, s.maxQuality)
         assertEquals("https://fmoviesunblocked.net/", s.referer)

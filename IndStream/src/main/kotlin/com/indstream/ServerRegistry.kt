@@ -154,9 +154,13 @@ object ServerFarm {
         // stream in resolveMovieBox, so hindi=false here. Playback needs
         // Referer/Origin https://fmoviesunblocked.net/. Huge fast library,
         // zero captcha — the fastest Hindi-dub source in the farm.
+        // Keyed TMDB (not IMDB): the resolver is purely title-keyed (it fetches
+        // the title from TmdbService itself) and never reads the IMDB id, so
+        // IMDB keying only added a serial wait on the id lookup before the
+        // fastest Hindi source could even START resolving.
         ServerSpec(
             id = "moviebox", name = "MovieBox",
-            idType = ServerIdType.IMDB,
+            idType = ServerIdType.TMDB,
             movieUrl = "https://h5-api.aoneroom.com/wefeed-h5api-bff",
             tvUrl = "https://h5-api.aoneroom.com/wefeed-h5api-bff",
             isJsonApi = true, referer = "https://fmoviesunblocked.net/",

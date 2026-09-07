@@ -42,6 +42,12 @@ import kotlinx.coroutines.withTimeoutOrNull
 class IndStream : Plugin() {
     override fun load(context: Context) {
         registerMainAPI(IndStreamProvider())
+        // MovieBox bearer pre-warm: the x-user token lives for hours, so one
+        // background GET now removes a serial round-trip (~0.5-1s) from the
+        // first resolve of the session — one more chunk of the 5-7s startup.
+        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+            runCatching { StreamEngine.prewarmMovieBoxToken() }
+        }
     }
 }
 
@@ -280,6 +286,11 @@ class IndStreamProvider : MainAPI() {
 
         val emitted = java.util.concurrent.atomic.AtomicInteger(0)
         val coveredSubLangs = Collections.synchronizedSet(HashSet<String>())
+        // Subtitle dedupe keys SHARED by every emit call of this loadLinks
+        // (first batch + all trickle batches + the fallback top-up): one
+        // (canonicalLang, url) pair is emitted exactly once per play, which is
+        // what makes it safe for trickle batches to carry subtitle tracks.
+        val sharedSubKeys = Collections.synchronizedSet(HashSet<String>())
         // Gate for the fast-start fill window: links are pushed to the player only
         // while this is true. Once loadLinks returns, it flips to false so the
         // still-running background pull stops touching the (now-closed) player and
@@ -292,10 +303,11 @@ class IndStreamProvider : MainAPI() {
         // straight to the player so playback starts with zero head.
         val cached = StreamEngine.FastStartCache.get(cacheKey)
         if (cached != null && cached.isNotEmpty()) {
-            val langs = StreamEngine.emit(cached, { emitted.incrementAndGet(); callback(it) }, subtitleCallback, originalLangNow())
+            val langs = StreamEngine.emit(cached, { emitted.incrementAndGet(); callback(it) }, subtitleCallback,
+                originalLangNow(), subDedupeKeys = sharedSubKeys)
             coveredSubLangs.addAll(langs)
             android.util.Log.i("IndStream", "loadLinks: instant replay from cache, ${cached.size} streams for tmdb=$tmdbId/$type")
-            topUpSubtitles(metaDeferred.await()?.imdbId, season, episode, originalLangNow(), coveredSubLangs, subtitleCallback)
+            topUpSubtitles(metaDeferred.await()?.imdbId, season, episode, originalLangNow(), coveredSubLangs, sharedSubKeys, subtitleCallback)
             return emitted.get() > 0
         }
 
@@ -351,14 +363,16 @@ class IndStreamProvider : MainAPI() {
         val firstBatch = buffered.toList()
         val started = if (buffered.isNotEmpty()) {
             // Emit the first batch ranked best-start-first (startupScore:
-            // adaptive/720p start fastest, history breaks ties). This call is
-            // the ONLY one that carries subtitles + manifest-probed labels —
-            // the video isn't running yet, so its bytes cost nothing.
+            // adaptive/720p start fastest, history breaks ties). This call
+            // probes master manifests (labels) and carries the first batch's
+            // subtitle tracks — the video isn't running yet, so its bytes
+            // cost nothing.
             val langs = StreamEngine.emit(
                 firstBatch,
                 { emitted.incrementAndGet(); callback(it) },
                 subtitleCallback,
                 originalLangNow(),
+                subDedupeKeys = sharedSubKeys,
             )
             coveredSubLangs.addAll(langs)
             true
@@ -367,8 +381,10 @@ class IndStreamProvider : MainAPI() {
         // PHASE 2 — background trickle: the stream is now warming up, but the
         // farm keeps resolving and each later batch is pushed to the player
         // for FAST_START_TRICKLE_MS (server list keeps growing). Trickle mode:
-        // NO master re-fetches (bytes belong to the video), no subtitle
-        // re-emission, one link every TRICKLE_EMIT_GAP_MS so nothing bursts.
+        // NO master re-fetches (bytes belong to the video), one link every
+        // TRICKLE_EMIT_GAP_MS so nothing bursts. Subtitle tracks ARE emitted —
+        // deduped through sharedSubKeys, so late servers (MovieBox!) bring
+        // their own captions instead of playing mute (user bug report).
         if (started) {
             val trickleEnd = System.currentTimeMillis() + StreamEngine.FAST_START_TRICKLE_MS
             // Phase 1 already handed everything buffered at that moment to the
@@ -376,30 +392,48 @@ class IndStreamProvider : MainAPI() {
             var lastEmittedCount = firstBatch.size
             fastStartScope.launch {
                 try {
+                    // Early fallback: when the first batch carried NO subtitle
+                    // track at all, fetch the wanted languages immediately
+                    // (budgeted, detached — must not stall the trickle loop)
+                    // instead of leaving the user subtitle-less while slow
+                    // servers resolve. When the first batch had tracks, only
+                    // the end-of-trickle top-up runs — by then coverage is
+                    // complete and the fetch is smaller.
+                    if (coveredSubLangs.isEmpty()) {
+                        launch {
+                            topUpSubtitles(imdbDeferred.await(), season, episode, originalLangNow(),
+                                coveredSubLangs, sharedSubKeys, subtitleCallback)
+                        }
+                    }
                     while (System.currentTimeMillis() < trickleEnd) {
                         val total = buffered.size
                         if (total > lastEmittedCount) {
                             val next = buffered.toList().drop(lastEmittedCount)
                             lastEmittedCount = total
-                            StreamEngine.emit(
+                            val langs = StreamEngine.emit(
                                 next,
                                 { emitted.incrementAndGet(); callback(it) },
                                 subtitleCallback,
                                 originalLangNow(),
                                 probeManifests = false,
-                                emitSubtitles = false,
                                 emitGapMs = StreamEngine.TRICKLE_EMIT_GAP_MS,
+                                subDedupeKeys = sharedSubKeys,
                             )
+                            coveredSubLangs.addAll(langs)
                         } else {
                             kotlinx.coroutines.delay(120)
                         }
                     }
+                    // Final top-up at trickle end: every server has arrived, so
+                    // this fetches ONLY the languages nothing covered. The
+                    // sharedSubKeys dedupe stops fallback tracks re-pushed by
+                    // the early pass from duplicating.
+                    topUpSubtitles(imdbDeferred.await(), season, episode, originalLangNow(),
+                        coveredSubLangs, sharedSubKeys, subtitleCallback)
                 } catch (t: Throwable) {
                     android.util.Log.w("IndStream", "trickle emit stopped: ${t.message}")
                 }
             }
-            // Awaiting is safe: metaDeferred is bounded by its own 3s timeout.
-            topUpSubtitles(imdbDeferred.await(), season, episode, originalLangNow(), coveredSubLangs, subtitleCallback)
         }
 
         android.util.Log.i("IndStream", "loadLinks: tmdb=$tmdbId/$type s=$season e=$episode -> started=$started, $emitted links emitted (first-frame)")
@@ -428,13 +462,16 @@ class IndStreamProvider : MainAPI() {
      *  wanted language (Hindi/English/original) is missing, fetch it from the
      *  OpenSubtitles fallback — budgeted so it can never hold up playback, and
      *  dropped silently when it takes too long. Shared by the instant-replay and
-     *  fast-start paths. */
+     *  fast-start paths. [sharedSubKeys] dedupes fallback tracks against
+     *  everything already emitted (server tracks + any earlier fallback pass),
+     *  so running the top-up twice (early + end-of-trickle) never duplicates. */
     private suspend fun topUpSubtitles(
         imdbId: String?,
         season: Int,
         episode: Int,
         originalLang: String?,
         coveredSubLangs: MutableSet<String>,
+        sharedSubKeys: MutableSet<String>,
         subtitleCallback: (SubtitleFile) -> Unit,
     ) {
         val missing = SubtitleFallback.missingLanguages(
@@ -442,6 +479,7 @@ class IndStreamProvider : MainAPI() {
         )
         if (missing.isNotEmpty()) {
             SubtitleFallback.fetch(imdbId, season, episode, missing)
+                .filter { sharedSubKeys.add("${it.lang}|${it.url}") }
                 .forEach { subtitleCallback(it) }
         }
     }

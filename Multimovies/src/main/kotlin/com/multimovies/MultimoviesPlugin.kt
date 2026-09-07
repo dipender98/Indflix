@@ -259,12 +259,17 @@ class MultimoviesProvider : MainAPI() {
          *  prefetch resolves ahead of the Play tap. */
         const val EMBED_PREFETCH_COUNT = 2
 
-        /** Fast-start fill window: after the first link is emitted, keep pulling
-         *  fast sources for this long so the player gets a few alternates, then
-         *  return so playback starts. The remaining (slower) sources keep
-         *  resolving in the background and land in [FastStartCache] for instant
-         *  replay. */
-        const val FAST_START_FILL_MS = 2_500L
+        /** Fill window (user spec Sept 2026: "keep pulling all servers, specially
+         *  the Hindi ones"): after the FIRST link starts playback, every source
+         *  that keeps resolving for this long is still pushed to the player live —
+         *  the server list keeps growing while the user watches. 2.5s was too
+         *  short: the slow multi-server sources (Nxsha's fleet, VidEm, 2embed…)
+         *  finished after the window and only ever landed in [FastStartCache], so
+         *  the CURRENT play never saw them (same complaint as IndStream's
+         *  MovieBox). loadLinks returns the moment the first link is pushed; a
+         *  detached finalizer closes this window, caches the full sorted list for
+         *  instant replay, and tops up subtitles. */
+        const val FAST_START_FILL_MS = 25_000L
 
         /** Hard cap on how long [loadLinks] waits before returning, regardless of
          *  whether the farm has finished. Safety net so a totally dead farm still
@@ -982,13 +987,20 @@ class MultimoviesProvider : MainAPI() {
 
         // Fast path 1.5: fast-start cache. If a previous play (or a background pull
         // from a prior visit) already resolved this exact load url, replay those
-        // links instantly so the player starts with zero head.
+        // links instantly so the player starts with zero head. NOTE: link NAMES
+        // ("Cineverse (Hindi)") say nothing about actual caption tracks — a
+        // Hindi-labelled link with no subs must NOT mark Hindi covered here, so
+        // the missing-language check starts from an EMPTY covered set (nothing
+        // was emitted as a subtitle track on this replay) and the fallback
+        // fetches exactly what's wanted. Duplicate tracks can't appear: the
+        // OpenSubtitles responses are stable per title and the fallback has its
+        // own cache.
         FastStartCache.get(data)?.let { cached ->
             if (cached.isNotEmpty()) {
                 cached.forEach { runCatching { callback(it) } }
                 if (meta != null) {
                     val missing = SubtitleFallback.missingLanguages(
-                        cached.mapNotNull { SubtitleServices.canonicalName(it.name ?: "") }.toSet(),
+                        emptySet(),
                         SubtitleFallback.desiredLanguages(),
                     )
                     if (missing.isNotEmpty()) {
@@ -1009,13 +1021,18 @@ class MultimoviesProvider : MainAPI() {
         var embeds: List<ResolvedEmbed> = awaited.orEmpty()
 
         if (embeds.isEmpty()) {
-            val doc = cachedDocOrFetch(data) ?: return@withDomainRetry false
-            embeds = coroutineScope {
-                parsePlayerOptions(doc, data).map { (name, triple) ->
-                    async {
-                        runCatching { resolveEmbed(data, name, triple.first, triple.second, triple.third) }.getOrNull()
-                    }
-                }.awaitAll().filterNotNull()
+            // A failed page fetch (site down / challenge unsolved) no longer
+            // aborts the whole load: the id-keyed global sources launched below
+            // are site-independent and still resolve + play.
+            val doc = cachedDocOrFetch(data)
+            if (doc != null) {
+                embeds = coroutineScope {
+                    parsePlayerOptions(doc, data).map { (name, triple) ->
+                        async {
+                            runCatching { resolveEmbed(data, name, triple.first, triple.second, triple.third) }.getOrNull()
+                        }
+                    }.awaitAll().filterNotNull()
+                }
             }
         }
 
@@ -1073,9 +1090,21 @@ class MultimoviesProvider : MainAPI() {
         // (selecting the fastest server in real time), a short fill window collects
         // a few more fast sources, then loadLinks returns and playback begins while
         // the slower servers keep resolving into [FastStartCache] for instant replay.
+        // GLOBAL id-keyed sources launch FIRST (user spec: instant play): they
+        // need no page fetch or admin-ajax, so launching them before the
+        // dooplayer embed pulls removes their entire serial head from the first
+        // frame. Previously they waited behind the embed doc + admin-ajax chain
+        // — the biggest chunk of the old 5-7s TV startup (TV has no prefetch).
         val globalSources = buildGlobalSources(meta)
-        val orderedEmbeds = embeds.sortedBy { priorityOf(it.name) }
         val labelCounter = ConcurrentHashMap<String, Int>()
+        val globalJobs = globalSources.map { g ->
+            sourceRefs.add(g)
+            searchScope.launch {
+                pullSource(g, labelCounter, data, emitted, found, trackedSubtitle, callback,
+                    linksAccepted = linksAccepted, firstLink = firstLink, cacheKey = data)
+            }
+        }
+        val orderedEmbeds = embeds.sortedBy { priorityOf(it.name) }
 
         val embedJobs = orderedEmbeds.map { e ->
             searchScope.launch {
@@ -1101,61 +1130,80 @@ class MultimoviesProvider : MainAPI() {
                     linksAccepted = linksAccepted, firstLink = firstLink, cacheKey = data)
             }
         }
-        val globalJobs = globalSources.map { g ->
-            sourceRefs.add(g)
-            searchScope.launch {
-                pullSource(g, labelCounter, data, emitted, found, trackedSubtitle, callback,
-                    linksAccepted = linksAccepted, firstLink = firstLink, cacheKey = data)
-            }
-        }
 
-        // Wait for the first link, enjoy a short fill window to grab a few more fast
-        // sources, then hand off to playback. The hard cap guarantees we never hang
-        // past FAST_START_MAX_MS even if the whole farm is slow/dead.
-        withTimeoutOrNull(FAST_START_MAX_MS) {
-            firstLink.await()
-            if (linksAccepted.get()) delay(FAST_START_FILL_MS)
-        }
-        linksAccepted.set(false)
+        // PHASE 1 — first frame: wait ONLY for the first link (any source —
+        // global or embed, whichever resolves first). The hard cap guarantees we
+        // never hang past FAST_START_MAX_MS even if the whole farm is slow/dead.
+        // No fill delay here: playback starts the moment the first link lands.
+        withTimeoutOrNull(FAST_START_MAX_MS) { firstLink.await() }
 
-        // OpenSubtitles top-up: when the pulled servers carried no captions
-        // for a wanted language (Hindi/English), fetch them from the fallback
-        // provider — budgeted, dropped on timeout, never blocks the streams
-        // that are already in the player (user spec Sept 2026).
-        if (meta != null) {
-            val missing = SubtitleFallback.missingLanguages(
-                coveredSubLangs.toSet(), SubtitleFallback.desiredLanguages(),
-            )
-            if (missing.isNotEmpty()) {
-                SubtitleFallback.fetch(meta.imdbId, meta.season, meta.episode, missing)
-                    .forEach { sub ->
-                        if (emittedSubKeys.add("${sub.lang}|${sub.url}")) {
-                            collectedSubs.add(sub)
-                            runCatching { subtitleCallback(sub) }
-                        }
-                    }
-            }
-        }
-
-        val sorted = MultiSourcePuller.sortLinks(found.toList(), sourceRefs.toList(), ::priorityOf, preferHindi = true)
-        val deduped = dedupeByHostQuality(sorted)
-        if (deduped.isEmpty()) {
-            // A fully dead prefetched entry would otherwise poison every retry
-            // within its TTL — drop it so the next attempt takes the full path.
+        if (emitted.isEmpty()) {
+            // Nothing went live: replay whatever already landed in FastStartCache
+            // (a prior visit's prefetch or background pulls), else surface "no
+            // link found" — and drop a stale prefetch so the next attempt
+            // re-resolves instead of replaying the same dead entry.
             if (prefetched) EmbedPrefetchCache.invalidate(data)
-            // Fallback: a background pull may have landed a link in FastStartCache
-            // between the fill window closing and here — replay it so we don't
-            // surface "no link found" when a stream is actually ready.
             val bg = FastStartCache.get(data)
             if (bg != null && bg.isNotEmpty()) {
                 bg.forEach { runCatching { callback(it) } }
                 return@withDomainRetry true
             }
-        } else if (meta != null) {
-            LinkCache.put(meta.imdbId, meta.season, meta.episode, deduped, collectedSubs.toList())
+            return@withDomainRetry false
         }
 
-        return@withDomainRetry deduped.isNotEmpty()
+        // PHASE 2 — detached fill window (user spec: keep pulling ALL servers,
+        // especially the Hindi ones): every source that resolves over the next
+        // FAST_START_FILL_MS is still pushed to the player live while playback
+        // runs. loadLinks does NOT block on it. When the window closes the gate
+        // shuts, the full sorted+deduped list is cached for instant replay, and
+        // OpenSubtitles tops up any wanted language the servers didn't carry.
+        searchScope.launch {
+            delay(FAST_START_FILL_MS)
+            linksAccepted.set(false)
+            val sorted = MultiSourcePuller.sortLinks(found.toList(), sourceRefs.toList(), ::priorityOf, preferHindi = true)
+            val deduped = dedupeByHostQuality(sorted)
+            if (deduped.isNotEmpty() && meta != null) {
+                LinkCache.put(meta.imdbId, meta.season, meta.episode, deduped, collectedSubs.toList())
+            }
+            if (meta != null) {
+                val missing = SubtitleFallback.missingLanguages(
+                    coveredSubLangs.toSet(), SubtitleFallback.desiredLanguages(),
+                )
+                if (missing.isNotEmpty()) {
+                    SubtitleFallback.fetch(meta.imdbId, meta.season, meta.episode, missing)
+                        .forEach { sub ->
+                            if (emittedSubKeys.add("${sub.lang}|${sub.url}")) {
+                                collectedSubs.add(sub)
+                                runCatching { subtitleCallback(sub) }
+                            }
+                        }
+                }
+            }
+        }
+
+        // Early subtitle fallback: when NO source pushed any caption track yet,
+        // fetch the wanted languages right away (budgeted, detached) instead of
+        // leaving the user subtitle-less for the whole fill window. The
+        // finalizer's top-up below dedupes against emittedSubKeys, so this
+        // never produces duplicate tracks.
+        if (collectedSubs.isEmpty() && meta != null) {
+            searchScope.launch {
+                val missing = SubtitleFallback.missingLanguages(
+                    coveredSubLangs.toSet(), SubtitleFallback.desiredLanguages(),
+                )
+                if (missing.isNotEmpty()) {
+                    SubtitleFallback.fetch(meta.imdbId, meta.season, meta.episode, missing)
+                        .forEach { sub ->
+                            if (emittedSubKeys.add("${sub.lang}|${sub.url}")) {
+                                collectedSubs.add(sub)
+                                runCatching { subtitleCallback(sub) }
+                            }
+                        }
+                }
+            }
+        }
+
+        return@withDomainRetry true
     }
 
     /** Pull a single source, streaming found links to [callback] as they arrive and
