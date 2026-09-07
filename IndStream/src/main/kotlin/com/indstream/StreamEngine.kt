@@ -22,10 +22,12 @@ import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.utils.*
 import kotlin.math.min
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.withTimeoutOrNull
 import org.jsoup.Jsoup
@@ -43,16 +45,18 @@ import org.jsoup.Jsoup
  */
 object StreamEngine {
 
-    // One slot per host: the live farm is ≤10 servers, so a smaller cap only
+    // One slot per host: the live farm is ≤16 servers, so a smaller cap only
     // made fast resolvers QUEUE behind slow multi-chain hosts (MovieBox /
-    // Allmovieland hold their slot 10-20s) and pushed the first frame out to
-    // 5-7s. Full-parallel launch = every host starts the instant the tap
-    // lands (user spec: instant play + all servers pulled).
-    private const val MAX_CONCURRENT = 10
+    // Allmovieland hold their slot 10-20s) and pushed the first frame out.
+    // Full-parallel launch = every host starts the instant the tap lands
+    // (user spec: instant play + all servers pulled).
+    private const val MAX_CONCURRENT = 16
     private const val MAX_SERVERS = 16
     private const val MAX_UNWRAP = 4
-    /** Minimum stream height to emit (user spec: 720p and above only). */
-    private const val MIN_QUALITY_P = 720
+    /** Minimum stream height to prefer for AUTO-PLAY (user spec Sept 2026:
+     *  the ≥720 gate moved here from emit() — the server LIST stays
+     *  unrestricted so every successful host is visible). */
+    private const val MIN_AUTO_HEIGHT = 720
 
     /** MovieBox bearer token cache (CSX parity): the x-user token lives for
      *  hours; caching it removes one serial round-trip from every resolve. */
@@ -81,6 +85,13 @@ object StreamEngine {
          *  "User-Agent: ExoPlayer" for CDNs that reject browser UAs). Merged
          *  into the ExtractorLink headers at emission time. */
         val extraHeaders: Map<String, String> = emptyMap(),
+        /** Wall time from the Play tap to this stream's arrival (ms), stamped
+         *  per batch in [resolveRealtime]. Live ranking signal. */
+        val resolveMs: Long? = null,
+        /** Live time-to-first-byte (ms) measured by [probeCandidates] during
+         *  the settle window. Null = not probed this session (score falls
+         *  back to the health-history prior). */
+        val ttfbMs: Long? = null,
     )
 
     /**
@@ -138,6 +149,35 @@ object StreamEngine {
     }
 
     /**
+     * Dual-ID race helper (user spec Sept 2026, Phase 1): run several id
+     * shapes for one host in parallel; the FIRST non-empty result wins and
+     * the losing attempts are cancelled. All-empty → emptyList. Used by the
+     * vidup/vidcore dispatch (both hosts accept TMDB and IMDB ids in their
+     * URL path) — TMDB-keyed arm starts at t=0, the IMDB-keyed arm starts as
+     * soon as the id resolves, so neither blocks the other.
+     */
+    private suspend fun raceFirst(vararg blocks: suspend () -> List<RawStream>): List<RawStream> {
+        if (blocks.isEmpty()) return emptyList()
+        if (blocks.size == 1) return runCatching { blocks[0]() }.getOrDefault(emptyList())
+        return coroutineScope {
+            val winner = CompletableDeferred<List<RawStream>>()
+            val pending = java.util.concurrent.atomic.AtomicInteger(blocks.size)
+            val jobs = blocks.map { block ->
+                launch {
+                    val r = runCatching { block() }.getOrDefault(emptyList())
+                    if (r.isNotEmpty()) winner.complete(r)
+                    else if (pending.decrementAndGet() == 0 && !winner.isCompleted) {
+                        winner.complete(emptyList())
+                    }
+                }
+            }
+            val result = winner.await()
+            jobs.forEach { it.cancel() }
+            result
+        }
+    }
+
+    /**
      * Resolve every server, invoking [onBatch] with a server's results the instant
      * that server finishes. Because the farm is launched fastest-first (see
      * [selectServers]), completion order is fastest-first â€” so a caller can start
@@ -161,6 +201,9 @@ object StreamEngine {
         val servers = selectServers(tmdbId, type, season, episode)
         if (servers.isEmpty()) return
         val sem = Semaphore(MAX_CONCURRENT)
+        // Wall-clock origin for the live resolve-time signal: every batch's
+        // RawStreams get stamped with ms-from-Play-tap (startupScore input).
+        val playStart = System.currentTimeMillis()
         coroutineScope {
             servers.map { spec ->
                 async {
@@ -170,7 +213,7 @@ object StreamEngine {
                         // servers never wait for (or trigger) the lookup.
                         val imdbId = if (spec.idType == ServerIdType.IMDB) imdbIdProvider?.invoke() else null
                         val outcome = withTimeoutOrNull(spec.timeoutSec * 1000L) {
-                            runCatching { resolveOne(spec, tmdbId, imdbId, type, season, episode) }
+                            runCatching { resolveOne(spec, tmdbId, imdbId, type, season, episode, imdbIdProvider) }
                                 .recover { t ->
                                     if (t is CleanMissException) {
                                         Log.i("IndStream", "${spec.id}: clean miss — ${t.message} (no breaker trip)")
@@ -188,10 +231,15 @@ object StreamEngine {
                         // so probe-based audioPriority would wrongly read 0. Bias the
                         // streams from a `spec.hindi` server to Hindi (priority 4) so
                         // they float above English sources in the audio-first sort.
+                        val resolveMs = System.currentTimeMillis() - playStart
                         val streams = outcome?.map { s ->
-                            if (spec.hindi) s.copy(audioPriority = 4, audioLabel = "Hindi") else s
+                            val biased = if (spec.hindi) s.copy(audioPriority = 4, audioLabel = "Hindi") else s
+                            biased.copy(resolveMs = resolveMs)
                         }.orEmpty()
-                        if (streams.isNotEmpty()) onBatch(spec.id, streams)
+                        if (streams.isNotEmpty()) {
+                            Log.d("IndStream", "server=${spec.id} resolve_ms=$resolveMs streams=${streams.size}")
+                            onBatch(spec.id, streams)
+                        }
                     } finally { sem.release() }
                 }
             }.awaitAll()
@@ -218,42 +266,148 @@ object StreamEngine {
     }
 
     /**
-     * Composite score for instant-play ranking. Higher = the stream is expected
-     * to begin playback sooner. The model is "start low, climb high": the first
-     * emitted link must produce frame 1 in the fewest possible bytes/round-trips,
-     * and once playback is running the player (or a manual tap) climbs to max
-     * resolution. Signal weights:
-     *  - History (55%): [HealthMonitor.speedScore] — EMA of past throughput +
-     *    latency for this exact server. A host that has proven fast keeps being
-     *    fast, so this dominates and lets a known-fast source (e.g. MovieBox)
-     *    win even when another server happens to resolve a hair earlier.
-     *  - Fresh probe (35%): this session's per-link speed probe (KB/s).
-     *  - Cold-start shape (≤10%): a direct 720p file starts in ~1 quality head;
-     *    an adaptive HLS master starts at its LOWEST rung and ABRs up; a direct
-     *    1080p/4K file must buffer megabytes before frame 1 (the VidLink
-     *    "fast host, slow start" effect). So within one server the first link
-     *    is the adaptive master, else the 720p file, else the highest res.
-     *  - Audio (≤4%): SOFT language preference only — Hindi/dual get a small
-     *    edge that can never overcome a meaningful speed difference.
+     * Live-probe score for instant-play ranking (user spec Sept 2026: rank
+     * from THIS session's measured signals, never static host-speed folklore).
+     * Higher = the stream is expected to produce frame 1 sooner AND at a
+     * usable quality. Weights:
+     *  - TTFB (40%): [RawStream.ttfbMs] probed live during the settle window —
+     *    time to first byte on the actual stream URL is the dominant
+     *    first-frame signal. When no live probe exists, a WEAK health-history
+     *    prior substitutes (never overrides a live probe).
+     *  - Resolve time (25%): [RawStream.resolveMs] — wall time from the Play
+     *    tap to this server answering.
+     *  - Throughput (20%): fresh probe kbps, else the server's health-history
+     *    average, else neutral 0.5.
+     *  - Quality (10%): 1.0 for ≥1080, 0.9 for ≥720, 0.5 for adaptive with
+     *    unknown height (lowered from 0.7 — user report: adaptive resolution
+     *    does not reliably climb), 0.0 for known sub-720.
+     *  - Audio (5%): SOFT language preference that can never overcome a
+     *    meaningful speed difference.
      */
+    private fun ttfbNorm(ms: Long): Double = 1.0 / (1.0 + ms / 500.0)
+    private fun throughputNorm(kbps: Long): Double = min(1.0, kbps / 5000.0)
+
+    private fun qualityNorm(s: RawStream): Double = when {
+        s.qualityHint >= 1080 -> 1.0
+        s.qualityHint >= MIN_AUTO_HEIGHT -> 0.9
+        s.isM3u8 && s.qualityHint <= 0 -> 0.5      // adaptive, height unknown
+        s.qualityHint in 1 until MIN_AUTO_HEIGHT -> 0.0
+        else -> 0.0
+    }
+
     private fun startupScore(s: RawStream): Double {
         val hist = HealthMonitor.speedScore(s.serverId) // 0..1
-        val fresh = if ((s.measuredKbps ?: 0L) > 0L)
-            min(1.0, (s.measuredKbps ?: 0L).toDouble() / 5000.0) else 0.5
-        // Cold-start shape: adaptive master = best (start at low rung, ramp up
-        // via ABR — the "720p first, climb to max" behaviour the player gets
-        // for free); direct 720p = next best; big direct files = worst.
-        val coldStart = when {
-            s.isM3u8 && s.qualityHint == 0 -> 0.10        // true adaptive master
-            s.isM3u8 -> 0.08                              // HLS (multi-rung master)
-            s.qualityHint in 480..720 -> 0.08             // direct 480-720p MP4
-            s.qualityHint >= 1080 -> 0.02                 // direct big file
-            else -> 0.04
+        val ttfbTerm = s.ttfbMs?.let { ttfbNorm(it) } ?: (0.6 + 0.3 * hist).coerceAtMost(1.0)
+        val resolveTerm = s.resolveMs?.let { ttfbNorm(it) } ?: 0.5
+        val throughputTerm = when {
+            (s.measuredKbps ?: 0L) > 0L -> throughputNorm(s.measuredKbps!!)
+            else -> HealthMonitor.averageThroughput(s.serverId)
+                ?.let { throughputNorm(it) } ?: 0.5
         }
-        val audioBonus = when (s.audioPriority) {
-            4 -> 0.04; 3 -> 0.03; 2 -> 0.02; 1 -> 0.01; else -> 0.0
+        val audioSoft = when (s.audioPriority) {
+            4 -> 1.0; 3 -> 0.75; 2 -> 0.5; 1 -> 0.25; else -> 0.0
         }
-        return hist * 0.55 + fresh * 0.35 + coldStart + audioBonus
+        return 0.40 * ttfbTerm + 0.25 * resolveTerm + 0.20 * throughputTerm +
+            0.10 * qualityNorm(s) + 0.05 * audioSoft
+    }
+
+    /**
+     * Auto-play pick (user spec Phase 2, strict eligibility order):
+     *  1. Streams with KNOWN height ≥720 (direct file or probed master
+     *     bestHeight) — a direct ≥720 file beats adaptive-unknown because
+     *     ExoPlayer ABR climbing is unreliable (user report Sept 2026).
+     *  2. Adaptive (m3u8) with unknown height — only if no ≥720 candidate exists.
+     *  3. Everything else (sub-720 only) — start the best available rather
+     *     than stall; late ≥720 arrivals still join the server list.
+     * Within the winning pool the highest [startupScore] (live probes) wins.
+     * Pure JVM logic (HealthMonitor is plain Kotlin) — unit-tested in
+     * Test/AutoPlayPickTest.kt.
+     */
+    fun pickAutoPlay(streams: List<RawStream>): RawStream? {
+        if (streams.isEmpty()) return null
+        val candidates = streams.filter { it.url.isNotBlank() }
+        if (candidates.isEmpty()) return null
+        // Strict pool order — adaptive-unknown competes ONLY when no known
+        // ≥720 candidate exists (it must not outrank a direct 720p file on
+        // raw TTFB, because ExoPlayer ABR climbing is unreliable).
+        val hd = candidates.filter { it.qualityHint >= MIN_AUTO_HEIGHT }
+        val pool = when {
+            hd.isNotEmpty() -> hd
+            else -> candidates.filter { it.isM3u8 && it.qualityHint <= 0 }
+                .ifEmpty { candidates }
+        }
+        val winner = pool.maxByOrNull { startupScore(it) }
+        Log.d("IndStream", "pickAutoPlay: pool=${pool.size}/${candidates.size} " +
+            "winner=${winner?.serverName} h=${winner?.qualityHint} " +
+            "ttfb=${winner?.ttfbMs}ms resolve=${winner?.resolveMs}ms score=${winner?.let { startupScore(it) }}")
+        return winner
+    }
+
+    /**
+     * Live probes for auto-play ranking, run INSIDE the 1.5s settle window
+     * (parallel, one round-trip per candidate, tight budgets). For HLS
+     * masters the master fetch does triple duty: TTFB + best variant height +
+     * audio renditions — the text is stored into [RawStream.inlineManifest]
+     * so `emit()` skips its own re-fetch. Returns stamped COPIES; the caller
+     * uses them for [pickAutoPlay] only (the arrival buffer is untouched, so
+     * FastStartCache keeps the raw streams).
+     */
+    suspend fun probeCandidates(streams: List<RawStream>): List<RawStream> {
+        val distinct = streams.distinctBy { it.url }.filter { it.url.isNotBlank() }
+        return coroutineScope {
+            distinct.map { raw ->
+                async {
+                    val stamped = if (raw.isM3u8) {
+                        // Master probe: TTFB + variants + audio in one fetch
+                        // (skip when the resolver already delivered everything).
+                        val alreadyKnown = raw.inlineManifest != null ||
+                            (raw.qualityHint > 0 && raw.audioPriority > 0)
+                        if (alreadyKnown) {
+                            val p = HttpKit.probeTtfb(raw.url, raw.referer,
+                                timeoutMs = PROBE_TTFB_BUDGET_MS, extraHeaders = raw.extraHeaders)
+                            raw.copy(ttfbMs = p.ttfbMs, measuredKbps = raw.measuredKbps ?: p.kbps)
+                        } else {
+                            val lh = LinkedHashMap<String, String>()
+                            lh.putAll(raw.extraHeaders)
+                            if (!lh.containsKey("Referer") && !raw.referer.isNullOrBlank()) lh["Referer"] = raw.referer!!
+                            val probeStart = System.currentTimeMillis()
+                            val fetched = withTimeoutOrNull(PROBE_MASTER_BUDGET_MS) {
+                                runCatching { app.get(raw.url, timeout = 3, headers = lh).text }.getOrNull()
+                            }
+                            if (fetched == null) {
+                                // Master probe lost the race with the settle
+                                // window — TTFB-only fallback, still eligible.
+                                val p = HttpKit.probeTtfb(raw.url, raw.referer,
+                                    timeoutMs = PROBE_TTFB_BUDGET_MS, extraHeaders = raw.extraHeaders)
+                                raw.copy(ttfbMs = p.ttfbMs)
+                            } else {
+                                val master = ManifestKit.parseMaster(fetched, raw.url)
+                                val height = master?.let { ManifestKit.bestHeight(it.variants) }?.takeIf { it > 0 }
+                                    ?: raw.qualityHint
+                                val pri = master?.let { ManifestKit.audioPriority(it) } ?: raw.audioPriority
+                                raw.copy(
+                                    ttfbMs = System.currentTimeMillis() - probeStart,
+                                    measuredKbps = raw.measuredKbps,
+                                    qualityHint = if (raw.qualityHint <= 0) height else raw.qualityHint,
+                                    audioPriority = if (pri > 0) pri else raw.audioPriority,
+                                    audioLabel = if (pri > 0 && raw.audioLabel.isBlank()) audioLabelFor(pri) else raw.audioLabel,
+                                    inlineManifest = master?.let { fetched },
+                                )
+                            }
+                        }
+                    } else {
+                        // Direct file: ranged GET gives TTFB + throughput.
+                        val p = HttpKit.probeTtfb(raw.url, raw.referer,
+                            timeoutMs = PROBE_TTFB_BUDGET_MS, extraHeaders = raw.extraHeaders)
+                        raw.copy(ttfbMs = p.ttfbMs, measuredKbps = raw.measuredKbps ?: p.kbps)
+                    }
+                    Log.d("IndStream", "probe server=${stamped.serverName} h=${stamped.qualityHint} " +
+                        "ttfb=${stamped.ttfbMs}ms kbps=${stamped.measuredKbps ?: "?"} " +
+                        "resolve=${stamped.resolveMs ?: "?"}ms url=${stamped.url.take(60)}")
+                    stamped
+                }
+            }.awaitAll()
+        }
     }
 
     /**
@@ -261,10 +415,10 @@ object StreamEngine {
      * masters go out as the adaptive source (the player selects the rung),
      * never as master + per-variant duplicates (user spec Sept 2026).
      *
-     * Quality gate (user spec): only 720p and above are emitted — 360/480p
-     * sources are dropped here, the single choke point every server's results
-     * flow through. Streams with qualityHint 0 (unknown, e.g. adaptive HLS
-     * masters) are kept: the player ABRs through their variants.
+     * Quality policy (user spec Sept 2026, REVISED): the ≥720 gate applies to
+     * AUTO-PLAY selection only ([pickAutoPlay]) — the server LIST is
+     * unrestricted so every successful host is visible, sub-720 included.
+     * The former single-choke-point <720 filter was removed here.
      *
      * Returns the canonical subtitle language names the servers actually
      * provided so the caller can top up gaps from [SubtitleFallback].
@@ -337,10 +491,11 @@ object StreamEngine {
             ranked.forEach { raw -> raw.subtitles.forEach { (lang, subUrl) -> emitSub(lang, subUrl) } }
         }
 
-        // Link pass: only gated, url-bearing streams become ExtractorLinks.
-        val eligible = ranked.filter { raw ->
-            raw.url.isNotBlank() && !(raw.qualityHint in 1 until MIN_QUALITY_P)
-        }
+        // Link pass: every url-bearing stream becomes a link (list is
+        // unrestricted — auto-play ≥720 preference lives in pickAutoPlay).
+        // Streams with a blank url are subtitle-only carriers (pipeline
+        // step 7) - they never become links.
+        val eligible = ranked.filter { raw -> raw.url.isNotBlank() }
 
         // Pre-resolve M3U8 masters before dedupe so the numbering key uses
         // the ACTUAL height (from variant parse) rather than qualityHint
@@ -444,7 +599,17 @@ object StreamEngine {
     // Internals ï¿½ multi-strategy pipeline (proven from Multimovies)
     // ------------------------------------------------------------------
 
-    private suspend fun resolveOne(spec: ServerSpec, tmdbId: Int, imdbId: String?, type: String, season: Int, episode: Int): List<RawStream> {
+    private suspend fun resolveOne(
+        spec: ServerSpec,
+        tmdbId: Int,
+        imdbId: String?,
+        type: String,
+        season: Int,
+        episode: Int,
+        /** Lazy IMDB lookup for the dual-ID race (vidup/vidcore accept both id
+         *  shapes). Null = no provider (prewarm path passes a direct id). */
+        imdbIdProvider: (suspend () -> String?)? = null,
+    ): List<RawStream> {
         val start = System.currentTimeMillis()
         val id = if (spec.idType == ServerIdType.IMDB)
             (imdbId ?: run { Log.w("IndStream", "${spec.id}: IMDB required but missing"); return emptyList() })
@@ -477,7 +642,12 @@ object StreamEngine {
         if (spec.id == "moviebox") {
             val result = resolveMovieBox(spec, tmdbId, imdbId, type, season, episode)
             if (result.isNotEmpty()) { okServer(spec, start, "moviebox", result.size); return result }
-            failServer(spec, "moviebox returned no streams")
+            // Soft-fail (user spec Sept 2026): an empty result after a REAL
+            // attempt (API answered, no playable/region streams) is a miss for
+            // this title, not a host failure — no breaker trip. Genuine network
+            // failures inside resolveMovieBox still record via failServer /
+            // the timeout path above.
+            failServer(spec, "moviebox returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
             return emptyList()
         }
         if (spec.id == "primesrc") {
@@ -528,22 +698,39 @@ object StreamEngine {
             failServer(spec, "8stream returned no streams")
             return emptyList()
         }
-        if (spec.id == "vidup") {
-            val result = resolveEncDecPlayer(spec, tmdbId, type, season, episode, "vidup")
-            if (result.isNotEmpty()) { okServer(spec, start, "vidup enc-dec", result.size); return result }
-            failServer(spec, "vidup returned no streams")
-            return emptyList()
-        }
-        if (spec.id == "vidcore") {
-            val result = resolveEncDecPlayer(spec, tmdbId, type, season, episode, "vidcore")
-            if (result.isNotEmpty()) { okServer(spec, start, "vidcore enc-dec", result.size); return result }
-            failServer(spec, "vidcore returned no streams")
+        if (spec.id == "vidup" || spec.id == "vidcore") {
+            val variant = spec.id
+            // Dual-ID race (user spec Sept 2026): both hosts accept TMDB AND
+            // IMDB ids in the URL path. The TMDB arm starts at t=0; the IMDB
+            // arm joins the race as soon as the id resolves (instant cache
+            // hit after load()). First non-empty result wins; on a joint miss
+            // one failure is recorded, not two.
+            val arms = mutableListOf<suspend () -> List<RawStream>>()
+            arms.add { resolveEncDecPlayer(spec, tmdbId.toString(), type, season, episode, variant) }
+            if (!imdbId.isNullOrBlank()) {
+                val fixed = imdbId
+                arms.add { resolveEncDecPlayer(spec, fixed, type, season, episode, variant) }
+            } else if (imdbIdProvider != null) {
+                val provider = imdbIdProvider
+                arms.add {
+                    val iid = provider.invoke()
+                    if (iid.isNullOrBlank()) emptyList<RawStream>()
+                    else resolveEncDecPlayer(spec, iid, type, season, episode, variant)
+                }
+            }
+            val result = raceFirst(*arms.toTypedArray())
+            if (result.isNotEmpty()) { okServer(spec, start, "$variant enc-dec", result.size); return result }
+            failServer(spec, "$variant returned no streams (tmdb${if (arms.size > 1) "+imdb" else ""} raced)")
             return emptyList()
         }
         if (spec.id == "allmovieland") {
             val result = resolveAllmovieland(spec, imdbId, type, season, episode)
             if (result.isNotEmpty()) { okServer(spec, start, "allmovieland multi-lang", result.size); return result }
-            failServer(spec, "allmovieland returned no streams")
+            // Soft-fail (user spec Sept 2026): multi-step chain finishing with
+            // no language streams is a title-level miss — network failures
+            // inside the resolver already log/return distinctly and the
+            // timeout path records hard failures.
+            failServer(spec, "allmovieland returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
             return emptyList()
         }
 
@@ -802,8 +989,10 @@ object StreamEngine {
                 (0 until n.length()).mapNotNull { i ->
                     val key = n.optString(i)
                     val height = key.toIntOrNull() ?: 0
-                    // Filter out streams below 720p
-                    if (height < 720) return@mapNotNull null
+                    // All qualities pass through here (user spec Sept 2026: the
+                    // ≥720 gate moved to AUTO-PLAY selection — the server list
+                    // stays unrestricted so 360/480 entries still surface for
+                    // manual pick / Hindi preference / bandwidth-limited titles).
                     val q = qualities.optJSONObject(key) ?: return@mapNotNull null
                     val url = q.optString("url").takeIf { it.isNotBlank() } ?: return@mapNotNull null
                     Triple(height, url, q)
@@ -1956,13 +2145,13 @@ object StreamEngine {
      */
     private suspend fun resolveEncDecPlayer(
         spec: ServerSpec,
-        tmdbId: Int?,
+        keyId: String?, // TMDB or IMDB id — both hosts accept either in the URL path
         type: String,
         season: Int,
         episode: Int,
         variant: String, // "vidup" or "vidcore"
     ): List<RawStream> {
-        val id = tmdbId ?: return emptyList()
+        val id = keyId?.takeIf { it.isNotBlank() } ?: return emptyList()
         val pageUrl = if (type == "movie") "${spec.referer!!.trimEnd('/')}/movie/$id"
             else "${spec.referer!!.trimEnd('/')}/tv/$id/$season/$episode"
         val referer = spec.referer!!
@@ -2080,7 +2269,7 @@ object StreamEngine {
         val searchUrl = "https://allmovieland.one/?do=search&subaction=search&story=$imdb"
         val searchHtml = withTimeoutOrNull(12_000L) {
             runCatching { app.get(searchUrl, timeout = 12, headers = headers).text }.getOrNull()
-        } ?: run { Log.w("Allmovieland", "search timeout"); return emptyList() }
+        } ?: run { Log.w("Allmovieland", "search timeout"); throw IllegalStateException("allmovieland search timeout (network)") }
         // Cards link to allmovieland.{art|one}/NNN-slug.html
         val cardUrl = Regex("""href="(https?://allmovieland\.[a-z]+/[^"]+\.html)"\s*>\s*<h3 class="new-short__title""")
             .find(searchHtml)?.groupValues?.get(1)
@@ -2089,13 +2278,13 @@ object StreamEngine {
         // 2. Card page → player domain + IMDB src
         val cardHtml = withTimeoutOrNull(12_000L) {
             runCatching { app.get(cardUrl, timeout = 12, headers = okHeaders(cardUrl)).text }.getOrNull()
-        } ?: return emptyList()
+        } ?: throw IllegalStateException("allmovieland card fetch failed (network)")
         val playerDomain = Regex("""AwsIndStreamDomain\s*=\s*'([^']+)'""")
             .find(cardHtml)?.groupValues?.get(1)?.trimEnd('/')
-            ?: run { Log.w("Allmovieland", "no AwsIndStreamDomain"); return emptyList() }
+            ?: run { Log.w("Allmovieland", "no AwsIndStreamDomain"); throw IllegalStateException("allmovieland parse: no AwsIndStreamDomain") }
         val playSrc = Regex("""src:\s*'([^']+)'""")
             .find(cardHtml)?.groupValues?.get(1)
-            ?: run { Log.w("Allmovieland", "no src in player config"); return emptyList() }
+            ?: run { Log.w("Allmovieland", "no src in player config"); throw IllegalStateException("allmovieland parse: no src") }
 
         // 3. Play page → file + key. The page serves the file URL inside an
         // ESCAPED JSON string ("https:\/\/cdn...\/playlist\/...") — captured
@@ -2105,13 +2294,13 @@ object StreamEngine {
         val playUrl = "$playerDomain/play/$playSrc"
         val playHtml = withTimeoutOrNull(10_000L) {
             runCatching { app.get(playUrl, timeout = 10, headers = okHeaders(cardUrl)).text }.getOrNull()
-        } ?: return emptyList()
+        } ?: throw IllegalStateException("allmovieland play fetch failed (network)")
         val file = Regex("""["']?file["']?\s*[:=]\s*["']([^"']+)["']""")
             .find(playHtml)?.groupValues?.get(1)?.replace("\\/", "/")
-            ?: run { Log.w("Allmovieland", "no file in play page"); return emptyList() }
+            ?: run { Log.w("Allmovieland", "no file in play page"); throw IllegalStateException("allmovieland parse: no file") }
         val key = Regex("""["']?key["']?\s*[:=]\s*["']([^"']+)["']""")
             .find(playHtml)?.groupValues?.get(1)
-            ?: run { Log.w("Allmovieland", "no key in play page"); return emptyList() }
+            ?: run { Log.w("Allmovieland", "no key in play page"); throw IllegalStateException("allmovieland parse: no key") }
 
         // file may be: an absolute URL (movies) OR a path that already starts
         // with "/playlist/" (series) — the naive "$playerDomain/playlist/$file"
@@ -2128,9 +2317,9 @@ object StreamEngine {
         playlistHeaders["X-Csrf-Token"] = key
         val playlistText = withTimeoutOrNull(10_000L) {
             runCatching { app.get(fileUrl, timeout = 10, headers = playlistHeaders).text }.getOrNull()
-        } ?: run { Log.w("Allmovieland", "playlist timeout"); return emptyList() }
+        } ?: run { Log.w("Allmovieland", "playlist timeout"); throw IllegalStateException("allmovieland playlist timeout (network)") }
         val playlist = runCatching { org.json.JSONArray(playlistText) }.getOrElse {
-            Log.w("Allmovieland", "playlist not JSON array"); return emptyList() }
+            Log.w("Allmovieland", "playlist not JSON array"); throw IllegalStateException("allmovieland playlist parse error") }
 
         // Series shape (verified live Sept 2026): each top entry is a SEASON
         // ("title":"Season 1") whose folder[] holds EPISODES, each holding a
@@ -2458,6 +2647,24 @@ object StreamEngine {
      *  ~150ms is plenty for the UI and guarantees no burst of manifest fetches
      *  (or player-channel traffic) competes with the first second of playback. */
     const val TRICKLE_EMIT_GAP_MS: Long = 150L
+
+    /** Hold window (user spec Sept 2026, Phase 1 → Phase 2): after the FIRST
+     *  server's batch lands, pause the player for this long so a fair live
+     *  sample can be probed in parallel — TTFB, resolve time, master bestHeight
+     *  — then auto-play the best ≥720 candidate. The user's product range is
+     *  1–2s; 1.5s is the sweet spot between "first frame speed" and
+     *  "enough samples to rank honestly". Hard-capped by [FAST_START_MAX_MS]. */
+    const val FAST_START_SETTLE_MS: Long = 1_500L
+
+    /** Live-probe budget per candidate during the settle window. One round
+     *  trip per stream; tight enough that 16 candidates complete inside the
+     *  hold even on a slow link. */
+    const val PROBE_TTFB_BUDGET_MS: Long = 600L
+
+    /** Master-probe budget (HLS master fetch does triple duty: TTFB + best
+     *  variant height + audio renditions — stored into [RawStream.inlineManifest]
+     *  so `emit()` skips its own re-fetch). */
+    const val PROBE_MASTER_BUDGET_MS: Long = 800L
 }
 
 

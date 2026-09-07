@@ -23,6 +23,11 @@ cloudstream {
 
 android {
     namespace = "com.indstream"
+    // JVM unit tests (AutoPlayPickTest etc.) exercise engine code that logs
+    // via android.util.Log — return no-op defaults instead of "not mocked".
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+    }
 }
 
 dependencies {

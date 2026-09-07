@@ -297,40 +297,64 @@ class IndStreamProvider : MainAPI() {
         // only lands results in FastStartCache for instant replay.
         val linksAccepted = java.util.concurrent.atomic.AtomicBoolean(true)
         val firstReady = CompletableDeferred<Unit>()
+        // Timestamp (ms) when the first batch actually arrived — published by
+        // the resolveRealtime onBatch closure. The 1.5s settle hold is
+        // measured from THIS point, not from the moment loadLinks started
+        // awaiting (which would include the user's tap-to-network latency).
+        val firstArrivalMs = java.util.concurrent.atomic.AtomicLong(Long.MAX_VALUE)
 
         // Instant replay: if a previous play already pulled this title (or the
         // background pull from a prior tap is still warm), fire the cached links
-        // straight to the player so playback starts with zero head.
+        // straight to the player so playback starts with zero head. Same
+        // winner-first split as the fresh-start path so frame-1 quality
+        // matches: the best live signal (cached fields) wins, the rest of the
+        // cache fills the server list.
         val cached = StreamEngine.FastStartCache.get(cacheKey)
         if (cached != null && cached.isNotEmpty()) {
-            val langs = StreamEngine.emit(cached, { emitted.incrementAndGet(); callback(it) }, subtitleCallback,
-                originalLangNow(), subDedupeKeys = sharedSubKeys)
-            coveredSubLangs.addAll(langs)
+            val winner = StreamEngine.pickAutoPlay(cached)
+            val winUrl = winner?.url
+            val rest = if (winUrl != null) cached.filter { it.url != winUrl } else cached
+            if (winner != null) {
+                val langs = StreamEngine.emit(listOf(winner), { emitted.incrementAndGet(); callback(it) },
+                    subtitleCallback, originalLangNow(), subDedupeKeys = sharedSubKeys)
+                coveredSubLangs.addAll(langs)
+            }
+            if (rest.isNotEmpty()) {
+                val langs = StreamEngine.emit(rest, { emitted.incrementAndGet(); callback(it) },
+                    subtitleCallback, originalLangNow(), subDedupeKeys = sharedSubKeys)
+                coveredSubLangs.addAll(langs)
+            }
             android.util.Log.i("IndStream", "loadLinks: instant replay from cache, ${cached.size} streams for tmdb=$tmdbId/$type")
             topUpSubtitles(metaDeferred.await()?.imdbId, season, episode, originalLangNow(), coveredSubLangs, sharedSubKeys, subtitleCallback)
             return emitted.get() > 0
         }
 
-        // Fast-start (user goal: pick the fastest server in real time, hit/start
-        // the stream, then pull the rest in the background). The farm is resolved
-        // in a detached scope so it survives this function returning: the first
-        // server's link is emitted the instant it's ready and playback begins,
-        // a short fill window grabs a few more fast sources, then we return while
-        // the slower servers keep resolving into FastStartCache.
+        // Fast-start (user spec Sept 2026, live-probe model):
+        //   1. Launch the whole farm (MAX_CONCURRENT=16, all servers in parallel)
+        //      and buffer arrivals in a synchronizedList.
+        //   2. Wait for the FIRST batch (firstReady) — the user has already paid
+        //      network + resolve time; the FAST_START_SETTLE_MS hold after that
+        //      is where the live sample is collected. Hold = 1.5s by default
+        //      (user product range 1–2s). Hard-capped by FAST_START_MAX_MS.
+        //   3. During the hold, probeCandidates runs in parallel against every
+        //      buffered stream (TTFB, master bestHeight, audioPriority). The
+        //      probe's master fetch is stored into RawStream.inlineManifest so
+        //      emit() skips its own re-fetch.
+        //   4. At hold end: pickAutoPlay selects the best ≥720 candidate (or
+        //      best available if nothing meets the bar). Emit ONLY that link →
+        //      the player auto-plays it and the list shows it.
+        //   5. The remaining buffered streams + every later arrival go to the
+        //      server list via a 25s trickle, deduped by url (emittedUrls) so
+        //      the winner never re-appears and FastStartCache stays consistent.
         //
         // IMDB-keyed servers resolve the id lazily through a SHARED deferred
         // (dedup: at most one find/episode lookup even when several servers ask).
         // TMDB-keyed servers never wait for it — the farm launches with zero
-        // serial head.
+        // serial head. This is Phase 0/Track B from the user spec; already
+        // implemented in the existing code path below.
         val imdbDeferred = fastStartScope.async {
             if (needsImdb) metaDeferred.await()?.imdbId else null
         }
-        // Buffer arrivals per batch. INSTANT-PLAY model (user spec): the video
-        // starts on the FIRST server that resolves — frame 1 beats everything —
-        // and the remaining servers keep arriving afterwards, pushing their
-        // links into the player while it plays (the server list grows in the
-        // background). Trickle batches are capped and staggered so background
-        // arrival never steals bandwidth from the running stream.
         val buffered = Collections.synchronizedList(mutableListOf<StreamEngine.RawStream>())
         fastStartScope.launch {
             try {
@@ -338,9 +362,13 @@ class IndStreamProvider : MainAPI() {
                     if (streams.isNotEmpty()) {
                         buffered.addAll(streams)
                         StreamEngine.FastStartCache.put(cacheKey, buffered.toList())
+                        // Publish the actual first-arrival timestamp so the
+                        // settle hold is measured from network-arrival time,
+                        // not from when loadLinks started awaiting.
+                        firstArrivalMs.compareAndSet(Long.MAX_VALUE, System.currentTimeMillis())
                         // Signal "we have something to play" the instant the
-                        // first server lands — the main thread starts playback
-                        // immediately, long before the rest of the farm.
+                        // first server lands — the main thread starts the hold
+                        // timer here, long before the rest of the farm.
                         if (linksAccepted.get() && emitted.get() == 0) firstReady.complete(Unit)
                     }
                 }
@@ -351,54 +379,95 @@ class IndStreamProvider : MainAPI() {
             }
         }
 
-        // PHASE 1 — first frame: wait only for the FIRST server's batch (the
-        // fastest host normally answers in well under a second; the hard cap
-        // exists only so a dead farm surfaces "no link found" instead of
-        // hanging). No settle delay before playback.
+        // PHASE 1 — hold + probe: wait for the FIRST server's batch, then
+        // hold until (first-arrival + FAST_START_SETTLE_MS) so live probes
+        // can finish — they start at firstReady completion and run in
+        // parallel with the remaining hold time. The hold is measured from
+        // the batch's ACTUAL arrival (firstArrivalMs, published by onBatch),
+        // never from the tap — a slow first server must not shorten the
+        // sample window. Total wait is still bounded by FAST_START_MAX_MS
+        // (measured from the tap) so a dead farm surfaces "no link found".
+        val playT0 = System.currentTimeMillis()
         withTimeoutOrNull(StreamEngine.FAST_START_MAX_MS) { firstReady.await() }
-        linksAccepted.set(false)
+        if (buffered.isEmpty()) {
+            android.util.Log.w("IndStream", "loadLinks: farm produced no streams in ${System.currentTimeMillis() - playT0}ms")
+            return false
+        }
+        // Hold deadline = first-arrival + SETTLE, clamped by the overall
+        // FAST_START_MAX_MS deadline (probeStartedAt is ~first-arrival + ε).
+        val probeStartedAt = System.currentTimeMillis()
+        val settleEnd = (firstArrivalMs.get() + StreamEngine.FAST_START_SETTLE_MS)
+            .coerceAtMost(playT0 + StreamEngine.FAST_START_MAX_MS)
+        val settleRemaining = (settleEnd - probeStartedAt).coerceIn(0L, StreamEngine.FAST_START_SETTLE_MS)
+        // Probes overlap the hold; if the hold is already spent (very late
+        // first batch deep into the cap) skip probing and rank on arrival
+        // data alone.
+        val probeDeferred = if (settleRemaining > 0L) {
+            fastStartScope.async { StreamEngine.probeCandidates(buffered.toList()) }
+        } else null
+        if (settleRemaining > 0L) kotlinx.coroutines.delay(settleRemaining)
+        val probed = probeDeferred?.let { d ->
+            runCatching { d.await() }.getOrElse { t ->
+                android.util.Log.w("IndStream", "probeCandidates failed: ${t.message}")
+                null
+            }
+        } ?: buffered.toList()
+        android.util.Log.i("IndStream", "loadLinks: settled ${System.currentTimeMillis() - firstArrivalMs.get()}ms after first arrival " +
+            "(held ${System.currentTimeMillis() - playT0}ms total, probed=${probed.size} candidates)")
 
-        // Snapshot of everything the farm produced before phase 1 ends — the
-        // first-frame batch AND the trickle slice point.
-        val firstBatch = buffered.toList()
-        val started = if (buffered.isNotEmpty()) {
-            // Emit the first batch ranked best-start-first (startupScore:
-            // adaptive/720p start fastest, history breaks ties). This call
-            // probes master manifests (labels) and carries the first batch's
-            // subtitle tracks — the video isn't running yet, so its bytes
-            // cost nothing.
+        // PHASE 2 — pick + emit auto-play winner. Strict eligibility per
+        // pickAutoPlay: ≥720 known > adaptive-unknown > everything else.
+        val winner = StreamEngine.pickAutoPlay(probed)
+        val autoPlayUrl = winner?.url
+        var started = winner != null
+        if (winner != null) {
             val langs = StreamEngine.emit(
-                firstBatch,
+                listOf(winner),
                 { emitted.incrementAndGet(); callback(it) },
                 subtitleCallback,
                 originalLangNow(),
                 subDedupeKeys = sharedSubKeys,
             )
             coveredSubLangs.addAll(langs)
-            true
-        } else false
+        } else if (probed.isNotEmpty()) {
+            // No url-bearing candidate (subtitle-only carriers only): still
+            // run the emit pass so caption tracks reach the player — the old
+            // first-batch path preserved this.
+            val langs = StreamEngine.emit(
+                probed,
+                { emitted.incrementAndGet(); callback(it) },
+                subtitleCallback,
+                originalLangNow(),
+                subDedupeKeys = sharedSubKeys,
+            )
+            coveredSubLangs.addAll(langs)
+            started = emitted.get() > 0
+        }
+        // Track every URL the player has already received so the trickle
+        // never re-pushes the winner (or any duplicates). Subtitle-only
+        // carriers have a blank url — key them on their subtitle urls so
+        // multiple carriers don't collapse into one.
+        fun dedupeKey(s: StreamEngine.RawStream): String =
+            if (s.url.isNotBlank()) s.url
+            else "sub|" + s.subtitles.joinToString("|") { it.second }
+        val emittedUrls = Collections.synchronizedSet(HashSet<String>())
+        autoPlayUrl?.let { emittedUrls.add(it) }
 
-        // PHASE 2 — background trickle: the stream is now warming up, but the
-        // farm keeps resolving and each later batch is pushed to the player
-        // for FAST_START_TRICKLE_MS (server list keeps growing). Trickle mode:
-        // NO master re-fetches (bytes belong to the video), one link every
-        // TRICKLE_EMIT_GAP_MS so nothing bursts. Subtitle tracks ARE emitted —
-        // deduped through sharedSubKeys, so late servers (MovieBox!) bring
-        // their own captions instead of playing mute (user bug report).
+        // PHASE 3 — background trickle: the stream is warming up, but the farm
+        // keeps resolving and each later batch is pushed to the player for
+        // FAST_START_TRICKLE_MS (server list keeps growing). Trickle mode: NO
+        // master re-fetches (bytes belong to the video), one link every
+        // TRICKLE_EMIT_GAP_MS so nothing bursts. Subtitle tracks ARE emitted
+        // — deduped through sharedSubKeys, so late servers (MovieBox!) bring
+        // their own captions instead of playing mute.
         if (started) {
             val trickleEnd = System.currentTimeMillis() + StreamEngine.FAST_START_TRICKLE_MS
-            // Phase 1 already handed everything buffered at that moment to the
-            // player; trickle only slices arrivals AFTER that point.
-            var lastEmittedCount = firstBatch.size
+            // Drain everything that's already buffered (minus the winner
+            // url) and then keep filling the list with later arrivals until
+            // the 25s window closes. emittedUrls is the single source of
+            // truth for "already pushed to the player".
             fastStartScope.launch {
                 try {
-                    // Early fallback: when the first batch carried NO subtitle
-                    // track at all, fetch the wanted languages immediately
-                    // (budgeted, detached — must not stall the trickle loop)
-                    // instead of leaving the user subtitle-less while slow
-                    // servers resolve. When the first batch had tracks, only
-                    // the end-of-trickle top-up runs — by then coverage is
-                    // complete and the fetch is smaller.
                     if (coveredSubLangs.isEmpty()) {
                         launch {
                             topUpSubtitles(imdbDeferred.await(), season, episode, originalLangNow(),
@@ -406,10 +475,9 @@ class IndStreamProvider : MainAPI() {
                         }
                     }
                     while (System.currentTimeMillis() < trickleEnd) {
-                        val total = buffered.size
-                        if (total > lastEmittedCount) {
-                            val next = buffered.toList().drop(lastEmittedCount)
-                            lastEmittedCount = total
+                        val slice = synchronized(buffered) { buffered.toList() }
+                        val next = slice.filter { emittedUrls.add(dedupeKey(it)) }
+                        if (next.isNotEmpty()) {
                             val langs = StreamEngine.emit(
                                 next,
                                 { emitted.incrementAndGet(); callback(it) },
@@ -421,13 +489,9 @@ class IndStreamProvider : MainAPI() {
                             )
                             coveredSubLangs.addAll(langs)
                         } else {
-                            kotlinx.coroutines.delay(120)
+                            kotlinx.coroutines.delay(200)
                         }
                     }
-                    // Final top-up at trickle end: every server has arrived, so
-                    // this fetches ONLY the languages nothing covered. The
-                    // sharedSubKeys dedupe stops fallback tracks re-pushed by
-                    // the early pass from duplicating.
                     topUpSubtitles(imdbDeferred.await(), season, episode, originalLangNow(),
                         coveredSubLangs, sharedSubKeys, subtitleCallback)
                 } catch (t: Throwable) {

@@ -335,8 +335,11 @@ object HealthMonitor {
     private val healthMap = java.util.concurrent.ConcurrentHashMap<String, ServerHealth>()
     private val lock = Any()
 
-    /** Max consecutive failures before tripping a server. */
-    private const val MAX_CONSECUTIVE_FAILURES = 3
+    /** Max consecutive failures before tripping a server. 5 (raised from 3,
+     *  user spec Sept 2026): empty-success / library-miss hosts (MovieBox,
+     *  Allmovieland) must not vanish after a few unlucky taps — only real
+     *  network/parse failures reach here now (clean misses bypass it). */
+    private const val MAX_CONSECUTIVE_FAILURES = 5
     /** Trip duration in ms (5 min). Kept short: embed hosts flap, and a long trip
      *  window plus a farm-wide trip shows "no link found" for the entire duration. */
     private const val TRIP_DURATION_MS = 5 * 60 * 1000L
