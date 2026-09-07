@@ -134,13 +134,51 @@ class ServerFarmHindiTest {
     }
 
     @Test
+    fun vidup_presentAndTmdbKeyed() {
+        val s = ServerFarm.allServers.first { it.id == "vidup" }
+        assertEquals("VidUp", s.name)
+        assertEquals(ServerIdType.TMDB, s.idType)
+        assertEquals("https://vidup.to/", s.referer)
+        assertEquals(2160, s.maxQuality, "VidUp supports 4K via Premier sub-server")
+        assertTrue(s.hasSubtitles)
+        val m = ServerFarm.buildMovieUrl(s, "27205")
+        assertTrue(m.contains("vidup.to/movie/27205"))
+        val tv = ServerFarm.buildTvUrl(s, "1399", 1, 1)
+        assertTrue(tv.contains("vidup.to/tv/1399/1/1"))
+    }
+
+    @Test
+    fun vidcore_presentAndTmdbKeyed() {
+        val s = ServerFarm.allServers.first { it.id == "vidcore" }
+        assertEquals("VidCore", s.name)
+        assertEquals(ServerIdType.TMDB, s.idType)
+        assertEquals("https://vidcore.io/", s.referer)
+        assertEquals(2160, s.maxQuality)
+        assertTrue(s.hasSubtitles)
+        val m = ServerFarm.buildMovieUrl(s, "27205")
+        assertTrue(m.contains("vidcore.io/movie/27205"))
+    }
+
+    @Test
+    fun allmovieland_presentAndHindiFlagged() {
+        val s = ServerFarm.allServers.first { it.id == "allmovieland" }
+        assertEquals("Allmovieland", s.name)
+        assertEquals(ServerIdType.IMDB, s.idType)
+        assertTrue(s.hindi, "Allmovieland is Hindi-first (Hindi/Bengali/Tamil/Telugu playlists)")
+        assertEquals(1080, s.maxQuality)
+        val m = ServerFarm.buildMovieUrl(s, "tt1375666")
+        assertTrue(m.contains("allmovieland.one") && m.contains("tt1375666"))
+    }
+
+    @Test
     fun bulletTrainServers_present() {
         // The fast direct-API servers (user spec Sept 2026: "click and play
         // like bullet train" — Hindi/multi-audio, no embed chain). mp4hydra,
         // vidzee, vixsrc and streamprovider are disabled (verified dead Sept
         // 2026: maintenance page / 404 / 403 / 502) — kept out of the farm so
         // they don't trip their breakers and blank the whole result set.
-        val ids = setOf("vidlink", "vaplayer", "vidrock", "videasy-hindi", "moviebox", "8stream")
+        val ids = setOf("vidlink", "vaplayer", "vidrock", "videasy-hindi", "moviebox", "8stream",
+            "vidup", "vidcore", "allmovieland")
         for (id in ids) {
             assertNotNull(
                 ServerFarm.allServers.firstOrNull { it.id == id },

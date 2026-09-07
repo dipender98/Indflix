@@ -312,96 +312,87 @@ object StreamEngine {
             raw.url.isNotBlank() && !(raw.qualityHint in 1 until MIN_QUALITY_P)
         }
 
-        // Naming (user spec): "{Server[-n]} ({Language}) {res}" — identical
-        // (name, language, resolution) groups numbered 1..N, to the last one.
-        // dedupeNames returns a list parallel to `eligible`: numbers[i] is the
-        // group number for eligible[i] (0 = unique, no number).
-        val numbers = LinkNaming.dedupeNames(eligible, originalLang)
+        // Pre-resolve M3U8 masters before dedupe so the numbering key uses
+        // the ACTUAL height (from variant parse) rather than qualityHint
+        // (which is 0 for adaptive masters). Without this, a master with
+        // qualityHint=0 and a direct MP4 qualityHint=1080 from the same
+        // server form separate dedupe groups and both print "1080p".
+        //
+        // Also: quality=0 on every ExtractorLink — the resolution is baked
+        // into the name string (user spec). CloudStream's built-in quality
+        // badge also uses ExtractorLink.quality, so setting it to a non-zero
+        // value duplicated the resolution: "VidLink (Multi) 1080p [1080p]".
+        // Setting quality=0 suppresses the badge and fixes the doubling.
+        data class ResolvedEmit(
+            val raw: RawStream,
+            val fullHeight: Int,
+            val tagLabel: String,
+            val master: ManifestKit.MasterPlaylist?,
+        )
+        val preResolved = eligible.map { raw ->
+            if (!raw.isM3u8 || !probeManifests) {
+                ResolvedEmit(raw, raw.qualityHint, raw.audioLabel, null)
+            } else {
+                val alreadyKnown = (raw.audioPriority > 0 || raw.measuredKbps != null) &&
+                    !raw.subtitles.any { it.second.startsWith("/") }
+                if (alreadyKnown) {
+                    ResolvedEmit(raw, raw.qualityHint, raw.audioLabel, null)
+                } else {
+                    val lh = LinkedHashMap<String, String>()
+                    lh.putAll(raw.extraHeaders)
+                    if (!lh.containsKey("Referer") && !raw.referer.isNullOrBlank()) lh["Referer"] = raw.referer!!
+                    val masterText = raw.inlineManifest ?: withTimeoutOrNull(4000L) {
+                        runCatching { app.get(raw.url, timeout = 4, headers = lh).text }.getOrNull()
+                    }
+                    val master = ManifestKit.parseMaster(masterText, raw.url)
+                    val h = master?.let { ManifestKit.bestHeight(it.variants) }?.takeIf { it > 0 } ?: raw.qualityHint
+                    val tag = if (master?.isMultiAudio == true) "Multi" else raw.audioLabel
+                    master?.let { m ->
+                        val langs = m.audio.map { r -> "lang=${r.language ?: "none"} name=${r.name} group=${r.groupId}" }
+                        Log.d("IndStream", "audioTracks server=${raw.serverName} multiAudio=${m.isMultiAudio} renditions=$langs")
+                    }
+                    ResolvedEmit(raw, h, tag, master)
+                }
+            }
+        }
+        val resolvedForKey = preResolved.map { it.raw.copy(qualityHint = it.fullHeight) }
+        val numbers = LinkNaming.dedupeNames(resolvedForKey, originalLang)
 
-        eligible.forEachIndexed { index, raw ->
+        preResolved.forEachIndexed { index, r ->
+            val raw = r.raw
             val dupIdx = numbers.getOrElse(index) { 0 }
             if (!emitted.add(raw.url)) return@forEachIndexed
 
-            // Link headers: per-stream extras first (vidlink CDN streams carry their
-            // exact playback requirements there ï¿½ mwVault rejects ANY Referer,
-            // mbVault needs the API-provided origin/referer), then a Referer
-            // fallback only for streams that declare one (embed servers).
-            // Never emit an empty Referer: the vidlink CDN 429s on its mere
-            // presence, which the player surfaces as
-            // ExoPlayer ERROR_CODE_IO_BAD_HTTP_STATUS (2004).
             val linkHeaders = LinkedHashMap<String, String>()
             linkHeaders.putAll(raw.extraHeaders)
             if (!linkHeaders.containsKey("Referer") && !raw.referer.isNullOrBlank()) {
                 linkHeaders["Referer"] = raw.referer!!
             }
 
-            if (raw.isM3u8) {
-                // Fast-start tier: SKIP the master re-fetch when resolution
-                // already probed this URL (probeAudio fetched the identical
-                // master to rank audio), when the label needs nothing the
-                // master would add — or in trickle mode, where the video is
-                // already running and bytes belong to it. The zero-effort
-                // path emits immediately — the player fetches the master
-                // itself for ABR.
-                val alreadyKnown = (raw.audioPriority > 0 || raw.measuredKbps != null) &&
-                    !raw.subtitles.any { it.second.startsWith("/") }
-                val master = if (alreadyKnown || !probeManifests) null else {
-                    val masterText = raw.inlineManifest ?: withTimeoutOrNull(4000L) {
-                        runCatching {
-                            app.get(raw.url, timeout = 4, headers = linkHeaders).text
-                        }.getOrNull()
-                    }
-                    ManifestKit.parseMaster(masterText, raw.url)
-                }
-                // Debug: what audio renditions does this master actually carry?
-                master?.let {
-                    val langs = it.audio.map { r -> "lang=${r.language ?: "none"} name=${r.name} group=${r.groupId}" }
-                    Log.d("IndStream", "audioTracks server=${raw.serverName} multiAudio=${it.isMultiAudio} renditions=$langs")
-                }
-                // Multi-audio masters carry every language at once — tag them
-                // "Multi" (single muxed streams keep their own label).
-                val tagLabel = if (master?.isMultiAudio == true) "Multi" else raw.audioLabel
-                // The final height drives the resolution part of the label: for
-                // adaptive masters it comes from the parsed variants, so a
-                // 1080p master shows "1080p" instead of "Auto".
-                val fullHeight = master?.let { ManifestKit.bestHeight(it.variants) }
-                    ?.takeIf { it > 0 } ?: raw.qualityHint
+            val label = LinkNaming.displayName(
+                serverName = raw.serverName,
+                audioLabel = r.tagLabel,
+                qualityHint = r.fullHeight,
+                duplicateIndex = dupIdx,
+                originalLang = originalLang,
+            )
 
-                // One link per stream — the master playlist IS the adaptive
-                // source (the player ABRs through its rungs). Emitting
-                // per-variant links next to the master duplicated every
-                // resolution in the server list ("2 times resolution",
-                // user spec Sept 2026), so M3U8s always go out once.
-                val label = LinkNaming.displayName(
-                    serverName = raw.serverName,
-                    audioLabel = tagLabel,
-                    qualityHint = fullHeight,
-                    duplicateIndex = dupIdx,
-                    originalLang = originalLang,
-                )
+            if (raw.isM3u8) {
                 onLink(ExtractorLink(
                     source = label, name = label,
                     url = raw.url, referer = raw.referer ?: "",
-                    quality = fullHeight,
+                    quality = 0,
                     headers = linkHeaders, type = ExtractorLinkType.M3U8,
                 ))
                 if (emitGapMs > 0) delay(emitGapMs)
-                // Server-owned subtitle renditions declared in the master.
-                master?.subtitles?.forEach { r ->
-                    r.uri?.let { emitSub(r.language ?: r.name, ManifestKit.resolveUrl(raw.url, it)) }
+                r.master?.subtitles?.forEach { sub ->
+                    sub.uri?.let { emitSub(sub.language ?: sub.name, ManifestKit.resolveUrl(raw.url, it)) }
                 }
             } else {
-                val videoLabel = LinkNaming.displayName(
-                    serverName = raw.serverName,
-                    audioLabel = raw.audioLabel,
-                    qualityHint = raw.qualityHint,
-                    duplicateIndex = dupIdx,
-                    originalLang = originalLang,
-                )
                 onLink(ExtractorLink(
-                    source = videoLabel,
-                    name = videoLabel,
-                    url = raw.url, referer = raw.referer ?: "", quality = raw.qualityHint,
+                    source = label, name = label,
+                    url = raw.url, referer = raw.referer ?: "",
+                    quality = 0,
                     headers = linkHeaders, type = ExtractorLinkType.VIDEO,
                 ))
                 if (emitGapMs > 0) delay(emitGapMs)
@@ -496,6 +487,24 @@ object StreamEngine {
             val result = resolve8Stream(spec, imdbId, type)
             if (result.isNotEmpty()) { okServer(spec, start, "8stream api", result.size); return result }
             failServer(spec, "8stream returned no streams")
+            return emptyList()
+        }
+        if (spec.id == "vidup") {
+            val result = resolveEncDecPlayer(spec, tmdbId, type, season, episode, "vidup")
+            if (result.isNotEmpty()) { okServer(spec, start, "vidup enc-dec", result.size); return result }
+            failServer(spec, "vidup returned no streams")
+            return emptyList()
+        }
+        if (spec.id == "vidcore") {
+            val result = resolveEncDecPlayer(spec, tmdbId, type, season, episode, "vidcore")
+            if (result.isNotEmpty()) { okServer(spec, start, "vidcore enc-dec", result.size); return result }
+            failServer(spec, "vidcore returned no streams")
+            return emptyList()
+        }
+        if (spec.id == "allmovieland") {
+            val result = resolveAllmovieland(spec, imdbId, type, season, episode)
+            if (result.isNotEmpty()) { okServer(spec, start, "allmovieland multi-lang", result.size); return result }
+            failServer(spec, "allmovieland returned no streams")
             return emptyList()
         }
 
@@ -1845,6 +1854,211 @@ object StreamEngine {
             }.awaitAll()
         }
         Log.d("8Stream", "got ${out.size} language streams")
+        return out
+    }
+
+    /**
+     * Vidup/Vidcore resolver — enc-dec.app pipeline (verified Sept 2026).
+     * Both players share the same moon.peakstorm.top HLS backend; the only
+     * difference is the domain prefix and enc-dec endpoint suffix.
+     *
+     * Pipeline (4 chained HTTP calls, ~1.5s total):
+     * 1. GET page → regex "en":"token" from inline script
+     * 2. GET enc-dec.app/api/enc-{variant}?text={token} → {servers, stream, token}
+     * 3. POST servers (X-CSRF-Token) → encrypted sub-server JSON
+     * 4. POST enc-dec.app/api/dec-{variant} → [{name:"Euro"|"CineX"|"Zenith"|"Premier", ...}]
+     * 5. For each sub-server: POST {stream}/{data} → dec → {url, tracks, 4kAvailable}
+     *
+     * Sub-server names carry quality hints: "Premier" = 4K.
+     * Hindi muxed on Bollywood titles (Dangal = "Original audio" = Hindi).
+     */
+    private suspend fun resolveEncDecPlayer(
+        spec: ServerSpec,
+        tmdbId: Int?,
+        type: String,
+        season: Int,
+        episode: Int,
+        variant: String, // "vidup" or "vidcore"
+    ): List<RawStream> {
+        val id = tmdbId ?: return emptyList()
+        val pageUrl = if (type == "movie") "${spec.referer!!.trimEnd('/')}/movie/$id"
+            else "${spec.referer!!.trimEnd('/')}/tv/$id/$season/$episode"
+        val referer = spec.referer!!
+
+        // 1. Page → token
+        val pageText = withTimeoutOrNull(10_000L) {
+            runCatching { app.get(pageUrl, timeout = 10, headers = okHeaders(referer)).text }.getOrNull()
+        } ?: run { Log.w(variant, "page timeout"); return emptyList() }
+        val token = Regex("""\\"(?:en|token)\\":\\"([^\\]+)\\"""")
+            .find(pageText)?.groupValues?.get(1)
+            ?.takeIf { it.isNotBlank() }
+            ?: run { Log.w(variant, "no token in page"); return emptyList() }
+        val encToken = java.net.URLEncoder.encode(token, "UTF-8")
+
+        // 2. enc-dec encrypt
+        val encText = withTimeoutOrNull(8_000L) {
+            runCatching { app.get("https://enc-dec.app/api/enc-$variant?text=$encToken", timeout = 8).text }.getOrNull()
+        } ?: return emptyList()
+        val encRoot = runCatching { org.json.JSONObject(encText) }.getOrNull() ?: return emptyList()
+        val encResult = encRoot.optJSONObject("result") ?: return emptyList()
+        val serversUrl = encResult.optString("servers").takeIf { it.isNotBlank() } ?: return emptyList()
+        val streamBase = encResult.optString("stream").takeIf { it.isNotBlank() } ?: return emptyList()
+        val csrfToken = encResult.optString("token").takeIf { it.isNotBlank() } ?: return emptyList()
+
+        // 3. POST servers → encrypted sub-server list
+        val srvHeaders = okHeaders(referer).toMutableMap()
+        srvHeaders["X-CSRF-Token"] = csrfToken
+        val srvEnc = withTimeoutOrNull(8_000L) {
+            runCatching { app.post(serversUrl, timeout = 8, headers = srvHeaders).text }.getOrNull()
+        } ?: return emptyList()
+
+        // 4. decrypt sub-server list
+        val srvDec = withTimeoutOrNull(8_000L) {
+            runCatching {
+                app.post("https://enc-dec.app/api/dec-$variant",
+                    timeout = 8, headers = mapOf("Content-Type" to "application/json"),
+                    json = mapOf("text" to srvEnc.trim())).text
+            }.getOrNull()
+        } ?: return emptyList()
+        val srvArr = runCatching { org.json.JSONObject(srvDec).optJSONArray("result") }.getOrNull()
+            ?: run { Log.w(variant, "dec returned no result array"); return emptyList() }
+
+        val out = mutableListOf<RawStream>()
+        for (i in 0 until srvArr.length()) {
+            val srv = srvArr.optJSONObject(i) ?: continue
+            val srvName = srv.optString("name").ifBlank { "Server${i + 1}" }
+            val srvData = srv.optString("data").takeIf { it.isNotBlank() } ?: continue
+            val desc = srv.optString("description", "")
+            val is4k = desc.contains("4K", ignoreCase = true) || srvName.contains("Premier", ignoreCase = true)
+
+            // 5. POST stream/{data} → final URL
+            val streamUrl = "$streamBase/$srvData"
+            val streamEnc = withTimeoutOrNull(8_000L) {
+                runCatching { app.post(streamUrl, timeout = 8, headers = srvHeaders).text }.getOrNull()
+            } ?: continue
+            val decText = withTimeoutOrNull(8_000L) {
+                runCatching {
+                    app.post("https://enc-dec.app/api/dec-$variant",
+                        timeout = 8, headers = mapOf("Content-Type" to "application/json"),
+                        json = mapOf("text" to streamEnc.trim())).text
+                }.getOrNull()
+            } ?: continue
+            val decResult = runCatching { org.json.JSONObject(decText) }.getOrNull()
+                ?.optJSONObject("result") ?: continue
+            val m3u8 = decResult.optString("url").takeIf { it.startsWith("http") } ?: continue
+            val subTracks = decResult.optJSONArray("tracks")?.let { arr ->
+                (0 until arr.length()).mapNotNull { j ->
+                    val t = arr.optJSONObject(j) ?: return@mapNotNull null
+                    val u = t.optString("file").takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                    (t.optString("label").ifBlank { "English" }) to u
+                }
+            } ?: emptyList()
+
+            out += RawStream(
+                serverId = spec.id,
+                serverName = "${spec.name} $srvName",
+                url = m3u8, isM3u8 = true, referer = referer,
+                qualityHint = if (is4k) 2160 else 1080,
+                subtitles = subTracks,
+                audioPriority = 0, // muxed audio — no EXT-X-MEDIA tracks to probe
+                audioLabel = "",
+            )
+        }
+        Log.d(variant, "got ${out.size} streams from ${srvArr.length()} sub-servers")
+        return out
+    }
+
+    /**
+     * Allmovieland resolver — DLE CMS with per-language HLS playlists
+     * (verified Sept 2026). Hindi, Bengali, Tamil, Telugu — each language
+     * is a separate HLS stream, so true selectable multi-audio.
+     *
+     * Pipeline:
+     * 1. IMDB-keyed DLE search → find card URL (allmovieland.{art|one}/NNN-slug.html)
+     * 2. Card page → extract AwsIndStreamDomain (self-updating) + IndStreamPlayerConfigs.src (IMDB id)
+     * 3. GET {domain}/play/{imdb} → script with file + key
+     * 4. GET {cdnDomain}/playlist/{file}.txt (X-Csrf-Token: {key}) → JSON [{title:"Hindi", file:..., id:...}]
+     * 5. Per language: GET {cdnDomain}/playlist/{lang.file}.txt → signed m3u8 URL
+     */
+    private suspend fun resolveAllmovieland(
+        spec: ServerSpec,
+        imdbId: String?,
+        type: String,
+        season: Int,
+        episode: Int,
+    ): List<RawStream> {
+        val imdb = imdbId?.takeIf { it.isNotBlank() } ?: return emptyList()
+        val headers = okHeaders("https://allmovieland.one/")
+
+        // 1. Search by IMDB id
+        val searchUrl = "https://allmovieland.one/?do=search&subaction=search&story=$imdb"
+        val searchHtml = withTimeoutOrNull(12_000L) {
+            runCatching { app.get(searchUrl, timeout = 12, headers = headers).text }.getOrNull()
+        } ?: run { Log.w("Allmovieland", "search timeout"); return emptyList() }
+        // Cards link to allmovieland.{art|one}/NNN-slug.html
+        val cardUrl = Regex("""href="(https?://allmovieland\.[a-z]+/[^"]+\.html)"\s*>\s*<h3 class="new-short__title""")
+            .find(searchHtml)?.groupValues?.get(1)
+            ?: run { Log.w("Allmovieland", "no card found for $imdb"); return emptyList() }
+
+        // 2. Card page → player domain + IMDB src
+        val cardHtml = withTimeoutOrNull(12_000L) {
+            runCatching { app.get(cardUrl, timeout = 12, headers = okHeaders(cardUrl)).text }.getOrNull()
+        } ?: return emptyList()
+        val playerDomain = Regex("""AwsIndStreamDomain\s*=\s*'([^']+)'""")
+            .find(cardHtml)?.groupValues?.get(1)?.trimEnd('/')
+            ?: run { Log.w("Allmovieland", "no AwsIndStreamDomain"); return emptyList() }
+        val playSrc = Regex("""src:\s*'([^']+)'""")
+            .find(cardHtml)?.groupValues?.get(1)
+            ?: run { Log.w("Allmovieland", "no src in player config"); return emptyList() }
+
+        // 3. Play page → file + key
+        val playUrl = "$playerDomain/play/$playSrc"
+        val playHtml = withTimeoutOrNull(10_000L) {
+            runCatching { app.get(playUrl, timeout = 10, headers = okHeaders(cardUrl)).text }.getOrNull()
+        } ?: return emptyList()
+        val file = Regex("""["']?file["']?\s*[:=]\s*["']([^"']+)["']""")
+            .find(playHtml)?.groupValues?.get(1)
+            ?: run { Log.w("Allmovieland", "no file in play page"); return emptyList() }
+        val key = Regex("""["']?key["']?\s*[:=]\s*["']([^"']+)["']""")
+            .find(playHtml)?.groupValues?.get(1)
+            ?: run { Log.w("Allmovieland", "no key in play page"); return emptyList() }
+
+        // file looks like "https://cdn.example.com/playlist/BASE64.txt"
+        // but may also be a relative path. Resolve to full URL.
+        val fileUrl = if (file.startsWith("http")) file else "$playerDomain/playlist/$file"
+        val cdnBase = fileUrl.substringBefore("/playlist/")
+
+        // 4. Language playlist (file = encrypted path like "B64hash.txt")
+        val playlistHeaders = okHeaders(playUrl).toMutableMap()
+        playlistHeaders["X-Csrf-Token"] = key
+        val playlistText = withTimeoutOrNull(10_000L) {
+            runCatching { app.get(fileUrl, timeout = 10, headers = playlistHeaders).text }.getOrNull()
+        } ?: run { Log.w("Allmovieland", "playlist timeout"); return emptyList() }
+        val playlist = runCatching { org.json.JSONArray(playlistText) }.getOrElse {
+            Log.w("Allmovieland", "playlist not JSON array"); return emptyList() }
+
+        // 5. Per-language: fetch each language's playlist → m3u8 URL
+        val out = mutableListOf<RawStream>()
+        for (i in 0 until playlist.length()) {
+            val entry = playlist.optJSONObject(i) ?: continue
+            val langTitle = entry.optString("title").ifBlank { "Multi" }
+            val langFile = entry.optString("file").takeIf { it.isNotBlank() } ?: continue
+            val langUrl = "$cdnBase/playlist/$langFile.txt"
+            val m3u8Text = withTimeoutOrNull(8_000L) {
+                runCatching { app.get(langUrl, timeout = 8, headers = playlistHeaders).text }.getOrNull()
+            } ?: continue
+            val m3u8 = m3u8Text.trim().takeIf { it.startsWith("http") } ?: continue
+            val isHindi = langTitle.contains("hindi", ignoreCase = true)
+            out += RawStream(
+                serverId = spec.id,
+                serverName = spec.name,
+                url = m3u8, isM3u8 = true, referer = playUrl,
+                qualityHint = 1080,
+                audioPriority = if (isHindi) 4 else 2,
+                audioLabel = langTitle,
+            )
+        }
+        Log.d("Allmovieland", "got ${out.size} language streams from ${playlist.length()} entries")
         return out
     }
 

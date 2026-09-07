@@ -191,6 +191,51 @@ object ServerFarm {
             isJsonApi = true, referer = "https://8-stream-api.vercel.app/",
             hasSubtitles = false, maxQuality = 1080, timeoutSec = 12,
         ),
+        // Vidup (vidup.to, verified Sept 2026): TMDB-keyed (accepts IMDB too
+        // via the URL path). 4-step enc-dec.app pipeline:
+        // 1) page → "en":"token" → enc-dec.app/api/enc-vidup → {servers,stream,token}
+        // 2) POST servers (X-CSRF-Token) → encrypted sub-server list
+        // 3) enc-dec.app/api/dec-vidup → [{name,description,data}...] (Euro/CineX/Zenith/Premier)
+        // 4) POST stream/{data} → dec-vidup → {url: moon.peakstorm.top/master.m3u8, tracks}
+        // CDN measured 64ms latency, 4K@16Mbps ladder. "Premier" sub-server = 4K.
+        // Hindi muxed on Bollywood titles (Dangal verified). No EXT-X-MEDIA audio
+        // renditions — audio is muxed per-language. movies + tv.
+        ServerSpec(
+            id = "vidup", name = "VidUp",
+            idType = ServerIdType.TMDB,
+            movieUrl = "https://vidup.to/movie/{id}",
+            tvUrl = "https://vidup.to/tv/{id}/{season}/{episode}",
+            referer = "https://vidup.to/",
+            hasSubtitles = true, maxQuality = 2160, timeoutSec = 20,
+        ),
+        // Vidcore (vidcore.io, verified Sept 2026): twin of Vidup — same
+        // enc-dec.app pipeline (enc-vidcore/dec-vidcore), same moon.peakstorm.top
+        // HLS backend, same sub-server names (Euro/CineX/Zenith/Premier).
+        // Built-in redundancy: if one trips the breaker the other covers.
+        ServerSpec(
+            id = "vidcore", name = "VidCore",
+            idType = ServerIdType.TMDB,
+            movieUrl = "https://vidcore.io/movie/{id}",
+            tvUrl = "https://vidcore.io/tv/{id}/{season}/{episode}",
+            referer = "https://vidcore.io/",
+            hasSubtitles = true, maxQuality = 2160, timeoutSec = 20,
+        ),
+        // Allmovieland (allmovieland.one, verified Sept 2026): DLE CMS
+        // with per-language HLS playlists — Hindi, Bengali, Tamil, Telugu.
+        // Pipeline: IMDB-keyed search → find card → page embeds
+        // AwsIndStreamDomain (self-updating from player.js) + IMDB src →
+        // /play/{imdb} → file+key → /playlist/{file}.txt (X-CSrf-Token) →
+        // JSON [{title:"Hindi"|"Bengali"|..., file}] → /playlist/{lang.file}.txt
+        // → direct m3u8 (360–1080p). Hindi-first, zero auth/captcha.
+        ServerSpec(
+            id = "allmovieland", name = "Allmovieland",
+            idType = ServerIdType.IMDB,
+            movieUrl = "https://allmovieland.one/?do=search&subaction=search&story={id}",
+            tvUrl = "https://allmovieland.one/?do=search&subaction=search&story={id}",
+            referer = "https://allmovieland.one/",
+            hasSubtitles = false, maxQuality = 1080, timeoutSec = 20,
+            hindi = true,
+        ),
         // MP4Hydra (mp4hydra.org): title-slug keyed multipart POST to /info2
         // returns per-quality HLS sources across Beta servers with embedded
         // subtitle tracks. Hindi duals appear as rows labelled Hindi; the slug
