@@ -9,7 +9,7 @@
             "Indflix"
         ],
         "description": "Federated embed-server resolver keyed by TMDB/IMDB id. Races dozens of independent HLS/DASH servers, picks the fastest CDN per title, and exposes multi-language audio + per-quality links.",
-        "fileSize": 102627,
+        "fileSize": 104503,
         "repositoryUrl": "https://github.com/dipender98/Indflix",
         "language": "hi",
         "tvTypes": [
@@ -18,7 +18,7 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/dipender98/Indflix/main/IndStream/icon.png",
         "apiVersion": 1,
-        "fileHash": "sha256-8917a5b140c72fb92f328c857f364afda649ea0a8f8de0c0b36bdc15a5915676"
+        "fileHash": "sha256-e3376dc093d2bfd9d563fb2d0e567e6a2dde0af71aac06b682f5fbee8d4c5b9a"
     },
     {
         "url": "https://raw.githubusercontent.com/dipender98/Indflix/builds/Multimovies.cs3",
@@ -30,7 +30,7 @@
             "Indflix"
         ],
         "description": "CloudStream provider that scrapes Multimovies and pulls sources in parallel with a per-source timeout.",
-        "fileSize": 81885,
+        "fileSize": 82382,
         "repositoryUrl": "https://github.com/dipender98/Indflix",
         "language": "hi",
         "tvTypes": [
@@ -42,6 +42,6 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/dipender98/Indflix/main/Multimovies/icon.png",
         "apiVersion": 1,
-        "fileHash": "sha256-f425b21b841eaafc07fe6354274c6f98dce74c03c220a6e7dfc58eaa0f5e423e"
+        "fileHash": "sha256-961ff743dceab93dafc21131cd6e5bfe8a9070d25c76f40f9451c445050d6884"
     }
 ]
