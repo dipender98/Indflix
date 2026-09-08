@@ -135,6 +135,33 @@ class LinkNamingTest {
         assertEquals("MovieBox 4K (English)", name)
     }
 
+    @Test
+    fun displayName_height2160p_noDuplicate_rawHeightToken() {
+        // Server name carries "2160p" while qualityLabel returns "4K" — must not duplicate.
+        val name = LinkNaming.displayName(
+            serverName = "Movie 2160p", audioLabel = "English", qualityHint = 2160,
+        )
+        assertEquals("Movie 2160p (English)", name)
+    }
+
+    @Test
+    fun displayName_height2160p_appendsLabel_whenNoHeightInName() {
+        // Server name has no resolution token — "4K" is appended.
+        val name = LinkNaming.displayName(
+            serverName = "Movie", audioLabel = "English", qualityHint = 2160,
+        )
+        assertEquals("Movie (English) 4K", name)
+    }
+
+    @Test
+    fun displayName_height1080p_noDuplicate_rawHeightToken() {
+        // Existing case still works: server name has "1080p".
+        val name = LinkNaming.displayName(
+            serverName = "Movie 1080p", audioLabel = "English", qualityHint = 1080,
+        )
+        assertEquals("Movie 1080p (English)", name)
+    }
+
     // ── numbering: unique → no number ────────────────────────────
 
     @Test

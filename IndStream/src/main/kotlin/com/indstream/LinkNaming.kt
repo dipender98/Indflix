@@ -119,7 +119,13 @@ object LinkNaming {
         // and alt tokens like "4K" are detected and not appended a second time
         // (otherwise the label renders as "… 1080p 1080p").
         val res = qualityLabel(qualityHint)
-        val resPart = if (res.isNotEmpty() && nameWithSub.contains(res, ignoreCase = true)) "" else res
+        // Also check if the name contains the height in "Xp" format (e.g. "2160p"
+        // for height 2160). This is needed because qualityLabel maps 2160→"4K"
+        // but server names may carry the raw "2160p" token; without this check
+        // the label would be appended a second time producing "2160p 4K".
+        val nameHasLabelToken = res.isNotEmpty() && nameWithSub.contains(res, ignoreCase = true)
+        val nameHasHeightToken = qualityHint > 0 && nameWithSub.contains("${qualityHint}p", ignoreCase = true)
+        val resPart = if (res.isNotEmpty() && (nameHasLabelToken || nameHasHeightToken)) "" else res
         val parts = listOfNotNull(
             serverPart,
             tagPart.takeIf { it.isNotBlank() },
