@@ -188,6 +188,75 @@ class NeutralOrderTest {
         assertEquals(0, out[0].quality)
     }
 
+    // ── Adaptive peak-resolution naming (user report: adaptive showed "Auto") ──
+
+    @Test
+    fun emit_hlsInlineManifest_labelsPeakResolution_neverAuto() = runBlocking {
+        // Harvest path leaves qualityHint=0; the inline master parse must lift the
+        // label to the PEAK variant ("4K") and quality=2160 — never "Auto".
+        val master = """
+#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=1500000,RESOLUTION=1280x720
+720/video.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=9000000,RESOLUTION=3840x2160
+2160/video.m3u8
+        """.trimIndent()
+        val out = mutableListOf<com.lagradost.cloudstream3.utils.ExtractorLink>()
+        StreamEngine.emit(
+            listOf(
+                RawStream(
+                    serverId = "hlsHost", serverName = "HlsHost",
+                    url = "https://x.example/master.m3u8", isM3u8 = true,
+                    qualityHint = 0, inlineManifest = master,
+                    audioLabel = "Hindi", audioPriority = 4,
+                ),
+            ),
+            onLink = { out.add(it) },
+            probeManifests = true,
+        )
+        assertEquals(1, out.size)
+        assertEquals(2160, out[0].quality)
+        assertTrue(out[0].name.contains("4K"), "name must carry peak res: ${out[0].name}")
+        assertFalse(out[0].name.contains("Auto"), "adaptive must not show Auto: ${out[0].name}")
+    }
+
+    @Test
+    fun emit_dashMpdInlineManifest_labelsPeakResolution() = runBlocking {
+        // DASH ladder: parseMpd must yield the peak video representation (1080)
+        // so the adaptive link labels "1080p" like its HLS sibling.
+        val mpd = """
+<?xml version="1.0" encoding="utf-8"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011">
+  <Period>
+    <AdaptationSet mimeType="video/mp4">
+      <Representation id="1" width="640" height="360" bandwidth="500000"/>
+      <Representation id="2" width="1920" height="1080" bandwidth="5000000"/>
+    </AdaptationSet>
+    <AdaptationSet mimeType="audio/mp4">
+      <Representation id="3" bandwidth="128000"/>
+    </AdaptationSet>
+  </Period>
+</MPD>
+        """.trimIndent()
+        val out = mutableListOf<com.lagradost.cloudstream3.utils.ExtractorLink>()
+        StreamEngine.emit(
+            listOf(
+                RawStream(
+                    serverId = "dashHost", serverName = "DashHost",
+                    url = "https://x.example/dash.mpd", isM3u8 = true,
+                    qualityHint = 0, inlineManifest = mpd,
+                    audioLabel = "Hindi", audioPriority = 4,
+                ),
+            ),
+            onLink = { out.add(it) },
+            probeManifests = true,
+        )
+        assertEquals(1, out.size)
+        assertEquals(1080, out[0].quality)
+        assertTrue(out[0].name.contains("1080p"), "name must carry peak res: ${out[0].name}")
+        assertFalse(out[0].name.contains("Auto"), "adaptive must not show Auto: ${out[0].name}")
+    }
+
     @Test
     fun emit_declaredHindiUrl_labelsHindi_unknownStaysUnknown() = runBlocking {
         // Host-declared language ("...hindi..." CDN path) → "(Hindi)" tag.

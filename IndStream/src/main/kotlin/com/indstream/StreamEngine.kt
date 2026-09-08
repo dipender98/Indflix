@@ -279,9 +279,13 @@ object StreamEngine {
             ranked.map { raw ->
                 async {
                     when {
-                        // HLS master: re-parse for real height + audio (skip when background/off or already known).
+                        // Adaptive master (HLS or DASH): re-parse for real height + audio
+                        // (skip when background/off, or when the height is ALREADY known —
+                        // probeAudioHeight stored it at harvest time). The gate is the
+                        // HEIGHT, not the audio probe: a probed-audio stream with no
+                        // height would previously skip this branch and label blank/0.
                         raw.isM3u8 && probeManifests -> {
-                            val alreadyKnown = raw.audioPriority > 0 || raw.measuredKbps != null
+                            val alreadyKnown = raw.qualityHint > 0
                             if (alreadyKnown) {
                                 ResolvedEmit(raw, raw.qualityHint, raw.audioLabel)
                             } else {
@@ -291,8 +295,10 @@ object StreamEngine {
                                 val masterText = raw.inlineManifest ?: withTimeoutOrNull(3000L) {
                                     runCatching { app.get(raw.url, timeout = 3, headers = lh).text }.getOrNull()
                                 }
+                                // Dispatch HLS/MPD: bestHeightOf parses the DASH MPD too, so
+                                // a MovieBox DASH ladder gets its real peak (e.g. 2160), not 0.
+                                val h = ManifestKit.bestHeightOf(masterText, raw.url).takeIf { it > 0 } ?: raw.qualityHint
                                 val master = ManifestKit.parseMaster(masterText, raw.url)
-                                val h = master?.let { ManifestKit.bestHeight(it.variants) }?.takeIf { it > 0 } ?: raw.qualityHint
                                 // Audio label: explicit server label wins; else the REAL track the
                                 // player auto-selects (multi-audio → "Multi", single track → its language);
                                 // else a language the HOST ITSELF declares in its URL/server name.
@@ -573,8 +579,8 @@ object StreamEngine {
             Log.d("IndStream", "${spec.id}: direct harvest found ${direct.size} urls")
             val result = direct.map { url ->
                 val probed = HttpKit.probeSpeed(url, referer)
-                val pri = probeAudio(url, referer)
-                RawStream(spec.id, spec.name, url, url.contains(".m3u8", ignoreCase = true), referer, 0, probed,
+                val (pri, h) = probeAudioHeight(url, referer)
+                RawStream(spec.id, spec.name, url, url.contains(".m3u8", ignoreCase = true), referer, h, probed,
                     audioPriority = pri, audioLabel = audioLabelFor(pri))
             }
             okServer(spec, start, "direct harvest", result.size)
@@ -601,8 +607,9 @@ object StreamEngine {
             Log.d("IndStream", "${spec.id}: extractor registry returned ${regLinks.size} links (outerOk=$regOk unwrapped=$unwrappedUrl)")
             val result = regLinks.map { link ->
                 val probed = HttpKit.probeSpeed(link.url, link.referer)
-                val pri = if (link.url.contains(".m3u8", ignoreCase = true)) probeAudio(link.url, link.referer) else 0
-                RawStream(spec.id, spec.name, link.url, link.type == ExtractorLinkType.M3U8, link.referer, link.quality, probed,
+                val (pri, h) = probeAudioHeight(link.url, link.referer)
+                RawStream(spec.id, spec.name, link.url, link.type == ExtractorLinkType.M3U8, link.referer,
+                    ManifestKit.maxQuality(link.quality, h), probed,
                     audioPriority = pri, audioLabel = audioLabelFor(pri))
             }
             okServer(spec, start, "extractor registry", result.size)
@@ -617,8 +624,8 @@ object StreamEngine {
             Log.d("IndStream", "${spec.id}: js harvest found ${jsUrls.size} urls")
             val result = jsUrls.map { url ->
                 val probed = HttpKit.probeSpeed(url, referer)
-                val pri = probeAudio(url, referer)
-                RawStream(spec.id, spec.name, url, url.contains(".m3u8", ignoreCase = true), referer, 0, probed,
+                val (pri, h) = probeAudioHeight(url, referer)
+                RawStream(spec.id, spec.name, url, url.contains(".m3u8", ignoreCase = true), referer, h, probed,
                     audioPriority = pri, audioLabel = audioLabelFor(pri))
             }
             okServer(spec, start, "js config harvest", result.size)
@@ -632,9 +639,9 @@ object StreamEngine {
         if (videoSrc != null) {
             Log.d("IndStream", "${spec.id}: video tag found: $videoSrc")
             val probed = HttpKit.probeSpeed(videoSrc, referer)
-            val pri = probeAudio(videoSrc, referer)
+            val (pri, h) = probeAudioHeight(videoSrc, referer)
             okServer(spec, start, "video tag", 1)
-            return listOf(RawStream(spec.id, spec.name, videoSrc, videoSrc.contains(".m3u8", ignoreCase = true), referer, 0, probed,
+            return listOf(RawStream(spec.id, spec.name, videoSrc, videoSrc.contains(".m3u8", ignoreCase = true), referer, h, probed,
                 audioPriority = pri, audioLabel = audioLabelFor(pri)))
         } else {
             Log.d("IndStream", "${spec.id}: no video tag")
@@ -684,25 +691,35 @@ object StreamEngine {
     private fun declaredHindiHint(raw: RawStream): String? =
         if (ManifestKit.isHindiFromName(raw.serverName, raw.url)) "Hindi" else null
 
-    /** Probe HLS master for best audio language priority. */
-    private suspend fun probeAudio(url: String, referer: String?): Int {
-        if (!url.contains(".m3u8", ignoreCase = true)) return 0
+    /**
+     * Probe an adaptive manifest (HLS master or DASH MPD) for the audio
+     * language priority AND the peak video height in ONE fetch — the master
+     * text serves both, so the height rides along for free and feeds
+     * [RawStream.qualityHint] (emit() then never needs a second refetch to
+     * label the adaptive link with its real best rendition: 4K/1080p/…).
+     * Returns (priority, bestHeight); (0, 0) when the url is not adaptive,
+     * unreachable, or nothing usable parses (honest unknown — no guesses).
+     */
+    private suspend fun probeAudioHeight(url: String, referer: String?): Pair<Int, Int> {
+        val isAdaptive = url.contains(".m3u8", ignoreCase = true) || url.contains(".mpd", ignoreCase = true)
+        if (!isAdaptive) return 0 to 0
         val text = withTimeoutOrNull(3000L) {
             runCatching { app.get(url, timeout = 3, headers = mapOf("Referer" to (referer ?: ""))).text }.getOrNull()
-        } ?: return 0
-        val master = ManifestKit.parseMaster(text, url) ?: return 0
-        val priority = ManifestKit.audioPriority(master)
-        // Debug: what audio renditions did the probe see?
-        val langs = master.audio.map { r -> "lang=${r.language ?: "none"} name=${r.name}" }
-        Log.d("IndStream", "probeAudio url=${url.take(80)} priority=$priority renditions=$langs")
-        return priority
+        } ?: return 0 to 0
+        val height = ManifestKit.bestHeightOf(text, url)
+        val master = ManifestKit.parseMaster(text, url)
+        val priority = master?.let { ManifestKit.audioPriority(it) } ?: 0
+        // Debug: what audio renditions + heights did the probe see?
+        val langs = master?.audio?.map { r -> "lang=${r.language ?: "none"} name=${r.name}" }.orEmpty()
+        Log.d("IndStream", "probeAudioHeight url=${url.take(80)} priority=$priority height=$height renditions=$langs")
+        return priority to height
     }
 
-    /** Probe an inline master playlist for audio priority (no network). */
-    private fun probeAudioInline(manifestText: String?): Int {
-        if (manifestText.isNullOrBlank()) return 0
-        val master = ManifestKit.parseMaster(manifestText) ?: return 0
-        return ManifestKit.audioPriority(master)
+    /** Probe an inline manifest (no network) for audio priority + peak height. */
+    private fun probeAudioInlineHeight(manifestText: String?): Pair<Int, Int> {
+        if (manifestText.isNullOrBlank()) return 0 to 0
+        val master = ManifestKit.parseMaster(manifestText) ?: return 0 to 0
+        return ManifestKit.audioPriority(master) to ManifestKit.bestHeight(master.variants)
     }
 
     /** Headers for vidlink.pro API + playlist requests (site Referer/Origin required). */
@@ -1321,9 +1338,12 @@ object StreamEngine {
                             // "Dual Audio [Hindi-English]" etc — any mention
                             // of Hindi ranks as Hindi (priority 4).
                             val isHindi = language?.contains("hindi", ignoreCase = true) == true
+                            // No " Auto" name suffix (user spec: the peak-resolution
+                            // label comes from the manifest probe — "MovieBox (Hindi) 4K";
+                            // a literal "MovieBox Auto" hid the real rendition).
                             added += RawStream(
                                 serverId = spec.id,
-                                serverName = spec.name + if (dash) " Auto" else "",
+                                serverName = spec.name,
                                 url = url,
                                 isM3u8 = url.contains(".m3u8", ignoreCase = true) || dash,
                                 referer = refererBase,
@@ -1824,12 +1844,13 @@ object StreamEngine {
             return emptyList()
         }
 
-        val pri = probeAudio(streamUrl, referer)
+        val (pri, h) = probeAudioHeight(streamUrl, referer)
         return listOf(
             RawStream(
                 serverId = spec.id, serverName = spec.name,
                 url = streamUrl, isM3u8 = streamUrl.contains(".m3u8", ignoreCase = true),
-                referer = referer, audioPriority = pri, audioLabel = audioLabelFor(pri)
+                referer = referer, qualityHint = h,
+                audioPriority = pri, audioLabel = audioLabelFor(pri)
             )
         )
     }
@@ -2200,12 +2221,12 @@ object StreamEngine {
         if (masterUrl != null || inlineManifest != null) {
             val url = masterUrl ?: ""
             val isHls = inlineManifest != null || url.contains(".m3u8", ignoreCase = true)
-            val pri = if (inlineManifest != null) probeAudioInline(inlineManifest)
-                else if (isHls && url.isNotBlank()) probeAudio(url, referer) else 0
+            val (pri, height) = when {
+                inlineManifest != null -> probeAudioInlineHeight(inlineManifest)
+                isHls && url.isNotBlank() -> probeAudioHeight(url, referer)
+                else -> 0 to 0
+            }
             val probed = if (url.isNotBlank()) HttpKit.probeSpeed(url, referer) else null
-            val height = inlineManifest?.let { m ->
-                ManifestKit.parseMaster(m)?.let { ManifestKit.bestHeight(it.variants) }
-            } ?: 0
             out.add(RawStream(
                 serverId = spec.id, serverName = spec.name,
                 url = url, isM3u8 = isHls, referer = referer,

@@ -260,6 +260,38 @@ class ManifestKitTest {
     }
 
     @Test
+    fun bestHeightOf_dispatchesHlsAndMpd() {
+        // HLS master: peak variant height.
+        val hls = """
+#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=1200000,RESOLUTION=1280x720
+720p.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=3840x2160
+2160p.m3u8
+        """.trimIndent()
+        assertEquals(2160, ManifestKit.bestHeightOf(hls, "https://x.example/master.m3u8"))
+        // DASH MPD: peak video representation height (audio set ignored).
+        val mpd = """
+<?xml version="1.0" encoding="utf-8"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011">
+  <Period>
+    <AdaptationSet mimeType="video/mp4">
+      <Representation id="1" width="1280" height="720" bandwidth="1500000"/>
+      <Representation id="2" width="1920" height="1080" bandwidth="5000000"/>
+    </AdaptationSet>
+    <AdaptationSet mimeType="audio/mp4">
+      <Representation id="3" bandwidth="128000"/>
+    </AdaptationSet>
+  </Period>
+</MPD>
+        """.trimIndent()
+        assertEquals(1080, ManifestKit.bestHeightOf(mpd, "https://x.example/dash.mpd"))
+        // Nothing usable → honest 0 (unknown), never a guess.
+        assertEquals(0, ManifestKit.bestHeightOf(null, "https://x.example/a.m3u8"))
+        assertEquals(0, ManifestKit.bestHeightOf("   ", "https://x.example/a.m3u8"))
+    }
+
+    @Test
     fun qualityLabel_generatesCorrectLabels() {
         assertEquals("4K", ManifestKit.qualityLabel(2160))
         assertEquals("1080p", ManifestKit.qualityLabel(1080))

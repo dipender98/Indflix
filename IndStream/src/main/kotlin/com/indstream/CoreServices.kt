@@ -680,6 +680,22 @@ object ManifestKit {
     /** Rank variants by quality (height desc), used to label links. */
     fun bestHeight(variants: List<Variant>): Int = variants.maxOfOrNull { it.height } ?: 0
 
+    /**
+     * Peak video height of a manifest text, HLS master or DASH MPD alike.
+     * Dispatches on content (`<MPD` → [parseMpd], else [parseMaster]) so
+     * adaptive links (HLS m3u8 AND DASH mpd) resolve their real best
+     * rendition — "4K"/"1080p" labels, never a guessed value. Returns 0
+     * when nothing usable parses (honest unknown, callers fall back).
+     */
+    fun bestHeightOf(text: String?, url: String): Int {
+        if (text.isNullOrBlank()) return 0
+        return if (text.contains("<MPD", ignoreCase = true)) {
+            parseMpd(text).maxOfOrNull { it.height } ?: 0
+        } else {
+            parseMaster(text, url)?.let { bestHeight(it.variants) } ?: 0
+        }
+    }
+
     /** Human label for a height: "4K"/"1080p"/"720p"/"480p"/"Auto". */
     fun qualityLabel(height: Int): String = when {
         height >= 2160 -> "4K"
