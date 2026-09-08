@@ -366,6 +366,19 @@ class IndStreamProvider : MainAPI() {
             return false
         }
 
+        // Fallback subtitles: the OpenSubtitles provider IS the subtitle
+        // source (user spec) — fired the moment the stream starts, in
+        // PARALLEL with the fill window, and AWAITED before the return:
+        // subtitleCallback pushes are only recorded while loadLinks is alive
+        // (the same job-liveness rule the change-server list rides on; a
+        // detached post-return push is silently dropped). Self-bounded:
+        // ≤2.5s IMDB wait + the provider's 6.5s fetch budget.
+        val subsJob = fastStartScope.async {
+            val imdb = runCatching { withTimeoutOrNull(2500L) { imdbDeferred.await() } }.getOrNull()
+            runCatching { topUpSubtitles(imdb, season, episode, originalLangNow(), subtitleCallback) }
+                .onFailure { android.util.Log.w("IndStream", "fallback subs failed: ${it.message}") }
+        }
+
         // LIVE_FILL window: hold until the farm resolves or the cap expires,
         // whichever first — every server that answers inside the window is
         // pushed live (above) and stays tappable in the change-server list.
@@ -373,16 +386,10 @@ class IndStreamProvider : MainAPI() {
         // Window closing: the app stops recording pushes the moment we return,
         // so late farm arrivals now land in FastStartCache only.
         windowOpen.set(false)
-
-        // Fallback subtitles: fetch when the stream starts (user spec) — the
-        // same title-keyed OpenSubtitles set every play gets, sync-safe after
-        // any in-player server switch. Budgeted so it can never hold up the
-        // return below.
-        val fallbackImdb = runCatching { withTimeoutOrNull(2500L) { imdbDeferred.await() } }.getOrNull()
-        fastStartScope.launch {
-            try { topUpSubtitles(fallbackImdb, season, episode, originalLangNow(), subtitleCallback) }
-            catch (t: Throwable) { android.util.Log.w("IndStream", "fallback subs failed: ${t.message}") }
-        }
+        // Let the subtitle tracks land BEFORE returning — the push IS the
+        // delivery; after the return the app drops it (bug: first play came
+        // up subtitle-less while this fetch ran detached past the return).
+        subsJob.await()
 
         // Return → the app auto-starts on whichever link its own quality
         // profile ranks first. The farm has (usually) already finished inside

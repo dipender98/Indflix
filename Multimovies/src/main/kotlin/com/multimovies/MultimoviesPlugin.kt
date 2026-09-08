@@ -998,6 +998,10 @@ class MultimoviesProvider : MainAPI() {
             LinkCache.get(meta.imdbId, meta.season, meta.episode)?.let { cached ->
                 if (cached.first.isNotEmpty()) {
                     cached.first.forEach { runCatching { callback(it) } }
+                    // SubtilesProvider is the ONLY subtitle source — replayed
+                    // titles must get their tracks too (the 15-min per-title
+                    // cache makes this near-instant on repeat).
+                    deliverFallbackSubs(meta, subtitleCallback)
                     return@withDomainRetry true
                 }
             }
@@ -1010,12 +1014,9 @@ class MultimoviesProvider : MainAPI() {
                 cached.forEach { runCatching { callback(it) } }
                 if (meta != null) {
                     // Fallback subtitles ARE the subtitle provider (user spec
-                    // Sept 2026): fetch the wanted set on every replay — the
-                    // provider's own cache makes repeats instant.
-                    SubtilesProvider.fetch(
-                        meta.imdbId, meta.season, meta.episode,
-                        SubtilesProvider.desiredLanguages(),
-                    ).forEach { runCatching { subtitleCallback(it) } }
+                    // Sept 2026 rewrite #2): fetch the wanted set on every
+                    // replay — the provider's own cache makes repeats instant.
+                    deliverFallbackSubs(meta, subtitleCallback)
                 }
                 return@withDomainRetry true
             }
@@ -1121,21 +1122,18 @@ class MultimoviesProvider : MainAPI() {
         }
 
         // Fallback subtitles (user spec rewrite #2): the OpenSubtitles provider
-        // IS the only subtitle source — fired the moment the first link lands
-        // (the stream is starting), detached and hard-budgeted inside the
-        // provider so it never adds latency here; its per-title cache makes
-        // repeat plays instant.
+        // IS the only subtitle source. Kicked off in PARALLEL with the pulls
+        // (gated on the first link so a dead farm never fetches) and AWAITED
+        // before any `true` return below: the app records subtitleCallback
+        // pushes only while loadLinks is alive — a detached post-return push
+        // is silently dropped (bug: the fast-farm race returned before the
+        // ~6.5s fetch landed, losing the tracks for this play).
         val metaSubs = meta
-        if (metaSubs != null) {
-            searchScope.launch {
+        val subsJob = metaSubs?.let { m ->
+            searchScope.async {
                 runCatching {
                     withTimeoutOrNull(FAST_START_MAX_MS) { firstLink.await() }
-                    if (found.isNotEmpty()) {
-                        SubtilesProvider.fetch(
-                            metaSubs.imdbId, metaSubs.season, metaSubs.episode,
-                            SubtilesProvider.desiredLanguages(),
-                        ).forEach { runCatching { subtitleCallback(it) } }
-                    }
+                    if (found.isNotEmpty()) deliverFallbackSubs(m, subtitleCallback)
                 }
             }
         }
@@ -1161,10 +1159,18 @@ class MultimoviesProvider : MainAPI() {
             val bg = FastStartCache.get(data)
             if (bg != null && bg.isNotEmpty()) {
                 bg.forEach { runCatching { callback(it) } }
+                meta?.let { deliverFallbackSubs(it, subtitleCallback) }
                 return@withDomainRetry true
             }
             return@withDomainRetry false
         }
+
+        // Subtitle tracks must land BEFORE the return (the app drops
+        // subtitleCallback pushes from a dead loadLinks job). Started
+        // parallel with the pulls above, so on a normal farm this await
+        // costs less than the fill window already spent; hard budgeted by
+        // the provider's fetch timeout either way.
+        subsJob?.await()
 
         // Full-list landing for the LinkCache instant replay: once the farm is
         // done, cache the deduped arrival-order list (host+quality dedupe only
@@ -1184,6 +1190,25 @@ class MultimoviesProvider : MainAPI() {
         android.util.Log.i("Multimovies", "loadLinks: ${emitted.size} links pushed live in " +
             "${System.currentTimeMillis() - loadStartMs}ms (arrival order, no ranking)")
         return@withDomainRetry true
+    }
+
+    /** Subtitle provider (user spec rewrite #2): the OpenSubtitles fallback
+     *  ([SubtilesProvider]) is the SOLE subtitle source — server captions are
+     *  never pushed. Fetches the wanted languages and emits them through the
+     *  player's `subtitleCallback`. MUST be called (and awaited) while
+     *  loadLinks is still running: the app drops subtitle pushes made after
+     *  the provider coroutine returns. Budgeted inside the provider (6.5s)
+     *  and cached per title (15 min), so repeat plays return instantly. */
+    private suspend fun deliverFallbackSubs(
+        meta: SourceMeta,
+        subtitleCallback: (SubtitleFile) -> Unit,
+    ) {
+        runCatching {
+            SubtilesProvider.fetch(
+                meta.imdbId, meta.season, meta.episode,
+                SubtilesProvider.desiredLanguages(),
+            ).forEach { runCatching { subtitleCallback(it) } }
+        }.onFailure { android.util.Log.w("Multimovies", "fallback subs failed: ${it.message}") }
     }
 
     /** Pull a single source, streaming found links to [callback] as they arrive and
@@ -1246,14 +1271,17 @@ class MultimoviesProvider : MainAPI() {
             )
 
         /** Emit one disambiguated link: quality-floor it (sub-720 fixed files
-         *  never reach the player OR the caches), record it, cache it, and
-         *  push it to the player IMMEDIATELY (arrival order) — unless [cacheOnly]
-         *  (prewarm pulls never touch a player). */
-        fun emitOne(l: ExtractorLink) {
+         *  never reach the player OR the caches), then enrich the label with
+         *  the PROBED language + resolution (user spec: whatever lands in the
+         *  server name must come from probing/parsing the stream itself or
+         *  the host's own declaration — never a guess), record it, cache it,
+         *  and push it to the player IMMEDIATELY (arrival order) — unless
+         *  [cacheOnly] (prewarm pulls never touch a player). */
+        suspend fun emitOne(l: ExtractorLink) {
             if (!passesFloor(l)) return
             val key = "${hostOf(l.url ?: "")}|${l.quality}"
             if (!emitted.add(key)) return
-            val dis = disambiguate(l)
+            val dis = disambiguate(MultiSourcePuller.enrichLabel(l))
             found.add(dis)
             if (cacheKey != null) FastStartCache.put(cacheKey, listOf(dis))
             firstLink?.complete(Unit)
@@ -1280,22 +1308,20 @@ class MultimoviesProvider : MainAPI() {
 
     /** Build the ExtractorLink emitted by the Cineverse fast path. Mirrors
      *  [MultiSourcePuller.directStreamLink]'s labeling + header logic so the
-     *  link shape matches what the registry path would have produced. */
+     *  link shape matches what the registry path would have produced. The
+     *  label stays the BASE server name here — [enrichLabel] (in [pullSource]'s
+     *  emitOne) appends the probed language + resolution. */
     private fun buildDirectLink(
         src: MultiSourcePuller.Source,
     ): ExtractorLink {
         val u = src.url
-        val label = MultiSourcePuller.linkLabel(
-            src.name,
-            MultiSourcePuller.isHindiHint(src.name, src.url, u),
-        )
         val headers = MultiSourcePuller.headersFor(u, src.referer, src.headers)
         val type = if (u.contains(".m3u8", ignoreCase = true)) ExtractorLinkType.M3U8
         else ExtractorLinkType.VIDEO
         val quality = getQualityFromName(u)
         return ExtractorLink(
-            source = label,
-            name = label,
+            source = src.name,
+            name = src.name,
             url = u,
             referer = src.referer ?: u,
             quality = quality,
@@ -1643,20 +1669,191 @@ object MultiSourcePuller {
             hostOf(url).let { h -> cineverseCdnHosts.any { h == it || h.endsWith(".$it") } } ||
             url.contains("serve_m3u8", ignoreCase = true)
 
-    /** Deterministic identity for an emitted link: `<Server>[ (hindi)]`.
-     *  Every ExtractorLink must carry this exact string in BOTH `source` and
-     *  `name`: CloudStream saves player priorities keyed on an exact match of
-     *  `source` while the server list displays `name`, so any drift (CDN
-     *  suffixes, quality suffixes, per-load counters) breaks the user's
-     *  ranking. Deliberately free of runtime-derived parts — extractor/extension
-     *  availability and CDN hosts must never influence it.
-     *
-     *  User spec (Sept 2026): language is always in brackets — "(hindi)",
-     *  "(eng)", "(multi)" — matching the IndStream [LinkNaming] convention. */
-    internal fun linkLabel(base: String?, hindi: Boolean): String {
-        val server = base?.trim()?.takeIf { it.isNotEmpty() }?.dedupeResolution()
-            ?: "Multimovies"
-        return if (hindi) "$server (Hindi)" else server
+    /** Deterministic identity base for an emitted link: the server's own
+     *  stable name. Every ExtractorLink must carry this exact string in BOTH
+     *  `source` and `name`: CloudStream saves player priorities keyed on an
+     *  exact match of `source` while the server list displays `name`, so any
+     *  drift (CDN suffixes, quality suffixes, per-load counters) breaks the
+     *  user's ranking. The probed (language) + resolution suffix is appended
+     *  by [enrichLabel] — derived from probing/parsing the stream itself, or
+     *  the host's own declaration; NEVER guessed. */
+
+    // ── Probed label enrichment (user spec: language + resolution ON the
+    //    server name, derived from probing/parsing — NEVER guessed) ──────
+
+    /** One parsed audio rendition of an HLS master (#EXT-X-MEDIA:AUDIO). */
+    data class AudioRendition(val language: String?, val name: String, val isDefault: Boolean)
+
+    /** Parsed HLS master: tallest variant height + audio renditions. */
+    data class MasterFacts(val bestHeight: Int, val audio: List<AudioRendition>)
+
+    /** Pure parse of an HLS master playlist text (JVM-testable): variant
+     *  heights from RESOLUTION=WxH, audio languages from #EXT-X-MEDIA.
+     *  Returns null when the text isn't a multi-variant master. */
+    internal fun parseMasterFacts(text: String?): MasterFacts? {
+        if (text.isNullOrBlank() || !text.contains("#EXT-X-STREAM-INF")) return null
+        var best = 0
+        Regex("""RESOLUTION=\d+x(\d+)""", RegexOption.IGNORE_CASE).findAll(text).forEach { m ->
+            m.groupValues[1].toIntOrNull()?.let { if (it > best) best = it }
+        }
+        val audio = mutableListOf<AudioRendition>()
+        Regex("""#EXT-X-MEDIA:([^\n]*)""").findAll(text).forEach { m ->
+            val attrs = m.groupValues[1]
+            fun attr(key: String): String? =
+                Regex("""$key\s*=\s*("([^"]*)"|([^,]*))""", RegexOption.IGNORE_CASE).find(attrs)
+                    ?.let { g ->
+                        g.groupValues[2].takeIf { it.isNotBlank() }
+                            ?: g.groupValues[3].trim().takeIf { it.isNotBlank() }
+                    }
+            if (attr("TYPE")?.equals("AUDIO", ignoreCase = true) == true) {
+                audio.add(AudioRendition(
+                    language = attr("LANGUAGE")?.trim()?.takeIf { it.isNotBlank() },
+                    name = attr("NAME")?.trim().orEmpty(),
+                    isDefault = attr("DEFAULT")?.equals("YES", ignoreCase = true) == true,
+                ))
+            }
+        }
+        return MasterFacts(best, audio)
+    }
+
+    /** Canonical language tag from a probed rendition — full display names
+     *  only (IndStream [com.indstream.LinkNaming.canonicalSubtitleName]
+     *  convention); unknown code → null (no guess). */
+    private fun languageTagOf(lang: String?, name: String): String? {
+        val s = (lang ?: name).trim().lowercase()
+        if (s.isEmpty()) return null
+        return when {
+            s.contains("dual") || s.contains("multi") || s.contains("+") || s.contains("&") -> "Multi"
+            s.contains("हिन्द") || s.contains("हिंद") || s == "hi" || s == "hin" || s.startsWith("hi-") || s.contains("hindi") -> "Hindi"
+            s == "en" || s == "eng" || s.startsWith("en-") || s.contains("english") -> "English"
+            s.contains("urdu") || s == "ur" || s == "urd" -> "Urdu"
+            s.contains("tamil") || s == "ta" || s == "tam" -> "Tamil"
+            s.contains("telugu") || s == "te" || s == "tel" -> "Telugu"
+            s.contains("malayalam") || s == "ml" || s == "mal" -> "Malayalam"
+            s.contains("kannada") || s == "kn" || s == "kan" -> "Kannada"
+            s.contains("marathi") || s == "mr" || s == "mar" -> "Marathi"
+            s.contains("bengali") || s.contains("bangla") || s == "bn" || s == "ben" -> "Bengali"
+            s.contains("japanese") || s == "ja" || s == "jpn" || s == "jp" -> "Japanese"
+            s.contains("korean") || s == "ko" || s == "kor" -> "Korean"
+            s.contains("chinese") || s == "zh" || s == "zho" || s == "chi" -> "Chinese"
+            s.contains("spanish") || s == "es" || s == "spa" -> "Spanish"
+            s.contains("french") || s == "fr" || s == "fra" || s == "fre" -> "French"
+            s.contains("arabic") || s == "ar" || s == "ara" || s == "arb" -> "Arabic"
+            else -> null
+        }
+    }
+
+    /** Language the HOST ITSELF declares (server brand "VidHindi", URL
+     *  "lan=hindi", CDN path token) — a declaration, not a guess. */
+    internal fun declaredHindi(sourceName: String?, url: String?): Boolean {
+        val hay = buildString {
+            sourceName?.let { append(it.lowercase()); append('|') }
+            url?.let { append(it.lowercase()) }
+        }
+        return hay.contains("hindi") || hay.contains("हिन्दी") || hay.contains("हिंदी")
+    }
+
+    /** Height→display token (mirrors IndStream [com.indstream.LinkNaming.qualityLabel]). */
+    internal fun qualityLabel(height: Int): String = when {
+        height >= 2160 -> "4K"
+        height >= 1440 -> "1440p"
+        height >= 1080 -> "1080p"
+        height >= 720 -> "720p"
+        height >= 480 -> "480p"
+        height >= 360 -> "360p"
+        height > 0 -> "${height}p"
+        else -> ""
+    }
+
+    /** Cheap height token from a direct-file URL ("...1080p.mp4") — a host
+     *  declaration, not a guess (0 = nothing declared). */
+    internal fun resolutionFromUrl(url: String?): Int {
+        if (url.isNullOrBlank()) return 0
+        return Regex("""(?<!\d)(\d{3,4})p(?!\d)""", RegexOption.IGNORE_CASE).findAll(url)
+            .mapNotNull { it.groupValues[1].toIntOrNull() }.maxOrNull() ?: 0
+    }
+
+    /** Budget for one master fetch inside emission (runs in the live fill
+     *  window, parallel per link — must never gate playback). */
+    private const val LABEL_PROBE_BUDGET_MS = 2500L
+
+    /** Cache of label probes per stream url (per process) so a re-pull of the
+     *  same source never re-fetches the same master. */
+    private val labelProbeCache = java.util.concurrent.ConcurrentHashMap<String, MasterFacts?>()
+
+    /** PROBE the stream for its real (language, height) facts: HLS masters
+     *  are fetched (2.5s budget) and parsed (variants + #EXT-X-MEDIA audio);
+     *  direct files report their DECLARED URL height only. A stream that
+     *  yields no facts gets NO tag — never a guess. */
+    internal suspend fun probeLabelFacts(l: ExtractorLink): MasterFacts? {
+        val url = l.url ?: return null
+        if (url.isBlank()) return null
+        if (l.type != ExtractorLinkType.M3U8) {
+            val declared = resolutionFromUrl(url).takeIf { it > 0 } ?: return null
+            return MasterFacts(declared, emptyList())
+        }
+        labelProbeCache[url]?.let { return it }
+        val facts = withTimeoutOrNull(LABEL_PROBE_BUDGET_MS) {
+            runCatching {
+                val headers = LinkedHashMap<String, String>()
+                headers.putAll(l.headers)
+                if (l.referer?.isNotBlank() == true && !headers.containsKey("Referer")) {
+                    headers["Referer"] = l.referer
+                }
+                val text = app.get(url, timeout = 3, headers = headers).text
+                parseMasterFacts(text)
+            }.getOrNull()
+        }
+        labelProbeCache[url] = facts
+        return facts
+    }
+
+    /** Enrich a link's label with probed language + resolution — the user's
+     *  "language and resolution in servers name" rule. Sources of truth, in
+     *  order: 1) the master playlist itself (EXT-X-MEDIA language of the
+     *  track that actually autoplays: DEFAULT=YES, else the single track;
+     *  multi-language masters → "Multi"; variant heights → resolution);
+     *  2) the link's own quality tag (registry extractors' real parse);
+     *  3) host declarations in the URL/name. Nothing derivable → label is
+     *  left untouched (stays "Unknown"/badge-less) — never guessed. */
+    internal suspend fun enrichLabel(l: ExtractorLink): ExtractorLink {
+        val facts = probeLabelFacts(l)
+        val height = facts?.bestHeight?.takeIf { it > 0 }
+            ?: l.quality.takeIf { it > 0 }
+            ?: resolutionFromUrl(l.url).takeIf { it > 0 }
+            ?: 0
+        val langTag: String? = when {
+            // Multi-language master → "Multi" (what the player's ABR exposes).
+            facts != null && facts.audio.mapNotNull { languageTagOf(it.language, it.name) }.distinct().size > 1 -> "Multi"
+            // The single track the player autoplays (DEFAULT or only rendition).
+            facts != null && facts.audio.isNotEmpty() ->
+                (facts.audio.firstOrNull { it.isDefault } ?: facts.audio.singleOrNull())
+                    ?.let { languageTagOf(it.language, it.name) }
+            // Host declaration ("VidHindi", "lan=hindi", "MyFlixer Hindi").
+            declaredHindi(l.source, l.url) -> "Hindi"
+            else -> null
+        }
+
+        // Rebuild the label: base (minus an existing tag/res), then the
+        // (Language) bracket, then the resolution token — deduped.
+        var base = (l.source ?: l.name ?: "Server").trim()
+        base = base.replace(Regex("""\s*\((?:Hindi|English|Multi|Urdu|Tamil|Telugu|Malayalam|Kannada|Marathi|Bengali|Japanese|Korean|Chinese|Spanish|French|Arabic|Unknown)\)\s*$""", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("""\s+\d{3,4}p\s*$|\s+4K\s*$""", RegexOption.IGNORE_CASE), "")
+            .dedupeResolution()
+        if (langTag != null && !base.contains(langTag, ignoreCase = true)) {
+            base = "$base ($langTag)"
+        }
+        val res = qualityLabel(height)
+        if (res.isNotEmpty() && !base.contains(res, ignoreCase = true)) {
+            base = "$base $res"
+        }
+        if (base == (l.source ?: l.name)) return l // unchanged → keep identity
+        return ExtractorLink(
+            source = base, name = base, url = l.url,
+            referer = l.referer, quality = height.takeIf { it > 0 } ?: l.quality,
+            headers = l.headers, extractorData = l.extractorData,
+            type = l.type, audioTracks = l.audioTracks ?: emptyList(),
+        )
     }
 
     /**
@@ -1751,36 +1948,13 @@ object MultiSourcePuller {
         return current
     }
 
-    /** True when a link name/label indicates a Hindi audio track. */
-    internal fun isHindi(link: ExtractorLink): Boolean {
-        val hay = buildString {
-            link.name?.let { append(it) }
-            append(' ')
-            link.source?.let { append(it) }
-        }.lowercase()
-        return hay.contains("hindi") || hay.contains("हिन्दी") || hay.contains("हिंदी")
-    }
-
-    /** True when a source URL, name, or stream URL contains a Hindi/streamhg hint.
-     *  Used by [sniff] to name the extracted link so the Hindi-preference sort
-     *  can prefer it. Checks the proxy platform (streamhg = Hindi), explicit
-     *  language params (lan=hindi), and any Hindi text in the source name. */
-    internal fun isHindiHint(sourceName: String, sourceUrl: String, streamUrl: String?): Boolean {
-        val hay = buildString {
-            append(sourceName.lowercase())
-            append('|')
-            append(sourceUrl.lowercase())
-            if (streamUrl != null) { append('|'); append(streamUrl.lowercase()) }
-        }
-        return hay.contains("streamhg") || hay.contains("hindi") || hay.contains("हिन्दी") || hay.contains("हिंदी") || hay.contains("lan=hindi") || hay.contains("modiplay") || hay.contains("serve_m3u8")
-    }
-
     /**
      * @param sources   raw server list (launch order = caller order)
      * @param timeoutMs per-source hard timeout in ms (project default: 15_000)
      * @param onSubtitle called for each subtitle found
-     * @param onLink optional: called immediately for every extracted link (streaming —
-     *        the player's change-server list fills in ARRIVAL order)
+     * @param onLink optional suspend callback, invoked immediately for every extracted
+     *        link (streaming — the player's change-server list fills in ARRIVAL
+     *        order; suspend so label probing can run inside the emit path)
      * @return list of extractor links in ARRIVAL order (user spec rewrite #2:
      *         no plugin-side ranking — the player's own quality/source profile
      *         decides what auto-plays)
@@ -1789,7 +1963,7 @@ object MultiSourcePuller {
         sources: List<Source>,
         timeoutMs: Long = MultimoviesProvider.SOURCE_TIMEOUT_MS,
         onSubtitle: (SubtitleFile) -> Unit,
-        onLink: (ExtractorLink) -> Unit = {},
+        onLink: suspend (ExtractorLink) -> Unit = {},
     ): List<ExtractorLink> = withContext(Dispatchers.IO) {
         if (sources.isEmpty()) return@withContext emptyList()
 
@@ -1823,7 +1997,7 @@ object MultiSourcePuller {
 
     /** Wrap a raw extractor link with the source's headers/referer defaults.
      *  Identity is NOT touched here: every extractSource branch already emits
-     *  final `source == name == linkLabel(...)` labels. */
+     *  final `source == name == <base server name>` labels. */
     private fun toExtractorLink(src: Source, l: ExtractorLink): ExtractorLink =
         ExtractorLink(
             source = l.source,
@@ -1891,10 +2065,9 @@ object MultiSourcePuller {
         // embed -> sources -> play flow deterministically (no browser needed).
         if (hostOf(src.url).contains("videm")) {
             return VidemExtractor.extract(src).map { s ->
-                val label = linkLabel(
-                    "VidEm (${s.name})",
-                    isHindiHint(src.name, src.url, s.url),
-                )
+                // BASE label only — emitOne's enrichLabel appends the probed
+                // (language) + resolution for the final identity.
+                val label = "VidEm (${s.name})"
                 ExtractorLink(
                     source = label,
                     name = label,
@@ -1916,10 +2089,9 @@ object MultiSourcePuller {
             val showLinks = ShowsExtractor.extract(src, onSubtitle = { subs.add(it) })
             subs.forEach { onSubtitle(it) }
             return showLinks.map { s ->
-                val label = linkLabel(
-                    "111Movies (${s.name})",
-                    isHindiHint(src.name, src.url, s.url),
-                )
+                // BASE label only — emitOne's enrichLabel appends the probed
+                // (language) + resolution for the final identity.
+                val label = "111Movies (${s.name})"
                 ExtractorLink(
                     source = label,
                     name = label,
@@ -1954,10 +2126,9 @@ object MultiSourcePuller {
         }.getOrDefault(false)
         if (registryOk && found.isNotEmpty()) {
             return found.map { l ->
-                val label = linkLabel(
-                    src.name,
-                    isHindi(l) || isHindiHint(src.name, src.url, l.url),
-                )
+                // BASE label only — emitOne's enrichLabel appends the probed
+                // (language) + resolution for the final identity.
+                val label = src.name
                 ExtractorLink(
                     source = label,
                     name = label,
@@ -1986,7 +2157,9 @@ object MultiSourcePuller {
             u.contains(".mp4", ignoreCase = true) ||
             u.contains(".webm", ignoreCase = true)
         if (!isStream) return null
-        val label = linkLabel(src.name, isHindiHint(src.name, src.url, u))
+        // BASE label only — emitOne's enrichLabel appends the probed
+        // (language) + resolution for the final identity.
+        val label = src.name
         val type = if (u.contains(".m3u8", ignoreCase = true)) ExtractorLinkType.M3U8
         else ExtractorLinkType.VIDEO
         // Use headersFor so the Cineverse serve_m3u8 proxy request, which the
@@ -2022,7 +2195,9 @@ object MultiSourcePuller {
             ?: decodeEncodedStreamUrl(text)
             ?: return emptyList()
 
-        val label = linkLabel(src.name, isHindiHint(src.name, src.url, stream))
+        // BASE label only — emitOne's enrichLabel appends the probed
+        // (language) + resolution for the final identity.
+        val label = src.name
         val linkType = if (stream.contains(".m3u8", ignoreCase = true)) ExtractorLinkType.M3U8
         else ExtractorLinkType.VIDEO
         return listOf(

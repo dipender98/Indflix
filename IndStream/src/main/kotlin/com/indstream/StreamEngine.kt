@@ -294,15 +294,20 @@ object StreamEngine {
                                 val master = ManifestKit.parseMaster(masterText, raw.url)
                                 val h = master?.let { ManifestKit.bestHeight(it.variants) }?.takeIf { it > 0 } ?: raw.qualityHint
                                 // Audio label: explicit server label wins; else the REAL track the
-                                // player auto-selects (multi-audio → "Multi", single track → its language).
-                                val tag = if (raw.audioLabel.isNotBlank()) raw.audioLabel
+                                // player auto-selects (multi-audio → "Multi", single track → its language);
+                                // else a language the HOST ITSELF declares in its URL/server name.
+                                // Anything still blank stays "Unknown" — never guessed.
+                                val tag = (if (raw.audioLabel.isNotBlank()) raw.audioLabel
                                 else if (master != null && master.isMultiAudio) "Multi"
                                 else if (master != null) audioLabelFor(ManifestKit.audioPriority(master))
-                                else raw.audioLabel
+                                else raw.audioLabel)
+                                    .ifBlank { declaredHindiHint(raw) ?: "" }
                                 ResolvedEmit(raw, h, tag)
                             }
                         }
-                        // Direct file: measure the REAL height (moov parse → URL token → "Auto").
+                        // Direct file: measure the REAL height (moov parse → URL token → "Auto");
+                        // language from the host's own declaration only (URL/server name) —
+                        // a file with no declared language stays "Unknown", never guessed.
                         !raw.isM3u8 && probeManifests -> {
                             val measured = HttpKit.resolveHeight(raw.url, raw.referer, raw.extraHeaders)
                             val h = if (measured > 0) measured
@@ -311,10 +316,19 @@ object StreamEngine {
                                 val fromUrl = ManifestKit.resolutionFromUrl(raw.url)
                                 if (fromUrl > 0) fromUrl else -1   // -1 = Auto (unknown direct file)
                             }
-                            ResolvedEmit(raw, h, raw.audioLabel)
+                            val tag = raw.audioLabel.ifBlank { declaredHindiHint(raw) ?: "" }
+                            ResolvedEmit(raw, h, tag)
                         }
-                        // Background/off path: trust the RawStream's own qualityHint (no new probes).
-                        else -> ResolvedEmit(raw, raw.qualityHint, raw.audioLabel)
+                        // Background/off path: trust the RawStream's own qualityHint (no
+                        // new probes). For direct files (non-adaptive) with no known
+                        // height, use -1 (the "Auto" sentinel) so the display name
+                        // shows "Auto" instead of a bare name. Language still comes
+                        // from host declarations only (URL/server name) — never guessed.
+                        else -> {
+                            val fullHeight = if (!raw.isM3u8 && raw.qualityHint <= 0) -1 else raw.qualityHint
+                            val tag = raw.audioLabel.ifBlank { declaredHindiHint(raw) ?: "" }
+                            ResolvedEmit(raw, fullHeight, tag)
+                        }
                     }
                 }
             }.awaitAll()
@@ -342,17 +356,19 @@ object StreamEngine {
             val isAdaptive = raw.isM3u8
             // ExtractorLink.quality = the REAL resolved height (user spec Sept
             // 2026) so the user's quality-profile ranks every stream by its
-            // height. The display name drops the resolution whenever the
-            // badge already shows it (known height > 0) — the old
-            // "1080p [1080p]" double print is gone. "Auto" (-1, unmeasured
-            // direct file) and adaptive-unknown (0) keep the name-side marker
-            // because no badge is rendered for quality=0.
+            // height, AND the name carries the same (language) + resolution —
+            // user spec: both must be visible ON THE SERVER NAME itself,
+            // derived from probing/parsing (master variants, moov measure,
+            // declared URL tokens) — never guessed. [LinkNaming.displayName]
+            // enforces the canonical `{Server} ({Language}) {Resolution}`
+            // shape, drops a repeat when the server name already shows the
+            // token, prints "Auto" for an unmeasurable direct file (-1) and
+            // nothing for a height-less adaptive master (0).
             val quality = r.fullHeight.coerceAtLeast(0)
-            val nameQuality = if (r.fullHeight > 0) 0 else r.fullHeight
             val label = LinkNaming.displayName(
                 serverName = raw.serverName,
                 audioLabel = r.tagLabel,
-                qualityHint = nameQuality,
+                qualityHint = r.fullHeight,
                 duplicateIndex = dupIdx,
                 originalLang = originalLang,
             )
@@ -659,6 +675,14 @@ object StreamEngine {
         1 -> "English"
         else -> ""
     }
+
+    /** DECLARED-language hint (user spec: probe/parsing wins, NEVER guess):
+     *  a language counts only when the host itself declares it — a server
+     *  brand that names it ("MyFlixer Hindi", "VidHindi") or a CDN path/URL
+     *  carrying the token ("...hindi..."). A stream with no such declaration
+     *  returns null and stays "Unknown" in the name. */
+    private fun declaredHindiHint(raw: RawStream): String? =
+        if (ManifestKit.isHindiFromName(raw.serverName, raw.url)) "Hindi" else null
 
     /** Probe HLS master for best audio language priority. */
     private suspend fun probeAudio(url: String, referer: String?): Int {

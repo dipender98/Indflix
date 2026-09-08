@@ -157,7 +157,7 @@ class NeutralOrderTest {
     }
 
     @Test
-    fun emit_resolutionPrintedOnce_realHeightOnBadgeOnly() = runBlocking {
+    fun emit_resolutionPrintedOnce_realHeightOnName() = runBlocking {
         val out = mutableListOf<com.lagradost.cloudstream3.utils.ExtractorLink>()
         StreamEngine.emit(
             listOf(stream("hd", url = "https://x.example/hd.mp4", isM3u8 = false, qualityHint = 1080)),
@@ -167,9 +167,47 @@ class NeutralOrderTest {
         assertEquals(1, out.size)
         val link = out[0]
         assertEquals(1080, link.quality)
-        // The name must NOT repeat the resolution (the old "1080p [1080p]"
-        // doubling); the badge (quality field) is the single source.
-        assertFalse(link.name.contains("1080p"))
+        // User spec: the resolution must appear ON the server name (derived
+        // from probing/parsing — never guessed), exactly ONCE (no doubling).
+        assertTrue(link.name.contains("1080p"))
+        assertEquals(1, Regex("1080p").findAll(link.name).count())
+    }
+
+    @Test
+    fun emit_unknownDirectFile_showsAuto_neverGuesses() = runBlocking {
+        val out = mutableListOf<com.lagradost.cloudstream3.utils.ExtractorLink>()
+        StreamEngine.emit(
+            listOf(stream("mystery", url = "https://x.example/mystery.mp4", isM3u8 = false, qualityHint = 0)),
+            onLink = { out.add(it) },
+            probeManifests = false,
+        )
+        assertEquals(1, out.size)
+        // No declared/measured height → "Auto" marker, never a fabricated res.
+        assertTrue(out[0].name.contains("Auto"))
+        assertFalse(out[0].name.contains("p"))
+        assertEquals(0, out[0].quality)
+    }
+
+    @Test
+    fun emit_declaredHindiUrl_labelsHindi_unknownStaysUnknown() = runBlocking {
+        // Host-declared language ("...hindi..." CDN path) → "(Hindi)" tag.
+        val declared = mutableListOf<com.lagradost.cloudstream3.utils.ExtractorLink>()
+        StreamEngine.emit(
+            listOf(stream("h1", url = "https://cdn.example/hindi/title/file.mp4", isM3u8 = false, qualityHint = 720)),
+            onLink = { declared.add(it) },
+            probeManifests = false,
+        )
+        assertEquals(1, declared.size)
+        assertTrue(declared[0].name.contains("(Hindi)"))
+        // No declaration anywhere → honest "Unknown", never a guess.
+        val unknown = mutableListOf<com.lagradost.cloudstream3.utils.ExtractorLink>()
+        StreamEngine.emit(
+            listOf(stream("n1", url = "https://cdn.example/a/b/file.mp4", isM3u8 = false, qualityHint = 720)),
+            onLink = { unknown.add(it) },
+            probeManifests = false,
+        )
+        assertEquals(1, unknown.size)
+        assertTrue(unknown[0].name.contains("(Unknown)"))
     }
 
     @Test
