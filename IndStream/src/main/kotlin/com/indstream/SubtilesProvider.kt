@@ -1,4 +1,4 @@
-package com.indstream
+﻿package com.indstream
 
 import android.util.Log
 import com.lagradost.cloudstream3.SubtitleFile
@@ -6,10 +6,9 @@ import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * FILE: SubtitleFallback.kt — last-resort subtitle source for titles where
- * the stream servers carry NO captions of their own (user spec, Sept 2026:
- * "servers give their own subtitles — take them; if some don't, use
- * OpenSubtitles or another provider").
+ * FILE: SubtilesProvider.kt — THE subtitle provider (user spec Sept 2026
+ * rewrite #2: server captions are never used; every play gets its subtitles
+ * from here, fetched when the stream starts).
  *
  * Provider: the OpenSubtitles v3+ Stremio community addon
  * (`opensubtitles.stremio.homes`), the same keyless service CSX / Cineverse
@@ -30,7 +29,7 @@ import java.util.concurrent.ConcurrentHashMap
  *    retried in the same process run beyond the small [CACHE_TTL_MS] cache.
  *  - Per-language cap keeps the subtitle menu readable.
  */
-object SubtitleFallback {
+object SubtilesProvider {
 
     private const val BASE = "https://opensubtitles.stremio.homes"
     /** Indian-market + global languages, verified accepted by the addon. */
@@ -71,7 +70,7 @@ object SubtitleFallback {
 
     /** Build the addon URL for one imdb id. Movies + series paths verified
      *  live (200 with subtitles). season/episode <= 0 -> movie. [langs] are
-     *  canonical language names ("Hindi", "English", …) — unmapped names are
+     *  canonical language names ("Hindi", "English", â€¦) â€” unmapped names are
      *  dropped; a fully-empty set falls back to "en|hi". */
     internal fun buildUrl(imdbId: String, season: Int, episode: Int, langs: Set<String>): String {
         val codes = langs.mapNotNull { CODES[it] }
@@ -84,7 +83,7 @@ object SubtitleFallback {
 
     /**
      * Fetch fallback subtitles for [imdbId] covering [missing] (canonical
-     * language names). Empty list on any failure/timeout — this must never
+     * language names). Empty list on any failure/timeout â€” this must never
      * break playback. Results cached per title+episode.
      */
     suspend fun fetch(
@@ -105,19 +104,19 @@ object SubtitleFallback {
         }
 
         val url = buildUrl(imdb, season, episode, missing)
-        Log.d("SubtitleFallback", "GET $url")
+        Log.d("SubtilesProvider", "GET $url")
         val text = withTimeoutOrNull(FETCH_BUDGET_MS) {
             runCatching {
                 com.lagradost.cloudstream3.app.get(url, timeout = 6).text
             }.getOrNull()
         }
         if (text.isNullOrBlank()) {
-            Log.w("SubtitleFallback", "no response within budget — dropped (streams unaffected)")
+            Log.w("SubtilesProvider", "no response within budget â€” dropped (streams unaffected)")
             return emptyList()
         }
         val subs = runCatching { parse(text, langs) }.getOrDefault(emptyList())
         if (subs.isNotEmpty()) put(key, subs)
-        Log.d("SubtitleFallback", "${subs.size} fallback subs for $imdb (langs=$langs)")
+        Log.d("SubtilesProvider", "${subs.size} fallback subs for $imdb (langs=$langs)")
         return subs
     }
 
@@ -132,7 +131,7 @@ object SubtitleFallback {
             val url = s.optString("url").takeIf { it.startsWith("http") && seenUrls.add(it) }
                 ?: continue
             val code = (s.optString("lang_code").ifBlank { s.optString("lang") }).lowercase()
-            // lang_code is ISO1 ("hi"), lang may be ISO2 ("hin"/"per") — accept
+            // lang_code is ISO1 ("hi"), lang may be ISO2 ("hin"/"per") â€” accept
             // only the languages we actually asked for.
             val code1 = code.take(2)
             if (code1 !in wantCodes && code !in wantCodes) continue
@@ -149,7 +148,7 @@ object SubtitleFallback {
         if (cache.size >= CACHE_MAX) {
             val now = System.currentTimeMillis()
             cache.entries.filter { it.value.first <= now }.forEach { cache.remove(it.key) }
-            if (cache.size >= CACHE_MAX) return // still full of fresh entries — skip caching
+            if (cache.size >= CACHE_MAX) return // still full of fresh entries â€” skip caching
         }
         cache[key] = (System.currentTimeMillis() + CACHE_TTL_MS) to subs
     }

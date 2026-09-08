@@ -1,4 +1,4 @@
-package com.multimovies
+﻿package com.multimovies
 
 import android.util.Log
 import com.lagradost.cloudstream3.SubtitleFile
@@ -6,18 +6,18 @@ import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
- * FILE: SubtitleServices.kt — subtitle normalization + OpenSubtitles fallback
- * for Multimovies (user spec, Sept 2026: "servers give their own subtitles —
- * take them; if some don't, use OpenSubtitles or another provider").
+ * FILE: SubtitleServices.kt — subtitle normalization + the OpenSubtitles
+ * provider for Multimovies (user spec Sept 2026 rewrite #2: server captions
+ * are ignored; [SubtilesProvider] IS the subtitle source, fetched when the
+ * stream starts).
  *
  *  - [canonicalName] maps raw API language strings (ISO codes, native script,
  *    3-letter codes like ara/ger/hin) to full display names: "Hindi",
  *    "English", "Urdu", …
- *  - [SubtitleFallback.fetch] tops up missing languages from the
+ *  - [SubtilesProvider.fetch] fetches the wanted languages from the
  *    OpenSubtitles v3+ Stremio community addon
  *    (opensubtitles.stremio.homes — keyless, the same service CSX uses).
- *    Hard-bounded by [FALLBACK_BUDGET_MS] and skipped entirely when the
- *    servers already covered the wanted languages.
+ *    Hard-bounded by [FALLBACK_BUDGET_MS]; never blocks or breaks playback.
  */
 object SubtitleServices {
 
@@ -57,12 +57,12 @@ object SubtitleServices {
 }
 
 /**
- * OpenSubtitles fallback — same provider as IndStream's SubtitleFallback
+ * OpenSubtitles fallback â€” same provider as IndStream's SubtilesProvider
  * (verified live Sept 2026). Runs AFTER links were delivered; a slow or dead
  * lookup costs at most the timeout and then is dropped (per the 2026 user
  * spec: never block a stream on subtitles).
  */
-object SubtitleFallback {
+object SubtilesProvider {
 
     private const val BASE = "https://opensubtitles.stremio.homes"
     private const val CONFIG = "ai-translated=true|from=all|auto-adjustment=true"
@@ -110,21 +110,21 @@ object SubtitleFallback {
         }
 
         val url = buildUrl(imdb, season, episode ?: -1, missing)
-        Log.d("SubtitleFallback", "GET $url")
+        Log.d("SubtilesProvider", "GET $url")
         val text = withTimeoutOrNull(FALLBACK_BUDGET_MS) {
             runCatching {
                 com.lagradost.cloudstream3.app.get(url, timeout = 6).text
             }.getOrNull()
         }
         if (text.isNullOrBlank()) {
-            Log.w("SubtitleFallback", "no response within budget — dropped (streams unaffected)")
+            Log.w("SubtilesProvider", "no response within budget â€” dropped (streams unaffected)")
             return emptyList()
         }
         val subs = runCatching { parse(text, langs) }.getOrDefault(emptyList())
         if (subs.isNotEmpty() && cache.size < 64) {
             cache[key] = (System.currentTimeMillis() + CACHE_TTL_MS) to subs
         }
-        Log.d("SubtitleFallback", "${subs.size} fallback subs for $imdb (langs=$langs)")
+        Log.d("SubtilesProvider", "${subs.size} fallback subs for $imdb (langs=$langs)")
         return subs
     }
 

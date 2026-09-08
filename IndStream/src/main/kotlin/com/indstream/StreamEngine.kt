@@ -5,9 +5,9 @@
  * FILE: StreamEngine.kt â€” the IndStream resolution engine (HOW a TMDB id
  * becomes playable links).
  *
- *  - [StreamEngine]   fans out to healthy servers in parallel, probes audio
- *                     + speed, gates on dual-audio (Hindi first) and emits
- *                     the fastest usable link set.
+ *  - [StreamEngine]   fans out to healthy servers in parallel and emits
+ *                     EVERY stream that answers in arrival order (user spec:
+ *                     neutral — the player's quality-profile decides).
  *  - [ServerFarm]     server registry + [HealthMonitor] ï¿½ defined in
  *                     ServerRegistry.kt (data + health state, no orchestration).
  *
@@ -19,14 +19,11 @@
 
 import android.util.Log
 import com.lagradost.cloudstream3.app
-import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.utils.*
-import kotlin.math.min
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.withTimeoutOrNull
@@ -38,10 +35,10 @@ import org.jsoup.Jsoup
  * 1. Fans out to healthy embed servers in parallel.
  * 2. Uses the same multi-strategy pipeline as Multimovies:
  *    fetch ? unwrap iframes ? bare-URL regex harvest ? loadExtractor registry
- *    ? JS config ? <video> source ? subtitles.
- * 3. Dual-audio gating: only emits servers whose master playlist carries
- *    at least Hindi+English audio tracks. When none do, falls back to
- *    the best available single-audio source.
+ *    ? JS config ? <video> source.
+ * 3. NEUTRAL emission (user spec Sept 2026 rewrite): every resolved stream
+ *    is pushed in arrival order; audio labels are display-only, and the
+ *    user's CloudStream quality/source profile decides what auto-plays.
  */
 object StreamEngine {
 
@@ -53,15 +50,6 @@ object StreamEngine {
     private const val MAX_CONCURRENT = 16
     private const val MAX_SERVERS = 16
     private const val MAX_UNWRAP = 4
-    /** Minimum stream height to prefer for AUTO-PLAY (user spec Sept 2026:
-     *  the ≥720 gate moved here from emit() — the server LIST stays
-     *  unrestricted so every successful host is visible). */
-    private const val MIN_AUTO_HEIGHT = 720
-    /** PREFERRED auto-play starter height (user Sept 2026 refinement): when a
-     *  1080p candidate exists (direct file OR adaptive master whose probed
-     *  bestHeight ≥1080) it is auto-played FIRST; ≥720 / adaptive-that-climbs
-     *  is the fallback. ≥720 stays the floor, not the target. */
-    private const val PREFERRED_HEIGHT = 1080
 
     /** MovieBox bearer token cache (CSX parity): the x-user token lives for
      *  hours; caching it removes one serial round-trip from every resolve. */
@@ -82,7 +70,6 @@ object StreamEngine {
         val referer: String? = null,
         val qualityHint: Int = 0,
         val measuredKbps: Long? = null,
-        val subtitles: List<Pair<String, String>> = emptyList(),
         val audioPriority: Int = 0,
         val audioLabel: String = "",
         val inlineManifest: String? = null, // HLS master playlist text delivered inline (JSON API)
@@ -90,13 +77,6 @@ object StreamEngine {
          *  "User-Agent: ExoPlayer" for CDNs that reject browser UAs). Merged
          *  into the ExtractorLink headers at emission time. */
         val extraHeaders: Map<String, String> = emptyMap(),
-        /** Wall time from the Play tap to this stream's arrival (ms), stamped
-         *  per batch in [resolveRealtime]. Live ranking signal. */
-        val resolveMs: Long? = null,
-        /** Live time-to-first-byte (ms) measured by [probeCandidates] during
-         *  the settle window. Null = not probed this session (score falls
-         *  back to the health-history prior). */
-        val ttfbMs: Long? = null,
     )
 
     /**
@@ -112,12 +92,10 @@ object StreamEngine {
     class CleanMissException(message: String) : Exception(message)
 
     /**
-     * Pick the servers to query for this title, in the order they should be hit:
-     * healthy first, Hindi-flagged first (so Hindi dubs play before slower
-     * English sources), then by learned real-time [HealthMonitor.speedScore].
-     * This is the "select the fastest server in real time" step of the fast-start
-     * path — the server list is launched in this order so the quickest,
-     * highest-priority host resolves and plays first.
+     * Pick the servers to query for this title. NEUTRAL (user spec Sept 2026:
+     * "do not prioritize based on anything") — healthy servers in registry
+     * order, no Hindi-first placement, no speed-score sorting. Every server
+     * launches in parallel anyway, so order only matters for tie-breaks.
      */
     private fun selectServers(tmdbId: Int, type: String, season: Int, episode: Int): List<ServerSpec> {
         val healthy = ServerFarm.allServers.filter { HealthMonitor.isHealthy(it.id) }
@@ -136,20 +114,14 @@ object StreamEngine {
             } else {
                 lastFarmProbeAt = now
                 // Clear only the trip state, keeping latency/throughput history so the
-                // speedScore ordering survives the re-probe.
+                // health data survives the re-probe (display/debug only — no ranking).
                 Log.w("IndStream", "all ${ServerFarm.allServers.size} servers tripped -- clearing trips, re-probing all")
                 HealthMonitor.resetTrips()
                 ServerFarm.allServers
             }
         } else healthy
-        // Hindi-first fast path: Hindi-flagged servers are placed FIRST
-        // (ahead of the rest of the farm) so their results arrive â€” and can
-        // play â€” before slower English sources finish probing.
-        val hindiFirst = candidates.filter { it.hindi }
-        val others = candidates.filterNot { it.hindi }
-            .sortedByDescending { HealthMonitor.speedScore(it.id) }
-        val servers = (hindiFirst + others).take(MAX_SERVERS)
-        Log.d("IndStream", "selectServers tmdb=$tmdbId type=$type s=$season e=$episode -> ${servers.size} servers (hindi-first: ${hindiFirst.map { it.id }})")
+        val servers = candidates.take(MAX_SERVERS)
+        Log.d("IndStream", "selectServers tmdb=$tmdbId type=$type s=$season e=$episode -> ${servers.size} servers (neutral order)")
         return servers
     }
 
@@ -184,11 +156,10 @@ object StreamEngine {
 
     /**
      * Resolve every server, invoking [onBatch] with a server's results the instant
-     * that server finishes. Because the farm is launched fastest-first (see
-     * [selectServers]), completion order is fastest-first â€” so a caller can start
-     * playback on the FIRST batch instead of waiting for the slowest server (the
-     * startup "head" before the first frame). This is the core of the fast-start
-     * path used by [IndStreamProvider.loadLinks].
+     * that server finishes. The whole farm launches in parallel, so completion
+     * order is fastest-first — the caller pushes each batch straight to the
+     * player (live source list) while loadLinks is still running, and keeps
+     * landing later arrivals in [FastStartCache] for the full-list replay.
      */
     suspend fun resolveRealtime(
         tmdbId: Int, type: String, season: Int = -1, episode: Int = -1,
@@ -206,9 +177,6 @@ object StreamEngine {
         val servers = selectServers(tmdbId, type, season, episode)
         if (servers.isEmpty()) return
         val sem = Semaphore(MAX_CONCURRENT)
-        // Wall-clock origin for the live resolve-time signal: every batch's
-        // RawStreams get stamped with ms-from-Play-tap (startupScore input).
-        val playStart = System.currentTimeMillis()
         coroutineScope {
             servers.map { spec ->
                 async {
@@ -232,17 +200,13 @@ object StreamEngine {
                             Log.w("IndStream", "${spec.id}: no result after ${spec.timeoutSec}s (timeout or crash), recording failure")
                             HealthMonitor.recordFailure(spec.id)
                         }
-                        // Hindi-only hosts often declare no labelled `hi` audio track,
-                        // so probe-based audioPriority would wrongly read 0. Bias the
-                        // streams from a `spec.hindi` server to Hindi (priority 4) so
-                        // they float above English sources in the audio-first sort.
-                        val resolveMs = System.currentTimeMillis() - playStart
+                        // Hindi-only hosts often declare no labelled `hi` audio track;
+                        // bias their streams' LABEL to Hindi (display only — the
+                        // Sept 2026 rewrite removed all priority sorting).
                         val streams = outcome?.map { s ->
-                            val biased = if (spec.hindi) s.copy(audioPriority = 4, audioLabel = "Hindi") else s
-                            biased.copy(resolveMs = resolveMs)
+                            if (spec.hindi && s.audioLabel.isBlank()) s.copy(audioPriority = 4, audioLabel = "Hindi") else s
                         }.orEmpty()
                         if (streams.isNotEmpty()) {
-                            Log.d("IndStream", "server=${spec.id} resolve_ms=$resolveMs streams=${streams.size}")
                             onBatch(spec.id, streams)
                         }
                     } finally { sem.release() }
@@ -252,309 +216,74 @@ object StreamEngine {
     }
 
     /**
-     * Resolve all streams across the farm (collects every server's results into a
-     * single list). Kept for callers that want the full list at once; the
-     * fast-start path in [IndStreamProvider.loadLinks] prefers [resolveRealtime].
-     */
-    suspend fun resolve(tmdbId: Int, imdbId: String?, type: String, season: Int = -1, episode: Int = -1): List<RawStream> {
-        if (tmdbId <= 0) {
-            Log.w("IndStream", "resolve skipped: invalid tmdbId=$tmdbId")
-            return emptyList()
-        }
-        val out = mutableListOf<RawStream>()
-        resolveRealtime(tmdbId, type, season, episode, imdbIdProvider = { imdbId }) { _, streams -> out += streams }
-        Log.d("IndStream", "resolved ${out.size} streams from farm")
-        // Same ranking as emit(): Hindi first, then speed, then quality.
-        return out.sortedWith(compareByDescending<RawStream> { it.audioPriority }
-            .thenByDescending { it.measuredKbps ?: 0L }
-            .thenByDescending { it.qualityHint })
-    }
-
-    /**
-     * Live-probe score for instant-play ranking (user spec Sept 2026: rank
-     * from THIS session's measured signals, never static host-speed folklore).
-     * Higher = the stream is expected to produce frame 1 sooner AND at a
-     * usable quality. Weights:
-     *  - TTFB (40%): [RawStream.ttfbMs] probed live during the settle window —
-     *    time to first byte on the actual stream URL is the dominant
-     *    first-frame signal. When no live probe exists, a WEAK health-history
-     *    prior substitutes (never overrides a live probe).
-     *  - Resolve time (25%): [RawStream.resolveMs] — wall time from the Play
-     *    tap to this server answering.
-     *  - Throughput (20%): fresh probe kbps, else the server's health-history
-     *    average, else neutral 0.5.
-     *  - Quality (10%): 1.0 for ≥1080, 0.9 for ≥720, 0.5 for adaptive with
-     *    unknown height (lowered from 0.7 — user report: adaptive resolution
-     *    does not reliably climb), 0.0 for known sub-720.
-     *  - Audio (5%): SOFT language preference that can never overcome a
-     *    meaningful speed difference.
-     */
-    private fun ttfbNorm(ms: Long): Double = 1.0 / (1.0 + ms / 500.0)
-    private fun throughputNorm(kbps: Long): Double = min(1.0, kbps / 5000.0)
-
-    private fun qualityNorm(s: RawStream): Double = when {
-        s.qualityHint >= 1080 -> 1.0
-        s.qualityHint >= MIN_AUTO_HEIGHT -> 0.9
-        s.isM3u8 && s.qualityHint <= 0 -> 0.5      // adaptive, height unknown
-        s.qualityHint in 1 until MIN_AUTO_HEIGHT -> 0.0
-        else -> 0.0
-    }
-
-    private fun startupScore(s: RawStream): Double {
-        val hist = HealthMonitor.speedScore(s.serverId) // 0..1
-        val ttfbTerm = s.ttfbMs?.let { ttfbNorm(it) } ?: (0.6 + 0.3 * hist).coerceAtMost(1.0)
-        val resolveTerm = s.resolveMs?.let { ttfbNorm(it) } ?: 0.5
-        val throughputTerm = when {
-            (s.measuredKbps ?: 0L) > 0L -> throughputNorm(s.measuredKbps!!)
-            else -> HealthMonitor.averageThroughput(s.serverId)
-                ?.let { throughputNorm(it) } ?: 0.5
-        }
-        val audioSoft = when (s.audioPriority) {
-            4 -> 1.0; 3 -> 0.75; 2 -> 0.5; 1 -> 0.25; else -> 0.0
-        }
-        return 0.40 * ttfbTerm + 0.25 * resolveTerm + 0.20 * throughputTerm +
-            0.10 * qualityNorm(s) + 0.05 * audioSoft
-    }
-
-    /**
-     * Auto-play pick (user spec Phase 2, **1080p-first** eligibility order):
-     *  1. 1080p pool — KNOWN height ≥1080 (direct 1080p file OR adaptive master
-     *     whose probed bestHeight ≥1080). This is the preferred starter.
-     *  2. 720p pool — KNOWN height ≥720 to <1080. Fallback when no 1080p exists.
-     *  3. Adaptive-unknown pool — m3u8 with unknown height (the player starts
-     *     ~720 and ABR-climbs; user-accepted). Only if no known ≥720 exists.
-     *  4. Everything else (sub-720 only) — start the best available rather
-     *     than stall; late ≥720+ arrivals still join the server list.
-     * Within the first non-empty pool, the highest [startupScore] (live probes)
-     * wins. Pure JVM logic (HealthMonitor is plain Kotlin) — unit-tested in
-     * Test/AutoPlayPickTest.kt.
-     */
-    fun pickAutoPlay(streams: List<RawStream>): RawStream? {
-        if (streams.isEmpty()) return null
-        val candidates = streams.filter { it.url.isNotBlank() }
-        if (candidates.isEmpty()) return null
-        // Strict 1080-first pool order. `qualityHint` is 0 for adaptive masters
-        // until probeCandidates stamps the probed bestHeight — so a 1080p
-        // adaptive master lands in pool1 only after the 1.5s settle probes run.
-        val p1080 = candidates.filter { it.qualityHint >= PREFERRED_HEIGHT }
-        val p720 = candidates.filter { it.qualityHint >= MIN_AUTO_HEIGHT }
-        val adaptiveUnknown = candidates.filter { it.isM3u8 && it.qualityHint <= 0 }
-        val pool = when {
-            p1080.isNotEmpty() -> p1080
-            p720.isNotEmpty() -> p720
-            adaptiveUnknown.isNotEmpty() -> adaptiveUnknown
-            else -> candidates
-        }
-        val winner = pool.maxByOrNull { startupScore(it) }
-        Log.d("IndStream", "pickAutoPlay: pool=${pool.size}/${candidates.size} " +
-            "winner=${winner?.serverName} h=${winner?.qualityHint} " +
-            "ttfb=${winner?.ttfbMs}ms resolve=${winner?.resolveMs}ms score=${winner?.let { startupScore(it) }}")
-        return winner
-    }
-
-    /**
-     * Live probes for auto-play ranking, run INSIDE the 1.5s settle window
-     * (parallel, one round-trip per candidate, tight budgets). For HLS
-     * masters the master fetch does triple duty: TTFB + best variant height +
-     * audio renditions — the text is stored into [RawStream.inlineManifest]
-     * so `emit()` skips its own re-fetch. Returns stamped COPIES; the caller
-     * uses them for [pickAutoPlay] only (the arrival buffer is untouched, so
-     * FastStartCache keeps the raw streams).
-     */
-    suspend fun probeCandidates(streams: List<RawStream>): List<RawStream> {
-        val distinct = streams.distinctBy { it.url }.filter { it.url.isNotBlank() }
-        return coroutineScope {
-            distinct.map { raw ->
-                async {
-                    val stamped = if (raw.isM3u8) {
-                        // Master probe: TTFB + variants + audio in one fetch
-                        // (skip when the resolver already delivered everything).
-                        val alreadyKnown = raw.inlineManifest != null ||
-                            (raw.qualityHint > 0 && raw.audioPriority > 0)
-                        if (alreadyKnown) {
-                            val p = HttpKit.probeTtfb(raw.url, raw.referer,
-                                timeoutMs = PROBE_TTFB_BUDGET_MS, extraHeaders = raw.extraHeaders)
-                            raw.copy(ttfbMs = p.ttfbMs, measuredKbps = raw.measuredKbps ?: p.kbps)
-                        } else {
-                            val lh = LinkedHashMap<String, String>()
-                            lh.putAll(raw.extraHeaders)
-                            if (!lh.containsKey("Referer") && !raw.referer.isNullOrBlank()) lh["Referer"] = raw.referer!!
-                            val probeStart = System.currentTimeMillis()
-                            val fetched = withTimeoutOrNull(PROBE_MASTER_BUDGET_MS) {
-                                runCatching { app.get(raw.url, timeout = 3, headers = lh).text }.getOrNull()
-                            }
-                            if (fetched == null) {
-                                // Master probe lost the race with the settle
-                                // window — TTFB-only fallback, still eligible.
-                                val p = HttpKit.probeTtfb(raw.url, raw.referer,
-                                    timeoutMs = PROBE_TTFB_BUDGET_MS, extraHeaders = raw.extraHeaders)
-                                raw.copy(ttfbMs = p.ttfbMs)
-                            } else {
-                                val master = ManifestKit.parseMaster(fetched, raw.url)
-                                val height = master?.let { ManifestKit.bestHeight(it.variants) }?.takeIf { it > 0 }
-                                    ?: raw.qualityHint
-                                val pri = master?.let { ManifestKit.audioPriority(it) } ?: raw.audioPriority
-                                raw.copy(
-                                    ttfbMs = System.currentTimeMillis() - probeStart,
-                                    measuredKbps = raw.measuredKbps,
-                                    qualityHint = if (raw.qualityHint <= 0) height else raw.qualityHint,
-                                    audioPriority = if (pri > 0) pri else raw.audioPriority,
-                                    audioLabel = if (pri > 0 && raw.audioLabel.isBlank()) audioLabelFor(pri) else raw.audioLabel,
-                                    inlineManifest = master?.let { fetched },
-                                )
-                            }
-                        }
-                    } else {
-                        // Direct file: ranged GET gives TTFB + throughput.
-                        val p = HttpKit.probeTtfb(raw.url, raw.referer,
-                            timeoutMs = PROBE_TTFB_BUDGET_MS, extraHeaders = raw.extraHeaders)
-                        raw.copy(ttfbMs = p.ttfbMs, measuredKbps = raw.measuredKbps ?: p.kbps)
-                    }
-                    Log.d("IndStream", "probe server=${stamped.serverName} h=${stamped.qualityHint} " +
-                        "ttfb=${stamped.ttfbMs}ms kbps=${stamped.measuredKbps ?: "?"} " +
-                        "resolve=${stamped.resolveMs ?: "?"}ms url=${stamped.url.take(60)}")
-                    stamped
-                }
-            }.awaitAll()
-        }
-    }
-
-    /**
-     * Emit links fastest-first. Each stream becomes exactly ONE link — HLS
-     * masters go out as the adaptive source (the player selects the rung),
-     * never as master + per-variant duplicates (user spec Sept 2026).
+     * Emit links (Sept 2026 rewrite, user spec). Changes from the old model:
      *
-     * Quality policy (user spec Sept 2026, REVISED): the ≥720 gate applies to
-     * AUTO-PLAY selection only ([pickAutoPlay]) — the server LIST is
-     * unrestricted so every successful host is visible, sub-720 included.
-     * The former single-choke-point <720 filter was removed here.
+     *  - NO PRIORITIZATION of our own: streams are emitted in ARRIVAL order.
+     *    The player's own quality-profile settings (the user's priority, like
+     *    CloudStream's source-priority dialog) decide what auto-plays. No
+     *    Hindi-first, no speed scores, no quality pools.
+     *  - REAL QUALITY HEIGHT: ExtractorLink.quality carries the resolved
+     *    height so the user's quality profile actually ranks it (quality=0
+     *    stays only for adaptive/unknown heights). The display name no longer
+     *    repeats the resolution — the player's badge shows it once (the old
+     *    "1080p [1080p]" double print is gone); an unmeasured direct file
+     *    keeps its "Auto" marker in the name.
+     *  - QUALITY FLOOR: fixed/progressive (non-HLS) links with a KNOWN height
+     *    below 720p are dropped ([passesQualityFloor]). Adaptive HLS masters
+     *    always pass — they ramp to their best rendition regardless of what
+     *    the master header reads — and unknown heights (0 / "Auto") can't be
+     *    proven low, so they stay.
+     *  - NO SERVER SUBTITLES: the OpenSubtitles fallback is THE subtitle
+     *    provider (fetched when the stream starts, title-keyed, sync-safe
+     *    after any in-player server switch). Caption lists from the servers
+     *    are ignored.
      *
-     * Returns the canonical subtitle language names the servers actually
-     * provided so the caller can top up gaps from [SubtitleFallback].
+     * One link per stream — HLS masters go out as the adaptive source (the
+     * player selects the rung), never as master + per-variant duplicates.
+     *
+     * Returns the set of emitted urls (empty strings are filtered upstream).
      */
     suspend fun emit(
         streams: List<RawStream>,
         onLink: (ExtractorLink) -> Unit,
-        onSubtitle: (SubtitleFile) -> Unit,
         /** TMDB original_language ("ja", "hi", ...): a stream whose audio label is
          *  "Original" carries this language, so "VidLink (Japanese)" is shown
          *  instead of "VidLink (Original)". */
         originalLang: String? = null,
-        /** Trickle mode (background server arrival AFTER the first frame):
-         *  true = skip the master-manifest re-fetch (zero extra bandwidth given
-         *  to the already-running video) and don't re-emit subtitles heights.
-         *  Labels fall back to the RawStream's own qualityHint. */
+        /** Background-arrival mode (user spec: while the video plays the
+         *  bandwidth belongs to it): true = skip the master-manifest re-fetch
+         *  for labels; the RawStream's own qualityHint is used as-is. */
         probeManifests: Boolean = true,
-        /** Subtitle pass — with the SHARED [subDedupeKeys] set this is safe on
-         *  every batch: each (canonicalLang, url) pair is emitted exactly once
-         *  across the whole loadLinks call, so late servers' caption tracks
-         *  reach the player too instead of being dropped. */
-        emitSubtitles: Boolean = true,
-        /** Sleep before emitting each link (trickle pacing: keeps background
-         *  arrivals from burstingmegabytes of manifest fetches / player
-         *  channel traffic while the stream is warming up). */
-        emitGapMs: Long = 0L,
-        /** Subtitle dedupe keys SHARED across every emit call of one loadLinks
-         *  (first batch + all trickle batches). When null a per-call set is
-         *  used (old behaviour: safe but trickle batches can't emit subs). */
-        subDedupeKeys: MutableSet<String>? = null,
-        /** Sync-safe subtitles (user plan Sept 2026): when set, ONLY the named
-         *  server's own caption tracks are emitted — other servers' sub files
-         *  are cut for a different video release and go out of sync on this
-         *  server's video. Subtitle-only carriers filter the same way. The
-         *  [SubtitleFallback] top-up fills the remaining language gaps (it is
-         *  title-keyed to a standard cut, so it stays sync-safe). Null = old
-         *  behaviour (no filter). */
-        subsOnlyForServerId: String? = null,
     ): Set<String> {
-        if (streams.isEmpty()) return emptySet()
         val emitted = java.util.Collections.synchronizedSet(HashSet<String>())
-        // Subtitle dedupe: per-quality RawStreams (VidLink qualities[]) and
-        // multi-master servers (VaPlayer) repeat the SAME caption list per
-        // stream, which made every subtitle show up 2-3 times (user-reported
-        // Sept 2026). One emission per (canonicalLang, url) — keyed on the
-        // SHARED set when the caller provides one, so dedupe spans batches.
-        val emittedSubs = subDedupeKeys ?: java.util.Collections.synchronizedSet(HashSet<String>())
-        val subLangs = java.util.Collections.synchronizedSet(HashSet<String>())
-        // Per-server provenance (user spec Sept 2026): tracks are tagged with the
-        // server that sent them — "Hindi (VidLink)" — and the fallback top-up tags
-        // "Hindi (Fallback)". Dedupe is URL-PRIMARY so the same VTT file reaching
-        // the player through several servers (or a later re-emit) appears exactly
-        // once, under the first source that delivered it.
-        fun emitSub(rawLang: String?, url: String, source: String?) {
-            if (url.isBlank()) return
-            if (!emittedSubs.add("url|$url")) return
-            val canonical = LinkNaming.canonicalSubtitleName(rawLang)
-            subLangs.add(canonical)
-            onSubtitle(SubtitleFile(LinkNaming.taggedSubtitleName(canonical, source), url))
-        }
+        if (streams.isEmpty()) return emitted
 
-        // Quality gate before numbering (user spec: 720p minimum) so the
-        // -1..-N group numbers are contiguous: gate first, then rank.
-        // Streams with a blank url are subtitle-only carriers (pipeline
-        // step 7) - they never reach the link gate below.
-        // Rank best-first for INSTANT PLAY: the first link emitted (the one the
-        // player auto-plays) must be the one that actually STARTS soonest, not
-        // merely the server that finished resolving first. Speed/history
-        // dominate; audio language is only a soft tie-breaker (user spec: a slow
-        // "Hindi" source must never outrank a fast one).
-        val ranked = streams.sortedWith(compareByDescending<RawStream> { startupScore(it) }
-            .thenByDescending { it.audioPriority }
-            .thenByDescending { it.measuredKbps ?: 0L }
-            .thenByDescending { it.qualityHint })
-
-        // Subtitle pass FIRST, over every stream including subtitle-only ones:
-        // each server's OWN caption tracks are taken here (user spec: "servers
-        // give their own subtitles - take them"), tagged with that server's
-        // name. The fallback provider later tops up whatever language none of
-        // the servers carried. Safe on every batch now that dedupe is shared
-        // (URL-primary) — late servers' tracks are emitted exactly once.
-        if (emitSubtitles) {
-            ranked.forEach { raw ->
-                if (subsOnlyForServerId == null || raw.serverId == subsOnlyForServerId) {
-                    raw.subtitles.forEach { (lang, subUrl) -> emitSub(lang, subUrl, raw.serverName) }
-                }
-            }
-        }
-
-        // Link pass: every url-bearing stream becomes a link (list is
-        // unrestricted — auto-play ≥720 preference lives in pickAutoPlay).
-        // Streams with a blank url are subtitle-only carriers (pipeline
-        // step 7) - they never become links.
-        val eligible = ranked.filter { raw -> raw.url.isNotBlank() }
+        // NEUTRAL order (user spec Sept 2026: no prioritizing): arrival order.
+        val ranked = streams.filter { it.url.isNotBlank() }
 
         // Pre-resolve M3U8 masters before dedupe so the numbering key uses
         // the ACTUAL height (from variant parse) rather than qualityHint
         // (which is 0 for adaptive masters). Without this, a master with
         // qualityHint=0 and a direct MP4 qualityHint=1080 from the same
         // server form separate dedupe groups and both print "1080p".
-        //
-        // Also: quality=0 on every ExtractorLink — the resolution is baked
-        // into the name string (user spec). CloudStream's built-in quality
-        // badge also uses ExtractorLink.quality, so setting it to a non-zero
-        // value duplicated the resolution: "VidLink (Multi) 1080p [1080p]".
-        // Setting quality=0 suppresses the badge and fixes the doubling.
         data class ResolvedEmit(
             val raw: RawStream,
             val fullHeight: Int,
             val tagLabel: String,
-            val master: ManifestKit.MasterPlaylist?,
         )
-        // Pre-resolve CONCURRENTLY: the old serial map added up to 4s PER
-        // unprobed HLS master (VaPlayer/VidUp/VidCore arrive without height or
-        // audio probes) BEFORE the first link reached the player — the single
-        // biggest chunk of the old 5-7s startup. Parallel fetches cap that
-        // head at one master timeout (~4s worst case, usually <1s).
+        // Pre-resolve CONCURRENTLY: serial map added up to 4s PER unprobed HLS
+        // master (VaPlayer/VidUp/VidCore arrive without height) BEFORE the first
+        // link reached the player. Parallel fetches cap that head at one master
+        // timeout (~4s worst case, usually <1s).
         val preResolved = coroutineScope {
-            eligible.map { raw ->
+            ranked.map { raw ->
                 async {
                     when {
-                        // HLS master: re-parse for real height + audio (skip when trickle/off or already known).
+                        // HLS master: re-parse for real height + audio (skip when background/off or already known).
                         raw.isM3u8 && probeManifests -> {
-                            val alreadyKnown = (raw.audioPriority > 0 || raw.measuredKbps != null) &&
-                                !raw.subtitles.any { it.second.startsWith("/") }
+                            val alreadyKnown = raw.audioPriority > 0 || raw.measuredKbps != null
                             if (alreadyKnown) {
-                                ResolvedEmit(raw, raw.qualityHint, raw.audioLabel, null)
+                                ResolvedEmit(raw, raw.qualityHint, raw.audioLabel)
                             } else {
                                 val lh = LinkedHashMap<String, String>()
                                 lh.putAll(raw.extraHeaders)
@@ -570,11 +299,7 @@ object StreamEngine {
                                 else if (master != null && master.isMultiAudio) "Multi"
                                 else if (master != null) audioLabelFor(ManifestKit.audioPriority(master))
                                 else raw.audioLabel
-                                master?.let { m ->
-                                    val langs = m.audio.map { r -> "lang=${r.language ?: "none"} name=${r.name} group=${r.groupId} default=${r.default}" }
-                                    Log.d("IndStream", "audioTracks server=${raw.serverName} multiAudio=${m.isMultiAudio} renditions=$langs")
-                                }
-                                ResolvedEmit(raw, h, tag, master)
+                                ResolvedEmit(raw, h, tag)
                             }
                         }
                         // Direct file: measure the REAL height (moov parse → URL token → "Auto").
@@ -586,10 +311,10 @@ object StreamEngine {
                                 val fromUrl = ManifestKit.resolutionFromUrl(raw.url)
                                 if (fromUrl > 0) fromUrl else -1   // -1 = Auto (unknown direct file)
                             }
-                            ResolvedEmit(raw, h, raw.audioLabel, null)
+                            ResolvedEmit(raw, h, raw.audioLabel)
                         }
-                        // Trickle/off path: trust the RawStream's own qualityHint (no new probes).
-                        else -> ResolvedEmit(raw, raw.qualityHint, raw.audioLabel, null)
+                        // Background/off path: trust the RawStream's own qualityHint (no new probes).
+                        else -> ResolvedEmit(raw, raw.qualityHint, raw.audioLabel)
                     }
                 }
             }.awaitAll()
@@ -602,44 +327,66 @@ object StreamEngine {
             val dupIdx = numbers.getOrElse(index) { 0 }
             if (!emitted.add(raw.url)) return@forEachIndexed
 
+            // Quality floor (user spec Sept 2026): fixed (non-HLS) links with a
+            // KNOWN height below 720p never surface. Adaptive masters always
+            // pass — their height reading is the master header, not their best
+            // rendition — and unknown heights (0) can't be proven low.
+            if (!passesQualityFloor(raw.isM3u8, r.fullHeight)) return@forEachIndexed
+
             val linkHeaders = LinkedHashMap<String, String>()
             linkHeaders.putAll(raw.extraHeaders)
             if (!linkHeaders.containsKey("Referer") && !raw.referer.isNullOrBlank()) {
                 linkHeaders["Referer"] = raw.referer!!
             }
 
+            val isAdaptive = raw.isM3u8
+            // ExtractorLink.quality = the REAL resolved height (user spec Sept
+            // 2026) so the user's quality-profile ranks every stream by its
+            // height. The display name drops the resolution whenever the
+            // badge already shows it (known height > 0) — the old
+            // "1080p [1080p]" double print is gone. "Auto" (-1, unmeasured
+            // direct file) and adaptive-unknown (0) keep the name-side marker
+            // because no badge is rendered for quality=0.
+            val quality = r.fullHeight.coerceAtLeast(0)
+            val nameQuality = if (r.fullHeight > 0) 0 else r.fullHeight
             val label = LinkNaming.displayName(
                 serverName = raw.serverName,
                 audioLabel = r.tagLabel,
-                qualityHint = r.fullHeight,
+                qualityHint = nameQuality,
                 duplicateIndex = dupIdx,
                 originalLang = originalLang,
             )
 
-            if (raw.isM3u8) {
+            if (isAdaptive) {
                 onLink(ExtractorLink(
                     source = label, name = label,
                     url = raw.url, referer = raw.referer ?: "",
-                    quality = 0,
+                    quality = quality,
                     headers = linkHeaders, type = ExtractorLinkType.M3U8,
                 ))
-                if (emitGapMs > 0) delay(emitGapMs)
-                if (subsOnlyForServerId == null || raw.serverId == subsOnlyForServerId) {
-                    r.master?.subtitles?.forEach { sub ->
-                        sub.uri?.let { emitSub(sub.language ?: sub.name, ManifestKit.resolveUrl(raw.url, it), raw.serverName) }
-                    }
-                }
             } else {
                 onLink(ExtractorLink(
                     source = label, name = label,
                     url = raw.url, referer = raw.referer ?: "",
-                    quality = 0,
+                    quality = quality,
                     headers = linkHeaders, type = ExtractorLinkType.VIDEO,
                 ))
-                if (emitGapMs > 0) delay(emitGapMs)
             }
         }
-        return subLangs.toSet()
+        return emitted
+    }
+
+    /**
+     * Quality floor (user spec Sept 2026): a FIXED (non-HLS) stream whose
+     * resolved height is a KNOWN value below 720p is dropped. Adaptive HLS
+     * masters always pass (they ABR-ramp to their best rendition even when
+     * the master header reads low/0) and unknown heights (0) can't be proven
+     * sub-720, so they stay. Pure function — unit-tested in NeutralOrderTest.
+     */
+    fun passesQualityFloor(isAdaptive: Boolean, height: Int): Boolean {
+        if (isAdaptive) return true
+        if (height <= 0) return true
+        return height >= 720
     }
 
     // ------------------------------------------------------------------
@@ -808,11 +555,10 @@ object StreamEngine {
         val direct = harvestUrls(unwrapped)
         if (direct.isNotEmpty()) {
             Log.d("IndStream", "${spec.id}: direct harvest found ${direct.size} urls")
-            val subs = grabSubtitles(unwrapped)
             val result = direct.map { url ->
                 val probed = HttpKit.probeSpeed(url, referer)
                 val pri = probeAudio(url, referer)
-                RawStream(spec.id, spec.name, url, url.contains(".m3u8", ignoreCase = true), referer, 0, probed, subs,
+                RawStream(spec.id, spec.name, url, url.contains(".m3u8", ignoreCase = true), referer, 0, probed,
                     audioPriority = pri, audioLabel = audioLabelFor(pri))
             }
             okServer(spec, start, "direct harvest", result.size)
@@ -823,9 +569,8 @@ object StreamEngine {
 
         // 4. CloudStream extractor registry (VidSrc, 2embed, embed.su, MyFlixer, etc.)
         val regLinks = mutableListOf<ExtractorLink>()
-        val regSubs = mutableListOf<SubtitleFile>()
         val regOk = runCatching {
-            loadExtractor(url = embedUrl, referer = referer, subtitleCallback = { regSubs.add(it) }, callback = { regLinks.add(it) })
+            loadExtractor(url = embedUrl, referer = referer, subtitleCallback = { }, callback = { regLinks.add(it) })
         }.getOrDefault(false)
         // Also try the deepest unwrapped URL ï¿½ most embed chains register a
         // CloudStream extractor on the INNER host (the actual player), not the
@@ -833,7 +578,7 @@ object StreamEngine {
         // player's CORS / origin check.
         if (unwrappedUrl != embedUrl) {
             runCatching {
-                loadExtractor(url = unwrappedUrl, referer = embedUrl, subtitleCallback = { regSubs.add(it) }, callback = { regLinks.add(it) })
+                loadExtractor(url = unwrappedUrl, referer = embedUrl, subtitleCallback = { }, callback = { regLinks.add(it) })
             }
         }
         if (regLinks.isNotEmpty()) {
@@ -842,7 +587,6 @@ object StreamEngine {
                 val probed = HttpKit.probeSpeed(link.url, link.referer)
                 val pri = if (link.url.contains(".m3u8", ignoreCase = true)) probeAudio(link.url, link.referer) else 0
                 RawStream(spec.id, spec.name, link.url, link.type == ExtractorLinkType.M3U8, link.referer, link.quality, probed,
-                    regSubs.map { it.lang to it.url },
                     audioPriority = pri, audioLabel = audioLabelFor(pri))
             }
             okServer(spec, start, "extractor registry", result.size)
@@ -855,11 +599,10 @@ object StreamEngine {
         val jsUrls = harvestJsUrls(unwrapped)
         if (jsUrls.isNotEmpty()) {
             Log.d("IndStream", "${spec.id}: js harvest found ${jsUrls.size} urls")
-            val subs = grabSubtitles(unwrapped)
             val result = jsUrls.map { url ->
                 val probed = HttpKit.probeSpeed(url, referer)
                 val pri = probeAudio(url, referer)
-                RawStream(spec.id, spec.name, url, url.contains(".m3u8", ignoreCase = true), referer, 0, probed, subs,
+                RawStream(spec.id, spec.name, url, url.contains(".m3u8", ignoreCase = true), referer, 0, probed,
                     audioPriority = pri, audioLabel = audioLabelFor(pri))
             }
             okServer(spec, start, "js config harvest", result.size)
@@ -872,24 +615,18 @@ object StreamEngine {
         val videoSrc = harvestVideoSource(unwrapped, embedUrl)
         if (videoSrc != null) {
             Log.d("IndStream", "${spec.id}: video tag found: $videoSrc")
-            val subs = grabSubtitles(unwrapped)
             val probed = HttpKit.probeSpeed(videoSrc, referer)
             val pri = probeAudio(videoSrc, referer)
             okServer(spec, start, "video tag", 1)
-            return listOf(RawStream(spec.id, spec.name, videoSrc, videoSrc.contains(".m3u8", ignoreCase = true), referer, 0, probed, subs,
+            return listOf(RawStream(spec.id, spec.name, videoSrc, videoSrc.contains(".m3u8", ignoreCase = true), referer, 0, probed,
                 audioPriority = pri, audioLabel = audioLabelFor(pri)))
         } else {
             Log.d("IndStream", "${spec.id}: no video tag")
         }
 
-        // 7. Subtitle-only fallback
-        val subs = grabSubtitles(unwrapped)
-        if (subs.isNotEmpty()) {
-            Log.d("IndStream", "${spec.id}: subtitles only (${subs.size})")
-            okServer(spec, start, "subtitles only", 0)
-            return listOf(RawStream(spec.id, spec.name, "", false, referer, subtitles = subs))
-        }
-
+        // (No subtitle-only fallback carrier: server captions are not emitted —
+        //  the SubtilesProvider provider is the only subtitle source, user spec
+        //  Sept 2026. A page with no stream is a failure like any other.)
         failServer(spec, "no harvestable stream across full pipeline")
         return emptyList()
     }
@@ -911,7 +648,7 @@ object StreamEngine {
     private fun okServer(spec: ServerSpec, start: Long, stage: String, streamCount: Int) {
         val ms = System.currentTimeMillis() - start
         Log.d("IndStream", "${spec.id}: OK via $stage, $streamCount streams in ${ms}ms")
-        HealthMonitor.recordSuccess(spec.id, ms, null)
+        HealthMonitor.recordSuccess(spec.id)
     }
 
     /** Returns audio label for the given priority. */
@@ -1003,22 +740,8 @@ object StreamEngine {
             return emptyList()
         }
 
-        // Captions live at stream.captions (new shape) or root.captions (legacy).
-        // The `language` field carries the display name — often a NATIVE-SCRIPT
-        // string (اُردُو / বাংলা / العربية / 中文 …), verified live Sept 2026.
-        // `lang`/`name` do NOT exist on the current shape; reading them first is
-        // what made every track show as a numbered "English 1..10" duplicate.
-        val subs = (stream.optJSONArray("captions") ?: root.optJSONArray("captions"))?.let { arr ->
-            (0 until arr.length()).mapNotNull { i ->
-                val c = arr.optJSONObject(i) ?: return@mapNotNull null
-                val u = c.optString("url").takeIf { it.isNotBlank() } ?: return@mapNotNull null
-                val lang = c.optString("language")
-                    .ifBlank { c.optString("lang") }
-                    .ifBlank { c.optString("name") }
-                    .ifBlank { "English" }
-                LinkNaming.canonicalSubtitleName(lang) to u
-            }
-        } ?: emptyList()
+        // (Server captions are NOT collected — the SubtilesProvider provider is
+        //  the only subtitle source, user spec Sept 2026.)
 
         // New shape (Sept 2026, sourceId mwVault/mbVault): stream.qualities maps
         // "360"/"480"/"720"/"1080" -> {type:"mp4", url (signed, TTL 3600),
@@ -1036,10 +759,10 @@ object StreamEngine {
                 (0 until n.length()).mapNotNull { i ->
                     val key = n.optString(i)
                     val height = key.toIntOrNull() ?: 0
-                    // All qualities pass through here (user spec Sept 2026: the
-                    // ≥720 gate moved to AUTO-PLAY selection — the server list
-                    // stays unrestricted so 360/480 entries still surface for
-                    // manual pick / Hindi preference / bandwidth-limited titles).
+                    // Quality floor note (user spec Sept 2026 rewrite #2): the
+                    // emit() quality floor now drops KNOWN sub-720 progressive
+                    // entries (360/480 mp4) at emission; adaptive masters are
+                    // always kept.
                     val q = qualities.optJSONObject(key) ?: return@mapNotNull null
                     val url = q.optString("url").takeIf { it.isNotBlank() } ?: return@mapNotNull null
                     Triple(height, url, q)
@@ -1055,7 +778,6 @@ object StreamEngine {
                         isM3u8 = false,
                         referer = null,
                         qualityHint = height,
-                        subtitles = subs,
                         extraHeaders = VidlinkSource.qualityPlaybackHeaders(q),
                     )
                 }
@@ -1090,7 +812,6 @@ object StreamEngine {
                 isM3u8 = master != null || masterUrl.contains(".m3u8", ignoreCase = true),
                 referer = null,
                 qualityHint = height,
-                subtitles = subs,
                 audioPriority = pri,
                 audioLabel = audioLabelFor(pri),
                 inlineManifest = masterText?.takeIf { master != null },
@@ -1331,7 +1052,6 @@ object StreamEngine {
                     serverId = spec.id, serverName = spec.name,
                     url = s.url, isM3u8 = isHls,
                     referer = null, qualityHint = 0, // adaptive master; heights come from variants
-                    subtitles = fetched.subtitles,
                     audioPriority = 4, audioLabel = "Hindi",
                     extraHeaders = VideasySource.apiHeaders(),
                 )
@@ -1560,18 +1280,8 @@ object StreamEngine {
                         (d.await() ?: org.json.JSONObject()) to (p.await() ?: org.json.JSONObject())
                     }
 
-                    // The server's OWN subtitle tracks ride in the play
-                    // response: subtitles[] {url, lanName|lan} (CSX-shape
-                    // verified; user spec Sept 2026: take what servers give).
-                    val subjectSubs = unwrapData(playObj).optJSONArray("subtitles")?.let { arr ->
-                        (0 until arr.length()).mapNotNull { i ->
-                            val s = arr.optJSONObject(i) ?: return@mapNotNull null
-                            val u = s.optString("url").takeIf { it.isNotBlank() } ?: return@mapNotNull null
-                            val lang = s.optString("lanName").ifBlank { s.optString("lan") }
-                                .ifBlank { s.optString("language") }.ifBlank { "English" }
-                            lang to u
-                        }
-                    } ?: emptyList()
+                    // (Server subtitle tracks in the play response are ignored:
+                    //  SubtilesProvider is the only subtitle provider.)
 
                     fun addStreams(arr: org.json.JSONArray?, dash: Boolean): List<RawStream> {
                         if (arr == null) return emptyList()
@@ -1594,7 +1304,6 @@ object StreamEngine {
                                 isM3u8 = url.contains(".m3u8", ignoreCase = true) || dash,
                                 referer = refererBase,
                                 qualityHint = resolution,
-                                subtitles = subjectSubs,
                                 audioPriority = if (isHindi) 4 else 2,
                                 audioLabel = language ?: "",
                             )
@@ -1716,10 +1425,9 @@ object StreamEngine {
 
         // CloudStream extractor registry on the inner player host.
         val regLinks = mutableListOf<ExtractorLink>()
-        val regSubs = mutableListOf<SubtitleFile>()
         runCatching {
             loadExtractor(url = unwrappedUrl, referer = link,
-                subtitleCallback = { regSubs.add(it) }, callback = { regLinks.add(it) })
+                subtitleCallback = { }, callback = { regLinks.add(it) })
         }
         if (regLinks.isNotEmpty()) {
             return regLinks.map { l ->
@@ -1727,7 +1435,6 @@ object StreamEngine {
                     serverId = spec.id, serverName = spec.name,
                     url = l.url, isM3u8 = l.type == ExtractorLinkType.M3U8,
                     referer = l.referer, qualityHint = l.quality,
-                    subtitles = regSubs.map { it.lang to it.url },
                     audioPriority = audioPriority, audioLabel = audioLabel,
                 )
             }
@@ -1787,9 +1494,6 @@ object StreamEngine {
             return emptyList()
         }
 
-        val subs = mutableListOf<Pair<String, String>>()
-        // The page JS maps /api/subtitles â€” the JSON carries none, skip.
-
         val playUrl = json.optString("playUrl").takeIf { it.isNotBlank() }
         val kind = json.optString("kind").ifBlank { "hls" }
         val audioTracks = json.optJSONArray("audioTracks")
@@ -1806,7 +1510,7 @@ object StreamEngine {
                 out += RawStream(
                     serverId = spec.id, serverName = spec.name,
                     url = url, isM3u8 = url.contains(".m3u8", true) || kind == "hls",
-                    referer = null, qualityHint = 0, subtitles = subs,
+                    referer = null, qualityHint = 0,
                     audioPriority = if (isHindi) 4 else 1,
                     audioLabel = if (isHindi) "Hindi" else label,
                     extraHeaders = mapOf("User-Agent" to NHD_UA),
@@ -1816,7 +1520,7 @@ object StreamEngine {
             out += RawStream(
                 serverId = spec.id, serverName = spec.name,
                 url = playUrl, isM3u8 = kind != "mp4",
-                referer = null, qualityHint = 0, subtitles = subs,
+                referer = null, qualityHint = 0,
                 extraHeaders = mapOf("User-Agent" to NHD_UA),
             )
         }
@@ -1875,13 +1579,6 @@ object StreamEngine {
         // measures the real master height instead of falsely claiming 1080p.
         val fileNameHeight = Regex("""\[(\d{3,4})p\]""", RegexOption.IGNORE_CASE)
             .find(fileName)?.groupValues?.get(1)?.toIntOrNull() ?: 0
-        val subs = data.optJSONArray("default_subs")?.let { arr ->
-            (0 until arr.length()).mapNotNull { i ->
-                val s = arr.optJSONObject(i) ?: return@mapNotNull null
-                val u = s.optString("url").takeIf { it.isNotBlank() } ?: return@mapNotNull null
-                (s.optString("lang").ifBlank { s.optString("code").ifBlank { "English" } }) to u
-            }
-        } ?: emptyList()
 
         val out = mutableListOf<RawStream>()
         for (i in 0 until urls.length()) {
@@ -1889,7 +1586,7 @@ object StreamEngine {
             out += RawStream(
                 serverId = spec.id, serverName = spec.name,
                 url = u, isM3u8 = true, referer = referer,
-                qualityHint = fileNameHeight, subtitles = subs,
+                qualityHint = fileNameHeight,
             )
         }
         Log.d("VaPlayer", "got ${out.size} master playlists")
@@ -1944,7 +1641,7 @@ object StreamEngine {
                 url = decrypted,
                 isM3u8 = decrypted.contains(".m3u8", true) || sd.optString("type") == "hls",
                 referer = "https://vidrock.ru/",
-                qualityHint = 0, subtitles = emptyList(),
+                qualityHint = 0,
                 audioPriority = if (isHindi) 4 else 1,
                 audioLabel = lang.ifBlank { "" },
             )
@@ -2036,7 +1733,7 @@ object StreamEngine {
                 serverId = spec.id, serverName = "${spec.name} ${svName.substringAfter("Server ")}".trim(),
                 url = streamUrl,
                 isM3u8 = playJson.optString("type") == "hls" || streamUrl.contains(".m3u8", true),
-                referer = null, qualityHint = 0, subtitles = emptyList(),
+                referer = null, qualityHint = 0,
                 audioPriority = if (isHindi) 4 else 1,
                 audioLabel = lang,
             )
@@ -2270,20 +1967,12 @@ object StreamEngine {
             val decResult = runCatching { org.json.JSONObject(decText) }.getOrNull()
                 ?.optJSONObject("result") ?: continue
             val m3u8 = decResult.optString("url").takeIf { it.startsWith("http") } ?: continue
-            val subTracks = decResult.optJSONArray("tracks")?.let { arr ->
-                (0 until arr.length()).mapNotNull { j ->
-                    val t = arr.optJSONObject(j) ?: return@mapNotNull null
-                    val u = t.optString("file").takeIf { it.isNotBlank() } ?: return@mapNotNull null
-                    (t.optString("label").ifBlank { "English" }) to u
-                }
-            } ?: emptyList()
 
             out += RawStream(
                 serverId = spec.id,
                 serverName = "${spec.name} $srvName",
                 url = m3u8, isM3u8 = true, referer = referer,
                 qualityHint = 0, // adaptive: emit() measures the real master height
-                subtitles = subTracks,
                 audioPriority = 0, // muxed audio — no EXT-X-MEDIA tracks to probe
                 audioLabel = "",
             )
@@ -2474,14 +2163,8 @@ object StreamEngine {
             Log.w("IndStream", "${spec.id}: missing \"source\" (${if (nullSource) "null -- id not known to this server" else "absent"}); root keys=${namesOf(root)}")
             return emptyList()
         }
-        val subs = root.optJSONArray("subtitles")?.let { arr ->
-            (0 until arr.length()).mapNotNull { i ->
-                val s = arr.optJSONObject(i) ?: return@mapNotNull null
-                val label = s.optString("label").ifBlank { null } ?: return@mapNotNull null
-                val file = s.optString("file").ifBlank { null } ?: return@mapNotNull null
-                label to file
-            }
-        } ?: emptyList()
+        // (root.subtitles is not collected — SubtilesProvider is the only
+        //  subtitle provider, user spec Sept 2026.)
 
         val out = mutableListOf<RawStream>()
 
@@ -2502,7 +2185,7 @@ object StreamEngine {
             out.add(RawStream(
                 serverId = spec.id, serverName = spec.name,
                 url = url, isM3u8 = isHls, referer = referer,
-                qualityHint = height, measuredKbps = probed, subtitles = subs,
+                qualityHint = height, measuredKbps = probed,
                 audioPriority = pri, audioLabel = audioLabelFor(pri), inlineManifest = inlineManifest,
             ))
         }
@@ -2518,7 +2201,7 @@ object StreamEngine {
                 RawStream(
                     serverId = spec.id, serverName = spec.name,
                     url = qUrl, isM3u8 = false, referer = referer,
-                    qualityHint = height, measuredKbps = probed, subtitles = subs,
+                    qualityHint = height, measuredKbps = probed,
                     audioPriority = 0, audioLabel = "",
                 )
             }.let { out.addAll(it) }
@@ -2580,17 +2263,6 @@ object StreamEngine {
         return relUrl(baseUrl, src).takeIf { it.startsWith("http") }
     }
 
-    /** Extract subtitle tracks from JWPlayer-style tracks array. */
-    private fun grabSubtitles(text: String?): List<Pair<String, String>> {
-        if (text.isNullOrBlank()) return emptyList()
-        val out = mutableListOf<Pair<String, String>>(); val seen = HashSet<String>()
-        Regex("""\{[^{}]*?"file"\s*:\s*"([^"]+)"[^{}]*?"label"\s*:\s*"([^"]+)"[^{}]*?\}""").findAll(text).forEach { m ->
-            val f = m.groupValues[1].replace("\\/", "/"); val l = m.groupValues[2]
-            if (f.isNotBlank() && l.isNotBlank() && seen.add(f)) out.add(l to f)
-        }
-        return out
-    }
-
     private fun relUrl(base: String, path: String): String {
         if (path.startsWith("http", ignoreCase = true)) return path
         if (path.startsWith("//")) return "https:$path"
@@ -2629,13 +2301,11 @@ object StreamEngine {
     private const val FARM_REPROBE_COOLDOWN_MS = 15_000L
 
     /**
-     * Per-title cache of resolved streams, populated by the fast-start background
-     * pull. Two jobs:
-     *   1. Instant replay — a re-tap (or switching back) emits cached links
-     *      immediately so playback starts with zero head.
-     *   2. Background landing zone — the slower servers that were still resolving
-     *      when playback started keep landing here, so the next play already has
-     *      the full farm without re-waiting.
+     * Per-title cache of resolved streams. Two jobs:
+     *   1. Instant replay — a re-tap (or switching back) emits the FULL server
+     *      list immediately with zero head.
+     *   2. Background landing zone — servers that resolve while the video plays
+     *      keep landing here, so the next open already has the full farm.
      * Short TTL: stream URLs are signed/expiring, so stale links are never served
      * for long.
      */
@@ -2663,66 +2333,22 @@ object StreamEngine {
         fun clear() = map.clear()
     }
 
-    /** Fill window (legacy): after the first server's link is emitted, keep pulling fast
-     *  servers for this long so the player gets a few alternates, then return so
-     *  playback starts. The remaining (slower) servers keep resolving in the
-     *  background and land in [FastStartCache] for instant replay. */
-    const val FAST_START_FILL_MS: Long = 2_500L
-
     /** Hard cap on how long [IndStreamProvider.loadLinks] waits for the FIRST
-     *  batch before returning, regardless of whether the farm has finished.
-     *  Safety net so a totally dead farm still surfaces "no link found"
-     *  instead of hanging. */
+     *  server batch before giving up. Safety net so a totally dead farm still
+     *  surfaces "no link found" instead of hanging. */
     const val FAST_START_MAX_MS: Long = 45_000L
 
-    /** Trickle window (instant-play model): frame 1 starts the moment the
-     *  FIRST server resolves (the fastest host normally answers in well under
-     *  a second). After that, the remaining servers keep resolving and their
-     *  links are pushed to the player for up to this long — the server list
-     *  keeps growing in the background — while capped/staggered so the
-     *  running stream keeps the bandwidth. 4s was too short: slow multi-chain
-     *  Hindi hosts (MovieBox detail+download+play chain, Allmovieland search →
-     *  card → play → playlist chain) resolve in 4-12s+ and only ever landed in
-     *  [FastStartCache], never in the CURRENT episode's server list (user
-     *  report: "many servers do not come in background … keep pulling all
-     *  servers, specially Hindi"). 25s covers every server's timeoutSec
-     *  (longest = 20s + the IMDB lookup the IMDB-keyed hosts wait on) while
-     *  staggered emission keeps the running stream's bandwidth free. Past
-     *  this window arrivals land in [FastStartCache] only (instant replay on
-     *  the next tap). */
-    const val FAST_START_TRICKLE_MS: Long = 25_000L
-
-    /** Pacing between links pushed during the trickle window: a link every
-     *  ~150ms is plenty for the UI and guarantees no burst of manifest fetches
-     *  (or player-channel traffic) competes with the first second of playback. */
-    const val TRICKLE_EMIT_GAP_MS: Long = 150L
-
-    /** Hold window (user spec Sept 2026, Phase 1 → Phase 2): after the FIRST
-     *  server's batch lands, pause the player for this long so a fair live
-     *  sample can be probed in parallel — TTFB, resolve time, master bestHeight
-     *  — then auto-play the best ≥720 candidate. The user's product range is
-     *  1–2s; 1.5s is the sweet spot between "first frame speed" and
-     *  "enough samples to rank honestly". Hard-capped by [FAST_START_MAX_MS]. */
-    const val FAST_START_SETTLE_MS: Long = 1_500L
-
-    /** Sync-safe subtitle fallback wait (user plan Sept 2026): the
-     *  [SubtitleFallback] top-up fires this long after the FIRST stream
-     *  arrival — ~0.5s after the settle-window winner emit — so the played
-     *  server's own caption tracks (if any) reach the player first and the
-     *  fallback fills only their language gaps. Fallback tracks are
-     *  title-keyed to a standard cut and stay sync-safe after any in-player
-     *  server switch. */
-    const val SUB_FALLBACK_WAIT_MS: Long = 2_000L
-
-    /** Live-probe budget per candidate during the settle window. One round
-     *  trip per stream; tight enough that 16 candidates complete inside the
-     *  hold even on a slow link. */
-    const val PROBE_TTFB_BUDGET_MS: Long = 600L
-
-    /** Master-probe budget (HLS master fetch does triple duty: TTFB + best
-     *  variant height + audio renditions — stored into [RawStream.inlineManifest]
-     *  so `emit()` skips its own re-fetch). */
-    const val PROBE_MASTER_BUDGET_MS: Long = 800L
+    /** Live fill window (user spec Sept 2026 rewrite #2): loadLinks STAYS
+     *  ALIVE for at most this long, pushing every server that answers into
+     *  the live change-server list — the list keeps growing while the player
+     *  is open (the app only records callback pushes while loadLinks runs, so
+     *  the old settle-and-return model froze it at the first arrivals).
+     *  Single tuning knob: longer captures more slow servers live
+     *  (MovieBox/Allmovieland finish ~10-20s) but keeps the loading spinner
+     *  up; shorter plays sooner and leaves the slowest servers to the
+     *  FastStartCache replay on re-open. [FAST_START_MAX_MS] remains the
+     *  hard ceiling for a totally dead farm. */
+    const val LIVE_FILL_MS: Long = 15_000L
 }
 
 

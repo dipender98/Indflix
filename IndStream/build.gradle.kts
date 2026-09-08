@@ -3,7 +3,7 @@ import java.util.Properties
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
-version = 6
+version = 7
 
 plugins {
     id("com.lagradost.cloudstream3.gradle")
@@ -33,6 +33,18 @@ android {
 dependencies {
     val cloudstream by configurations
     cloudstream("com.lagradost:cloudstream3:pre-release")
+
+    // The recloudstream gradle plugin materializes the CloudStream classes jar
+    // at <gradle home>/caches/cloudstream/... and wires it into `compileOnly`
+    // via a file dependency — which is why `cloudstream3:pre-release` shows
+    // FAILED in dependency reports yet compilation works. Unit tests that touch
+    // ExtractorLink (NeutralOrderTest asserts emitted link quality/shape) need
+    // the SAME jar on the test classpath. Run any compile task once to
+    // materialize it.
+    val csJar = File(project.gradle.gradleUserHomeDir, "caches/cloudstream/cloudstream/cloudstream.jar")
+    if (csJar.exists()) {
+        testImplementation(files(csJar))
+    }
 }
 
 // The CloudStream gradle plugin's `make` dexes the unshrunk classes with plain

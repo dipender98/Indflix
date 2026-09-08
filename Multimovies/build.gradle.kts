@@ -3,7 +3,7 @@ import java.util.Properties
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
-version = 5
+version = 6
 
 plugins {
     id("com.lagradost.cloudstream3.gradle")

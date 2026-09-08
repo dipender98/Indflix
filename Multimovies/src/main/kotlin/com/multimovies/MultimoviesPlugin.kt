@@ -9,8 +9,8 @@
  *  - [MultimoviesProvider]  MainAPI â€” scrapes multimovies.motorcycles
  *                           (search / load / loadLinks, dooplayer servers).
  *  - [MultiSourcePuller]    parallel-pull engine: races every source with a
- *                           per-source timeout, unwraps embeds, sorts links
- *                           by latency + Hindi-audio preference.
+ *                           per-source timeout, unwraps embeds, pushes links
+ *                           live in arrival order (no ranking).
  *  - [GlobalSources]        registry of id-keyed global embed sources
  *                           (2embed, VidSrc, 111Movies, ...).
  *
@@ -35,8 +35,6 @@ import com.lagradost.cloudstream3.utils.loadExtractor
 import java.net.URLEncoder
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicBoolean
-import kotlin.math.min
 import kotlinx.coroutines.*
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Deferred
@@ -120,19 +118,18 @@ internal fun parseRating(item: Element): Double? {
         .takeIf { it.isNotBlank() }?.toDoubleOrNull()
 }
 
-/** Server names as they appear on the Multimovies "Video Sources" list, plus the
- *  direct global sources, ordered by speed/reliability (fastest/most reliable
- *  first). Verified Aug 2026: live diagnostic confirmed Cineverse (current CDN
- *  vibuxer.com, serve_m3u8=1 proxy), nxsha (.cc/.space) and nhdapi respond;
- *  the legacy modiplay.com / gdmirror.com / nxsha.com back-ends are all dead.
- *  Cineverse is the verified fast + Hindi source.
+/** Server names as they appear on the Multimovies "Video Sources" list, used
+ *  ONLY to pick which [MultimoviesProvider.EMBED_PREFETCH_COUNT] dooplayer
+ *  servers the movie detail page resolves in the BACKGROUND (a warm-up
+ *  optimization — the prefetch cache, never the play path). Play-time
+ *  behavior is fully NEUTRAL (user spec Sept 2026 rewrite #2): every source
+ *  launches in parallel, links push in ARRIVAL order, and the user's own
+ *  CloudStream quality/source profile decides what auto-plays.
  *
  *  Nxsha (index 1) expands internally into its own server fleet resolved by
  *  [NxshaExtractor] through nxsha.space's encrypted /api/servers+/api/sources:
- *  Nitro (fastest), MbPly, MhPly, Citadel, AwsPly, StremFx, VidHindi(4K embed),
- *  CastVid, Lolly, Prvibd, Stvvid, Ophm, AsiaLug, TunWatch, Gbru. Nitro-first
- *  ordering lives in NxshaExtractor.orderServers; SourceSpeedTracker re-ranks
- *  after the first load.
+ *  Nitro, MbPly, MhPly, Citadel, AwsPly, StremFx, VidHindi(4K embed),
+ *  CastVid, Lolly, Prvibd, Stvvid, Ophm, AsiaLug, TunWatch, Gbru.
  *
  *  The tail lists the id-based GlobalSources (2embed.cc, VidSrc, 111Movies) —
  *  verified-responding public hosts; Nxsha's own sources match the "nxsha"
@@ -162,12 +159,19 @@ private val SEARCH_ITEMS_SELECTOR = "div#archive-content div.item, div.search-pa
  * rotates its live domain every few days (announced on the multimovies.wtf gateway);
  * [MultimoviesDomainResolver] keeps mainUrl pointed at the current mirror.
  *
- * Source handling policy (per project requirements):
- *  - Multiple streaming sources are pulled in PARALLEL.
- *  - Each source has a hard TIMEOUT of ~30 seconds (SOURCE_TIMEOUT_MS).
- *  - Sources are tried in PRIORITY order (reliable + fast first). The priority list
- *    is defined in [SOURCE_PRIORITY] and is used both to order parallel launches and
- *    to sort the returned links.
+ * Source handling policy (user spec Sept 2026 rewrite #2 — NEUTRAL):
+ *  - Multiple streaming sources are pulled in PARALLEL with a per-source
+ *    TIMEOUT (SOURCE_TIMEOUT_MS).
+ *  - EVERY resolved link is pushed to the player immediately, in ARRIVAL
+ *    order — no plugin-side prioritization of any kind. loadLinks stays
+ *    alive for [MultimoviesProvider.LIVE_FILL_MS] so the change-server list
+ *    keeps growing while the player is open.
+ *  - [SOURCE_PRIORITY] ranks only which servers a movie detail page
+ *    PREFETCHES in the background (warm-up, never the play path).
+ *  - KNOWN sub-720p fixed files are dropped ([passesQualityFloor]); adaptive
+ *    (m3u8) links always pass.
+ *  - Server captions are ignored; the OpenSubtitles fallback
+ *    ([SubtilesProvider]) is the only subtitle source.
  */
 class MultimoviesProvider : MainAPI() {
 
@@ -260,38 +264,32 @@ class MultimoviesProvider : MainAPI() {
          *  prefetch resolves ahead of the Play tap. */
         const val EMBED_PREFETCH_COUNT = 2
 
-        /** Fill window (user spec Sept 2026: "keep pulling all servers, specially
-         *  the Hindi ones"): after the FIRST link starts playback, every source
-         *  that keeps resolving for this long is still pushed to the player live —
-         *  the server list keeps growing while the user watches. 2.5s was too
-         *  short: the slow multi-server sources (Nxsha's fleet, VidEm, 2embed…)
-         *  finished after the window and only ever landed in [FastStartCache], so
-         *  the CURRENT play never saw them (same complaint as IndStream's
-         *  MovieBox). loadLinks returns the moment the first link is pushed; a
-         *  detached finalizer closes this window, caches the full sorted list for
-         *  instant replay, and tops up subtitles. */
-        const val FAST_START_FILL_MS = 25_000L
+        /** Fill window (user spec Sept 2026 rewrite #2, "live-growing server
+         *  list"): loadLinks STAYS ALIVE and pushes EVERY resolved link to
+         *  the player until all pulls finish or this cap elapses — whichever
+         *  first. The app records callback pushes only while loadLinks runs,
+         *  so returning early (the old detached-fill model) froze the
+         *  change-server list at the first arrivals. Single tuning knob:
+         *  longer captures more slow servers live (Nxsha's fleet,
+         *  MovieBox-class hosts finish ~10-20s) but keeps the loading spinner
+         *  up; shorter plays sooner and leaves the slowest servers to the
+         *  [FastStartCache] replay on re-open. Hard-capped by
+         *  [FAST_START_MAX_MS]. */
+        const val LIVE_FILL_MS = 15_000L
 
         /** Hard cap on how long [loadLinks] waits before returning, regardless of
          *  whether the farm has finished. Safety net so a totally dead farm still
          *  surfaces "no link found" instead of hanging. */
         const val FAST_START_MAX_MS = 45_000L
 
-        /** Hold window (user spec Sept 2026, ported from IndStream): after the
-         *  FIRST link lands, pause the player for this long so a fair live
-         *  sample can be probed in parallel — TTFB, master bestHeight — then
-         *  auto-play the best 1080p-first candidate. User product range 1–2s;
-         *  1.5s is the sweet spot. Hard-capped by [FAST_START_MAX_MS]. */
-        const val FAST_START_SETTLE_MS = 1_500L
-
-        /** Live-probe budget per candidate during the hold window (direct-file
-         *  ranged GET). One round trip per stream; tight enough that all
-         *  candidates complete inside the hold. */
-        const val PROBE_TTFB_BUDGET_MS = 600L
-
-        /** Master-probe budget (HLS master fetch does triple duty: TTFB + best
-         *  variant height via [AutoPlayPicker.bestMasterHeight]). */
-        const val PROBE_MASTER_BUDGET_MS = 800L
+        /** Quality floor (user spec Sept 2026 rewrite #2): a FIXED (non-HLS)
+         *  stream whose resolved quality is a KNOWN height below 720p is
+         *  dropped at emission. Adaptive (m3u8) masters ALWAYS pass — they
+         *  ABR-ramp to their best rendition even when the measured height
+         *  reads low/0 — and unknown heights (0) can't be proven sub-720.
+         *  Pure function — unit-tested in Test/QualityFloorMmTest.kt. */
+        fun passesQualityFloor(isAdaptive: Boolean, height: Int): Boolean =
+            isAdaptive || height <= 0 || height >= 720
 
         /** Max number of detail-page Documents cached in memory. Beyond this,
          *  oldest entries are evicted when a new page is fetched. */
@@ -933,7 +931,6 @@ class MultimoviesProvider : MainAPI() {
         if (FastStartCache.get(pageUrl)?.isNotEmpty() == true) return
         val sources = buildGlobalSources(meta)
         if (sources.isEmpty()) return
-        val emitted = java.util.concurrent.atomic.AtomicBoolean(false)
         searchScope.launch {
             runCatching {
                 sources.forEach { g ->
@@ -942,20 +939,22 @@ class MultimoviesProvider : MainAPI() {
                         Collections.synchronizedSet(HashSet()),
                         Collections.synchronizedList(mutableListOf()),
                         { _ -> }, { },
-                        // Closed gate: pre-warm NEVER emits to a player — the
+                        // Cache-only: pre-warm NEVER emits to a player — the
                         // gathered links land in FastStartCache only.
-                        linksAccepted = java.util.concurrent.atomic.AtomicBoolean(false),
                         firstLink = null,
                         cacheKey = pageUrl,
+                        cacheOnly = true,
                     )
                 }
-                emitted.set(true)
             }
         }
     }
 
-    /** Resolve the top-priority player servers for [pageUrl] to their final
-     *  post-unwrap URLs. Empty when the page exposes no usable options. */
+    /** Resolve the player servers for [pageUrl] to their final post-unwrap
+     *  URLs. The [SOURCE_PRIORITY] order here only picks WHICH background
+     *  prefetch runs first (warm-up, never the play path); the Play-tap
+     *  pipeline itself is fully neutral. Empty when the page exposes no
+     *  usable options. */
     private suspend fun resolveTopEmbeds(pageUrl: String, doc: Document): List<ResolvedEmbed> {
         val options = parsePlayerOptions(doc, pageUrl)
             .sortedBy { priorityOf(it.first) }
@@ -986,60 +985,37 @@ class MultimoviesProvider : MainAPI() {
     ): Boolean = withDomainRetry(retryIf = { !it }) {
         var meta = SourceMetaCache.get(data)
 
-        // Fast path 1: cached links emit instantly so playback starts right away
-        // (like other plugins). The LinkCache TTL is short (5 min) so stale URLs
-        // don't linger; no liveness probe delays the first frame.
+        // USER SPEC (Sept 2026 rewrite #2): NO plugin-side ranking anywhere —
+        // not on the fresh path, not on replays. The user's CloudStream
+        // quality/source-profile setting alone decides what auto-plays. Server
+        // subtitles are ignored entirely (the OpenSubtitles fallback below is
+        // THE subtitle provider), and KNOWN sub-720p fixed files are dropped
+        // (adaptive masters always pass — see [passesQualityFloor]).
+
+        // Fast path 1: cached links replay instantly, in stored (arrival)
+        // order — no winner pick, no re-sort.
         if (meta != null) {
             LinkCache.get(meta.imdbId, meta.season, meta.episode)?.let { cached ->
                 if (cached.first.isNotEmpty()) {
-                    // Winner-first replay (same 1080p-first pick as the fresh
-                    // path; no new probes — cached quality tags rank the pools).
-                    val links = cached.first
-                    val winner = AutoPlayPicker.pickAutoPlay(links)
-                    if (winner != null) {
-                        runCatching { callback(winner) }
-                        links.forEach { if (it !== winner) runCatching { callback(it) } }
-                    } else {
-                        links.forEach { runCatching { callback(it) } }
-                    }
-                    // Replayed titles must keep their subtitles too — the
-                    // cache stores the normalized server subs (Sept 2026:
-                    // cached replays used to come back subtitle-less).
-                    cached.second.forEach { runCatching { subtitleCallback(it) } }
+                    cached.first.forEach { runCatching { callback(it) } }
                     return@withDomainRetry true
                 }
             }
         }
 
-        // Fast path 1.5: fast-start cache. If a previous play (or a background pull
-        // from a prior visit) already resolved this exact load url, replay those
-        // links instantly so the player starts with zero head. NOTE: link NAMES
-        // ("Cineverse (Hindi)") say nothing about actual caption tracks — a
-        // Hindi-labelled link with no subs must NOT mark Hindi covered here, so
-        // the missing-language check starts from an EMPTY covered set (nothing
-        // was emitted as a subtitle track on this replay) and the fallback
-        // fetches exactly what's wanted. Duplicate tracks can't appear: the
-        // OpenSubtitles responses are stable per title and the fallback has its
-        // own cache.
+        // Fast path 1.5: fast-start cache — a previous play (or a background
+        // pull from a prior visit) already resolved this exact load url.
         FastStartCache.get(data)?.let { cached ->
             if (cached.isNotEmpty()) {
-                // Winner-first replay (mirrors the LinkCache path above).
-                val winner = AutoPlayPicker.pickAutoPlay(cached)
-                if (winner != null) {
-                    runCatching { callback(winner) }
-                    cached.forEach { if (it !== winner) runCatching { callback(it) } }
-                } else {
-                    cached.forEach { runCatching { callback(it) } }
-                }
+                cached.forEach { runCatching { callback(it) } }
                 if (meta != null) {
-                    val missing = SubtitleFallback.missingLanguages(
-                        emptySet(),
-                        SubtitleFallback.desiredLanguages(),
-                    )
-                    if (missing.isNotEmpty()) {
-                        SubtitleFallback.fetch(meta.imdbId, meta.season, meta.episode, missing)
-                            .forEach { runCatching { subtitleCallback(it) } }
-                    }
+                    // Fallback subtitles ARE the subtitle provider (user spec
+                    // Sept 2026): fetch the wanted set on every replay — the
+                    // provider's own cache makes repeats instant.
+                    SubtilesProvider.fetch(
+                        meta.imdbId, meta.season, meta.episode,
+                        SubtilesProvider.desiredLanguages(),
+                    ).forEach { runCatching { subtitleCallback(it) } }
                 }
                 return@withDomainRetry true
             }
@@ -1050,7 +1026,6 @@ class MultimoviesProvider : MainAPI() {
         // is still running (Play tapped early), await it briefly rather than
         // duplicating the network work.
         val awaited = EmbedPrefetchCache.awaitInFlight(data, timeoutMs = 1200L)
-        val prefetched = awaited != null && awaited.isNotEmpty()
         var embeds: List<ResolvedEmbed> = awaited.orEmpty()
 
         if (embeds.isEmpty()) {
@@ -1078,134 +1053,111 @@ class MultimoviesProvider : MainAPI() {
             }
         }
 
-        // Streaming pipeline: every source (global id-based + each dooplayer embed)
-        // is unwrapped and pulled concurrently, so the fastest working source emits
-        // its link first — CloudStream's loading dialog stays visible while slower
-        // sources resolve and populates the source list the user can switch between.
-        //
-        // [firstLink]/[linksAccepted] drive the fast-start: links (and subtitles)
-        // are pushed to the player only while [linksAccepted] is true (the fill
-        // window); once loadLinks returns, it flips false so the still-running
-        // background pulls stop touching the (now-closed) player and only land in
-        // [FastStartCache] for instant replay.
+        // LIVE-FILL pipeline (user spec rewrite #2): every source (global
+        // id-keyed + each dooplayer embed) is pulled concurrently; each
+        // resolved link is pushed to the player THE MOMENT it lands, in
+        // arrival order — no hold window, no buffering, no winner selection.
+        // loadLinks stays alive until every pull answers or [LIVE_FILL_MS]
+        // elapses (the app records callback pushes only while this coroutine
+        // runs), so the change-server list keeps growing while the player is
+        // open instead of freezing at the first 1-2 arrivals. Links keep
+        // landing in [FastStartCache] so a re-open replays the full list.
         val emitted = Collections.synchronizedSet(HashSet<String>())
         val found = Collections.synchronizedList(mutableListOf<ExtractorLink>())
-        val sourceRefs = Collections.synchronizedList(mutableListOf<MultiSourcePuller.Source>())
         val firstLink = CompletableDeferred<Unit>()
-        val linksAccepted = AtomicBoolean(true)
-        // Hold-window state (user spec Sept 2026, ported from IndStream): links
-        // are BUFFERED until the winner is picked, then the gate opens and the
-        // rest flow to the player live for the fill window.
-        //  - playerGate: links/subs reach the player ONLY while true. Opens
-        //    after the auto-play winner is emitted; the fill finalizer closes it.
-        //  - firstArrivalMs: when the first link actually landed (the hold is
-        //    measured from THIS, not from the tap).
-        //  - resolveMsByKey: url → ms from loadLinks start to that link's
-        //    arrival (live-score input, mirrors IndStream's RawStream.resolveMs).
-        //  - playerEmitted: keys already pushed to the player (same key fn as
-        //    emitOne) so the winner is never re-pushed by the drain.
-        //  - pushedSubKeys: player-push dedupe for subtitles, separate from
-        //    emittedSubKeys (which dedupes COLLECTION and keeps running during
-        //    the hold while pushes are gated off).
-        val playerGate = AtomicBoolean(false)
-        val firstArrivalMs = java.util.concurrent.atomic.AtomicLong(Long.MAX_VALUE)
-        val loadStartMs = System.currentTimeMillis()
-        val resolveMsByKey = Collections.synchronizedMap(HashMap<String, Long>())
-        val playerEmitted = Collections.synchronizedSet(HashSet<String>())
-        val pushedSubKeys = Collections.synchronizedSet(HashSet<String>())
-        // Subtitle accounting (user spec Sept 2026): every server-owned
-        // subtitle passes through `trackedSubtitle` — names are canonicalized
-        // ("hin" -> "Hindi", اُردُو -> "Urdu"), duplicates per (lang|url) are
-        // dropped, and the language set is remembered so the OpenSubtitles
-        // fallback can top up precisely what no server carried.
-        val collectedSubs = Collections.synchronizedList(mutableListOf<SubtitleFile>())
-        val coveredSubLangs = Collections.synchronizedSet(HashSet<String>())
-        val emittedSubKeys = Collections.synchronizedSet(HashSet<String>())
-        val trackedSubtitle: (SubtitleFile) -> Unit = { sub ->
-            val canonical = SubtitleServices.canonicalName(sub.lang)
-            if (emittedSubKeys.add("$canonical|${sub.url}")) {
-                coveredSubLangs.add(canonical)
-                val normalized = SubtitleFile(canonical, sub.url)
-                collectedSubs.add(normalized)
-                // Only surface subtitles to the player once the hold window is
-                // over (playerGate open); hold-period tracks are flushed by the
-                // post-winner drain. Later arrivals push live until the fill
-                // window closes, then cache for replay.
-                if (playerGate.get() && pushedSubKeys.add("$canonical|${sub.url}")) {
-                    runCatching { subtitleCallback(normalized) }
+        val labelCounter = ConcurrentHashMap<String, Int>()
+        // Server-caption NO-OP (user spec rewrite #2): extractor caption lists
+        // are ignored everywhere — nothing is collected, cached, or pushed.
+        val noopSubtitle: (SubtitleFile) -> Unit = { }
+
+        val globalSources = buildGlobalSources(meta)
+        // Completion accounting: the pulls run detached so they keep landing
+        // in FastStartCache even after loadLinks returns; this counter lets
+        // the fill wait (and the LinkCache finalizer) react when the farm ends.
+        val remainingPulls = java.util.concurrent.atomic.AtomicInteger(globalSources.size + embeds.size)
+        val allPullsDone = CompletableDeferred<Unit>()
+        if (globalSources.isEmpty() && embeds.isEmpty()) allPullsDone.complete(Unit)
+
+        globalSources.forEach { g ->
+            searchScope.launch {
+                try {
+                    pullSource(g, labelCounter, data, emitted, found, noopSubtitle, callback,
+                        firstLink = firstLink, cacheKey = data)
+                } finally {
+                    if (remainingPulls.decrementAndGet() <= 0) allPullsDone.complete(Unit)
                 }
             }
         }
 
-        // Streaming pipeline with fast-start: every source (global id-based + each
-        // dooplayer embed) is pulled concurrently, launched in priority order so
-        // Cineverse (the reliable/fast Hindi source) starts resolving and emits its
-        // link first; lower-priority fallbacks join as they resolve.
-        //
-        // The pulls run in the detached [searchScope] so they survive this function
-        // returning: the first link is pushed to the player the moment it's ready
-        // (selecting the fastest server in real time), a short fill window collects
-        // a few more fast sources, then loadLinks returns and playback begins while
-        // the slower servers keep resolving into [FastStartCache] for instant replay.
-        // GLOBAL id-keyed sources launch FIRST (user spec: instant play): they
-        // need no page fetch or admin-ajax, so launching them before the
-        // dooplayer embed pulls removes their entire serial head from the first
-        // frame. Previously they waited behind the embed doc + admin-ajax chain
-        // — the biggest chunk of the old 5-7s TV startup (TV has no prefetch).
-        val globalSources = buildGlobalSources(meta)
-        val labelCounter = ConcurrentHashMap<String, Int>()
-        val globalJobs = globalSources.map { g ->
-            sourceRefs.add(g)
+        // Embed pulls: launch order is the site's own option order (no
+        // priority re-ranking — user spec rewrite #2: neutral). Arrival
+        // order of the LINKS decides list position, not launch order.
+        embeds.forEach { e ->
             searchScope.launch {
-                pullSource(g, labelCounter, data, emitted, found, trackedSubtitle, callback,
-                    linksAccepted = linksAccepted, firstLink = firstLink, cacheKey = data,
-                    playerGate = playerGate, firstArrivalMs = firstArrivalMs, loadStartMs = loadStartMs,
-                    resolveMsByKey = resolveMsByKey, playerEmitted = playerEmitted)
-            }
-        }
-        val orderedEmbeds = embeds.sortedBy { priorityOf(it.name) }
-
-        val embedJobs = orderedEmbeds.map { e ->
-            searchScope.launch {
-                val finalUrl = MultiSourcePuller.unwrapEmbed(e.url, referer = data, headers = commonHeaders)
-                // After unwrap, the URL may now point at a downstream CDN
-                // (Cineverse -> vibuxer / serve_m3u8 proxy). Augment headers
-                // with the host-specific pair the proxy requires so the
-                // link the player replays against doesn't 403.
-                val srcHeaders = commonHeaders + MultiSourcePuller.headersFor(finalUrl, referer = data)
-                val src = MultiSourcePuller.Source(
-                    name = e.name,
-                    url = finalUrl,
-                    referer = data,
-                    headers = srcHeaders,
-                    // Cached ids let the Nxsha extractor resolve even when the
-                    // embed URL itself carries no tmdb/imdb marker.
-                    tmdbId = meta?.tmdbId,
-                    imdbId = meta?.imdbId,
-                    latencyMs = e.latencyMs,
-                )
-                sourceRefs.add(src)
-                pullSource(src, labelCounter, data, emitted, found, trackedSubtitle, callback,
-                    linksAccepted = linksAccepted, firstLink = firstLink, cacheKey = data,
-                    playerGate = playerGate, firstArrivalMs = firstArrivalMs, loadStartMs = loadStartMs,
-                    resolveMsByKey = resolveMsByKey, playerEmitted = playerEmitted)
+                try {
+                    val finalUrl = MultiSourcePuller.unwrapEmbed(e.url, referer = data, headers = commonHeaders)
+                    // After unwrap, the URL may now point at a downstream CDN
+                    // (Cineverse -> vibuxer / serve_m3u8 proxy). Augment headers
+                    // with the host-specific pair the proxy requires so the
+                    // link the player replays against doesn't 403.
+                    val srcHeaders = commonHeaders + MultiSourcePuller.headersFor(finalUrl, referer = data)
+                    val src = MultiSourcePuller.Source(
+                        name = e.name,
+                        url = finalUrl,
+                        referer = data,
+                        headers = srcHeaders,
+                        // Cached ids let the Nxsha extractor resolve even when the
+                        // embed URL itself carries no tmdb/imdb marker.
+                        tmdbId = meta?.tmdbId,
+                        imdbId = meta?.imdbId,
+                        latencyMs = e.latencyMs,
+                    )
+                    pullSource(src, labelCounter, data, emitted, found, noopSubtitle, callback,
+                        firstLink = firstLink, cacheKey = data)
+                } finally {
+                    if (remainingPulls.decrementAndGet() <= 0) allPullsDone.complete(Unit)
+                }
             }
         }
 
-        // PHASE 1 — hold + probe (user spec Sept 2026, ported from IndStream):
-        // wait for the FIRST link, then hold until (first-arrival +
-        // FAST_START_SETTLE_MS) so live probes can finish — they start now and
-        // run in parallel with the remaining hold time. The hold is measured
-        // from the link's ACTUAL arrival, never from the tap. Total wait stays
-        // bounded by FAST_START_MAX_MS (measured from the tap).
-        withTimeoutOrNull(FAST_START_MAX_MS) { firstLink.await() }
+        // Fallback subtitles (user spec rewrite #2): the OpenSubtitles provider
+        // IS the only subtitle source — fired the moment the first link lands
+        // (the stream is starting), detached and hard-budgeted inside the
+        // provider so it never adds latency here; its per-title cache makes
+        // repeat plays instant.
+        val metaSubs = meta
+        if (metaSubs != null) {
+            searchScope.launch {
+                runCatching {
+                    withTimeoutOrNull(FAST_START_MAX_MS) { firstLink.await() }
+                    if (found.isNotEmpty()) {
+                        SubtilesProvider.fetch(
+                            metaSubs.imdbId, metaSubs.season, metaSubs.episode,
+                            SubtilesProvider.desiredLanguages(),
+                        ).forEach { runCatching { subtitleCallback(it) } }
+                    }
+                }
+            }
+        }
+
+        // LIVE FILL: hold loadLinks alive until every pull answers or the cap
+        // elapses — whichever first — so all those pushes register in the live
+        // change-server list. If NOTHING has landed by the cap, keep waiting
+        // out the hard FAST_START_MAX_MS ceiling so a slow farm still surfaces
+        // its first link instead of an early "no link found".
+        val loadStartMs = System.currentTimeMillis()
+        withTimeoutOrNull(LIVE_FILL_MS) { allPullsDone.await() }
+        if (found.isEmpty()) {
+            val hard = (loadStartMs + FAST_START_MAX_MS - System.currentTimeMillis()).coerceAtLeast(0L)
+            withTimeoutOrNull(hard) { allPullsDone.await() }
+        }
 
         if (found.isEmpty()) {
             // Nothing went live: replay whatever already landed in FastStartCache
             // (a prior visit's prefetch or background pulls), else surface "no
             // link found" — and drop a stale prefetch so the next attempt
             // re-resolves instead of replaying the same dead entry.
-            if (prefetched) EmbedPrefetchCache.invalidate(data)
+            if (awaited != null && awaited.isNotEmpty()) EmbedPrefetchCache.invalidate(data)
             val bg = FastStartCache.get(data)
             if (bg != null && bg.isNotEmpty()) {
                 bg.forEach { runCatching { callback(it) } }
@@ -1214,126 +1166,40 @@ class MultimoviesProvider : MainAPI() {
             return@withDomainRetry false
         }
 
-        // Probes overlap the hold; skip when the hold is already spent (very
-        // late first link deep into the cap) — rank on arrival data alone.
-        val settleEnd = (firstArrivalMs.get() + FAST_START_SETTLE_MS)
-            .coerceAtMost(loadStartMs + FAST_START_MAX_MS)
-        val settleRemaining = (settleEnd - System.currentTimeMillis()).coerceIn(0L, FAST_START_SETTLE_MS)
-        val probeDeferred = if (settleRemaining > 0L) {
-            searchScope.async { AutoPlayPicker.probeCandidates(found.toList()) }
-        } else null
-        if (settleRemaining > 0L) delay(settleRemaining)
-        val probes = probeDeferred?.let { d ->
-            runCatching { d.await() }.getOrElse { t ->
-                android.util.Log.w("Multimovies", "probeCandidates failed: ${t.message}")
-                emptyMap()
-            }
-        } ?: emptyMap()
-
-        // PHASE 2 — pick + emit the auto-play WINNER only (1080p-first strict
-        // pools: ≥1080 → ≥720 → adaptive-unknown → all). The player starts on
-        // this link; everything else follows through the gate.
-        val winner = AutoPlayPicker.pickAutoPlay(found.toList(), probes, resolveMsByKey)
-        if (winner == null) {
-            // Only degenerate candidates (blank urls) — nothing to play.
-            return@withDomainRetry false
-        }
-        val winnerKey = "${hostOf(winner.url ?: "")}|${winner.quality}"
-        playerEmitted.add(winnerKey)
-        playerGate.set(true)
-        runCatching { callback(winner) }
-        android.util.Log.i("Multimovies", "loadLinks: held ${System.currentTimeMillis() - loadStartMs}ms, " +
-            "winner=${winner.source} h=${winner.quality.takeIf { it > 0 } ?: probes[winner.url]?.probedHeight}")
-
-        // Drain buffered leftovers + subtitle tracks collected during the hold
-        // (in stored order, ~150ms apart so nothing bursts).
-        found.toList().forEach { l ->
-            val key = "${hostOf(l.url ?: "")}|${l.quality}"
-            if (playerEmitted.add(key)) {
-                runCatching { callback(l) }
-                delay(150)
-            }
-        }
-        collectedSubs.toList().forEach { s ->
-            val canonical = SubtitleServices.canonicalName(s.lang)
-            if (pushedSubKeys.add("$canonical|${s.url}")) {
-                runCatching { subtitleCallback(s) }
-            }
-        }
-
-        // PHASE 3 — detached fill window (user spec: keep pulling ALL servers,
-        // especially the Hindi ones): every source that resolves over the next
-        // FAST_START_FILL_MS is still pushed to the player live while playback
-        // runs. loadLinks does NOT block on it. When the window closes the gates
-        // shut, the full sorted+deduped list is cached for instant replay, and
-        // OpenSubtitles tops up any wanted language the servers didn't carry.
-        searchScope.launch {
-            delay(FAST_START_FILL_MS)
-            linksAccepted.set(false)
-            playerGate.set(false)
-            val sorted = MultiSourcePuller.sortLinks(found.toList(), sourceRefs.toList(), ::priorityOf, preferHindi = true)
-            val deduped = dedupeByHostQuality(sorted)
-            if (deduped.isNotEmpty() && meta != null) {
-                LinkCache.put(meta.imdbId, meta.season, meta.episode, deduped, collectedSubs.toList())
-            }
-            if (meta != null) {
-                val missing = SubtitleFallback.missingLanguages(
-                    coveredSubLangs.toSet(), SubtitleFallback.desiredLanguages(),
-                )
-                if (missing.isNotEmpty()) {
-                    SubtitleFallback.fetch(meta.imdbId, meta.season, meta.episode, missing)
-                        .forEach { sub ->
-                            if (emittedSubKeys.add("${sub.lang}|${sub.url}")) {
-                                collectedSubs.add(sub)
-                                val canonical = SubtitleServices.canonicalName(sub.lang)
-                                if (pushedSubKeys.add("$canonical|${sub.url}")) {
-                                    runCatching { subtitleCallback(sub) }
-                                }
-                            }
-                        }
-                }
-            }
-        }
-
-        // Early subtitle fallback: when NO source pushed any caption track yet,
-        // fetch the wanted languages right away (budgeted, detached) instead of
-        // leaving the user subtitle-less for the whole fill window. The
-        // finalizer's top-up below dedupes against emittedSubKeys, so this
-        // never produces duplicate tracks.
-        if (collectedSubs.isEmpty() && meta != null) {
+        // Full-list landing for the LinkCache instant replay: once the farm is
+        // done, cache the deduped arrival-order list (host+quality dedupe only
+        // — no ranking; no subs — the subtitle provider owns captions).
+        // Detached, so a capped return never races it.
+        val metaFinal = meta
+        if (metaFinal != null) {
             searchScope.launch {
-                val missing = SubtitleFallback.missingLanguages(
-                    coveredSubLangs.toSet(), SubtitleFallback.desiredLanguages(),
-                )
-                if (missing.isNotEmpty()) {
-                    SubtitleFallback.fetch(meta.imdbId, meta.season, meta.episode, missing)
-                        .forEach { sub ->
-                            if (emittedSubKeys.add("${sub.lang}|${sub.url}")) {
-                                collectedSubs.add(sub)
-                                if (playerGate.get() && pushedSubKeys.add("${sub.lang}|${sub.url}")) {
-                                    runCatching { subtitleCallback(sub) }
-                                }
-                            }
-                        }
+                allPullsDone.await()
+                val deduped = dedupeByHostQuality(found.toList())
+                if (deduped.isNotEmpty()) {
+                    LinkCache.put(metaFinal.imdbId, metaFinal.season, metaFinal.episode, deduped)
                 }
             }
         }
 
+        android.util.Log.i("Multimovies", "loadLinks: ${emitted.size} links pushed live in " +
+            "${System.currentTimeMillis() - loadStartMs}ms (arrival order, no ranking)")
         return@withDomainRetry true
     }
 
     /** Pull a single source, streaming found links to [callback] as they arrive and
-     *  collecting them (deduped at emission time) into [found] for the final sort
-     *  and link cache. Links arrive already carrying their stable identity
-     *  (`source == name == "<Server>[ Hindi]"`, set at origin in
+     *  collecting them (deduped at emission time) into [found] for the final
+     *  cache. Links arrive already carrying their stable identity
+     *  (`source == name == "<Server>[ (Hindi)]"`, set at origin in
      *  MultiSourcePuller) — no renaming happens here.
+     *
+     *  User spec rewrite #2: links push to the player IMMEDIATELY, in arrival
+     *  order — the old hold-window/playerGate/buffer machinery is gone; the
+     *  user's own CloudStream quality/source profile decides what auto-plays.
      *
      *  Cineverse fast path: if [src] is a Cineverse CDN URL that already points
      *  straight at a stream (the `serve_m3u8=1` proxy URL that `unwrapEmbed`
      *  surfaces), the playable link is emitted immediately via [callback] — no
-     *  second `pull()` round-trip, no registry lookup, no `loadExtractor` step.
-     *  Recorded as a fast success in [SourceSpeedTracker] so the sort key
-     *  reflects the win. */
+     *  second `pull()` round-trip, no registry lookup, no `loadExtractor` step. */
     private suspend fun pullSource(
         src: MultiSourcePuller.Source,
         labelCounter: ConcurrentHashMap<String, Int>,
@@ -1342,24 +1208,16 @@ class MultimoviesProvider : MainAPI() {
         found: MutableList<ExtractorLink>,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
-        /** Fast-start gate: when non-null, links are only pushed to the player
-         *  while this flag is true (the fill window); otherwise they are resolved
-         *  purely into [found]/[FastStartCache] in the background. */
-        linksAccepted: java.util.concurrent.atomic.AtomicBoolean? = null,
-        /** Completed on the first link so the fast-start await in [loadLinks] can
-         *  return and start playback. */
+        /** Completed on the first link so the subtitle trigger in [loadLinks]
+         *  can fire the fallback fetch as the stream starts. */
         firstLink: CompletableDeferred<Unit>? = null,
         /** When set, every resolved link is also merged into [FastStartCache] (keyed
          *  by the load url) so a re-tap replays instantly. */
         cacheKey: String? = null,
-        /** Hold-window state (loadLinks only; null for prewarm background pulls):
-         *  gate for player pushes, first-arrival timestamp, load-start wall time,
-         *  per-url resolve times, and already-pushed player keys. */
-        playerGate: AtomicBoolean? = null,
-        firstArrivalMs: java.util.concurrent.atomic.AtomicLong? = null,
-        loadStartMs: Long = 0L,
-        resolveMsByKey: MutableMap<String, Long>? = null,
-        playerEmitted: MutableSet<String>? = null,
+        /** Prewarm mode: links land in [found]/[FastStartCache] only — the
+         *  callback is never invoked, so a background pull can't reach into a
+         *  player it was not started from. */
+        cacheOnly: Boolean = false,
     ): List<ExtractorLink> {
         /** Disambiguate duplicate labels within a single load: the first link
          *  with a given label keeps it; subsequent links with the same label
@@ -1378,30 +1236,29 @@ class MultimoviesProvider : MainAPI() {
             )
         }
 
-        /** Emit one disambiguated link: always record it for sorting/caching.
-         *  With hold-window state (loadLinks): pushes to the player only once
-         *  the winner is emitted and [playerGate] is open; `firstLink` completes
-         *  on the first RECORD so the hold timer starts at network-arrival time.
-         *  Without it (prewarm background pulls): legacy behaviour — push
-         *  immediately, no gating. */
+        /** Quality floor (user spec rewrite #2): drop KNOWN sub-720p fixed
+         *  files. Adaptive (m3u8) links and unknown heights (0) always pass.
+         *  Sub-720 entries never reach the player OR the caches. */
+        fun passesFloor(l: ExtractorLink): Boolean =
+            MultimoviesProvider.passesQualityFloor(
+                l.type == ExtractorLinkType.M3U8,
+                l.quality,
+            )
+
+        /** Emit one disambiguated link: quality-floor it (sub-720 fixed files
+         *  never reach the player OR the caches), record it, cache it, and
+         *  push it to the player IMMEDIATELY (arrival order) — unless [cacheOnly]
+         *  (prewarm pulls never touch a player). */
         fun emitOne(l: ExtractorLink) {
+            if (!passesFloor(l)) return
             val key = "${hostOf(l.url ?: "")}|${l.quality}"
             if (!emitted.add(key)) return
             val dis = disambiguate(l)
             found.add(dis)
-            if (playerGate != null) {
-                // Live-score input: arrival wall time relative to loadLinks
-                // start; the hold measures from the first link's ARRIVAL.
-                resolveMsByKey?.putIfAbsent(l.url ?: "", System.currentTimeMillis() - loadStartMs)
-                firstArrivalMs?.compareAndSet(Long.MAX_VALUE, System.currentTimeMillis())
-            }
             if (cacheKey != null) FastStartCache.put(cacheKey, listOf(dis))
             firstLink?.complete(Unit)
-            val pushNow = if (playerGate != null) playerGate.get() && playerEmitted!!.add(key)
-                          else (linksAccepted == null || linksAccepted.get())
-            if (pushNow) {
-                runCatching { callback(dis) }
-            }
+            if (cacheOnly) return // prewarm: cache only
+            runCatching { callback(dis) }
         }
 
         val cineverseFastLink = if (MultiSourcePuller.isCineverseHost(src.url) &&
@@ -1410,14 +1267,12 @@ class MultimoviesProvider : MainAPI() {
                 src.url.contains(".mp4", ignoreCase = true))
         ) buildDirectLink(src) else null
         if (cineverseFastLink != null) {
-            SourceSpeedTracker.record(src.name, 0L, success = true)
             emitOne(cineverseFastLink)
             return listOf(cineverseFastLink)
         }
         return MultiSourcePuller.pull(
             sources = listOf(src),
             timeoutMs = SOURCE_TIMEOUT_MS,
-            priorityOf = ::priorityOf,
             onSubtitle = subtitleCallback,
             onLink = { l -> emitOne(l) },
         )
@@ -1532,8 +1387,10 @@ class MultimoviesProvider : MainAPI() {
     private fun hostOf(url: String): String =
         url.substringAfter("://").substringBefore("/").lowercase()
 
-    /** Keep only the highest-ranked link per (host, quality) — avoids duplicate
-     *  entries when the same final host is reached through multiple paths. */
+    /** Light dedupe (user spec rewrite #2): keep the FIRST arrival per
+     *  (host, quality) so the same final host reached through multiple paths
+     *  doesn't duplicate entries. Deliberately NOT a ranking — order within
+     *  the list is untouched (arrival order). */
     private fun dedupeByHostQuality(links: List<ExtractorLink>): List<ExtractorLink> {
         val seen = HashSet<String>()
         return links.filter { l -> seen.add("${hostOf(l.url ?: "")}|${l.quality}") }
@@ -1635,260 +1492,22 @@ internal object MultimoviesDomainResolver {
 }
 
 /**
- * Session-scoped memory of per-source extraction speed. [MultiSourcePuller.pull]
- * records how long each source took to produce links (or fail/timeout), and the
- * final link sort uses the measured average — so "fast" is decided by the user's
- * actual network, with the curated SOURCE_PRIORITY list only as the cold-start
- * fallback.
- *
- * In-memory only (this CloudStream build exposes no persistent settings API);
- * resets on app restart.
- */
-internal object SourceSpeedTracker {
-    /** Penalty (ms) added per failed attempt, so sources that fail often are
-     *  demoted below consistently-fast ones. */
-    private const val FAILURE_PENALTY_MS = 30_000L
-
-    private data class Stats(var successes: Int = 0, var totalMs: Long = 0L, var failures: Int = 0) {
-        fun avgMs(): Double = if (successes == 0) Double.MAX_VALUE
-        else (totalMs + failures * FAILURE_PENALTY_MS).toDouble() / successes
-    }
-
-    private val map = java.util.concurrent.ConcurrentHashMap<String, Stats>()
-
-    fun record(name: String, durationMs: Long, success: Boolean) {
-        map.compute(name) { _, s ->
-            val stats = s ?: Stats()
-            if (success) {
-                stats.successes++
-                stats.totalMs += durationMs
-            } else {
-                stats.failures++
-            }
-            stats
-        }
-    }
-
-    /** Learned average extraction latency for [name], or null when never measured.
-     *  Measured-but-never-succeeded sources return [Double.MAX_VALUE] (slowest). */
-    fun averageLatency(name: String): Double? = map[name]?.avgMs()
-}
-
-/**
- * AutoPlayPicker — live-probe ranked auto-play selection for Multimovies
- * (user spec Sept 2026, ported from IndStream's StreamEngine model).
- *
- * On Play the provider buffers arriving links during a 1.5s hold window while
- * [probeCandidates] measures each candidate live — TTFB on the actual stream
- * URL and, for HLS masters, the tallest variant height parsed from the master
- * playlist. [pickAutoPlay] then selects the auto-play winner from strict
- * quality pools: **1080p first** (direct 1080p file OR adaptive master whose
- * probed bestHeight ≥1080), then ≥720, then adaptive-unknown (the player
- * starts ~720 and ABR-climbs — user-accepted), then everything else. Within
- * the first non-empty pool the highest [liveScore] wins.
- *
- * Scoring weights (same as IndStream):
- *   0.40 TTFB + 0.25 resolve time + 0.20 throughput + 0.10 quality + 0.05
- *   Hindi-soft. [SourceSpeedTracker] history is only a weak prior when no
- *  live probe exists — never an override.
- */
-internal object AutoPlayPicker {
-
-    private const val PREFERRED_HEIGHT = 1080
-    private const val MIN_AUTO_HEIGHT = 720
-
-    /** Live probe result for one stream URL. Either field may be null when the
-     *  probe lost its budget race — the candidate stays eligible, scored on its
-     *  resolve time + history prior instead. */
-    data class Probe(val ttfbMs: Long?, val kbps: Long?, val probedHeight: Int = 0)
-    private val NO_PROBE = Probe(null, null, 0)
-
-    /**
-     * Cheap live probe: ranged GET (first 64KB) under [budgetMs]. Returns TTFB
-     * + measured throughput. Mirrors IndStream's HttpKit.probeTtfb but uses
-     * CloudStream's `app` client (headers/cookies/CF handling shared with the
-     * extraction pipeline).
-     */
-    suspend fun probeTtfb(
-        url: String,
-        headers: Map<String, String> = emptyMap(),
-        referer: String? = null,
-        budgetMs: Long = MultimoviesProvider.PROBE_TTFB_BUDGET_MS,
-    ): Probe {
-        if (url.isBlank()) return NO_PROBE
-        return withTimeoutOrNull(budgetMs) {
-            runCatching {
-                val start = System.currentTimeMillis()
-                val hdrs = LinkedHashMap<String, String>()
-                hdrs.putAll(headers)
-                hdrs["Range"] = "bytes=0-65535"
-                if (!referer.isNullOrBlank() && hdrs["Referer"].isNullOrBlank()) hdrs["Referer"] = referer
-                val resp = app.get(url, timeout = (budgetMs / 1000L).coerceAtLeast(1L), headers = hdrs)
-                val ttfb = System.currentTimeMillis() - start
-                val bytes = resp.text.length.coerceAtLeast(1)
-                val kbps = (bytes * 1000L) / (ttfb.coerceAtLeast(1) * 1024L)
-                Probe(ttfb, kbps)
-            }.getOrNull() ?: NO_PROBE
-        } ?: NO_PROBE
-    }
-
-    /** Tallest variant height in an HLS master playlist text (RESOLUTION=WxH).
-     *  0 when the text isn't a multi-variant master. Deliberately a regex —
-     *  Multimovies doesn't need the full ManifestKit port for ranking. */
-    fun bestMasterHeight(text: String?): Int {
-        if (text.isNullOrBlank() || !text.contains("#EXT-X-STREAM-INF")) return 0
-        var best = 0
-        Regex("""RESOLUTION=\d+x(\d+)""").findAll(text).forEach { m ->
-            m.groupValues[1].toIntOrNull()?.let { if (it > best) best = it }
-        }
-        return best
-    }
-
-    /**
-     * Probe every distinct candidate url in parallel (one round-trip each,
-     * tight budgets — these run INSIDE the 1.5s hold). For HLS links the
-     * master fetch does double duty: TTFB + tallest variant height. Returns a
-     * map keyed by link url; candidates that fail probing simply stay absent
-     * (treated as unprobed, still eligible).
-     */
-    suspend fun probeCandidates(links: List<ExtractorLink>): Map<String, Probe> {
-        val distinct = links.filter { !it.url.isNullOrBlank() }.distinctBy { it.url }
-        if (distinct.isEmpty()) return emptyMap()
-        return coroutineScope {
-            distinct.map { l ->
-                async {
-                    val probe = if (l.type == ExtractorLinkType.M3U8) {
-                        val start = System.currentTimeMillis()
-                        val text = withTimeoutOrNull(MultimoviesProvider.PROBE_MASTER_BUDGET_MS) {
-                            runCatching {
-                                app.get(
-                                    l.url,
-                                    timeout = 3,
-                                    headers = l.headers + mapOf("Range" to "bytes=0-65535"),
-                                    referer = l.referer?.takeIf { it.isNotBlank() },
-                                ).text
-                            }.getOrNull()
-                        }
-                        if (text == null) {
-                            // Master probe lost the race with the hold —
-                            // TTFB-only fallback, still eligible.
-                            probeTtfb(l.url, l.headers, l.referer)
-                        } else {
-                            val h = bestMasterHeight(text)
-                            val ttfb = System.currentTimeMillis() - start
-                            if (h > 0) Probe(ttfb, null, h) else probeTtfb(l.url, l.headers, l.referer)
-                        }
-                    } else {
-                        probeTtfb(l.url, l.headers, l.referer)
-                    }
-                    android.util.Log.d(
-                        "Multimovies",
-                        "probe server=${l.source} h=${l.quality.takeIf { it > 0 } ?: probe.probedHeight} " +
-                            "ttfb=${probe.ttfbMs}ms kbps=${probe.kbps ?: "?"} url=${l.url.take(60)}",
-                    )
-                    l.url to probe
-                }
-            }.awaitAll().toMap()
-        }
-    }
-
-    private fun ttfbNorm(ms: Long): Double = 1.0 / (1.0 + ms / 500.0)
-    private fun throughputNorm(kbps: Long): Double = min(1.0, kbps / 5000.0)
-
-    /** Effective height: the link's own quality tag when present, else the
-     *  probed master height. 0 = unknown (adaptive master, never probed). */
-    private fun effectiveHeight(l: ExtractorLink, probe: Probe?): Int =
-        l.quality.takeIf { it > 0 } ?: probe?.probedHeight ?: 0
-
-    private fun qualityNorm(l: ExtractorLink, probe: Probe?): Double {
-        val h = effectiveHeight(l, probe)
-        return when {
-            h >= PREFERRED_HEIGHT -> 1.0
-            h >= MIN_AUTO_HEIGHT -> 0.9
-            l.type == ExtractorLinkType.M3U8 && h <= 0 -> 0.5   // adaptive, height unknown
-            else -> 0.0
-        }
-    }
-
-    private fun hindiSoft(l: ExtractorLink): Double =
-        if (MultiSourcePuller.isHindi(l)) 1.0 else 0.0
-
-    /**
-     * Live score: 0.40 TTFB + 0.25 resolve + 0.20 throughput + 0.10 quality
-     * + 0.05 Hindi-soft. Unprobed candidates fall back to the
-     * [SourceSpeedTracker] latency prior for the TTFB term.
-     */
-    fun liveScore(
-        l: ExtractorLink,
-        probe: Probe? = null,
-        resolveMs: Long? = null,
-    ): Double {
-        val hist = SourceSpeedTracker.averageLatency(MultiSourcePuller.sourceKey(l.source))
-        val ttfbTerm = probe?.ttfbMs?.let { ttfbNorm(it) }
-            ?: (0.6 + 0.3 * (hist?.takeIf { it < Double.MAX_VALUE / 2 }
-                ?.let { 1.0 / (1.0 + it / 500.0) } ?: 0.5)).coerceAtMost(1.0)
-        val resolveTerm = resolveMs?.let { ttfbNorm(it) } ?: 0.5
-        val throughputTerm = probe?.kbps?.takeIf { it > 0 }?.let { throughputNorm(it) } ?: 0.5
-        return 0.40 * ttfbTerm + 0.25 * resolveTerm + 0.20 * throughputTerm +
-            0.10 * qualityNorm(l, probe) + 0.05 * hindiSoft(l)
-    }
-
-    /**
-     * Auto-play pick (1080p-first, strict pool order):
-     *  1. effective height ≥1080 (direct file OR probed master bestHeight)
-     *  2. effective height ≥720
-     *  3. adaptive (m3u8) with unknown height — player starts ~720, ABR-climbs
-     *  4. everything else (sub-720 only) — best available, never stalls
-     * Within the first non-empty pool the highest [liveScore] wins. Pure JVM
-     * logic — unit-tested in Test/AutoPlayPickMmTest.kt.
-     */
-    fun pickAutoPlay(
-        links: List<ExtractorLink>,
-        probes: Map<String, Probe> = emptyMap(),
-        resolveMs: Map<String, Long> = emptyMap(),
-    ): ExtractorLink? {
-        if (links.isEmpty()) return null
-        val candidates = links.filter { !it.url.isNullOrBlank() }
-        if (candidates.isEmpty()) return null
-        fun probeOf(l: ExtractorLink): Probe? = probes[l.url] ?: NO_PROBE
-        fun eff(l: ExtractorLink): Int = effectiveHeight(l, probeOf(l))
-        val p1080 = candidates.filter { eff(it) >= PREFERRED_HEIGHT }
-        val p720 = candidates.filter { eff(it) >= MIN_AUTO_HEIGHT }
-        val adaptiveUnknown = candidates.filter { it.type == ExtractorLinkType.M3U8 && eff(it) <= 0 }
-        val pool = when {
-            p1080.isNotEmpty() -> p1080
-            p720.isNotEmpty() -> p720
-            adaptiveUnknown.isNotEmpty() -> adaptiveUnknown
-            else -> candidates
-        }
-        val winner = pool.maxByOrNull { l -> liveScore(l, probeOf(l), resolveMs[l.url]) }
-        android.util.Log.d(
-            "Multimovies",
-            "pickAutoPlay: pool=${pool.size}/${candidates.size} winner=${winner?.source} " +
-                "h=${winner?.let { eff(it) }} ttfb=${winner?.let { probeOf(it)?.ttfbMs }}ms " +
-                "resolve=${winner?.url?.let { resolveMs[it] }}ms score=${winner?.let { liveScore(it, probeOf(it), resolveMs[it.url]) }}",
-        )
-        return winner
-    }
-}
-
-/**
- * MultiSourcePuller - the source-priority / parallel-pull / timeout engine.
+ * MultiSourcePuller - the parallel-pull / timeout engine (NEUTRAL, user spec
+ * rewrite #2: no plugin-side ranking of any kind).
  *
  * Given a list of (serverName, url) pairs it:
- *   1. Orders them by measured speed ([SourceSpeedTracker]) with the static
- *      [MultimoviesProvider.SOURCE_PRIORITY] as fallback.
- *   2. Launches ALL of them concurrently (parallel pulling).
- *   3. Wraps each individual source in a [timeoutMs] timeout (default 30s).
+ *   1. Launches ALL of them concurrently (parallel pulling) in caller order.
+ *   2. Wraps each individual source in a [timeoutMs] timeout (default 15s).
  *      A single slow/dead source can never block the others.
- *   4. Returns the successfully extracted links, sorted by measured speed.
+ *   3. Returns the successfully extracted links in ARRIVAL order — the
+ *      player's own quality/source profile decides what auto-plays.
  *
-* Per source it runs a unified extraction pipeline:
-     *     a. CloudStream's extractor registry (loadExtractor)
-     *     b. a generic m3u8/mp4 sniff of the player page
+ * Per source it runs a unified extraction pipeline:
+ *     a. CloudStream's extractor registry (loadExtractor)
+ *     b. a generic m3u8/mp4 sniff of the player page
  *
  * This is intentionally decoupled from the provider so the strategy can be
- * tuned (timeouts, priority weights, concurrency limits) in one place.
+ * tuned (timeouts, concurrency limits) in one place.
  */
 object MultiSourcePuller {
 
@@ -2157,20 +1776,18 @@ object MultiSourcePuller {
     }
 
     /**
-     * @param sources   raw server list (unsorted is fine, sorting happens here)
+     * @param sources   raw server list (launch order = caller order)
      * @param timeoutMs per-source hard timeout in ms (project default: 15_000)
-     * @param priorityOf maps a server name to a sort index (lower = better)
-     * @param preferHindi when true, Hindi-audio links win latency/priority ties
      * @param onSubtitle called for each subtitle found
      * @param onLink optional: called immediately for every extracted link (streaming —
-     *        lets the player start the fastest source instead of waiting for all sources)
-     * @return list of extractor links, ordered by measured speed then priority then latency then Hindi
+     *        the player's change-server list fills in ARRIVAL order)
+     * @return list of extractor links in ARRIVAL order (user spec rewrite #2:
+     *         no plugin-side ranking — the player's own quality/source profile
+     *         decides what auto-plays)
      */
     suspend fun pull(
         sources: List<Source>,
         timeoutMs: Long = MultimoviesProvider.SOURCE_TIMEOUT_MS,
-        priorityOf: (String) -> Int,
-        preferHindi: Boolean = true,
         onSubtitle: (SubtitleFile) -> Unit,
         onLink: (ExtractorLink) -> Unit = {},
     ): List<ExtractorLink> = withContext(Dispatchers.IO) {
@@ -2179,13 +1796,11 @@ object MultiSourcePuller {
         val links = Collections.synchronizedList(mutableListOf<ExtractorLink>())
         val subs = Collections.synchronizedList(mutableListOf<SubtitleFile>())
 
-        // Launch higher-priority sources first so the reliable/fast ones (Cineverse)
-        // start resolving and emit their link before slower fallbacks.
-        val orderedSources = sources.sortedBy { priorityOf(it.name) }
+        // All sources launch together (parallel); completion order = arrival
+        // order. No priority ordering, no speed tracking (rewrite #2).
         coroutineScope {
-            orderedSources.map { src ->
+            sources.map { src ->
                 async {
-                    val startedMs = System.currentTimeMillis()
                     val result = withTimeoutOrNull(timeoutMs) {
                         runCatching {
                             val found = extractSource(src, onSubtitle = { subs.add(it) })
@@ -2197,18 +1812,13 @@ object MultiSourcePuller {
                             }
                         }
                     }
-                    val made = result?.getOrNull().orEmpty()
-                    SourceSpeedTracker.record(
-                        src.name,
-                        System.currentTimeMillis() - startedMs,
-                        success = made.isNotEmpty(),
-                    )
+                    result?.getOrNull().orEmpty()
                 }
             }.awaitAll()
         }
 
         subs.forEach { onSubtitle(it) }
-        sortLinks(links, sources, priorityOf, preferHindi)
+        links.toList()
     }
 
     /** Wrap a raw extractor link with the source's headers/referer defaults.
@@ -2226,47 +1836,6 @@ object MultiSourcePuller {
             type = l.type,
             audioTracks = l.audioTracks ?: emptyList(),
         )
-
-    /** Normalize an [ExtractorLink.source] / [Source.name] into a stable key for
-     *  speed tracking and priority lookup: strips any duplicate counter
-     *  ("Name-2"), trailing language annotation (" Hindi") and the trailing
-     *  parenthesized server label, so "Nxsha (Nitro) Hindi-2",
-     *  "Cineverse-2" and "Cineverse (Vibuxer)" all reduce to their
-     *  SOURCE_PRIORITY name. */
-    internal fun sourceKey(source: String?): String {
-        if (source == null) return ""
-        return source
-            .replace(Regex("""-\d+$"""), "")
-            .replace(Regex("""\s+Hindi$""", RegexOption.IGNORE_CASE), "")
-            .replace(Regex("""\s+\([^)]*\)$"""), "")
-            .trim()
-    }
-
-    /**
-     * Order links for the player. Primary key is the curated static [priorityOf]
-     * ranking (so Cineverse / the reliable fast sources always come first);
-     * measured per-source speed and per-call embed latency only break ties within
-     * the same priority, then the known quality (1080p-first, user spec Sept
-     * 2026), then the Hindi preference, then adaptive HLS over fixed
-     * progressive files — an m3u8 manifest lets the player start quickly at a
-     * lower rendition and ramp quality up automatically.
-     */
-    internal fun sortLinks(
-        links: List<ExtractorLink>,
-        sources: List<Source>,
-        priorityOf: (String) -> Int,
-        preferHindi: Boolean = true,
-    ): List<ExtractorLink> {
-        val latencyByName = sources.associate { it.name to it.latencyMs }
-        val comparator = compareBy<ExtractorLink>(
-            { priorityOf(sourceKey(it.source)) },
-            { SourceSpeedTracker.averageLatency(sourceKey(it.source)) ?: Double.MAX_VALUE },
-            { latencyByName[sourceKey(it.source)] ?: Long.MAX_VALUE },
-        ).thenByDescending { it.quality }
-            .thenByDescending { if (preferHindi) isHindi(it) else false }
-            .thenByDescending { it.type == ExtractorLinkType.M3U8 }
-        return links.sortedWith(comparator)
-    }
 
     /** True when [url] points at a YouTube host (trailer embeds). */
     internal fun isYouTubeHost(url: String): Boolean {
@@ -2371,8 +1940,9 @@ object MultiSourcePuller {
 
         // Stage a: CloudStream extractor registry (installed/built-in extractors).
         // Relabeled to the source's stable identity — registry links carry bare
-        // extractor names that would miss SOURCE_PRIORITY and drift whenever
-        // extensions are installed or removed.
+        // extractor names that drift whenever extensions are installed or
+        // removed; the stable label keeps the player's per-source priority
+        // entries (the USER's settings) working across loads.
         val found = mutableListOf<ExtractorLink>()
         val registryOk = runCatching {
             loadExtractor(

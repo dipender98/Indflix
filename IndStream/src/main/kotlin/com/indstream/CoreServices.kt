@@ -107,43 +107,6 @@ object HttpKit {
         }
     }
 
-    /** Live first-frame probe result for the auto-play ranking (user spec Sept
-     *  2026: rank from THIS session's measurements, not host-speed history).
-     *  [ttfbMs] = wall time to first response bytes; [kbps] = measured media
-     *  throughput over the probe window. Either may be null on a failed probe
-     *  (the candidate stays eligible, scored on its resolve time instead). */
-    class ProbeResult(val ttfbMs: Long?, val kbps: Long?)
-
-    /**
-     * Cheap live probe of a stream URL: ranged GET (first [rangeBytes] bytes)
-     * under [timeoutMs]. Returns TTFB + throughput. Budget is deliberately
-     * tight — probes run inside the 1.5s settle window, in parallel, one
-     * round-trip per candidate; a probe that does not finish in time loses
-     * its points but never blocks the pick.
-     */
-    suspend fun probeTtfb(
-        url: String,
-        referer: String? = null,
-        timeoutMs: Long = 600L,
-        rangeBytes: Long = 65_536L,
-        extraHeaders: Map<String, String> = emptyMap(),
-    ): ProbeResult {
-        if (url.isBlank()) return ProbeResult(null, null)
-        return withTimeoutOrNull(timeoutMs) {
-            runCatching {
-                val start = System.currentTimeMillis()
-                val headers = mutableMapOf("User-Agent" to userAgent, "Range" to "bytes=0-$rangeBytes")
-                if (!referer.isNullOrBlank()) headers["Referer"] = referer
-                headers.putAll(extraHeaders)
-                val resp = app.get(url, timeout = (timeoutMs / 1000L).coerceAtLeast(1L), headers = headers)
-                val ttfb = System.currentTimeMillis() - start
-                val bytes = resp.text.length.coerceAtLeast(1)
-                val kbps = (bytes * 1000L) / (ttfb.coerceAtLeast(1) * 1024L)
-                ProbeResult(ttfb, kbps)
-            }.getOrNull() ?: ProbeResult(null, null)
-        } ?: ProbeResult(null, null)
-    }
-
     /**
      * Measure the REAL pixel height of a direct (non-HLS) media file by parsing its
      * ISO-BMFF (MP4/MOV) container. Fetches the `moov` box — front for faststart,
