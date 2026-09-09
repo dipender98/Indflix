@@ -164,7 +164,12 @@ object ServerFarm {
             movieUrl = "https://h5-api.aoneroom.com/wefeed-h5api-bff",
             tvUrl = "https://h5-api.aoneroom.com/wefeed-h5api-bff",
             isJsonApi = true, referer = "https://fmoviesunblocked.net/",
-            hasSubtitles = true, maxQuality = 2160, timeoutSec = 20,
+            // timeoutSec 20→30 (Sept 2026): farm wraps resolveOne in
+            // withTimeoutOrNull(spec.timeoutSec*1000); the tightened budgets
+            // (bearer 6 + 2×search 7 + detail 6 + dl/play 6 ≈ 25s serial worst
+            // incl. the token refresh + search retry) must fit under this kill
+            // so a slow-but-alive resolve is not canned into a hard failure.
+            hasSubtitles = true, maxQuality = 2160, timeoutSec = 30,
         ),
         // PrimeSrc (primesrc.me, verified live Sept 2026): IMDB-keyed JSON API.
         // GET /api/v1/s?imdb={id}&type=movie|tv[&season=&episode=] returns
@@ -224,20 +229,29 @@ object ServerFarm {
             referer = "https://vidcore.io/",
             hasSubtitles = true, maxQuality = 2160, timeoutSec = 20,
         ),
-        // Allmovieland (allmovieland.one, verified Sept 2026): DLE CMS
+        // Allmovieland (allmovieland.art, verified Sept 2026): DLE CMS
         // with per-language HLS playlists — Hindi, Bengali, Tamil, Telugu.
         // Pipeline: IMDB-keyed search → find card → page embeds
         // AwsIndStreamDomain (self-updating from player.js) + IMDB src →
         // /play/{imdb} → file+key → /playlist/{file}.txt (X-CSrf-Token) →
         // JSON [{title:"Hindi"|"Bengali"|..., file}] → /playlist/{lang.file}.txt
         // → direct m3u8 (360–1080p). Hindi-first, zero auth/captcha.
+        // DOMAIN MOVE (verified 2026-09-08): allmovieland.one now 301-redirects
+        // to allmovieland.art and the full pipeline works there; the resolver
+        // (StreamEngine.allmovielandHosts) still carries a host-fallback list,
+        // so this spec just pins the current live host.
+        // timeoutSec 20→30 (Sept 2026): the farm kill at 20s canned
+        // slow-but-alive 5-step chains → HealthMonitor marked each timeout a
+        // hard failure → 5 strikes tripped the breaker → "sometimes doesn't
+        // work" (user report). The tightened resolver budgets (8+6+6+6 serial
+        // + per-lang fetches ≈ 26s worst) fit under this.
         ServerSpec(
             id = "allmovieland", name = "Allmovieland",
             idType = ServerIdType.IMDB,
-            movieUrl = "https://allmovieland.one/?do=search&subaction=search&story={id}",
-            tvUrl = "https://allmovieland.one/?do=search&subaction=search&story={id}",
-            referer = "https://allmovieland.one/",
-            hasSubtitles = false, maxQuality = 1080, timeoutSec = 20,
+            movieUrl = "https://allmovieland.art/?do=search&subaction=search&story={id}",
+            tvUrl = "https://allmovieland.art/?do=search&subaction=search&story={id}",
+            referer = "https://allmovieland.art/",
+            hasSubtitles = false, maxQuality = 1080, timeoutSec = 30,
             hindi = true,
         ),
         // MP4Hydra (mp4hydra.org): title-slug keyed multipart POST to /info2

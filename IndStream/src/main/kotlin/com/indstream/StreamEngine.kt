@@ -297,7 +297,10 @@ object StreamEngine {
                                 }
                                 // Dispatch HLS/MPD: bestHeightOf parses the DASH MPD too, so
                                 // a MovieBox DASH ladder gets its real peak (e.g. 2160), not 0.
-                                val h = ManifestKit.bestHeightOf(masterText, raw.url).takeIf { it > 0 } ?: raw.qualityHint
+                                // Adaptive guard (Sept 2026): an HLS master never carries the
+                                // -1 "Auto" direct-file sentinel — clamp the fallback height
+                                // to ≥0 in THIS branch too, not only the probeManifests=false one.
+                                val h = (ManifestKit.bestHeightOf(masterText, raw.url).takeIf { it > 0 } ?: raw.qualityHint).coerceAtLeast(0)
                                 val master = ManifestKit.parseMaster(masterText, raw.url)
                                 // Audio label: explicit server label wins; else the REAL track the
                                 // player auto-selects (multi-audio → "Multi", single track → its language);
@@ -331,7 +334,19 @@ object StreamEngine {
                         // shows "Auto" instead of a bare name. Language still comes
                         // from host declarations only (URL/server name) — never guessed.
                         else -> {
-                            val fullHeight = if (!raw.isM3u8 && raw.qualityHint <= 0) -1 else raw.qualityHint
+                            var fullHeight = if (!raw.isM3u8 && raw.qualityHint <= 0) -1 else raw.qualityHint
+                            // Adaptive guard (Sept 2026): an HLS master can
+                            // NEVER carry the -1 "Auto" direct-file sentinel —
+                            // clamp negatives to 0 (unknown-adaptive), and if
+                            // the server shipped the master inline (the API's
+                            // `manifest` field) read its peak height directly,
+                            // so adaptive links get their real badge without
+                            // a probe even when probeManifests=false.
+                            if (raw.isM3u8 && fullHeight < 0) fullHeight = 0
+                            if (raw.isM3u8 && fullHeight <= 0 && !raw.inlineManifest.isNullOrBlank()) {
+                                val h = ManifestKit.bestHeightOf(raw.inlineManifest, raw.url).takeIf { it > 0 } ?: 0
+                                if (h > 0) fullHeight = h
+                            }
                             val tag = raw.audioLabel.ifBlank { declaredHindiHint(raw) ?: "" }
                             ResolvedEmit(raw, fullHeight, tag)
                         }
@@ -1115,10 +1130,15 @@ object StreamEngine {
             }?.let { return it }
         }
         val base = "https://h5-api.aoneroom.com"
-        val xUser = withTimeoutOrNull(8_000L) {
+        // INTERNAL BUDGETS (Sept 2026, MovieBox farm-kill rework): bearer 6s,
+        // search 7s/attempt (one retry), detail 6s, download/play 6s — the
+        // serial worst case (6 + 2×7 + 6 + 6 ≈ 25s) must fit under the 30s
+        // spec.timeoutSec kill so a slow-but-alive resolve returns inside
+        // the farm window instead of being canned mid-chain.
+        val xUser = withTimeoutOrNull(6_000L) {
             runCatching {
                 app.get("$base/wefeed-h5api-bff/app/get-latest-app-pkgs?app_name=moviebox",
-                    timeout = 8, headers = okHeaders())
+                    timeout = 6, headers = okHeaders())
             }.getOrNull()
         }?.headers?.get("x-user") ?: run { Log.w("MovieBox", "no x-user header"); return null }
         val t = runCatching { org.json.JSONObject(xUser).optString("token", "") }
@@ -1197,9 +1217,9 @@ object StreamEngine {
                 "Connection" to "keep-alive",
                 "Authorization" to "Bearer $token",
             )
-            val searchJsonText = withTimeoutOrNull(10_000L) {
+            val searchJsonText = withTimeoutOrNull(7_000L) {
                 runCatching {
-                    app.post("$base/wefeed-h5api-bff/subject/search", timeout = 10, headers = baseHeaders,
+                    app.post("$base/wefeed-h5api-bff/subject/search", timeout = 7, headers = baseHeaders,
                         json = mapOf(
                             "keyword" to title, "page" to 1, "perPage" to 24,
                             "subjectType" to subjectType,
@@ -1277,10 +1297,10 @@ object StreamEngine {
                     if (type != "movie" && seasonEnd in 1 until season) return@async emptyList<RawStream>()
 
                     // 3. detailPath lookup.
-                    val detailText = withTimeoutOrNull(8_000L) {
+                    val detailText = withTimeoutOrNull(6_000L) {
                         runCatching {
                             app.get("https://h5.aoneroom.com/wefeed-h5-bff/web/post/list/subject?id=$subjectId",
-                                timeout = 8, headers = okHeaders()).text
+                                timeout = 6, headers = okHeaders()).text
                         }.getOrNull()
                     } ?: return@async emptyList<RawStream>()
                     val detailPath = runCatching { org.json.JSONObject(detailText) }.getOrNull()
@@ -1303,18 +1323,18 @@ object StreamEngine {
                     // 4. download + play endpoints in parallel.
                     val (downloadObj, playObj) = kotlinx.coroutines.coroutineScope {
                         val d = async {
-                            withTimeoutOrNull(8_000L) {
+                            withTimeoutOrNull(6_000L) {
                                 runCatching {
                                     app.get("$base/wefeed-h5api-bff/subject/download?$params",
-                                        timeout = 8, headers = reqHeaders).text
+                                        timeout = 6, headers = reqHeaders).text
                                 }.getOrNull()
                             }?.let { t -> runCatching { org.json.JSONObject(t) }.getOrNull() }
                         }
                         val p = async {
-                            withTimeoutOrNull(8_000L) {
+                            withTimeoutOrNull(6_000L) {
                                 runCatching {
                                     app.get("$base/wefeed-h5api-bff/subject/play?$params",
-                                        timeout = 8, headers = reqHeaders).text
+                                        timeout = 6, headers = reqHeaders).text
                                 }.getOrNull()
                             }?.let { t -> runCatching { org.json.JSONObject(t) }.getOrNull() }
                         }
@@ -2038,6 +2058,13 @@ object StreamEngine {
      * 4. GET {cdnDomain}/playlist/{file}.txt (X-Csrf-Token: {key}) → JSON [{title:"Hindi", file:..., id:...}]
      * 5. Per language: GET {cdnDomain}/playlist/{lang.file}.txt → signed m3u8 URL
      */
+    /** Candidate allmovieland hosts, newest first (Sept 2026 domain move):
+     *  allmovieland.one 301-redirects to allmovieland.art and the full
+     *  pipeline works on .art; .one stays as the fallback in case .art moves
+     *  again. Pinned as a pure list by ServerFarmHindiTest. */
+    internal fun allmovielandHosts(): List<String> =
+        listOf("https://allmovieland.art", "https://allmovieland.one")
+
     private suspend fun resolveAllmovieland(
         spec: ServerSpec,
         imdbId: String?,
@@ -2046,21 +2073,40 @@ object StreamEngine {
         episode: Int,
     ): List<RawStream> {
         val imdb = imdbId?.takeIf { it.isNotBlank() } ?: return emptyList()
-        val headers = okHeaders("https://allmovieland.one/")
 
-        // 1. Search by IMDB id
-        val searchUrl = "https://allmovieland.one/?do=search&subaction=search&story=$imdb"
-        val searchHtml = withTimeoutOrNull(12_000L) {
-            runCatching { app.get(searchUrl, timeout = 12, headers = headers).text }.getOrNull()
-        } ?: run { Log.w("Allmovieland", "search timeout"); throw IllegalStateException("allmovieland search timeout (network)") }
+        // 1. Search by IMDB id, across [allmovielandHosts] in order: an
+        // unreachable/unparsable host falls to the next one; only when EVERY
+        // host fails to answer is it a network failure (breaker trip). A
+        // page that answers but carries no card is a library miss (below).
+        // INTERNAL BUDGETS (user spec Sept 2026, re-landed after a rebuild
+        // restored HEAD's loose 12/12/10/10/8×N values): search 8s PER HOST,
+        // card 6s, play 6s, playlist 6s, per-language m3u8 5s each but
+        // fetched CONCURRENTLY (one 5s ceiling for the whole language stage,
+        // not 5s×N) — every serial chain of these ceilings lands inside the
+        // 30s allmovieland farm timeoutSec kill, so a slow-but-alive resolve
+        // is never canned mid-chain.
+        var searchHtml: String? = null
+        for (host in allmovielandHosts()) {
+            val html = withTimeoutOrNull(8_000L) {
+                runCatching {
+                    app.get("$host/?do=search&subaction=search&story=$imdb",
+                        timeout = 8, headers = okHeaders("$host/")).text
+                }.getOrNull()
+            }
+            if (html != null) { searchHtml = html; break }
+            Log.w("Allmovieland", "host $host unreachable, trying next")
+        }
+        val searchPage = searchHtml
+            ?: throw IllegalStateException("allmovieland search timeout (network, all hosts)")
         // Cards link to allmovieland.{art|one}/NNN-slug.html
         val cardUrl = Regex("""href="(https?://allmovieland\.[a-z]+/[^"]+\.html)"\s*>\s*<h3 class="new-short__title""")
-            .find(searchHtml)?.groupValues?.get(1)
+            .find(searchPage)?.groupValues?.get(1)
             ?: run { throw CleanMissException("no card found for $imdb (title not in library)") }
 
-        // 2. Card page → player domain + IMDB src
-        val cardHtml = withTimeoutOrNull(12_000L) {
-            runCatching { app.get(cardUrl, timeout = 12, headers = okHeaders(cardUrl)).text }.getOrNull()
+        // 2. Card page → player domain + IMDB src (6s ceiling, budget spec
+        // Sept 2026 — see search step above).
+        val cardHtml = withTimeoutOrNull(6_000L) {
+            runCatching { app.get(cardUrl, timeout = 6, headers = okHeaders(cardUrl)).text }.getOrNull()
         } ?: throw IllegalStateException("allmovieland card fetch failed (network)")
         val playerDomain = Regex("""AwsIndStreamDomain\s*=\s*'([^']+)'""")
             .find(cardHtml)?.groupValues?.get(1)?.trimEnd('/')
@@ -2075,8 +2121,9 @@ object StreamEngine {
         // with "http") and substringBefore("/playlist/") (the literal
         // "/playlist/" never appears in "\/playlist\/"). Unescape first.
         val playUrl = "$playerDomain/play/$playSrc"
-        val playHtml = withTimeoutOrNull(10_000L) {
-            runCatching { app.get(playUrl, timeout = 10, headers = okHeaders(cardUrl)).text }.getOrNull()
+        // 6s ceiling (budget spec Sept 2026 — see search step above).
+        val playHtml = withTimeoutOrNull(6_000L) {
+            runCatching { app.get(playUrl, timeout = 6, headers = okHeaders(cardUrl)).text }.getOrNull()
         } ?: throw IllegalStateException("allmovieland play fetch failed (network)")
         val file = Regex("""["']?file["']?\s*[:=]\s*["']([^"']+)["']""")
             .find(playHtml)?.groupValues?.get(1)?.replace("\\/", "/")
@@ -2095,11 +2142,12 @@ object StreamEngine {
         }
         val cdnBase = fileUrl.substringBefore("/playlist/")
 
-        // 4. Language playlist (file = encrypted path like "B64hash.txt")
+        // 4. Language playlist (file = encrypted path like "B64hash.txt").
+        // 6s ceiling (budget spec Sept 2026 — see search step above).
         val playlistHeaders = okHeaders(playUrl).toMutableMap()
         playlistHeaders["X-Csrf-Token"] = key
-        val playlistText = withTimeoutOrNull(10_000L) {
-            runCatching { app.get(fileUrl, timeout = 10, headers = playlistHeaders).text }.getOrNull()
+        val playlistText = withTimeoutOrNull(6_000L) {
+            runCatching { app.get(fileUrl, timeout = 6, headers = playlistHeaders).text }.getOrNull()
         } ?: run { Log.w("Allmovieland", "playlist timeout"); throw IllegalStateException("allmovieland playlist timeout (network)") }
         val playlist = runCatching { org.json.JSONArray(playlistText) }.getOrElse {
             Log.w("Allmovieland", "playlist not JSON array"); throw IllegalStateException("allmovieland playlist parse error") }
@@ -2145,22 +2193,34 @@ object StreamEngine {
             }
         } else emptyList()
 
-        // 5. Per-language: fetch each language's playlist → m3u8 URL
+        // 5. Per-language: fetch each language's playlist → m3u8 URL.
+        // CONCURRENT, 5s each (budget spec Sept 2026, re-landed — the rebuild
+        // restored a serial 8s×N loop): a multi-language title must not pay
+        // 8s PER entry on the farm's critical path. async over langEntries,
+        // one 5s ceiling per fetch, results collected IN ORDER via awaitAll;
+        // a failed/slow fetch is skipped (null), never retried.
         val out = mutableListOf<RawStream>()
         val langEntries = leaves.ifEmpty {
             (0 until playlist.length()).mapNotNull { playlist.optJSONObject(it) }
                 .filter { !it.optString("file").isNullOrBlank() }
                 .map { LangLeaf(it.optString("title").ifBlank { "Multi" }, it.optString("file")) }
         }
-        for (leaf in langEntries) {
+        val fetched = coroutineScope {
+            langEntries.map { leaf ->
+                async {
+                    val langFile = leaf.file.replace("\\/", "/")
+                    val langUrl = if (langFile.startsWith("http")) langFile
+                    else "$cdnBase/playlist/$langFile.txt"
+                    val m3u8Text = withTimeoutOrNull(5_000L) {
+                        runCatching { app.get(langUrl, timeout = 5, headers = playlistHeaders).text }.getOrNull()
+                    }
+                    leaf to m3u8Text?.trim()?.replace("\\/", "/")?.takeIf { it.startsWith("http") }
+                }
+            }.awaitAll()
+        }
+        for ((leaf, m3u8) in fetched) {
+            if (m3u8 == null) continue
             val langTitle = leaf.lang
-            val langFile = leaf.file.replace("\\/", "/")
-            val langUrl = if (langFile.startsWith("http")) langFile
-            else "$cdnBase/playlist/$langFile.txt"
-            val m3u8Text = withTimeoutOrNull(8_000L) {
-                runCatching { app.get(langUrl, timeout = 8, headers = playlistHeaders).text }.getOrNull()
-            } ?: continue
-            val m3u8 = m3u8Text.trim().replace("\\/", "/").takeIf { it.startsWith("http") } ?: continue
             val isHindi = langTitle.contains("hindi", ignoreCase = true)
             out += RawStream(
                 serverId = spec.id,
@@ -2392,8 +2452,13 @@ object StreamEngine {
      *  (MovieBox/Allmovieland finish ~10-20s) but keeps the loading spinner
      *  up; shorter plays sooner and leaves the slowest servers to the
      *  FastStartCache replay on re-open. [FAST_START_MAX_MS] remains the
-     *  hard ceiling for a totally dead farm. */
-    const val LIVE_FILL_MS: Long = 15_000L
+     *  hard ceiling for a totally dead farm.
+     *  15s→90s (user spec Sept 2026 rewrite #3, "90s LIVE_FILL"): the
+     *  player starts as soon as the first batch lands regardless, while the
+     *  change-server list keeps growing; the old 15s window frozen the list
+     *  before the 90s tail (slow hosts + the 13s subtitle budget + the 30s
+     *  farm kills) had landed, showing "no more servers" prematurely. */
+    const val LIVE_FILL_MS: Long = 90_000L
 }
 
 

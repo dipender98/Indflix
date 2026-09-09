@@ -372,7 +372,8 @@ class IndStreamProvider : MainAPI() {
         // subtitleCallback pushes are only recorded while loadLinks is alive
         // (the same job-liveness rule the change-server list rides on; a
         // detached post-return push is silently dropped). Self-bounded:
-        // ≤2.5s IMDB wait + the provider's 6.5s fetch budget.
+        // ≤2.5s IMDB wait + the provider's 13s fetch budget (90s LIVE_FILL
+        // window leaves both pushes ample room to land before loadLinks ends).
         val subsJob = fastStartScope.async {
             val imdb = runCatching { withTimeoutOrNull(2500L) { imdbDeferred.await() } }.getOrNull()
             runCatching { topUpSubtitles(imdb, season, episode, originalLangNow(), subtitleCallback) }

@@ -528,8 +528,10 @@ def test_vidcore(t):
 
 def test_allmovieland(t):
     s = sess()
-    search = s.get(f"https://allmovieland.one/?do=search&subaction=search&story={t['imdb']}",
-                   headers=ok_headers("https://allmovieland.one/"), timeout=15).text
+    # allmovieland.one 301s to allmovieland.art (verified 2026-09-08) — keep
+    # .one as the manual-fallback host if .art moves again.
+    search = s.get(f"https://allmovieland.art/?do=search&subaction=search&story={t['imdb']}",
+                   headers=ok_headers("https://allmovieland.art/"), timeout=12).text
     card = re.search(r'href="(https?://allmovieland\.[a-z]+/[^"]+\.html)"\s*>\s*<h3 class="new-short__title', search)
     if not card:
         return ("MISS", "no card found (title not in library)", 0, None)

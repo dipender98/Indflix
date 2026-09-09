@@ -5,6 +5,7 @@ import com.indstream.TitleMatch
 import com.indstream.ServerFarm
 import com.indstream.ServerIdType
 import com.indstream.ServerSpec
+import com.indstream.StreamEngine
 import com.indstream.VidlinkSource
 import com.indstream.VideasySource
 
@@ -168,8 +169,32 @@ class ServerFarmHindiTest {
         assertEquals(ServerIdType.IMDB, s.idType)
         assertTrue(s.hindi, "Allmovieland is Hindi-first (Hindi/Bengali/Tamil/Telugu playlists)")
         assertEquals(1080, s.maxQuality)
+        // timeoutSec 30 (Sept 2026): the 20s farm kill canned slow-but-alive
+        // 5-step chains mid-flight — tripping the breaker on a merely-slow
+        // host; the tightened resolver budgets must fit under this kill.
+        assertEquals(30, s.timeoutSec, "allmovieland farm kill must fit the resolver chain")
+        // DOMAIN MOVE (verified 2026-09-08): .one 301s to .art — the spec
+        // pins the live host; allmovielandHosts() carries the fallback.
         val m = ServerFarm.buildMovieUrl(s, "tt1375666")
-        assertTrue(m.contains("allmovieland.one") && m.contains("tt1375666"))
+        assertTrue(m.contains("allmovieland.art") && m.contains("tt1375666"))
+    }
+
+    @Test
+    fun allmovieland_hosts_fallbackOrderPinned() {
+        // Pure: newest host first (.art live today), .one kept as the manual
+        // fallback if .art moves again (StreamEngine.resolveAllmovieland loops).
+        assertEquals(
+            listOf("https://allmovieland.art", "https://allmovieland.one"),
+            StreamEngine.allmovielandHosts(),
+        )
+    }
+
+    @Test
+    fun moviebox_timeoutBudgetFitsFarmKill() {
+        // bearer 6 + 2×search 7 + detail 6 + dl/play 6 ≈ 25s serial worst
+        // case must fit under the MovieBox timeoutSec kill (Sept 2026).
+        val s = ServerFarm.allServers.first { it.id == "moviebox" }
+        assertEquals(30, s.timeoutSec, "MovieBox internal budgets (6/7/6/6) must fit this kill")
     }
 
     @Test

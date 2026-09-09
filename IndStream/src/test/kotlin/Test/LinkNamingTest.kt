@@ -10,7 +10,8 @@ import kotlin.test.assertEquals
  * defined in [LinkNaming] (Sept 2026 user spec).
  *
  *  - Language tag mapping (raw strings → canonical short tokens).
- *  - Display name assembly (brackets, resolution dedupe, server numbering).
+ *  - Display name assembly (brackets, single-token resolution — ALWAYS
+ *    strip-then-append, user spec Sept 2026 re-report — server numbering).
  *  - Subtitle language normalisation (native-script → canonical English).
  *  - Group numbering: unique = no number; 2 identical → "-1"/"-2";
  *    5 identical → "-1"…"-5"; 20 identical → "-1"…"-20".
@@ -92,12 +93,14 @@ class LinkNamingTest {
 
     @Test
     fun displayName_resolutionInName_noDuplicate() {
-        // "Server 1080p" has resolution in the indicator → quality NOT appended.
+        // Sub-indicator carries "1080p": the token is STRIPPED from the server
+        // part and the measured one appended exactly once (new strip-then-append
+        // semantics — the old code kept the name token and skipped the append).
         val name = LinkNaming.displayName(
             serverName = "PrimeSrc", audioLabel = "Original", qualityHint = 1080,
             subIndicator = "Nova 1080p",
         )
-        assertEquals("PrimeSrc Nova 1080p (Original)", name)
+        assertEquals("PrimeSrc Nova (Original) 1080p", name)
     }
 
     @Test
@@ -118,30 +121,34 @@ class LinkNamingTest {
 
     @Test
     fun displayName_resolutionGluedNoDuplicate() {
-        // Resolution glued to a word ("Server1080p") must still be detected so the
-        // quality is NOT appended a second time → no "1080p 1080p".
+        // Resolution glued to a word ("Server1080p"): the old contains() check
+        // missed the glued form; the strip regex catches it — the name renders
+        // "Server" and the measured token appears exactly once, never twice.
         val name = LinkNaming.displayName(
             serverName = "Server1080p", audioLabel = "Hindi", qualityHint = 1080,
         )
-        assertEquals("Server1080p (Hindi)", name)
+        assertEquals("Server (Hindi) 1080p", name)
     }
 
     @Test
     fun displayName_fourKNoDuplicate() {
-        // "4K" is not a \d{3,4}p token, so it must be detected by exact-match too.
+        // "4K" in the name + measured 2160: name token stripped, "4K" appended
+        // exactly once (new semantics) — never "MovieBox 4K (English) 4K".
         val name = LinkNaming.displayName(
             serverName = "MovieBox 4K", audioLabel = "English", qualityHint = 2160,
         )
-        assertEquals("MovieBox 4K (English)", name)
+        assertEquals("MovieBox (English) 4K", name)
     }
 
     @Test
     fun displayName_height2160p_noDuplicate_rawHeightToken() {
-        // Server name carries "2160p" while qualityLabel returns "4K" — must not duplicate.
+        // Server name carries the raw "2160p" token while qualityHint maps to
+        // "4K": the old code's contains("4K")/contains("2160p") dance missed
+        // variants; the strip removes "2160p" and the single "4K" is appended.
         val name = LinkNaming.displayName(
             serverName = "Movie 2160p", audioLabel = "English", qualityHint = 2160,
         )
-        assertEquals("Movie 2160p (English)", name)
+        assertEquals("Movie (English) 4K", name)
     }
 
     @Test
@@ -155,11 +162,74 @@ class LinkNamingTest {
 
     @Test
     fun displayName_height1080p_noDuplicate_rawHeightToken() {
-        // Existing case still works: server name has "1080p".
+        // "Movie 1080p" + measured 1080: token stripped from the name, the
+        // measured one appended once.
         val name = LinkNaming.displayName(
             serverName = "Movie 1080p", audioLabel = "English", qualityHint = 1080,
         )
-        assertEquals("Movie 1080p (English)", name)
+        assertEquals("Movie (English) 1080p", name)
+    }
+
+    // ── AT-MOST-ONE resolution token (user spec Sept 2026 re-report) ──
+
+    @Test
+    fun displayName_reReport_a_serverTokenStripped_measuredAppendedOnce() {
+        // (a) "Server 1080p" + measured 1080 → exactly one "1080p", the one
+        // from the height. Never "Server 1080p (English) 1080p".
+        val name = LinkNaming.displayName(
+            serverName = "Server 1080p", audioLabel = "English", qualityHint = 1080,
+        )
+        assertEquals("Server (English) 1080p", name)
+        assertEquals(1, countToken(name, """\d{3,4}p"""))
+    }
+
+    @Test
+    fun displayName_reReport_b_gluedToken_strippedAndAppendedOnce() {
+        // (b) glued "Server1080p" — the variant the contains() check missed.
+        val name = LinkNaming.displayName(
+            serverName = "Server1080p", audioLabel = "English", qualityHint = 1080,
+        )
+        assertEquals("Server (English) 1080p", name)
+        assertEquals(1, countToken(name, """\d{3,4}p"""), "no doubled token: $name")
+    }
+
+    @Test
+    fun displayName_reReport_c_fourKNameToken_appearsOnce() {
+        // (c) "MovieBox 4K" + 2160 → one "4K".
+        val name = LinkNaming.displayName(
+            serverName = "MovieBox 4K", audioLabel = "English", qualityHint = 2160,
+        )
+        assertEquals("MovieBox (English) 4K", name)
+        assertEquals(1, countToken(name, """4K"""))
+    }
+
+    @Test
+    fun displayName_reReport_d_staleWrongToken_realHeightShownOnce() {
+        // (d) name carries a STALE, WRONG token ("1080p") while the measured
+        // height is 720: guessing is stripped; only the real height shows.
+        val name = LinkNaming.displayName(
+            serverName = "VidEm 1080p", audioLabel = "English", qualityHint = 720,
+        )
+        assertEquals("VidEm (English) 720p", name)
+    }
+
+    @Test
+    fun displayName_reReport_e_stripKeepsDuplicateNumbering() {
+        // (e) the "-N" duplicate suffix must survive the strip: two identical
+        // "VidLink 1080p" members (hint 1080) → "VidLink-1 … 1080p"/"VidLink-2 …".
+        val streams = listOf(
+            raw("VidLink 1080p", "English", 1080),
+            raw("VidLink 1080p", "English", 1080),
+        )
+        val nums = LinkNaming.dedupeNames(streams)
+        val names = streams.mapIndexed { i, s ->
+            LinkNaming.displayName(
+                serverName = s.serverName, audioLabel = s.audioLabel,
+                qualityHint = s.qualityHint, duplicateIndex = nums[i],
+            )
+        }
+        assertEquals("VidLink-1 (English) 1080p", names[0])
+        assertEquals("VidLink-2 (English) 1080p", names[1])
     }
 
     // ── numbering: unique → no number ────────────────────────────
@@ -334,4 +404,8 @@ class LinkNamingTest {
             url = "https://example.com/${serverName.hashCode()}.m3u8",
             isM3u8 = true, qualityHint = qualityHint, audioLabel = audioLabel,
         )
+
+    /** How many times a (regex) resolution token occurs in a label. */
+    private fun countToken(label: String, tokenRegex: String) =
+        Regex(tokenRegex, RegexOption.IGNORE_CASE).findAll(label).count()
 }

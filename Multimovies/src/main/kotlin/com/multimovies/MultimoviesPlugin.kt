@@ -1,12 +1,12 @@
 ﻿package com.multimovies
 /**
 
- * FILE: MultimoviesPlugin.kt â€” the Multimovies plugin and provider engine.
+ * FILE: MultimoviesPlugin.kt — the Multimovies plugin and provider engine.
  *
  * Everything Multimovies-site-specific lives here:
  *  - [Multimovies]          plugin entrypoint (@CloudstreamPlugin); registers
  *                           the provider with CloudStream.
- *  - [MultimoviesProvider]  MainAPI â€” scrapes multimovies.motorcycles
+ *  - [MultimoviesProvider]  MainAPI — scrapes multimovies.motorcycles
  *                           (search / load / loadLinks, dooplayer servers).
  *  - [MultiSourcePuller]    parallel-pull engine: races every source with a
  *                           per-source timeout, unwraps embeds, pushes links
@@ -1121,13 +1121,15 @@ class MultimoviesProvider : MainAPI() {
             }
         }
 
-        // Fallback subtitles (user spec rewrite #2): the OpenSubtitles provider
-        // IS the only subtitle source. Kicked off in PARALLEL with the pulls
+        // Fallback subtitles (user spec rewrite #3): the two-source provider
+        // (OpenSubtitles addon + SubSense top-up) is the ONLY subtitle
+        // source. Kicked off in PARALLEL with the pulls
         // (gated on the first link so a dead farm never fetches) and AWAITED
         // before any `true` return below: the app records subtitleCallback
         // pushes only while loadLinks is alive — a detached post-return push
         // is silently dropped (bug: the fast-farm race returned before the
-        // ~6.5s fetch landed, losing the tracks for this play).
+        // slow fetch landed, losing the tracks for this play; the provider
+        // budget is 13s now - see SubtilesProvider.FETCH_BUDGET_MS).
         val metaSubs = meta
         val subsJob = metaSubs?.let { m ->
             searchScope.async {
@@ -1192,12 +1194,13 @@ class MultimoviesProvider : MainAPI() {
         return@withDomainRetry true
     }
 
-    /** Subtitle provider (user spec rewrite #2): the OpenSubtitles fallback
+    /** Subtitle provider (user spec rewrite #3): the two-source OpenSubtitles +
+     *  SubSense fallback
      *  ([SubtilesProvider]) is the SOLE subtitle source — server captions are
      *  never pushed. Fetches the wanted languages and emits them through the
      *  player's `subtitleCallback`. MUST be called (and awaited) while
      *  loadLinks is still running: the app drops subtitle pushes made after
-     *  the provider coroutine returns. Budgeted inside the provider (6.5s)
+     *  the provider coroutine returns. Budgeted inside the provider (13s FETCH_BUDGET_MS)
      *  and cached per title (15 min), so repeat plays return instantly. */
     private suspend fun deliverFallbackSubs(
         meta: SourceMeta,
