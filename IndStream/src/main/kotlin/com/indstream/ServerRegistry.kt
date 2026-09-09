@@ -193,15 +193,39 @@ object ServerFarm {
         // 8Stream (himanshu8443/8StreamApi): IMDB-keyed JSON API — /mediaInfo
         // returns per-language playlist entries (Hindi/English/Tamil/Telugu/
         // Bengali) whose {file,key} pair exchanges at POST /api/v1/getStream
-        // for a DIRECT HLS master. Two calls per language, zero captcha —
-        // bullet-train instant play. Movies only (no episode targeting).
+        // for a DIRECT HLS master. Movies only (no episode targeting).
+        // DISABLED Sept 2026 (verified live + user report): the shared public
+        // Vercel deployment hard-rejects unauthenticated traffic — 429 "Too
+        // Many Requests" / 403 on every probe across titles, so /mediaInfo
+        // never answers and the two-call exchange can't even start. Nothing to
+        // fix client-side (the upstream is rate-limit-gated for everyone).
+        // Re-enable alongside resolve8Stream only if a self-hosted instance
+        // or an open mirror appears.
+        // ServerSpec(
+        //     id = "8stream", name = "8Stream",
+        //     idType = ServerIdType.IMDB,
+        //     movieUrl = "https://8-stream-api.vercel.app/api/v1/mediaInfo?id={id}",
+        //     tvUrl = "https://8-stream-api.vercel.app/api/v1/mediaInfo?id={id}",
+        //     isJsonApi = true, referer = "https://8-stream-api.vercel.app/",
+        //     hasSubtitles = false, maxQuality = 1080, timeoutSec = 12,
+        // ),
+        // VidNest (new.vidnest.fun aggregator, verified live Sept 2026):
+        // TMDB-keyed fan-out across the host's own sub-servers. Each returns
+        // {encrypted, data} where data is a CUSTOM-base64 blob (non-standard
+        // alphabet, decoded locally in StreamEngine.decodeVidnestPayload) and
+        // the per-server JSON shapes differ. moviebox/allmovies entries carry
+        // lang/language fields ("Hindi", "Tamil", ...) — the only aggregator
+        // backends besides MovieBox itself that LABEL language per stream.
+        // Sub-servers flap (502s observed): failures inside the resolver are
+        // soft-skipped per sub-server and an all-empty aggregate is a clean
+        // miss, so the breaker never locks the whole host out for one bad tap.
         ServerSpec(
-            id = "8stream", name = "8Stream",
-            idType = ServerIdType.IMDB,
-            movieUrl = "https://8-stream-api.vercel.app/api/v1/mediaInfo?id={id}",
-            tvUrl = "https://8-stream-api.vercel.app/api/v1/mediaInfo?id={id}",
-            isJsonApi = true, referer = "https://8-stream-api.vercel.app/",
-            hasSubtitles = false, maxQuality = 1080, timeoutSec = 12,
+            id = "vidnest", name = "VidNest",
+            idType = ServerIdType.TMDB,
+            movieUrl = "https://new.vidnest.fun/{server}/movie/{id}",
+            tvUrl = "https://new.vidnest.fun/{server}/tv/{id}/{season}/{episode}",
+            isJsonApi = true, referer = "https://vidnest.fun/",
+            hasSubtitles = false, maxQuality = 1080, timeoutSec = 20,
         ),
         // Vidup (vidup.to, verified Sept 2026): TMDB-keyed (accepts IMDB too
         // via the URL path). 4-step enc-dec.app pipeline:

@@ -148,8 +148,16 @@ object VideasySource {
 
     /** Full decoded payload: stream sources + the server's own subtitle
      *  tracks ({url, language|lang|code} items — usually empty, but they
-     *  must be taken when present, user spec Sept 2026). */
-    data class Result(val sources: List<Source>, val subtitles: List<Pair<String, String>>)
+     *  must be taken when present, user spec Sept 2026).
+     *
+     *  [httpOk] separates "the API answered and decryption succeeded" (empty
+     *  sources = the upstream simply has no entry, or it is mid-flap) from
+     *  "the API itself failed" (timeout/5xx/decrypt failure). The resolver
+     *  clean-misses the first bucket — the upstream flaps 500s in short
+     *  windows (verified live: all-empty then all-populated within 2 minutes)
+     *  and hard-failing those flaps tripped the breaker, making the server
+     *  vanish for minutes after each flap (user report Sept 2026). */
+    data class Result(val sources: List<Source>, val subtitles: List<Pair<String, String>>, val httpOk: Boolean)
 
     // ---- JVM-test hooks (internal, same-package access) ----
 
@@ -180,7 +188,7 @@ object VideasySource {
             val seed = JSONObject(seedJson).optString("seed")
             if (seed.isBlank()) {
                 Log.w("VideasyHindi", "no seed in response: ${seedJson.take(120)}")
-                return Result(emptyList(), emptyList())
+                return Result(emptyList(), emptyList(), httpOk = false)
             }
 
             val q = buildString {
@@ -200,7 +208,7 @@ object VideasySource {
             ).text
             if (enc.isBlank() || enc.startsWith("<")) {
                 Log.w("VideasyHindi", "bad response (${enc.length}B): ${enc.take(80)}")
-                return Result(emptyList(), emptyList())
+                return Result(emptyList(), emptyList(), httpOk = false)
             }
 
             val jsonText = decrypt(enc, seed, tmdbId)
@@ -225,10 +233,10 @@ object VideasySource {
                     lang to url
                 }
             } ?: emptyList()
-            Result(sources, subtitles)
+            Result(sources, subtitles, httpOk = true)
         } catch (e: Exception) {
             Log.w("VideasyHindi", "fetchSources failed: ${e.message}")
-            Result(emptyList(), emptyList())
+            Result(emptyList(), emptyList(), httpOk = false)
         }
     }
 }

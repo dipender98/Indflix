@@ -528,6 +528,20 @@ object StreamEngine {
             failServer(spec, "vidrock returned no streams")
             return emptyList()
         }
+        if (spec.id == "vidnest") {
+            val (result, answered) = resolveVidnest(spec, tmdbId, type, season, episode)
+            if (result.isNotEmpty()) { okServer(spec, start, "vidnest fan-out", result.size); return result }
+            if (answered == 0) {
+                failServer(spec, "vidnest: no sub-server answered (host down)")
+            } else {
+                // Soft-fail (user spec Sept 2026, MovieBox parity): sub-servers
+                // answered but none carry this title — a title-level miss, not
+                // a host failure. VidNest flaps 502s per sub-server, and hard-
+                // failing the aggregate for one bad tap would trip the breaker.
+                failServer(spec, "vidnest returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
+            }
+            return emptyList()
+        }
         if (spec.id == "videm") {
             val result = resolveVidem(spec, tmdbId, imdbId, type, season, episode)
             if (result.isNotEmpty()) { okServer(spec, start, "videm", result.size); return result }
@@ -1115,7 +1129,18 @@ object StreamEngine {
             tmdbId = tmdbId, imdbId = imdbId, title = title, year = year,
             mediaType = type, season = season, episode = episode,
         )
-        if (fetched.sources.isEmpty()) return emptyList()
+        // API-level failure (timeout/5xx/decrypt): a genuine outage — let the
+        // breaker do its job. Verified live Sept 2026: the upstream flaps in
+        // SHORT windows (all-empty then all-populated within 2 minutes), so a
+        // hard trip here was locking the server out long after recovery.
+        if (!fetched.httpOk) return emptyList()
+        // API answered but nothing for this title (or mid-flap): CLEAN miss —
+        // no breaker trip, the next tap retries immediately instead of the
+        // server vanishing from the farm (user report: "appears in some
+        // movies/series, not in others").
+        if (fetched.sources.isEmpty()) {
+            throw CleanMissException("upstream answered, no entry (flap or library miss)")
+        }
 
         val out = fetched.sources
             .filter { it.quality.equals("Hindi", ignoreCase = true) }
@@ -1790,6 +1815,176 @@ object StreamEngine {
             javax.crypto.spec.GCMParameterSpec(128, nonce),
         )
         String(cipher.doFinal(cipherText), Charsets.UTF_8)
+    }.getOrNull()
+
+    /**
+     * VidNest resolver (new.vidnest.fun aggregator, verified live Sept 2026):
+     * TMDB-keyed fan-out across the host's sub-servers — moviebox/allmovies/
+     * klikxxi/onehd/vidlink/hollymoviehd/purstream. Movie + tv per sub-server:
+     *   GET {server}/movie/{tmdb} | {server}/tv/{tmdb}/{s}/{e}
+     *   -> {"encrypted":true,"data":"<custom-b64>"} | plain JSON
+     * The custom base64 uses a NON-standard alphabet (see VIDNEST_ALPHABET);
+     * decoded payloads are per-server JSON with DIFFERENT shapes:
+     *   moviebox    {url:[{lang,link,resolution,type}]}
+     *   allmovies   {streams:[{url,language,type}]}
+     *   klikxxi     {sources:[{url,quality,type}]}
+     *   onehd       {url,headers?,subtitles?}
+     *   hollymoviehd{sources:[{file,label,type}]}
+     *   purstream   {sources:[{url,format,name}]}
+     *   vidlink     {data:{stream:{playlist,captions}}}
+     * Sub-servers flap (502) independently: per-sub failures are skipped and
+     * only the ANSWER COUNT is reported so the dispatch can distinguish
+     * "host down" (breaker trip) from "title miss" (clean miss).
+     * All sub-servers launch in parallel; per-sub timeout is half the spec
+     * budget so the fan-out always fits inside the per-server kill.
+     */
+    private suspend fun resolveVidnest(
+        spec: ServerSpec,
+        tmdbId: Int?,
+        type: String,
+        season: Int,
+        episode: Int,
+    ): Pair<List<RawStream>, Int> {
+        val id = tmdbId ?: return emptyList<RawStream>() to 0
+        val subServers = listOf(
+            "moviebox", "allmovies", "klikxxi", "onehd",
+            "hollymoviehd", "purstream", "vidlink",
+        )
+        val subTimeout = ((spec.timeoutSec - 2).coerceAtLeast(6) * 1000L / 2).toLong()
+        val headers = mapOf(
+            "User-Agent" to HttpKit.userAgent,
+            "Referer" to "https://vidnest.fun/",
+            "Origin" to "https://vidnest.fun",
+            "Accept" to "application/json, text/javascript, */*; q=0.01",
+        )
+
+        data class SubResult(val server: String, val answered: Boolean, val streams: List<RawStream>)
+
+        val results = coroutineScope {
+            subServers.map { sub ->
+                async {
+                    val url = if (type == "movie")
+                        "https://new.vidnest.fun/$sub/movie/$id"
+                    else "https://new.vidnest.fun/$sub/tv/$id/$season/$episode"
+                    val raw = withTimeoutOrNull(subTimeout) {
+                        runCatching { app.get(url, timeout = subTimeout / 1000, headers = headers).text }
+                            .getOrNull()
+                    }
+                    if (raw.isNullOrBlank()) return@async SubResult(sub, answered = false, streams = emptyList())
+                    val decoded = runCatching {
+                        val root = org.json.JSONObject(raw)
+                        if (root.optBoolean("encrypted") && !root.isNull("data")) {
+                            val payload = root.optString("data")
+                            if (payload.isBlank()) return@runCatching null
+                            val json = decodeVidnestPayload(payload) ?: return@runCatching null
+                            org.json.JSONObject(json)
+                        } else {
+                            root
+                        }
+                    }.getOrNull() ?: return@async SubResult(sub, answered = true, streams = emptyList())
+                    SubResult(sub, answered = true, streams = parseVidnestSub(sub, decoded, spec))
+                }
+            }.map { it.await() }
+        }
+
+        val answered = results.count { it.answered }
+        val streams = results.flatMap { it.streams }
+            // URL dedupe: vidlink sub-server can mirror what the dedicated
+            // VidLink spec already emits — the farm dedupes later anyway, but
+            // an in-resolver dedupe keeps the log honest.
+            .distinctBy { it.url }
+        Log.d("VidNest", "fan-out: $answered/${subServers.size} answered, ${streams.size} streams " +
+            "(${results.filter { it.streams.isNotEmpty() }.joinToString { it.server }})")
+        return streams to answered
+    }
+
+    /** Parse one decoded VidNest sub-server payload into streams. The shapes
+     *  differ per sub-server (documented on [resolveVidnest]); unknown shapes
+     *  return empty and are logged with their keys for future additions. */
+    private fun parseVidnestSub(sub: String, root: org.json.JSONObject, spec: ServerSpec): List<RawStream> {
+        val out = mutableListOf<RawStream>()
+        fun add(url: String, lang: String, qualityLabel: String, isFile: Boolean) {
+            if (!url.startsWith("http")) return
+            val pri = when {
+                lang.contains("hindi", true) -> 4
+                lang.isBlank() -> 0
+                else -> 2 // labelled non-Hindi audio (Tamil/Telugu/Japanese/...) — "Original" tier
+            }
+            out += RawStream(
+                serverId = spec.id, serverName = spec.name,
+                url = url, isM3u8 = !isFile || url.contains(".m3u8", true),
+                referer = "https://vidnest.fun/",
+                qualityHint = Regex("(\\d{3,4})").find(qualityLabel)?.groupValues?.get(1)?.toIntOrNull() ?: 0,
+                audioPriority = pri,
+                audioLabel = lang,
+            )
+        }
+        when (sub) {
+            "moviebox" -> root.optJSONArray("url")?.let { arr ->
+                for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    add(o.optString("link"), o.optString("lang"), o.optString("resolution"), o.optString("type") == "mp4")
+                }
+            }
+            "allmovies" -> root.optJSONArray("streams")?.let { arr ->
+                for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    add(o.optString("url"), o.optString("language"), "", o.optString("type") == "mp4")
+                }
+            }
+            "klikxxi" -> root.optJSONArray("sources")?.let { arr ->
+                for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    add(o.optString("url"), "", o.optString("quality"), o.optString("type") == "mp4")
+                }
+            }
+            "hollymoviehd" -> root.optJSONArray("sources")?.let { arr ->
+                for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    add(o.optString("file"), "", o.optString("label"), o.optString("type") == "mp4")
+                }
+            }
+            "purstream" -> root.optJSONArray("sources")?.let { arr ->
+                for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    add(o.optString("url"), "", o.optString("name"), o.optString("format") == "mp4")
+                }
+            }
+            "onehd" -> add(root.optString("url"), "", "", true)
+            "vidlink" -> root.optJSONObject("data")?.optJSONObject("stream")?.optString("playlist")?.let {
+                add(it, "", "", true)
+            }
+        }
+        if (out.isEmpty()) Log.d("VidNest", "$sub: no recognizable stream shape; keys=${namesOf(root)}")
+        return out
+    }
+
+    /** VidNest custom-base64 decode — the host encodes payloads with its own
+     *  alphabet (RB0fpH8ZEyVLkv7c2i6MAJ5u3IKFDxlS1NTsnGaqmXYdUrtzjwObCgQP94hoeW+/=).
+     *  Straight port of the frontend decoder: map each char back to its 6-bit
+     *  value, re-pack into bytes, strip '=' placeholders (64 sentinel). */
+    private val vidnestAlphabet = "RB0fpH8ZEyVLkv7c2i6MAJ5u3IKFDxlS1NTsnGaqmXYdUrtzjwObCgQP94hoeW+/="
+
+    private fun decodeVidnestPayload(input: String): String? = runCatching {
+        val rev = HashMap<Char, Int>(vidnestAlphabet.length)
+        vidnestAlphabet.forEachIndexed { idx, c -> rev[c] = idx }
+        val pad = (4 - input.length % 4) % 4
+        val padded = input + "=".repeat(pad)
+        val bytes = ByteArray(padded.length / 4 * 3)
+        var w = 0
+        var i = 0
+        while (i < padded.length) {
+            val c0 = rev[padded[i]] ?: 64
+            val c1 = rev[padded[i + 1]] ?: 64
+            val c2 = if (padded[i + 2] == '=') 64 else rev[padded[i + 2]] ?: 64
+            val c3 = if (padded[i + 3] == '=') 64 else rev[padded[i + 3]] ?: 64
+            if (c0 == 64 || c1 == 64) throw IllegalArgumentException("bad vidnest b64 at $i")
+            bytes[w++] = ((c0 shl 2) or (c1 shr 4)).toByte()
+            if (c2 != 64) bytes[w++] = (((c1 and 0x0F) shl 4) or (c2 shr 2)).toByte()
+            if (c3 != 64) bytes[w++] = (((c2 and 0x03) shl 6) or c3).toByte()
+            i += 4
+        }
+        String(bytes, 0, w, Charsets.UTF_8)
     }.getOrNull()
 
     /**

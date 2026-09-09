@@ -204,10 +204,11 @@ class ServerFarmHindiTest {
     fun bulletTrainServers_present() {
         // The fast direct-API servers (user spec Sept 2026: "click and play
         // like bullet train" — Hindi/multi-audio, no embed chain). mp4hydra,
-        // vidzee, vixsrc and streamprovider are disabled (verified dead Sept
-        // 2026: maintenance page / 404 / 403 / 502) — kept out of the farm so
-        // they don't trip their breakers and blank the whole result set.
-        val ids = setOf("vidlink", "vaplayer", "vidrock", "videasy-hindi", "moviebox", "8stream",
+        // vidzee, vixsrc, streamprovider and 8stream are disabled (verified
+        // dead Sept 2026: maintenance page / 404 / 403 / 502 / hard 429+403
+        // rate-limit-gate) — kept out of the farm so they don't trip their
+        // breakers and blank the whole result set.
+        val ids = setOf("vidlink", "vaplayer", "vidrock", "videasy-hindi", "moviebox", "vidnest",
             "vidup", "vidcore", "allmovieland")
         for (id in ids) {
             assertNotNull(
@@ -216,7 +217,8 @@ class ServerFarmHindiTest {
             )
         }
         // Disabled/dead servers must NOT be in the live farm.
-        val disabled = setOf("mp4hydra", "vidzee", "vixsrc", "streamprovider", "nhd", "primesrc", "myflixer-hindi", "videm")
+        val disabled = setOf("mp4hydra", "vidzee", "vixsrc", "streamprovider", "nhd", "primesrc",
+            "myflixer-hindi", "videm", "8stream")
         for (id in disabled) {
             assertNull(
                 ServerFarm.allServers.firstOrNull { it.id == id },
