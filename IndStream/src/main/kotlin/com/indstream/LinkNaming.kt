@@ -4,29 +4,29 @@ import com.indstream.StreamEngine.RawStream
 
 /**
  * FILE: LinkNaming.kt — the ONE naming rule every emitted link must follow
- * (user spec, Sept 2026):
+ * (user spec, Sept 2026, revised):
  *
- *   `{ServerName[-n]} ({Language}) {Resolution}`
+ *   `{ServerName[-n]} ({Language})`
  *
  *  - {ServerName}  base server name. When several links share the exact same
  *                  (name, language, resolution), ALL members are numbered
  *                  right after the server name with "-n": 2 servers render as
- *                  "VidLink-1 (Hindi) 1080p" / "VidLink-2 (Hindi) 1080p", 5
- *                  servers number "-1"…"-5", 20 number "-1"…"-20" — to the
- *                  last one. A unique server keeps its plain name (no "-1").
+ *                  "VidLink-1 (Hindi)" / "VidLink-2 (Hindi)", 5 servers
+ *                  number "-1"…"-5", 20 number "-1"…"-20" — to the last one.
+ *                  A unique server keeps its plain name (no "-1").
  *  - ({Language})  always present, in brackets. Full display names with a
  *                  capital initial: Hindi, English, Multi, Japanese, …  — see
  *                  [languageTag]. A stream that carries several languages at
  *                  once (dual-audio master) is "Multi".
- *  - {Resolution}  the stream's tallest known height ("1080p", "4K"),
- *                  appended exactly once. user spec Sept 2026 (re-report):
- *                  a resolution token must appear AT MOST ONCE per server
- *                  name; the token comes from the measured/declared height
- *                  only — never guessed. Any token inside the server name or
- *                  sub-indicator ("Server 1080p", "Server1080p", "2160p"
- *                  vs mapped "4K") is STRIPPED before the measured one is
- *                  appended — no check-then-skip, so glued/variant forms can
- *                  never render "Server (Multi) 1080p 1080p".
+ *  - {Resolution}  user spec Sept 2026 (second revision): resolution is NOT
+ *                  printed in the server name at all — the CloudStream player
+ *                  shows each link's quality badge itself (from
+ *                  ExtractorLink.quality), so naming it here rendered it
+ *                  TWICE on many servers (e.g. "VidLink (Hindi) 1080p  1080p").
+ *                  Any token already inside the server name or sub-indicator
+ *                  ("Server 1080p", "Server1080p", "2160p", "4K") is STRIPPED,
+ *                  leaving the badge as the single source of resolution.
+ *                  [qualityLabel] remains for callers that need the token.
  */
 object LinkNaming {
 
@@ -82,23 +82,26 @@ object LinkNaming {
     /**
      * True when [indicator] (a sub-server label like "Server 1080p",
      * "Fade 1080p", "Nova") carries a resolution token. Kept as a query
-     * helper — [displayName] no longer checks-then-skips; it always strips
-     * (see RESOLUTION_TOKEN) and appends the measured token exactly once.
+     * helper — [displayName] strips these tokens from the server name and
+     * appends nothing (CloudStream's own badge is the only resolution print).
      */
     fun hasResolution(indicator: String?): Boolean =
         !indicator.isNullOrBlank() &&
             Regex("""\b(\d{3,4})p\b""", RegexOption.IGNORE_CASE).containsMatchIn(indicator)
 
     /**
-     * Build the final display name.
+     * Build the final display name: `{Server[-n]} ({Language})`. No resolution
+     * token is printed — CloudStream renders the link's quality badge itself
+     * (user spec Sept 2026, second revision).
      *
      * @param serverName   base server/brand, e.g. "VidLink", "PrimeSrc Nova".
      * @param audioLabel   raw audio label from the resolver ("Hindi", "hi",
      *                     "Original", "हिन्दी", "").
-     * @param qualityHint  tallest known height (0 = unknown/adaptive).
+     * @param qualityHint  accepted for call-site compatibility (dedupe
+     *                     grouping); intentionally NOT rendered in the name.
      * @param subIndicator optional sub-server label that is part of the base
      *                     name; resolution tokens in it are stripped like the
-     *                     base name's, exactly one being appended at the end.
+     *                     base name's.
      * @param duplicateIndex group number from [dedupeNames]: 0 = unique (no
      *                     number), 1..N = the n-th member of an identical
      *                     (name+language+resolution) group — numbered to the
@@ -127,23 +130,17 @@ object LinkNaming {
             Regex("\\b${Regex.escape(tag)}\\b", RegexOption.IGNORE_CASE).containsMatchIn(nameWithSub)
         ) "" else "($tag)"
 
-        // user spec Sept 2026 (re-report): a resolution token must appear AT
-        // MOST ONCE per server name; the token comes from the measured/declared
-        // height only — never guessed. The old check-then-skip compared the
-        // exact output token via contains(), which MISSED glued/variant forms
-        // ("Server1080p", "x1080p", raw "2160p" vs mapped "4K") and let labels
-        // render "… 1080p 1080p". New rule: ALWAYS strip-then-append — every
-        // RESOLUTION_TOKEN is removed from the server part (folded sub-indicator
-        // and the "-N" duplicate suffix included — "-1"…"-20" survive because a
-        // token must end in p/K) and from the (language) bracket contributions,
-        // then exactly ONE qualityLabel(qualityHint) is appended. That is the
-        // FINAL-label safety net: a literal "1080p … 1080p" is impossible. With
-        // an unknown height (0) nothing is appended and the name's own guessed
-        // token stays stripped — a blank is honest, a guess is not.
-        val res = qualityLabel(qualityHint)
+        // user spec Sept 2026 (second revision): the server name carries NO
+        // resolution token — CloudStream shows each link's quality badge itself
+        // (ExtractorLink.quality), so printing it here duplicated it on many
+        // servers. Every RESOLUTION_TOKEN inside the server part (folded
+        // sub-indicator included; the "-N" duplicate suffix survives because a
+        // token must end in p/K) is stripped and NOTHING is appended. With a
+        // guessed token stripped, a name like "Server1080p" renders "Server"
+        // and the player's badge is the single source of resolution.
         val serverDisplay = RESOLUTION_TOKEN.replace(serverPart, "").trim()
         val tagDisplay = if (tagPart.isBlank()) "" else RESOLUTION_TOKEN.replace(tagPart, "").trim()
-        val parts = listOf(serverDisplay, tagDisplay, res).filter { it.isNotBlank() }
+        val parts = listOf(serverDisplay, tagDisplay).filter { it.isNotBlank() }
         return parts.joinToString(" ")
     }
 

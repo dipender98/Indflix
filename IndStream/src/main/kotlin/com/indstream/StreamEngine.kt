@@ -330,9 +330,11 @@ object StreamEngine {
                         }
                         // Background/off path: trust the RawStream's own qualityHint (no
                         // new probes). For direct files (non-adaptive) with no known
-                        // height, use -1 (the "Auto" sentinel) so the display name
-                        // shows "Auto" instead of a bare name. Language still comes
-                        // from host declarations only (URL/server name) — never guessed.
+                        // height, use -1 so they stay distinguishable from adaptive
+                        // masters (height 0) in dedupe grouping; the display name no
+                        // longer prints resolution at all (CloudStream's quality badge
+                        // does). Language still comes from host declarations only
+                        // (URL/server name) — never guessed.
                         else -> {
                             var fullHeight = if (!raw.isM3u8 && raw.qualityHint <= 0) -1 else raw.qualityHint
                             // Adaptive guard (Sept 2026): an HLS master can
@@ -357,6 +359,13 @@ object StreamEngine {
         val resolvedForKey = preResolved.map { it.raw.copy(qualityHint = it.fullHeight) }
         val numbers = LinkNaming.dedupeNames(resolvedForKey, originalLang)
 
+        // 720p-floor observability (Sept 2026): the floor is user spec and MovieBox
+        // has no CSX equivalent, so a MovieBox-only-480p title would surface as
+        // "server absent" with zero logs. Count drops vs survives per server and
+        // log once when a server lost EVERYTHING to the floor. Behavior unchanged.
+        val floorDroppedByServer = HashMap<String, Int>()
+        val emittedByServer = HashMap<String, Int>()
+
         preResolved.forEachIndexed { index, r ->
             val raw = r.raw
             val dupIdx = numbers.getOrElse(index) { 0 }
@@ -366,7 +375,11 @@ object StreamEngine {
             // KNOWN height below 720p never surface. Adaptive masters always
             // pass — their height reading is the master header, not their best
             // rendition — and unknown heights (0) can't be proven low.
-            if (!passesQualityFloor(raw.isM3u8, r.fullHeight)) return@forEachIndexed
+            if (!passesQualityFloor(raw.isM3u8, r.fullHeight)) {
+                floorDroppedByServer.merge(raw.serverId, 1, Int::plus)
+                return@forEachIndexed
+            }
+            emittedByServer.merge(raw.serverId, 1, Int::plus)
 
             val linkHeaders = LinkedHashMap<String, String>()
             linkHeaders.putAll(raw.extraHeaders)
@@ -377,14 +390,13 @@ object StreamEngine {
             val isAdaptive = raw.isM3u8
             // ExtractorLink.quality = the REAL resolved height (user spec Sept
             // 2026) so the user's quality-profile ranks every stream by its
-            // height, AND the name carries the same (language) + resolution —
-            // user spec: both must be visible ON THE SERVER NAME itself,
-            // derived from probing/parsing (master variants, moov measure,
-            // declared URL tokens) — never guessed. [LinkNaming.displayName]
-            // enforces the canonical `{Server} ({Language}) {Resolution}`
-            // shape, drops a repeat when the server name already shows the
-            // token, prints "Auto" for an unmeasurable direct file (-1) and
-            // nothing for a height-less adaptive master (0).
+            // height AND CloudStream's own badge is the ONLY resolution print
+            // (user spec revision: the server name never repeats it). The name
+            // carries the (language) tag — derived from probing/parsing, never
+            // guessed. [LinkNaming.displayName] enforces the canonical
+            // `{Server} ({Language})` shape and strips any guessed resolution
+            // token inside the server/sub name; it prints nothing for an
+            // unmeasurable direct file (-1) or height-less master (0).
             val quality = r.fullHeight.coerceAtLeast(0)
             val label = LinkNaming.displayName(
                 serverName = raw.serverName,
@@ -408,6 +420,11 @@ object StreamEngine {
                     quality = quality,
                     headers = linkHeaders, type = ExtractorLinkType.VIDEO,
                 ))
+            }
+        }
+        floorDroppedByServer.forEach { (sid, n) ->
+            if ((emittedByServer[sid] ?: 0) == 0) {
+                Log.i("IndStream", "$sid streams dropped by 720p floor ($n candidates, none ≥720p)")
             }
         }
         return emitted
@@ -1130,15 +1147,20 @@ object StreamEngine {
             }?.let { return it }
         }
         val base = "https://h5-api.aoneroom.com"
-        // INTERNAL BUDGETS (Sept 2026, MovieBox farm-kill rework): bearer 6s,
-        // search 7s/attempt (one retry), detail 6s, download/play 6s — the
-        // serial worst case (6 + 2×7 + 6 + 6 ≈ 25s) must fit under the 30s
-        // spec.timeoutSec kill so a slow-but-alive resolve returns inside
-        // the farm window instead of being canned mid-chain.
-        val xUser = withTimeoutOrNull(6_000L) {
+        // INTERNAL BUDGETS (Sept 2026 latency parity rework, user report:
+        // MovieBox absent in IndStream while CSX works on the same device/
+        // network — CSX sends NO per-request timeout (nicehttp default = 0 =
+        // callTimeout off) so legit 8-12s responses survive there and were
+        // canned by our 6/7s budgets here): bearer 8s (prewarm covers the
+        // cold path), search 15s single attempt (+12s auth-retry only on a
+        // rejected token answer, never on a plain timeout), detail 8s,
+        // download/play 8s (these two run in parallel).
+        // CSX parity: the pkgs GET goes out with NO header overrides at all
+        // (the CloudStream default UA the reference plugin effectively uses).
+        val xUser = withTimeoutOrNull(8_000L) {
             runCatching {
                 app.get("$base/wefeed-h5api-bff/app/get-latest-app-pkgs?app_name=moviebox",
-                    timeout = 6, headers = okHeaders())
+                    timeout = 8)
             }.getOrNull()
         }?.headers?.get("x-user") ?: run { Log.w("MovieBox", "no x-user header"); return null }
         val t = runCatching { org.json.JSONObject(xUser).optString("token", "") }
@@ -1191,12 +1213,14 @@ object StreamEngine {
         val host = "h5-api.aoneroom.com"
         val base = "https://$host"
 
-        // 1+2. Bearer token + title search, with ONE retry (user report Sept
-        // 2026: MovieBox works, then vanishes, then works — the aoneroom host
-        // flaps, and a stale bearer token blanks the search even though a
-        // fresh token resolves it). A failed/empty search drops the cached
-        // token and retries once before giving up. The prewarmed token
-        // (prewarmMovieBoxToken) usually makes the first attempt instant.
+        // 1+2. Bearer token + title search (Sept 2026 latency-parity rework,
+        // user report: MovieBox absent while CSX works on the same device/
+        // network). CSX search is ONE uncapped request; we give it a single
+        // 15s attempt first. The retry (12s, fresh bearer) fires ONLY when
+        // the API REJECTS the answer (HTTP 401/403 or a non-zero `code`) —
+        // i.e. a genuinely stale token (user report: "works, then vanishes,
+        // then works"). A plain timeout with an accepted token must NOT
+        // double-wait: the slow-but-alive case is already the 15s budget.
         suspend fun movieBoxBearer(forceRefresh: Boolean): String? =
             fetchMovieBoxBearer(forceRefresh)
 
@@ -1208,36 +1232,59 @@ object StreamEngine {
         var baseHeaders: Map<String, String> = emptyMap()
         var searchItems: org.json.JSONArray? = null
         for (attempt in 0 until 2) {
+            val budgetSec = if (attempt == 0) 15L else 12L
             val token = movieBoxBearer(forceRefresh = attempt > 0) ?: return emptyList()
+            // CSX's EXACT baseHeaders (invokeMoviebox): Asia/Kolkata and the
+            // okHeaders() Chrome UA were IndStream inventions; aoneroom is
+            // known to answer differently per profile, so copy the reference
+            // plugin byte-for-byte (incl. Host and Linux Chrome 138 UA).
             baseHeaders = mapOf(
-                "X-Client-Info" to "{\"timezone\":\"Asia/Kolkata\"}",
+                "X-Client-Info" to "{\"timezone\":\"Africa/Nairobi\"}",
                 "Accept-Language" to "en-US,en;q=0.5",
                 "Accept" to "application/json",
                 "Referer" to base,
+                "Host" to host,
                 "Connection" to "keep-alive",
                 "Authorization" to "Bearer $token",
+                "User-Agent" to "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
             )
-            val searchJsonText = withTimeoutOrNull(7_000L) {
+            val resp = withTimeoutOrNull(budgetSec * 1000L) {
                 runCatching {
-                    app.post("$base/wefeed-h5api-bff/subject/search", timeout = 7, headers = baseHeaders,
+                    app.post("$base/wefeed-h5api-bff/subject/search", timeout = budgetSec, headers = baseHeaders,
                         json = mapOf(
                             "keyword" to title, "page" to 1, "perPage" to 24,
                             "subjectType" to subjectType,
                         ))
                 }.getOrNull()
-            }?.text
-            val found = searchJsonText?.let {
-                runCatching { org.json.JSONObject(it) }.getOrNull()
-            }?.let { unwrapData(it).optJSONArray("items") }
+            }
+            if (resp == null) {
+                // Timeout / connection failure: a second wait is pointless —
+                // the token was never rejected (CSX survives this the same
+                // way only because it never cuts the first request; our 15s
+                // is the parity compromise inside the farm kill).
+                Log.w("MovieBox", "search no answer in ${budgetSec}s (attempt ${attempt + 1})")
+                break
+            }
+            val root = runCatching { org.json.JSONObject(resp.text) }.getOrNull()
+            val found = root?.let { unwrapData(it).optJSONArray("items") }
             if (found != null && found.length() > 0) {
                 searchItems = found
                 break
             }
-            Log.w("MovieBox", "search failed/empty (attempt ${attempt + 1})" +
-                if (attempt == 0) " — retrying with a fresh bearer token" else "")
+            val jsonCode = root?.optString("code", "")?.takeIf { it.isNotBlank() } ?: "0"
+            val authRejected = resp.code == 401 || resp.code == 403 || jsonCode != "0"
+            if (!authRejected) {
+                // Answered, accepted, just no rows for this title — a real
+                // miss, not a token problem; retrying would only burn 12s.
+                Log.w("MovieBox", "search answered with no items")
+                break
+            }
+            if (attempt > 0) break
+            Log.w("MovieBox", "search rejected (HTTP ${resp.code}, code=$jsonCode)" +
+                " — retrying once with a fresh bearer token")
             movieBoxToken = null
         }
-        val items = searchItems ?: run { Log.w("MovieBox", "no search items after retry"); return emptyList() }
+        val items = searchItems ?: run { Log.w("MovieBox", "no search items"); return emptyList() }
 
         // "Title [Hindi]" / "Title (Hindi Dubbed)" → audio; "Title S1-S3"
         // trailing suffix is season coverage, stripped before matching. The
@@ -1296,11 +1343,12 @@ object StreamEngine {
                     // into S1-S3 / S4-…). seasonEnd==0 (no marker) never skips.
                     if (type != "movie" && seasonEnd in 1 until season) return@async emptyList<RawStream>()
 
-                    // 3. detailPath lookup.
-                    val detailText = withTimeoutOrNull(6_000L) {
+                    // 3. detailPath lookup — CSX parity: NO header overrides
+                    // (bare app.get on the h5.aoneroom.com web host).
+                    val detailText = withTimeoutOrNull(8_000L) {
                         runCatching {
                             app.get("https://h5.aoneroom.com/wefeed-h5-bff/web/post/list/subject?id=$subjectId",
-                                timeout = 6, headers = okHeaders()).text
+                                timeout = 8).text
                         }.getOrNull()
                     } ?: return@async emptyList<RawStream>()
                     val detailPath = runCatching { org.json.JSONObject(detailText) }.getOrNull()
@@ -1311,7 +1359,7 @@ object StreamEngine {
                     if (detailPath.isBlank()) return@async emptyList<RawStream>()
 
                     val reqHeaders = baseHeaders + mapOf(
-                        "Referer" to "$refererBase/spa/videoPlayPage/movies/$detailPath?id=$subjectId&type=/movie/detail",
+                        "Referer" to "https://fmoviesunblocked.net/spa/videoPlayPage/movies/$detailPath?id=$subjectId&type=/movie/detail",
                         "Origin" to refererBase.trimEnd('/'),
                     )
                     val params = buildString {
@@ -1320,21 +1368,23 @@ object StreamEngine {
                         append("&detailPath=$detailPath")
                     }
 
-                    // 4. download + play endpoints in parallel.
+                    // 4. download + play endpoints in parallel (CSX runs them
+                    // back-to-back; parallel keeps the combined wall time at
+                    // this ONE 8s budget shared by both).
                     val (downloadObj, playObj) = kotlinx.coroutines.coroutineScope {
                         val d = async {
-                            withTimeoutOrNull(6_000L) {
+                            withTimeoutOrNull(8_000L) {
                                 runCatching {
                                     app.get("$base/wefeed-h5api-bff/subject/download?$params",
-                                        timeout = 6, headers = reqHeaders).text
+                                        timeout = 8, headers = reqHeaders).text
                                 }.getOrNull()
                             }?.let { t -> runCatching { org.json.JSONObject(t) }.getOrNull() }
                         }
                         val p = async {
-                            withTimeoutOrNull(6_000L) {
+                            withTimeoutOrNull(8_000L) {
                                 runCatching {
                                     app.get("$base/wefeed-h5api-bff/subject/play?$params",
-                                        timeout = 6, headers = reqHeaders).text
+                                        timeout = 8, headers = reqHeaders).text
                                 }.getOrNull()
                             }?.let { t -> runCatching { org.json.JSONObject(t) }.getOrNull() }
                         }
@@ -1370,6 +1420,13 @@ object StreamEngine {
                                 qualityHint = resolution,
                                 audioPriority = if (isHindi) 4 else 2,
                                 audioLabel = language ?: "",
+                                // CSX parity: playback link carries Referer AND
+                                // Origin (aoneroom CDNs reject bare-Referer
+                                // fetches on some hosts).
+                                extraHeaders = mapOf(
+                                    "Referer" to refererBase,
+                                    "Origin" to refererBase.trimEnd('/'),
+                                ),
                             )
                         }
                         return added

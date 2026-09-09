@@ -164,12 +164,15 @@ object ServerFarm {
             movieUrl = "https://h5-api.aoneroom.com/wefeed-h5api-bff",
             tvUrl = "https://h5-api.aoneroom.com/wefeed-h5api-bff",
             isJsonApi = true, referer = "https://fmoviesunblocked.net/",
-            // timeoutSec 20→30 (Sept 2026): farm wraps resolveOne in
-            // withTimeoutOrNull(spec.timeoutSec*1000); the tightened budgets
-            // (bearer 6 + 2×search 7 + detail 6 + dl/play 6 ≈ 25s serial worst
-            // incl. the token refresh + search retry) must fit under this kill
-            // so a slow-but-alive resolve is not canned into a hard failure.
-            hasSubtitles = true, maxQuality = 2160, timeoutSec = 30,
+            // timeoutSec 30→40 (Sept 2026 user report: MovieBox absent while
+            // the reference CSX plugin works on the SAME device/network — CSX
+            // sends no per-request timeout, so latency-parity budgets
+            // (bearer 8s warm-cached + search 15s + auth-only 12s retry +
+            // detail 8s + dl/play 8s parallel ≈ 39s serial worst) need this
+            // kill to stay above the chain. 40s still LANDS LIVE: the LIVE_FILL
+            // window is 90s, so a slow-alive MovieBox keeps streaming into an
+            // open player instead of being silently canned.
+            hasSubtitles = true, maxQuality = 2160, timeoutSec = 40,
         ),
         // PrimeSrc (primesrc.me, verified live Sept 2026): IMDB-keyed JSON API.
         // GET /api/v1/s?imdb={id}&type=movie|tv[&season=&episode=] returns

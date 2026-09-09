@@ -119,9 +119,11 @@ internal fun parseRating(item: Element): Double? {
 }
 
 /** Server names as they appear on the Multimovies "Video Sources" list, used
- *  ONLY to pick which [MultimoviesProvider.EMBED_PREFETCH_COUNT] dooplayer
- *  servers the movie detail page resolves in the BACKGROUND (a warm-up
- *  optimization — the prefetch cache, never the play path). Play-time
+ *  ONLY to pick the ORDER in which the movie detail page's background prefetch
+ *  resolves dooplayer servers — EVERY server is prefetched and each result is
+ *  published to the prefetch cache THE MOMENT it lands (warm-up optimization,
+ *  never the play path). Cineverse is index 0, so its fully-resolved +
+ *  unwrapped stream URL is the first warm entry a Play tap can reuse. Play-time
  *  behavior is fully NEUTRAL (user spec Sept 2026 rewrite #2): every source
  *  launches in parallel, links push in ARRIVAL order, and the user's own
  *  CloudStream quality/source profile decides what auto-plays.
@@ -166,8 +168,9 @@ private val SEARCH_ITEMS_SELECTOR = "div#archive-content div.item, div.search-pa
  *    order — no plugin-side prioritization of any kind. loadLinks stays
  *    alive for [MultimoviesProvider.LIVE_FILL_MS] so the change-server list
  *    keeps growing while the player is open.
- *  - [SOURCE_PRIORITY] ranks only which servers a movie detail page
- *    PREFETCHES in the background (warm-up, never the play path).
+ *  - [SOURCE_PRIORITY] orders the dooplayer servers a movie detail page
+ *    PREFETCHES in the background — all of them, fastest-first (warm-up,
+ *    never the play path).
  *  - KNOWN sub-720p fixed files are dropped ([passesQualityFloor]); adaptive
  *    (m3u8) links always pass.
  *  - Server captions are ignored; the OpenSubtitles fallback
@@ -260,22 +263,18 @@ class MultimoviesProvider : MainAPI() {
         /** Worst-case budget for an uncached search before giving up. */
         const val SEARCH_TOTAL_BUDGET_MS = 2500L
 
-        /** How many top-priority player servers the movie-page background
-         *  prefetch resolves ahead of the Play tap. */
-        const val EMBED_PREFETCH_COUNT = 2
-
-        /** Fill window (user spec Sept 2026 rewrite #2, "live-growing server
-         *  list"): loadLinks STAYS ALIVE and pushes EVERY resolved link to
-         *  the player until all pulls finish or this cap elapses — whichever
-         *  first. The app records callback pushes only while loadLinks runs,
-         *  so returning early (the old detached-fill model) froze the
-         *  change-server list at the first arrivals. Single tuning knob:
-         *  longer captures more slow servers live (Nxsha's fleet,
-         *  MovieBox-class hosts finish ~10-20s) but keeps the loading spinner
-         *  up; shorter plays sooner and leaves the slowest servers to the
-         *  [FastStartCache] replay on re-open. Hard-capped by
+        /** Fill window (user spec Sept 2026 rewrite #4 — speed-first):
+         *  loadLinks stays alive and pushes EVERY resolved link to the player
+         *  as it lands (arrival order) — but only for this shorter window, so
+         *  a couple of slow hosts no longer hold the change-server spinner
+         *  open for 15 s on every play. The pulls are launched DETACHED:
+         *  whatever misses the window keeps resolving in the BACKGROUND and
+         *  lands in [FastStartCache] (per load url) and [LinkCache] (per
+         *  title), whose instant replays already carry the FULL server list
+         *  on re-open — "keep fetching all servers in the background" stays
+         *  true; only the live wait got faster. Hard-capped by
          *  [FAST_START_MAX_MS]. */
-        const val LIVE_FILL_MS = 15_000L
+        const val LIVE_FILL_MS = 8_000L
 
         /** Hard cap on how long [loadLinks] waits before returning, regardless of
          *  whether the farm has finished. Safety net so a totally dead farm still
@@ -908,16 +907,19 @@ class MultimoviesProvider : MainAPI() {
             }
     }
 
-    /** Background movie-only prefetch: resolve the top [EMBED_PREFETCH_COUNT]
-     *  dooplayer servers (static priority order) through admin-ajax and unwrap,
-     *  then park the results in [EmbedPrefetchCache] so a Play tap can skip the
-     *  page fetch AND admin-ajax entirely. [EmbedPrefetchCache.resolveOrJoin]
-     *  deduplicates concurrent starts; any error simply leaves the cache empty.
-     *  Never blocks or fails load(). */
+    /** Background movie-only prefetch: resolve EVERY dooplayer server through
+     *  admin-ajax and unwrap it to its final stream/relay URL, publishing each
+     *  result into [EmbedPrefetchCache] THE MOMENT it lands (fastest-first per
+     *  [SOURCE_PRIORITY], so Cineverse — index 0 — is warm within the first
+     *  round-trips). A Play tap then replays the already-resolved servers and
+     *  only tops-up the few still missing, instead of re-resolving the whole
+     *  page. [EmbedPrefetchCache.resolveOrJoin] deduplicates concurrent
+     *  starts; any error simply leaves the cache empty. Never blocks or fails
+     *  load(). */
     private fun prefetchEmbeds(pageUrl: String, doc: Document) {
         searchScope.launch {
             runCatching {
-                EmbedPrefetchCache.resolveOrJoin(pageUrl, resolve = { resolveTopEmbeds(pageUrl, doc) })
+                EmbedPrefetchCache.resolveOrJoin(pageUrl, resolve = { resolveAllEmbeds(pageUrl, doc) })
             }
         }
     }
@@ -925,15 +927,18 @@ class MultimoviesProvider : MainAPI() {
     /** Movie-only pre-warm of the GLOBAL id-based sources into [FastStartCache]
      *  (the dooplayer embed path has [prefetchEmbeds]; without this the global
      *  path only resolved on the Play tap). Runs with the gate closed — results
-     *  only land in the cache, nothing touches a player. Never blocks load(). */
+     *  only land in the cache, nothing touches a player. The five sources are
+     *  independent network calls, so each gets its own launch: the warm-up now
+     *  takes as long as the SLOWEST source instead of the SUM of all of them
+     *  (the old sequential forEach could burn ~5 × 15 s). Never blocks load(). */
     private fun prefetchGlobals(meta: SourceMeta, pageUrl: String) {
         if (meta.imdbId.isBlank() && meta.tmdbId == null) return
         if (FastStartCache.get(pageUrl)?.isNotEmpty() == true) return
         val sources = buildGlobalSources(meta)
         if (sources.isEmpty()) return
-        searchScope.launch {
-            runCatching {
-                sources.forEach { g ->
+        sources.forEach { g ->
+            searchScope.launch {
+                runCatching {
                     pullSource(
                         g, ConcurrentHashMap(), pageUrl,
                         Collections.synchronizedSet(HashSet()),
@@ -950,15 +955,15 @@ class MultimoviesProvider : MainAPI() {
         }
     }
 
-    /** Resolve the player servers for [pageUrl] to their final post-unwrap
-     *  URLs. The [SOURCE_PRIORITY] order here only picks WHICH background
-     *  prefetch runs first (warm-up, never the play path); the Play-tap
-     *  pipeline itself is fully neutral. Empty when the page exposes no
-     *  usable options. */
-    private suspend fun resolveTopEmbeds(pageUrl: String, doc: Document): List<ResolvedEmbed> {
+    /** Resolve EVERY player server for [pageUrl] to its final post-unwrap URL.
+     *  Each completed server is published to [EmbedPrefetchCache] immediately
+     *  (see [publish]) so the Play tap never waits on the slowest host. The
+     *  [SOURCE_PRIORITY] order here only picks WHICH background prefetch runs
+     *  first (warm-up, never the play path); the Play-tap pipeline itself is
+     *  fully neutral. Empty when the page exposes no usable options. */
+    private suspend fun resolveAllEmbeds(pageUrl: String, doc: Document): List<ResolvedEmbed> {
         val options = parsePlayerOptions(doc, pageUrl)
             .sortedBy { priorityOf(it.first) }
-            .take(EMBED_PREFETCH_COUNT)
         if (options.isEmpty()) return emptyList()
         return coroutineScope {
             options.map { (name, triple) ->
@@ -966,7 +971,12 @@ class MultimoviesProvider : MainAPI() {
                     runCatching {
                         val e = resolveEmbed(pageUrl, name, triple.first, triple.second, triple.third)
                             ?: return@runCatching null
-                        e.copy(url = MultiSourcePuller.unwrapEmbed(e.url, referer = pageUrl, headers = commonHeaders))
+                        val resolved = e.copy(
+                            url = MultiSourcePuller.unwrapEmbed(e.url, referer = pageUrl, headers = commonHeaders),
+                            unwrapped = true,
+                        )
+                        EmbedPrefetchCache.publish(pageUrl, resolved)
+                        resolved
                     }.getOrNull()
                 }
             }.awaitAll().filterNotNull()
@@ -1023,24 +1033,36 @@ class MultimoviesProvider : MainAPI() {
         }
 
         // Fast path 2: embeds prefetched in the background while the detail page
-        // was open — skips the page fetch AND admin-ajax entirely. If a prefetch
-        // is still running (Play tapped early), await it briefly rather than
-        // duplicating the network work.
+        // was open — skips the page fetch AND admin-ajax entirely. The prefetch
+        // resolves EVERY server and publishes each arrival the moment it lands,
+        // so on tap we use whatever has completed (Cineverse is resolved first):
+        // a finished job gives the full list; a still-running one gives its
+        // partial arrivals and we top-up ONLY the missing servers here — no
+        // more waiting 1.2 s and then re-resolving the entire page.
         val awaited = EmbedPrefetchCache.awaitInFlight(data, timeoutMs = 1200L)
-        var embeds: List<ResolvedEmbed> = awaited.orEmpty()
+        var embeds: List<ResolvedEmbed> =
+            (awaited.orEmpty() + EmbedPrefetchCache.arrived(data)).distinctBy { it.name }
 
-        if (embeds.isEmpty()) {
-            // A failed page fetch (site down / challenge unsolved) no longer
-            // aborts the whole load: the id-keyed global sources launched below
-            // are site-independent and still resolve + play.
+        if (awaited == null) {
+            // No complete prefetch (cold tap or warm-up still running): resolve
+            // the servers not already in hand. On a cold page that is ALL of
+            // them — same work as the old full path, launched in parallel, and
+            // a failed page fetch no longer aborts the whole load because the
+            // id-keyed global sources launched below are site-independent.
             val doc = cachedDocOrFetch(data)
             if (doc != null) {
-                embeds = coroutineScope {
-                    parsePlayerOptions(doc, data).map { (name, triple) ->
-                        async {
-                            runCatching { resolveEmbed(data, name, triple.first, triple.second, triple.third) }.getOrNull()
-                        }
-                    }.awaitAll().filterNotNull()
+                val have = embeds.mapTo(HashSet()) { it.name }
+                val missing = parsePlayerOptions(doc, data)
+                    .distinctBy { it.first }
+                    .filterNot { have.contains(it.first) }
+                if (missing.isNotEmpty()) {
+                    embeds += coroutineScope {
+                        missing.map { (name, triple) ->
+                            async {
+                                runCatching { resolveEmbed(data, name, triple.first, triple.second, triple.third) }.getOrNull()
+                            }
+                        }.awaitAll().filterNotNull()
+                    }
                 }
             }
         }
@@ -1054,15 +1076,15 @@ class MultimoviesProvider : MainAPI() {
             }
         }
 
-        // LIVE-FILL pipeline (user spec rewrite #2): every source (global
-        // id-keyed + each dooplayer embed) is pulled concurrently; each
-        // resolved link is pushed to the player THE MOMENT it lands, in
-        // arrival order — no hold window, no buffering, no winner selection.
-        // loadLinks stays alive until every pull answers or [LIVE_FILL_MS]
-        // elapses (the app records callback pushes only while this coroutine
-        // runs), so the change-server list keeps growing while the player is
-        // open instead of freezing at the first 1-2 arrivals. Links keep
-        // landing in [FastStartCache] so a re-open replays the full list.
+        // LIVE-FILL pipeline (user spec Sept 2026 rewrite #4 — speed-first):
+        // every source (global id-keyed + each dooplayer embed) is pulled
+        // concurrently; each resolved link is pushed to the player THE MOMENT
+        // it lands, in arrival order — no hold window, no buffering, no winner
+        // selection. loadLinks stays alive for [LIVE_FILL_MS] so the fast
+        // servers register in the live change-server list, then returns while
+        // the DETACHED pulls keep resolving every remaining server in the
+        // background into [FastStartCache] — the next open replays the FULL
+        // list instantly (see the constant's doc).
         val emitted = Collections.synchronizedSet(HashSet<String>())
         val found = Collections.synchronizedList(mutableListOf<ExtractorLink>())
         val firstLink = CompletableDeferred<Unit>()
@@ -1096,7 +1118,11 @@ class MultimoviesProvider : MainAPI() {
         embeds.forEach { e ->
             searchScope.launch {
                 try {
-                    val finalUrl = MultiSourcePuller.unwrapEmbed(e.url, referer = data, headers = commonHeaders)
+                    // Prefetched entries are already unwrapped (resolveAllEmbeds)
+                    // — skip a redundant iframe walk; only cold-resolved embeds
+                    // need the unwrap here.
+                    val finalUrl = if (e.unwrapped) e.url
+                    else MultiSourcePuller.unwrapEmbed(e.url, referer = data, headers = commonHeaders)
                     // After unwrap, the URL may now point at a downstream CDN
                     // (Cineverse -> vibuxer / serve_m3u8 proxy). Augment headers
                     // with the host-specific pair the proxy requires so the
@@ -1811,14 +1837,16 @@ object MultiSourcePuller {
         return facts
     }
 
-    /** Enrich a link's label with probed language + resolution — the user's
-     *  "language and resolution in servers name" rule. Sources of truth, in
-     *  order: 1) the master playlist itself (EXT-X-MEDIA language of the
-     *  track that actually autoplays: DEFAULT=YES, else the single track;
-     *  multi-language masters → "Multi"; variant heights → resolution);
-     *  2) the link's own quality tag (registry extractors' real parse);
-     *  3) host declarations in the URL/name. Nothing derivable → label is
-     *  left untouched (stays "Unknown"/badge-less) — never guessed. */
+    /** Enrich a link's label with probed language — the user's "language in
+     *  server name" rule (resolution is NOT named here: CloudStream's quality
+     *  badge is the only resolution print, user spec Sept 2026 revision).
+     *  Sources of truth, in order: 1) the master playlist itself (EXT-X-MEDIA
+     *  language of the track that actually autoplays: DEFAULT=YES, else the
+     *  single track; multi-language masters → "Multi"; variant heights →
+     *  ExtractorLink.quality only); 2) the link's own quality tag (registry
+     *  extractors' real parse); 3) host declarations in the URL/name. Nothing
+     *  derivable → label is left untouched (stays "Unknown"/badge-less) —
+     *  never guessed. */
     internal suspend fun enrichLabel(l: ExtractorLink): ExtractorLink {
         val facts = probeLabelFacts(l)
         val height = facts?.bestHeight?.takeIf { it > 0 }
@@ -1837,18 +1865,17 @@ object MultiSourcePuller {
             else -> null
         }
 
-        // Rebuild the label: base (minus an existing tag/res), then the
-        // (Language) bracket, then the resolution token — deduped.
+        // Rebuild the label: base (minus any existing tag/res token), then the
+        // (Language) bracket. NO resolution token is appended — CloudStream
+        // renders the link's quality badge itself (ExtractorLink.quality), so
+        // printing it here showed it twice on many servers (user spec Sept
+        // 2026, second revision).
         var base = (l.source ?: l.name ?: "Server").trim()
         base = base.replace(Regex("""\s*\((?:Hindi|English|Multi|Urdu|Tamil|Telugu|Malayalam|Kannada|Marathi|Bengali|Japanese|Korean|Chinese|Spanish|French|Arabic|Unknown)\)\s*$""", RegexOption.IGNORE_CASE), "")
             .replace(Regex("""\s+\d{3,4}p\s*$|\s+4K\s*$""", RegexOption.IGNORE_CASE), "")
             .dedupeResolution()
         if (langTag != null && !base.contains(langTag, ignoreCase = true)) {
             base = "$base ($langTag)"
-        }
-        val res = qualityLabel(height)
-        if (res.isNotEmpty() && !base.contains(res, ignoreCase = true)) {
-            base = "$base $res"
         }
         if (base == (l.source ?: l.name)) return l // unchanged → keep identity
         return ExtractorLink(
@@ -2241,31 +2268,43 @@ object SourceMetaCache {
 }
 
 /** One resolved dooplayer server: its display name, the final (post-unwrap)
- *  stream/embed URL, the admin-ajax round-trip latency as a speed hint, and
- *  the raw pre-unwrap embed URL (still carrying the IMDB id) used only for
- *  last-resort meta recovery. Lives here so [EmbedPrefetchCache] and
- *  MultimoviesProvider share a single definition. */
+ *  stream/embed URL, the admin-ajax round-trip latency as a speed hint, the
+ *  raw pre-unwrap embed URL (still carrying the IMDB id) used only for
+ *  last-resort meta recovery, and whether [url] is already fully unwrapped
+ *  (prefetch path) so the Play tap can skip a redundant iframe walk. Lives
+ *  here so [EmbedPrefetchCache] and MultimoviesProvider share a single
+ *  definition. */
 data class ResolvedEmbed(
     val name: String,
     val url: String,
     val latencyMs: Long,
     val embedUrl: String? = null,
+    val unwrapped: Boolean = false,
 )
 
 /** Session-level cache of player sources prefetched in the background while a
  *  movie's detail page is open, keyed by the page URL loadLinks() receives.
- *  A completed hit lets playback start without re-fetching the page or hitting
- *  admin-ajax at all. TTL is short because embed/stream URLs carry expiring
- *  signed tokens; bounded with evict-oldest like SearchCache.
+ *  EVERY dooplayer server is prefetched and each finished one is published
+ *  incrementally (see [publish]/[arrived]), so playback can start from the
+ *  fast hosts (Cineverse first) even mid-warm-up — with a completed hit it
+ *  skips the page fetch AND admin-ajax entirely. TTL is short because
+ *  embed/stream URLs carry expiring signed tokens; bounded with evict-oldest
+ *  like SearchCache.
  *
  *  While a prefetch is still running the entry holds its coroutine, so a Play
  *  tap (or a detail-page revisit) awaits/joins the same job instead of
  *  duplicating the network work. */
 object EmbedPrefetchCache {
-    private data class Entry(
+    private class Entry(
         val embeds: List<ResolvedEmbed>?,
         val inFlight: Deferred<List<ResolvedEmbed>>?,
         val expiresAt: Long,
+        /** Servers a still-running prefetch has already resolved, published
+         *  one-by-one in arrival order so a Play tap mid-warm-up can start
+         *  from the fast hosts (Cineverse first) instead of waiting for the
+         *  whole fleet or re-resolving everything. */
+        val partial: MutableList<ResolvedEmbed> =
+            Collections.synchronizedList(mutableListOf()),
     )
 
     private const val TTL_MS = 4 * 60 * 1000L
@@ -2281,6 +2320,30 @@ object EmbedPrefetchCache {
             return null
         }
         return e.embeds
+    }
+
+    /** Publish ONE resolved server into a still-running prefetch's partial
+     *  list (called from [resolveAllEmbeds] as each embed+unwrap finishes).
+     *  No-op when the entry is gone, expired, or already finalized. */
+    fun publish(key: String, embed: ResolvedEmbed) {
+        val e = map[key] ?: return
+        if (System.currentTimeMillis() > e.expiresAt || e.embeds != null) return
+        synchronized(e.partial) {
+            if (e.partial.none { it.name == embed.name }) e.partial.add(embed)
+        }
+    }
+
+    /** Snapshot of the servers arrived so far for an IN-FLIGHT prefetch
+     *  (empty once the entry is complete — [get]/[awaitInFlight] carry the
+     *  final list then). */
+    fun arrived(key: String): List<ResolvedEmbed> {
+        val e = map[key] ?: return emptyList()
+        if (System.currentTimeMillis() > e.expiresAt) {
+            map.remove(key)
+            return emptyList()
+        }
+        if (e.embeds != null) return emptyList()
+        return synchronized(e.partial) { e.partial.toList() }
     }
 
     /** Runs [resolve] for [key] unless one is already running or completed, in

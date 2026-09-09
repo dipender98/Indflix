@@ -191,10 +191,13 @@ class ServerFarmHindiTest {
 
     @Test
     fun moviebox_timeoutBudgetFitsFarmKill() {
-        // bearer 6 + 2×search 7 + detail 6 + dl/play 6 ≈ 25s serial worst
-        // case must fit under the MovieBox timeoutSec kill (Sept 2026).
+        // CSX latency parity (user report Sept 2026: MovieBox absent while
+        // CSX works on same device/network — CSX sends no per-request
+        // timeout). Budgets: bearer 8 (prewarmed→0) + search 15 + auth-only
+        // retry 12 + detail 8 + dl/play 8 ≈ 39-43s worst serial, so the kill
+        // moved 30→40; LIVE_FILL (90s) still lands a slow-alive result.
         val s = ServerFarm.allServers.first { it.id == "moviebox" }
-        assertEquals(30, s.timeoutSec, "MovieBox internal budgets (6/7/6/6) must fit this kill")
+        assertEquals(40, s.timeoutSec, "MovieBox latency-parity budgets (8/15+12/8/8) must fit this kill")
     }
 
     @Test

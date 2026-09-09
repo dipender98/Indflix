@@ -157,7 +157,7 @@ class NeutralOrderTest {
     }
 
     @Test
-    fun emit_resolutionPrintedOnce_realHeightOnName() = runBlocking {
+    fun emit_realHeightOnlyOnQuality_NEVERonName() = runBlocking {
         val out = mutableListOf<com.lagradost.cloudstream3.utils.ExtractorLink>()
         StreamEngine.emit(
             listOf(stream("hd", url = "https://x.example/hd.mp4", isM3u8 = false, qualityHint = 1080)),
@@ -167,14 +167,15 @@ class NeutralOrderTest {
         assertEquals(1, out.size)
         val link = out[0]
         assertEquals(1080, link.quality)
-        // User spec: the resolution must appear ON the server name (derived
-        // from probing/parsing — never guessed), exactly ONCE (no doubling).
-        assertTrue(link.name.contains("1080p"))
-        assertEquals(1, Regex("1080p").findAll(link.name).count())
+        // User spec Sept 2026 (revised): the server name carries NO resolution
+        // token — CloudStream's quality badge (from ExtractorLink.quality) is
+        // the single resolution print. "1080p 1080p" was the duplication bug.
+        assertEquals(0, Regex("""\d{3,4}p|4K""", RegexOption.IGNORE_CASE).findAll(link.name).count(),
+            "name must be resolution-free: ${link.name}")
     }
 
     @Test
-    fun emit_unknownDirectFile_showsAuto_neverGuesses() = runBlocking {
+    fun emit_unknownDirectFile_nameStaysClean_neverGuesses() = runBlocking {
         val out = mutableListOf<com.lagradost.cloudstream3.utils.ExtractorLink>()
         StreamEngine.emit(
             listOf(stream("mystery", url = "https://x.example/mystery.mp4", isM3u8 = false, qualityHint = 0)),
@@ -182,18 +183,20 @@ class NeutralOrderTest {
             probeManifests = false,
         )
         assertEquals(1, out.size)
-        // No declared/measured height → "Auto" marker, never a fabricated res.
-        assertTrue(out[0].name.contains("Auto"))
-        assertFalse(out[0].name.contains("p"))
+        // No declared/measured height → quality stays 0 (Unknown badge) and the
+        // name prints neither a guess nor an "Auto" marker.
+        assertFalse(out[0].name.contains("Auto"))
+        assertEquals(0, Regex("""\d{3,4}p|4K""", RegexOption.IGNORE_CASE).findAll(out[0].name).count())
         assertEquals(0, out[0].quality)
     }
 
-    // ── Adaptive peak-resolution naming (user report: adaptive showed "Auto") ──
+    // ── Adaptive peak-resolution: quality field only (Sept 2026 revision) ──
 
     @Test
-    fun emit_hlsInlineManifest_labelsPeakResolution_neverAuto() = runBlocking {
-        // Harvest path leaves qualityHint=0; the inline master parse must lift the
-        // label to the PEAK variant ("4K") and quality=2160 — never "Auto".
+    fun emit_hlsInlineManifest_liftsQualityToPeak_neverOnName() = runBlocking {
+        // Harvest path leaves qualityHint=0; the inline master parse must lift
+        // the emitted quality to the PEAK variant (2160) — the name stays
+        // resolution-free (CloudStream's badge shows it; user spec revision).
         val master = """
 #EXTM3U
 #EXT-X-STREAM-INF:BANDWIDTH=1500000,RESOLUTION=1280x720
@@ -216,8 +219,8 @@ class NeutralOrderTest {
         )
         assertEquals(1, out.size)
         assertEquals(2160, out[0].quality)
-        assertTrue(out[0].name.contains("4K"), "name must carry peak res: ${out[0].name}")
-        assertFalse(out[0].name.contains("Auto"), "adaptive must not show Auto: ${out[0].name}")
+        assertFalse(out[0].name.contains("4K"), "name must NOT carry resolution: ${out[0].name}")
+        assertFalse(out[0].name.contains("Auto"), "name must NOT show Auto: ${out[0].name}")
     }
 
     @Test
@@ -253,8 +256,8 @@ class NeutralOrderTest {
         )
         assertEquals(1, out.size)
         assertEquals(1080, out[0].quality)
-        assertTrue(out[0].name.contains("1080p"), "name must carry peak res: ${out[0].name}")
-        assertFalse(out[0].name.contains("Auto"), "adaptive must not show Auto: ${out[0].name}")
+        assertFalse(out[0].name.contains("1080p"), "name must NOT carry resolution: ${out[0].name}")
+        assertFalse(out[0].name.contains("Auto"), "name must NOT show Auto: ${out[0].name}")
     }
 
     @Test

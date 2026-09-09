@@ -10,8 +10,9 @@ import kotlin.test.assertEquals
  * defined in [LinkNaming] (Sept 2026 user spec).
  *
  *  - Language tag mapping (raw strings → canonical short tokens).
- *  - Display name assembly (brackets, single-token resolution — ALWAYS
- *    strip-then-append, user spec Sept 2026 re-report — server numbering).
+ *  - Display name assembly (brackets, NO resolution token — CloudStream's
+ *    quality badge is the only resolution print, user spec Sept 2026
+ *    revision — server numbering).
  *  - Subtitle language normalisation (native-script → canonical English).
  *  - Group numbering: unique = no number; 2 identical → "-1"/"-2";
  *    5 identical → "-1"…"-5"; 20 identical → "-1"…"-20".
@@ -79,7 +80,7 @@ class LinkNamingTest {
         val name = LinkNaming.displayName(
             serverName = "VidLink", audioLabel = "Hindi", qualityHint = 1080,
         )
-        assertEquals("VidLink (Hindi) 1080p", name)
+        assertEquals("VidLink (Hindi)", name)
     }
 
     @Test
@@ -88,19 +89,19 @@ class LinkNamingTest {
         val name = LinkNaming.displayName(
             serverName = "MyFlixer Hindi", audioLabel = "Hindi", qualityHint = 1080,
         )
-        assertEquals("MyFlixer Hindi 1080p", name)
+        assertEquals("MyFlixer Hindi", name)
     }
 
     @Test
-    fun displayName_resolutionInName_noDuplicate() {
-        // Sub-indicator carries "1080p": the token is STRIPPED from the server
-        // part and the measured one appended exactly once (new strip-then-append
-        // semantics — the old code kept the name token and skipped the append).
+    fun displayName_resolutionInName_strippedNotAppended() {
+        // Sub-indicator carries "1080p": the token is STRIPPED and nothing is
+        // appended — CloudStream's quality badge shows the resolution (user
+        // spec Sept 2026 revision).
         val name = LinkNaming.displayName(
             serverName = "PrimeSrc", audioLabel = "Original", qualityHint = 1080,
             subIndicator = "Nova 1080p",
         )
-        assertEquals("PrimeSrc Nova (Original) 1080p", name)
+        assertEquals("PrimeSrc Nova (Original)", name)
     }
 
     @Test
@@ -116,107 +117,103 @@ class LinkNamingTest {
         val name = LinkNaming.displayName(
             serverName = "VidLink", audioLabel = "Multi", qualityHint = 1080,
         )
-        assertEquals("VidLink (Multi) 1080p", name)
+        assertEquals("VidLink (Multi)", name)
     }
 
     @Test
-    fun displayName_resolutionGluedNoDuplicate() {
-        // Resolution glued to a word ("Server1080p"): the old contains() check
-        // missed the glued form; the strip regex catches it — the name renders
-        // "Server" and the measured token appears exactly once, never twice.
+    fun displayName_resolutionGluedStripped() {
+        // Resolution glued to a word ("Server1080p"): the strip regex catches
+        // it — the name renders "Server" with NO resolution anywhere in it.
         val name = LinkNaming.displayName(
             serverName = "Server1080p", audioLabel = "Hindi", qualityHint = 1080,
         )
-        assertEquals("Server (Hindi) 1080p", name)
+        assertEquals("Server (Hindi)", name)
     }
 
     @Test
-    fun displayName_fourKNoDuplicate() {
-        // "4K" in the name + measured 2160: name token stripped, "4K" appended
-        // exactly once (new semantics) — never "MovieBox 4K (English) 4K".
+    fun displayName_fourKStrippedFromName() {
+        // "4K" in the name is stripped; nothing is appended.
         val name = LinkNaming.displayName(
             serverName = "MovieBox 4K", audioLabel = "English", qualityHint = 2160,
         )
-        assertEquals("MovieBox (English) 4K", name)
+        assertEquals("MovieBox (English)", name)
     }
 
     @Test
-    fun displayName_height2160p_noDuplicate_rawHeightToken() {
-        // Server name carries the raw "2160p" token while qualityHint maps to
-        // "4K": the old code's contains("4K")/contains("2160p") dance missed
-        // variants; the strip removes "2160p" and the single "4K" is appended.
+    fun displayName_height2160p_rawHeightTokenStripped() {
+        // Server name carries the raw "2160p" token: stripped, nothing appended.
         val name = LinkNaming.displayName(
             serverName = "Movie 2160p", audioLabel = "English", qualityHint = 2160,
         )
-        assertEquals("Movie (English) 4K", name)
+        assertEquals("Movie (English)", name)
     }
 
     @Test
-    fun displayName_height2160p_appendsLabel_whenNoHeightInName() {
-        // Server name has no resolution token — "4K" is appended.
+    fun displayName_noHeightInName_appendsNothing() {
+        // Server name has no resolution token and a known height — still NO
+        // token in the name (the player's badge shows it).
         val name = LinkNaming.displayName(
             serverName = "Movie", audioLabel = "English", qualityHint = 2160,
         )
-        assertEquals("Movie (English) 4K", name)
+        assertEquals("Movie (English)", name)
     }
 
     @Test
-    fun displayName_height1080p_noDuplicate_rawHeightToken() {
-        // "Movie 1080p" + measured 1080: token stripped from the name, the
-        // measured one appended once.
+    fun displayName_height1080p_rawHeightTokenStripped() {
+        // "Movie 1080p": the guessed token is stripped from the name.
         val name = LinkNaming.displayName(
             serverName = "Movie 1080p", audioLabel = "English", qualityHint = 1080,
         )
-        assertEquals("Movie (English) 1080p", name)
+        assertEquals("Movie (English)", name)
     }
 
-    // ── AT-MOST-ONE resolution token (user spec Sept 2026 re-report) ──
+    // ── NO resolution token in names (user spec Sept 2026 revision) ──
 
     @Test
-    fun displayName_reReport_a_serverTokenStripped_measuredAppendedOnce() {
-        // (a) "Server 1080p" + measured 1080 → exactly one "1080p", the one
-        // from the height. Never "Server 1080p (English) 1080p".
+    fun displayName_revision_a_serverTokenStripped_nothingAppended() {
+        // (a) "Server 1080p" → zero resolution tokens in the label.
         val name = LinkNaming.displayName(
             serverName = "Server 1080p", audioLabel = "English", qualityHint = 1080,
         )
-        assertEquals("Server (English) 1080p", name)
-        assertEquals(1, countToken(name, """\d{3,4}p"""))
+        assertEquals("Server (English)", name)
+        assertEquals(0, countToken(name, """\d{3,4}p|4K"""))
     }
 
     @Test
-    fun displayName_reReport_b_gluedToken_strippedAndAppendedOnce() {
-        // (b) glued "Server1080p" — the variant the contains() check missed.
+    fun displayName_revision_b_gluedToken_stripped() {
+        // (b) glued "Server1080p" — the strip regex catches it.
         val name = LinkNaming.displayName(
             serverName = "Server1080p", audioLabel = "English", qualityHint = 1080,
         )
-        assertEquals("Server (English) 1080p", name)
-        assertEquals(1, countToken(name, """\d{3,4}p"""), "no doubled token: $name")
+        assertEquals("Server (English)", name)
+        assertEquals(0, countToken(name, """\d{3,4}p|4K"""), "no resolution in name: $name")
     }
 
     @Test
-    fun displayName_reReport_c_fourKNameToken_appearsOnce() {
-        // (c) "MovieBox 4K" + 2160 → one "4K".
+    fun displayName_revision_c_fourKNameToken_stripped() {
+        // (c) "MovieBox 4K" → removed.
         val name = LinkNaming.displayName(
             serverName = "MovieBox 4K", audioLabel = "English", qualityHint = 2160,
         )
-        assertEquals("MovieBox (English) 4K", name)
-        assertEquals(1, countToken(name, """4K"""))
+        assertEquals("MovieBox (English)", name)
+        assertEquals(0, countToken(name, """4K"""))
     }
 
     @Test
-    fun displayName_reReport_d_staleWrongToken_realHeightShownOnce() {
-        // (d) name carries a STALE, WRONG token ("1080p") while the measured
-        // height is 720: guessing is stripped; only the real height shows.
+    fun displayName_revision_d_staleWrongToken_neverShown() {
+        // (d) name carries a STALE token ("1080p") while the measured height
+        // is 720: the guess is stripped and the real height belongs to the
+        // player's badge, not the label.
         val name = LinkNaming.displayName(
             serverName = "VidEm 1080p", audioLabel = "English", qualityHint = 720,
         )
-        assertEquals("VidEm (English) 720p", name)
+        assertEquals("VidEm (English)", name)
     }
 
     @Test
-    fun displayName_reReport_e_stripKeepsDuplicateNumbering() {
+    fun displayName_revision_e_stripKeepsDuplicateNumbering() {
         // (e) the "-N" duplicate suffix must survive the strip: two identical
-        // "VidLink 1080p" members (hint 1080) → "VidLink-1 … 1080p"/"VidLink-2 …".
+        // "VidLink 1080p" members (hint 1080) → "VidLink-1 …"/"VidLink-2 …".
         val streams = listOf(
             raw("VidLink 1080p", "English", 1080),
             raw("VidLink 1080p", "English", 1080),
@@ -228,8 +225,8 @@ class LinkNamingTest {
                 qualityHint = s.qualityHint, duplicateIndex = nums[i],
             )
         }
-        assertEquals("VidLink-1 (English) 1080p", names[0])
-        assertEquals("VidLink-2 (English) 1080p", names[1])
+        assertEquals("VidLink-1 (English)", names[0])
+        assertEquals("VidLink-2 (English)", names[1])
     }
 
     // ── numbering: unique → no number ────────────────────────────
@@ -302,8 +299,8 @@ class LinkNamingTest {
                 qualityHint = s.qualityHint, duplicateIndex = nums[i],
             )
         }
-        assertEquals("VidLink-1 (Hindi) 1080p", names[0])
-        assertEquals("VidLink-2 (Hindi) 1080p", names[1])
+        assertEquals("VidLink-1 (Hindi)", names[0])
+        assertEquals("VidLink-2 (Hindi)", names[1])
     }
 
     @Test
@@ -315,7 +312,7 @@ class LinkNamingTest {
                 serverName = s.serverName, audioLabel = s.audioLabel,
                 qualityHint = s.qualityHint, duplicateIndex = nums[i],
             )
-            assertEquals("PrimeSrc-${i + 1} (English) 720p", name)
+            assertEquals("PrimeSrc-${i + 1} (English)", name)
         }
     }
 
@@ -366,10 +363,12 @@ class LinkNamingTest {
     }
 
     @Test
-    fun displayName_directUnknownShowsAutoNot1080() {
-        // Regression: a measured-unknown direct file must not be labelled 1080p.
+    fun displayName_directUnknownShowsNoResolution() {
+        // Regression (revised spec): a measured-unknown direct file gets no
+        // guessed token — and with the new rule NO name carries resolution at
+        // all, so "Auto"/"1080p" can never appear in the label.
         val name = LinkNaming.displayName("VidRock", "Hindi", qualityHint = -1)
-        assertEquals("VidRock (Hindi) Auto", name)
+        assertEquals("VidRock (Hindi)", name)
     }
 
     // ── taggedSubtitleName ───────────────────────────────────────
