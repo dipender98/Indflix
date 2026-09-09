@@ -90,6 +90,13 @@ class IndStreamProvider : MainAPI() {
      *  detail-page visits must not re-resolve the whole farm. */
     private val prewarmed = java.util.Collections.synchronizedSet(HashSet<String>())
 
+    /** Farm keys (FastStartCache keys) whose background pre-warm is STILL
+     *  resolving. A Play tap that replays a PARTIAL warm registers its key
+     *  here as a waiter target, so late warm arrivals still reach the live
+     *  change-server list instead of only the cache (loadLinks must stay
+     *  alive for the app to record pushes — the CSX/CineStream rule). */
+    private val warmFarms = java.util.concurrent.ConcurrentHashMap<String, kotlinx.coroutines.Job>()
+
     override var mainUrl = "https://www.themoviedb.org"
     override var name = "IndStream"
     // India flag in the search-provider picker (three-dot menu) and provider
@@ -296,6 +303,8 @@ class IndStreamProvider : MainAPI() {
         // (the USER's priority settings) decides what auto-plays.
         val cached = StreamEngine.FastStartCache.get(cacheKey)
         if (cached != null && cached.isNotEmpty()) {
+            val replayPushed = Collections.synchronizedSet(HashSet<String>())
+            cached.forEach { replayPushed += it.url }
             StreamEngine.emit(
                 cached,
                 { emitted.incrementAndGet(); callback(it) },
@@ -306,7 +315,37 @@ class IndStreamProvider : MainAPI() {
             // the same title-keyed OpenSubtitles set every play gets — sync-safe
             // after any in-player server switch.
             topUpSubtitles(metaDeferred.await()?.imdbId, season, episode, originalLangNow(), subtitleCallback)
-            android.util.Log.i("IndStream", "loadLinks: instant replay from cache, ${cached.size} streams for tmdb=$tmdbId/$type")
+            // CSX rule: if the background warm for THIS title is still resolving,
+            // the replay above was only a PARTIAL list — return now and the app
+            // drops every later arrival from the live list. So poll the
+            // still-growing FastStartCache and forward newly-landed servers
+            // straight to the player (already-fetched — zero new probes) until
+            // the farm finishes or the live window caps out.
+            val warm = warmFarms[cacheKey]
+            if (warm != null) {
+                val fillStart = System.currentTimeMillis()
+                while (warm.isActive && System.currentTimeMillis() - fillStart < StreamEngine.LIVE_FILL_MS) {
+                    delay(250)
+                    val grown = StreamEngine.FastStartCache.get(cacheKey)
+                    val fresh = grown?.filter { replayPushed.add(it.url) } ?: emptyList()
+                    if (fresh.isNotEmpty()) StreamEngine.emit(
+                        fresh,
+                        { emitted.incrementAndGet(); callback(it) },
+                        originalLangNow(),
+                        probeManifests = false,
+                    )
+                }
+                // Final diff: the last batch may have merged after our last poll.
+                val grown = StreamEngine.FastStartCache.get(cacheKey)
+                val fresh = grown?.filter { replayPushed.add(it.url) } ?: emptyList()
+                if (fresh.isNotEmpty()) StreamEngine.emit(
+                    fresh,
+                    { emitted.incrementAndGet(); callback(it) },
+                    originalLangNow(),
+                    probeManifests = false,
+                )
+            }
+            android.util.Log.i("IndStream", "loadLinks: replay from warm cache (+live tail: ${if (warm != null) "yes" else "no"}), ${emitted.get()} streams for tmdb=$tmdbId/$type")
             return emitted.get() > 0
         }
 
@@ -403,12 +442,15 @@ class IndStreamProvider : MainAPI() {
 
     /** Fire-and-forget farm resolution into [StreamEngine.FastStartCache] while
      *  the detail page is open so a later Play tap replays instantly. Never
-     *  blocks [load], swallows all errors, and runs at most once per title. */
+     *  blocks [load], swallows all errors, and runs at most once per title. The
+     *  job is registered in [warmFarms] so a Play tap that catches a PARTIAL
+     *  warm stays alive and forwards each later arrival into the live
+     *  change-server list instead of freezing at the partial set. */
     private fun prewarm(tmdbId: Int, imdbId: String?, type: String) {
         val key = StreamEngine.FastStartCache.key(tmdbId, type, -1, -1)
         if (!prewarmed.add(key)) return
         if (StreamEngine.FastStartCache.get(key) != null) return
-        fastStartScope.launch {
+        val job = fastStartScope.launch {
             runCatching {
                 // load() just warmed TmdbService's cache: the lazy lookup below
                 // is an instant cache hit for IMDB-keyed servers.
@@ -417,6 +459,8 @@ class IndStreamProvider : MainAPI() {
                 }
             }.onFailure { android.util.Log.w("IndStream", "prewarm failed: ${it.message}") }
         }
+        warmFarms[key] = job
+        job.invokeOnCompletion { warmFarms.remove(key, job) }
     }
 
     /** Subtitle provider (user spec Sept 2026 rewrite): server captions are

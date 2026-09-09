@@ -263,18 +263,21 @@ class MultimoviesProvider : MainAPI() {
         /** Worst-case budget for an uncached search before giving up. */
         const val SEARCH_TOTAL_BUDGET_MS = 2500L
 
-        /** Fill window (user spec Sept 2026 rewrite #4 — speed-first):
-         *  loadLinks stays alive and pushes EVERY resolved link to the player
-         *  as it lands (arrival order) — but only for this shorter window, so
-         *  a couple of slow hosts no longer hold the change-server spinner
-         *  open for 15 s on every play. The pulls are launched DETACHED:
-         *  whatever misses the window keeps resolving in the BACKGROUND and
-         *  lands in [FastStartCache] (per load url) and [LinkCache] (per
-         *  title), whose instant replays already carry the FULL server list
-         *  on re-open — "keep fetching all servers in the background" stays
-         *  true; only the live wait got faster. Hard-capped by
-         *  [FAST_START_MAX_MS]. */
-        const val LIVE_FILL_MS = 8_000L
+        /** Live change-server window (user spec Sept 2026 rewrite #5 — CSX/
+         *  CineStream model, matches IndStream [com.indstream.StreamEngine.LIVE_FILL_MS]).
+         *  loadLinks stays ALIVE until EVERY pull answers or this cap elapses
+         *  (whichever first) and pushes each resolved link to the player THE
+         *  MOMENT it lands, in arrival order. WHY long, not short: the host
+         *  records callback pushes ONLY while loadLinks runs (return freezes the
+         *  change-server list at whatever landed so far), yet it starts the
+         *  VIDEO as soon as the FIRST link crosses AUTO_SKIP_PRIORITY —
+         *  loadLinks still running. So a wide window does NOT delay first play
+         *  (warm prefetch + parallel pulls bring that first link up in
+         *  seconds), it just keeps the server list growing live for the whole
+         *  farm, exactly like CineStream's "grows past 30 s while the video is
+         *  already at 5-7 s". Anything still resolving past the cap lands in
+         *  [FastStartCache]/[LinkCache] for the instant full-list replay. */
+        const val LIVE_FILL_MS = 90_000L
 
         /** Hard cap on how long [loadLinks] waits before returning, regardless of
          *  whether the farm has finished. Safety net so a totally dead farm still
@@ -1076,15 +1079,15 @@ class MultimoviesProvider : MainAPI() {
             }
         }
 
-        // LIVE-FILL pipeline (user spec Sept 2026 rewrite #4 — speed-first):
-        // every source (global id-keyed + each dooplayer embed) is pulled
+        // LIVE-FILL pipeline (user spec Sept 2026 rewrite #5 — CSX model): every
+        // source (global id-keyed + each dooplayer embed) is pulled
         // concurrently; each resolved link is pushed to the player THE MOMENT
         // it lands, in arrival order — no hold window, no buffering, no winner
-        // selection. loadLinks stays alive for [LIVE_FILL_MS] so the fast
-        // servers register in the live change-server list, then returns while
-        // the DETACHED pulls keep resolving every remaining server in the
-        // background into [FastStartCache] — the next open replays the FULL
-        // list instantly (see the constant's doc).
+        // selection. loadLinks stays alive for [LIVE_FILL_MS] so the WHOLE farm
+        // keeps appending to the change-server list DURING playback (the host
+        // already auto-started on the first eligible push), then anything still
+        // resolving lands detached in [FastStartCache] — the next open replays
+        // the FULL list instantly.
         val emitted = Collections.synchronizedSet(HashSet<String>())
         val found = Collections.synchronizedList(mutableListOf<ExtractorLink>())
         val firstLink = CompletableDeferred<Unit>()
@@ -1166,20 +1169,21 @@ class MultimoviesProvider : MainAPI() {
             }
         }
 
-        // LIVE FILL: hold loadLinks alive until every pull answers or the cap
-        // elapses — whichever first — so all those pushes register in the live
-        // change-server list. If NOTHING has landed by the cap, keep waiting
-        // out the hard FAST_START_MAX_MS ceiling so a slow farm still surfaces
-        // its first link instead of an early "no link found".
+        // LIVE FILL, CSX-style (rewrite #5) — two gates mirroring [com.indstream.IndStreamProvider]’s proven flow:
+        // 1. FIRST-STREAM gate: if NOTHING has landed within FAST_START_MAX_MS, stop
+        //    early — replay a background warm from a previous visit if there is
+        //    one, otherwise surface "no link found". A working farm never waits here.
+        // 2. GROW gate: once the first link is live the player has already started
+        //    (the host auto-skips loading on the first eligible push while this
+        //    coroutine is still running), so loadLinks stays alive until every
+        //    pull answers or the LIVE_FILL_MS cap — every straggler server
+        //    appends to the change-server list DURING playback instead of
+        //    freezing it at the first arrivals.
         val loadStartMs = System.currentTimeMillis()
-        withTimeoutOrNull(LIVE_FILL_MS) { allPullsDone.await() }
-        if (found.isEmpty()) {
-            val hard = (loadStartMs + FAST_START_MAX_MS - System.currentTimeMillis()).coerceAtLeast(0L)
-            withTimeoutOrNull(hard) { allPullsDone.await() }
-        }
-
-        if (found.isEmpty()) {
-            // Nothing went live: replay whatever already landed in FastStartCache
+        val nothingToPull = embeds.isEmpty() && globalSources.isEmpty()
+        val firstStream = !nothingToPull &&
+            withTimeoutOrNull(FAST_START_MAX_MS) { firstLink.await() } != null
+        if (!firstStream) {
             // (a prior visit's prefetch or background pulls), else surface "no
             // link found" — and drop a stale prefetch so the next attempt
             // re-resolves instead of replaying the same dead entry.
@@ -1192,6 +1196,9 @@ class MultimoviesProvider : MainAPI() {
             }
             return@withDomainRetry false
         }
+
+        // All pulls answer, or the cap (whichever first) — pushes land live.
+        withTimeoutOrNull(LIVE_FILL_MS) { allPullsDone.await() }
 
         // Subtitle tracks must land BEFORE the return (the app drops
         // subtitleCallback pushes from a dead loadLinks job). Started
