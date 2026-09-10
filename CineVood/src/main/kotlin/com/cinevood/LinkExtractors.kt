@@ -5,6 +5,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.getQualityFromName
 import com.lagradost.cloudstream3.utils.loadExtractor
+import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.utils.unshortenLinkSafe
 
 /*
@@ -88,6 +89,10 @@ object LinkExtractors {
 
         // 4) Core extractor registry
         if (allowGeneric) {
+            // tagged runs in loadExtractor's non-suspend callback, so it uses the
+            // (deprecated but still-supported) constructor; push() below uses the
+            // newExtractorLink factory where we are in a suspend context.
+            @Suppress("DEPRECATION")
             val tagged = { extra: ExtractorLink ->
                 callback(
                     ExtractorLink(
@@ -122,21 +127,22 @@ object LinkExtractors {
     ): Boolean = runCatching { dispatch(url, link, referer, subtitleCallback, callback, allowGeneric) }
         .getOrDefault(false)
 
-    private fun push(
+    private suspend fun push(
         url: String, hostName: String, link: GroupInfo, referer: String,
         type: ExtractorLinkType, headers: Map<String, String>,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         callback(
-            ExtractorLink(
+            newExtractorLink(
                 source = "CineVood",
                 name = displayName(link, hostName),
                 url = url,
-                referer = referer,
-                quality = qualityInt(link),
-                type = type,
-                headers = headers + mapOf("User-Agent" to SharedServices.userAgent())
-            )
+                type = type
+            ) {
+                this.referer = referer
+                quality = qualityInt(link)
+                this.headers = headers + mapOf("User-Agent" to SharedServices.userAgent())
+            }
         )
         return true
     }

@@ -41,28 +41,6 @@ def clean_upscale(img, size):
     return out
 
 
-def white_to_alpha(img):
-    """Wordmark may have transparent or white background; flatten onto white
-    first, then turn white into transparency by luminance."""
-    if img.mode in ("RGBA", "LA", "P") or "A" in img.mode:
-        src = img.convert("RGBA")
-        flat = Image.new("RGB", src.size, (255, 255, 255))
-        flat.paste(src, mask=src.getchannel("A"))
-        img = flat
-    else:
-        img = img.convert("RGB")
-    w, h = img.size
-    out = Image.new("RGBA", (w, h))
-    sp, dp = img.load(), out.load()
-    for y in range(h):
-        for x in range(w):
-            r, g, b = sp[x, y]
-            d = 255 - (r + g + b) / 3
-            a = int(max(0, min(255, d * 3.2)))
-            dp[x, y] = (r, g, b, a)
-    return out
-
-
 # 1) circular play mark, de-pixelated
 mark = clean_upscale(Image.open(FAVICON).convert("RGBA"), 272)
 
@@ -78,7 +56,7 @@ wm_h = int(wm_crop.height * wm_w / wm_crop.width)
 wm = wm_crop.resize((wm_w, wm_h), Image.LANCZOS)
 wm = wm.filter(ImageFilter.UnsharpMask(radius=1.4, percent=80, threshold=2))
 
-# 3) true-black rounded card, 4x supersampled corners
+# 3) near-black rounded card (26,26,26), 4x supersampled corners
 S = 4
 mask = Image.new("L", (SIZE * S, SIZE * S), 0)
 d = ImageDraw.Draw(mask)
