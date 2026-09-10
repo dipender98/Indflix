@@ -361,7 +361,7 @@ def test_moviebox(t):
     data = r.json().get("data") or {}
     items = (data.get("data") or data).get("items") or []
 
-    sfx = re.compile(r"\s+S\d+(?:\s*-\s*S?\d+)?$", re.I)
+    sfx = re.compile(r"\s+S(\d+)(?:\s*-\s*S?(\d+))?$", re.I)
     brk = re.compile(r"[\[(]([^\])]+)[\])]", re.I)
     norm = lambda s: re.sub(r"[^a-z0-9]", "", s.lower())
     tn = norm(t["title"])
@@ -373,7 +373,9 @@ def test_moviebox(t):
             continue
         rows_seen.append(raw)
         m = sfx.search(raw)
-        season_end = int("".join(ch for ch in m.group(0) if ch.isdigit())) if m else 0
+        # Range END (matches StreamEngine.movieboxSeasonEnd): "S1-S4" -> 4,
+        # NOT the old digit-filter "S1-S4" -> 14 that defeated the skip guard.
+        season_end = int(m.group(2) or m.group(1)) if m else 0
         audio = next((g for g in brk.findall(raw)
                       if any(c.isalpha() for c in g) and not any(c.isdigit() for c in g)), None)
         clean = norm(re.sub(r"\s*\d{4}", "",
@@ -527,38 +529,88 @@ def test_vidcore(t):
 # ────────────────────────── Allmovieland (IMDB, Hindi) ──────────────────────────
 
 def test_allmovieland(t):
+    """Mirrors the v14 (Sept 2026 audit) resolver: two card-markup shapes +
+    slug-verified title fallback, IMDb-preferred player-src walk with
+    'Video Not Found' skips (library miss, not host failure), STRICT
+    season/episode tree match — never a silent first-entry fallback."""
+    import urllib.parse
     s = sess()
-    # allmovieland.one 301s to allmovieland.art (verified 2026-09-08) — keep
-    # .one as the manual-fallback host if .art moves again.
-    search = s.get(f"https://allmovieland.art/?do=search&subaction=search&story={t['imdb']}",
-                   headers=ok_headers("https://allmovieland.art/"), timeout=12).text
-    card = re.search(r'href="(https?://allmovieland\.[a-z]+/[^"]+\.html)"\s*>\s*<h3 class="new-short__title', search)
-    if not card:
-        return ("MISS", "no card found (title not in library)", 0, None)
-    card_html = s.get(card.group(1), headers=ok_headers(card.group(1)), timeout=15).text
+    hosts = ["https://allmovieland.art", "https://allmovieland.one"]
+    CARD = re.compile(
+        r'<a\s+class="new-short__title--link"\s+href="(https?://allmovieland\.[a-z]+/[^"]+\.html)'
+        r'|href="(https?://allmovieland\.[a-z]+/[^"]+\.html)"\s*>\s*<h3 class="new-short__title')
+
+    def find_card(html, title=None):
+        for mm in CARD.finditer(html):
+            url = mm.group(1) or mm.group(2)
+            if not title:
+                return url
+            tn = re.sub(r"[^a-z0-9]", "", title.lower())
+            slug = re.sub(r"^\d+-", "", url.rsplit("/", 1)[-1][:-5])
+            slug = re.sub(r"[^a-z0-9]", "", slug.lower())
+            if slug == tn or slug.startswith(tn) or (len(tn) >= 4 and tn in slug):
+                return url
+        return None
+
+    card_url = None
+    host_used = None
+    for host in hosts:
+        try:
+            search = s.get(f"{host}/?do=search&subaction=search&story={t['imdb']}",
+                           headers=ok_headers(f"{host}/"), timeout=12).text
+        except Exception:
+            continue
+        host_used = host
+        card_url = find_card(search)
+        if card_url:
+            break
+    if not card_url and t.get("title"):
+        host_used = host_used or hosts[0]
+        try:
+            q = urllib.parse.quote(t["title"])
+            by_title = s.get(f"{host_used}/?do=search&subaction=search&story={q}",
+                             headers=ok_headers(f"{host_used}/"), timeout=12).text
+            card_url = find_card(by_title, t["title"])
+        except Exception:
+            pass
+    if not card_url:
+        return ("MISS", "no card (IMDB-search empty shells AND title-miss)", 0, None)
+
+    card = s.get(card_url, headers=ok_headers(card_url), timeout=15)
+    card_html = card.text
     dom = re.search(r"AwsIndStreamDomain\s*=\s*'([^']+)'", card_html)
-    src = re.search(r"src:\s*'([^']+)'", card_html)
-    if not (dom and src):
-        return ("FAIL", "no player domain/src in card", 0, None)
-    play_url = f"{dom.group(1).rstrip('/')}/play/{src.group(1)}"
-    play_html = s.get(play_url, headers=ok_headers(card.group(1)), timeout=15).text
-    f = re.search(r"""["']?file["']?\s*[:=]\s*["']([^"']+)["']""", play_html)
-    k = re.search(r"""["']?key["']?\s*[:=]\s*["']([^"']+)["']""", play_html)
+    srcs = list(dict.fromkeys(v for v in re.findall(r"src:\s*'([^']+)'", card_html) if v))
+    print(f"      card={card_url.rsplit('/', 1)[-1]} player srcs={srcs[:4]}")
+    if not (dom and srcs):
+        return ("FAIL", "no player domain/srcs in card", 0, None)
+    base = dom.group(1).rstrip("/")
+    ordered = [x for x in srcs if t["imdb"] in x] + [x for x in srcs if t["imdb"] not in x]
+    f = k = None
+    play_url = None
+    for cand in ordered[:2]:
+        play_url = f"{base}/play/{cand}"
+        try:
+            ph = s.get(play_url, headers=ok_headers(card_url), timeout=10).text
+        except Exception:
+            continue
+        if not ph.strip() or "video not found" in ph.lower():
+            continue
+        f = re.search(r"""["']?file["']?\s*[:=]\s*["']([^"']+)["']""", ph)
+        k = re.search(r"""["']?key["']?\s*[:=]\s*["']([^"']+)["']""", ph)
+        if f and k:
+            break
+        f = k = None
     if not (f and k):
-        return ("FAIL", "no file/key in play page", 0, None)
-    # The page serves the file URL ESCAPED ("https:\/\/cdn...") — unescape like
-    # the patched Kotlin resolver. Series serve a path that already starts
-    # with /playlist/ (don't double it).
+        return ("MISS", "no playable entry behind card player src(s) (library), host fine", 0, None)
     file = f.group(1).replace("\\/", "/")
     file_url = file if file.startswith("http") else (
-        dom.group(1).rstrip("/") + file if file.startswith("/playlist/")
-        else f"{dom.group(1).rstrip('/')}/playlist/{file}")
+        base + file if file.startswith("/playlist/") else f"{base}/playlist/{file}")
     cdn = file_url.split("/playlist/")[0]
     ph = ok_headers(play_url)
     ph["X-Csrf-Token"] = k.group(1)
-    pl = s.get(file_url, headers=ph, timeout=15).text
+    pl = s.get(file_url, headers=ph, timeout=15)
     try:
-        entries = json.loads(pl)
+        entries = pl.json()
     except Exception:
         return ("FAIL", "playlist not JSON", 0, None)
 
@@ -574,17 +626,31 @@ def test_allmovieland(t):
                 leaves.append((e.get("title") or "Multi", e["file"]))
         return leaves
 
+    def is_season(e, season):
+        kids = e.get("folder") or []
+        if not kids or any(k2.get("file") for k2 in kids if isinstance(k2, dict)):
+            return False
+        title = e.get("title", "")
+        word = re.search(r"season|сезон", title, re.I) or re.search(rf"\bs{season}\b", title, re.I)
+        return bool((word and re.search(rf"\b{season}\b", title)) or str(e.get("id")) == str(season))
+
+    def is_episode(e, season, episode):
+        kids = e.get("folder") or []
+        if not kids:
+            return False
+        return (str(e.get("episode")) == str(episode)
+                or str(e.get("id")) == f"{season}-{episode}"
+                or re.search(rf"(?i)(?:^|[^a-z0-9])(?:episode|ep\.?|e\.?)[.\s_:=-]*0*{episode}(?!\d)", e.get("title", ""))
+                or re.search(rf"(?i)s\d+e\s*0*{episode}(?!\d)", e.get("title", "")))
+
     if t["kind"] == "tv":
-        season_obj = next((e for e in entries if isinstance(e, dict)
-                           and (re.search(rf"\b{t['season']}\b", e.get("title", ""))
-                                or str(e.get("id")) == str(t["season"]))),
-                          entries[0] if entries and isinstance(entries[0], dict) else None)
-        eps = (season_obj.get("folder") or []) if isinstance(season_obj, dict) else []
-        ep_obj = next((e for e in eps if isinstance(e, dict)
-                       and (str(e.get("episode")) == str(t["episode"])
-                            or str(e.get("id")) == f"{t['season']}-{t['episode']}")),
-                      next((e for e in eps if isinstance(e, dict)), None))
-        lang_entries = collect_leaves(ep_obj.get("folder") or []) if ep_obj else []
+        so = next((e for e in entries if is_season(e, t["season"])), None)
+        eps = (so.get("folder") or []) if so else (entries if t["season"] == 1 else [])
+        ep_obj = next((e for e in eps if isinstance(e, dict) and is_episode(e, t["season"], t["episode"])), None)
+        print(f"      tree: seasons={[e.get('title') for e in entries][:4]} ep-picked={ep_obj.get('title') if ep_obj else None!r}")
+        if ep_obj is None:
+            return ("MISS", f"STRICT picker: no exact S{t['season']}E{t['episode']} (v14 never falls back to first)", 0, None)
+        lang_entries = collect_leaves(ep_obj.get("folder") or [])
     else:
         lang_entries = [(e.get("title") or "Multi", e["file"])
                         for e in entries if isinstance(e, dict) and e.get("file")]
@@ -605,6 +671,87 @@ def test_allmovieland(t):
             len(streams), streams)
 
 
+# ────────────────────────── VidNest (TMDB fan-out, 7 subs) ──────────────────────────
+
+VN_ALPHABET = "RB0fpH8ZEyVLkv7c2i6MAJ5u3IKFDxlS1NTsnGaqmXYdUrtzjwObCgQP94hoeW+/="
+
+
+def vn_decode(inp):
+    rev = {c: i for i, c in enumerate(VN_ALPHABET)}
+    pad = (4 - len(inp) % 4) % 4
+    inp += "=" * pad
+    out = bytearray()
+    for i in range(0, len(inp), 4):
+        c0 = rev.get(inp[i], 64)
+        c1 = rev.get(inp[i + 1], 64)
+        c2 = 64 if inp[i + 2] == "=" else rev.get(inp[i + 2], 64)
+        c3 = 64 if inp[i + 3] == "=" else rev.get(inp[i + 3], 64)
+        if c0 == 64 or c1 == 64:
+            return None
+        out.append(((c0 << 2) | (c1 >> 4)) & 0xFF)
+        if c2 != 64:
+            out.append((((c1 & 15) << 4) | (c2 >> 2)) & 0xFF)
+        if c3 != 64:
+            out.append((((c2 & 3) << 6) | c3) & 0xFF)
+    return bytes(out).decode("utf-8", "replace")
+
+
+def vn_is_error_page(text):
+    """Same classifier as StreamEngine.vidnestIsErrorPage: Cloudflare 502
+    bodies are host-DOWN, not 'answered'."""
+    t0 = text.lstrip()
+    if not t0:
+        return False
+    if t0.startswith("<"):
+        return True
+    low = t0.lower()
+    return ('"error_name"' in low) or ("bad gateway" in low) or ('"cloudflare"' in low) or ("error 50" in low)
+
+
+def test_vidnest(t):
+    s = sess()
+    vh = ok_headers("https://vidnest.fun/")
+    vh["Origin"] = "https://vidnest.fun"
+    subs = ("moviebox", "allmovies", "klikxxi", "onehd", "hollymoviehd", "purstream", "vidlink")
+    streams, answered, downs = [], 0, []
+    for sub in subs:
+        url = (f"https://new.vidnest.fun/{sub}/movie/{t['tmdb']}" if t["kind"] == "movie"
+               else f"https://new.vidnest.fun/{sub}/tv/{t['tmdb']}/{t['season']}/{t['episode']}")
+        try:
+            raw = s.get(url, headers=vh, timeout=12).text
+        except Exception:
+            downs.append(sub)
+            continue
+        if not raw.strip() or vn_is_error_page(raw):
+            downs.append(sub)
+            continue
+        answered += 1
+        try:
+            root = json.loads(raw)
+            if root.get("encrypted") and root.get("data"):
+                root = json.loads(vn_decode(root["data"]))
+        except Exception:
+            continue
+        pick = lambda o: o.get("link") or o.get("url") or o.get("file") or ""
+        arr = (root.get("url") or root.get("streams") or root.get("sources") or [])
+        if isinstance(arr, dict):
+            arr = [arr]
+        for e in arr:
+            if isinstance(e, dict) and str(pick(e)).startswith("http"):
+                streams.append((str(e.get("lang") or e.get("language") or sub),
+                                pick(e), ".m3u8" in pick(e)))
+        one = root.get("data", {}).get("stream", {}).get("playlist") if sub == "vidlink" else root.get("url")
+        if isinstance(one, str) and one.startswith("http") and not streams:
+            streams.append((sub, one, ".m3u8" in one))
+    if not streams:
+        status = "DOWN" if answered == 0 else "MISS"
+        return (status, f"{answered}/{len(subs)} answered, down: {downs or '—'}", 0, None)
+    ok, detail = deep_ok(streams[0][1], streams[0][2], vh)
+    return ("OK" if ok else "DEAD",
+            f"{answered}/{len(subs)} answered, {len(streams)} streams; first: {detail}",
+            len(streams), streams)
+
+
 # ────────────────────────── runner ──────────────────────────
 
 # (name, fn, alt-title-per-kind overrides)
@@ -619,7 +766,8 @@ SERVERS = [
     ("8Stream", test_8stream, None),
     ("VidUp", test_vidup, None),
     ("VidCore", test_vidcore, None),
-    ("Allmovieland", test_allmovieland, None),
+    ("VidNest", test_vidnest, {"tv": TITLE_TV_MB}),
+    ("Allmovieland", test_allmovieland, {"tv": TITLE_TV_MB}),
 ]
 
 

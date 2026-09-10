@@ -18,7 +18,7 @@ https://raw.githubusercontent.com/dipender98/Indflix/builds/repo.json
 - ⚡ **Instant play** — servers are probed in real time and the link most
   likely to start playing immediately is picked first (fast HLS streams,
   no waiting on slow sources); the rest fill in in the background
-- 🎬 **Multi-server streaming** — 11 live servers including VidLink,
+- 🎬 **Multi-server streaming** — 9 live servers including VidLink,
   VaPlayer, VidRock, MovieBox, Videasy Hindi, VidNest (7 sub-server
   fan-out with per-stream language labels), VidUp, VidCore, Allmovieland
   and more — every source is health-monitored with an automatic circuit

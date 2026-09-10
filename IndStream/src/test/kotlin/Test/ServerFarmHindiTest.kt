@@ -169,10 +169,12 @@ class ServerFarmHindiTest {
         assertEquals(ServerIdType.IMDB, s.idType)
         assertTrue(s.hindi, "Allmovieland is Hindi-first (Hindi/Bengali/Tamil/Telugu playlists)")
         assertEquals(1080, s.maxQuality)
-        // timeoutSec 30 (Sept 2026): the 20s farm kill canned slow-but-alive
-        // 5-step chains mid-flight — tripping the breaker on a merely-slow
-        // host; the tightened resolver budgets must fit under this kill.
-        assertEquals(30, s.timeoutSec, "allmovieland farm kill must fit the resolver chain")
+        // timeoutSec 30→60 (Sept 2026 F8 budget-invariant audit): the
+        // documented chain ceilings — search 8s×2 hosts (IMDB pass) + 8s
+        // title fallback + card 6 + 2×(play 5 + playlist 6) + language 5
+        // ≈ 55s — must fit under this kill; every canned timeout is a
+        // breaker strike, and strikes were the disappear/flap symptom.
+        assertEquals(60, s.timeoutSec, "allmovieland farm kill must fit the resolver chain")
         // DOMAIN MOVE (verified 2026-09-08): .one 301s to .art — the spec
         // pins the live host; allmovielandHosts() carries the fallback.
         val m = ServerFarm.buildMovieUrl(s, "tt1375666")
@@ -194,10 +196,12 @@ class ServerFarmHindiTest {
         // CSX latency parity (user report Sept 2026: MovieBox absent while
         // CSX works on same device/network — CSX sends no per-request
         // timeout). Budgets: bearer 8 (prewarmed→0) + search 15 + auth-only
-        // retry 12 + detail 8 + dl/play 8 ≈ 39-43s worst serial, so the kill
-        // moved 30→40; LIVE_FILL (90s) still lands a slow-alive result.
+        // retry [fresh bearer 8 + search 12, SKIPPED once >25s spent] +
+        // detail 8 + dl/play 8 ⇒ single chain ≈ 39s, full reject chain ≈ 51s;
+        // the kill moved 30→40→55 so no slow-but-alive chain is canned into
+        // a breaker strike. LIVE_FILL (90s) still lands the result live.
         val s = ServerFarm.allServers.first { it.id == "moviebox" }
-        assertEquals(40, s.timeoutSec, "MovieBox latency-parity budgets (8/15+12/8/8) must fit this kill")
+        assertEquals(55, s.timeoutSec, "MovieBox latency-parity budgets (8/15[+8/12]/8/8) must fit this kill")
     }
 
     @Test

@@ -172,7 +172,15 @@ object ServerFarm {
             // kill to stay above the chain. 40s still LANDS LIVE: the LIVE_FILL
             // window is 90s, so a slow-alive MovieBox keeps streaming into an
             // open player instead of being silently canned.
-            hasSubtitles = true, maxQuality = 2160, timeoutSec = 40,
+            // 40→55 (F8 audit 2026-09-10): the AUTH-REJECTION retry adds a
+            // second bearer fetch (8s cold) + 12s search — single-chain worst
+            // 8+15+8+12+8+8 = 59s. The kill moved above the chain (55 covers
+            // the realistic cold-start+reject path; resolveMovieBox also
+            // SKIPS the retry once >25s has been spent), so a slow-but-alive
+            // MovieBox is never canned into a breaker strike — every canned
+            // timeout was one of the 5 strikes that hid the server for 5 min
+            // (the "show up / vanish" flap in the live-window bug report).
+            hasSubtitles = true, maxQuality = 2160, timeoutSec = 55,
         ),
         // PrimeSrc (primesrc.me, verified live Sept 2026): IMDB-keyed JSON API.
         // GET /api/v1/s?imdb={id}&type=movie|tv[&season=&episode=] returns
@@ -270,15 +278,21 @@ object ServerFarm {
         // timeoutSec 20→30 (Sept 2026): the farm kill at 20s canned
         // slow-but-alive 5-step chains → HealthMonitor marked each timeout a
         // hard failure → 5 strikes tripped the breaker → "sometimes doesn't
-        // work" (user report). The tightened resolver budgets (8+6+6+6 serial
-        // + per-lang fetches ≈ 26s worst) fit under this.
+        // work" (user report).
+        // 30→60 (F8 budget-invariant audit 2026-09-10): the resolver now also
+        // carries a title-fallback search and a two-player-src chain —
+        // documented ceilings: search 8s ×2 hosts (IMDB pass) + 8s (title
+        // fallback) + card 6s + 2 × (play 5s + playlist 6s) + language stage
+        // 5s ≈ 55s worst, so the kill sits above the chain; a canned timeout
+        // is a breaker strike, and strikes are the disappear/flap symptom the
+        // user reported for this server.
         ServerSpec(
             id = "allmovieland", name = "Allmovieland",
             idType = ServerIdType.IMDB,
             movieUrl = "https://allmovieland.art/?do=search&subaction=search&story={id}",
             tvUrl = "https://allmovieland.art/?do=search&subaction=search&story={id}",
             referer = "https://allmovieland.art/",
-            hasSubtitles = false, maxQuality = 1080, timeoutSec = 30,
+            hasSubtitles = false, maxQuality = 1080, timeoutSec = 60,
             hindi = true,
         ),
         // MP4Hydra (mp4hydra.org): title-slug keyed multipart POST to /info2

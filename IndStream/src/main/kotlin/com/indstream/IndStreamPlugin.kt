@@ -258,11 +258,49 @@ class IndStreamProvider : MainAPI() {
     // Load links (the resolver)
     // ------------------------------------------------------------------
 
+    /** Correlation id so every line of ONE Play tap strings together in
+     *  logcat (live-window debug, Sept 2026 audit): "TAP#7 …". */
+    private val tapSeq = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /** A farm resolution already running for a cacheKey — from THIS provider's
+     *  live path OR a detail-page pre-warm. A second Play tap on the SAME
+     *  title must JOIN it (forward its arrivals) instead of launching a second
+     *  full farm: double launches half the bandwidth while a video is already
+     *  streaming and hammer the same APIs (RC-G, Sept 2026 audit). */
+    private class FarmHandle(val key: String, val job: kotlinx.coroutines.Job)
+    private val inFlightFarm = java.util.concurrent.atomic.AtomicReference<FarmHandle?>(null)
+
+    /** Live-window audit entry: logs TAP start/end and surfaces APP-SIDE
+     *  CANCELLATION — the field report "buffered 7–8 s then no link" cannot be
+     *  produced by the plugin's own 45/90 s gates, so whether the app kills
+     *  loadLinks early is the open question this answers (RC-L, Sept 2026). */
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
+        callback: (ExtractorLink) -> Unit,
+    ): Boolean {
+        val tap = tapSeq.incrementAndGet()
+        val t0 = System.currentTimeMillis()
+        android.util.Log.i("IndStream", "TAP#$tap loadLinks start casting=$isCasting")
+        val result = try {
+            loadLinksInner(tap, data, isCasting, subtitleCallback, callback)
+        } catch (c: kotlinx.coroutines.CancellationException) {
+            android.util.Log.w("IndStream", "TAP#$tap loadLinks CANCELLED by the app after " +
+                "${System.currentTimeMillis() - t0}ms (${c.message ?: c.javaClass.simpleName})")
+            throw c
+        }
+        android.util.Log.i("IndStream", "TAP#$tap loadLinks END result=$result in " +
+            "${System.currentTimeMillis() - t0}ms")
+        return result
+    }
+
+    private suspend fun loadLinksInner(
+        tap: Int,
+        data: String,
+        isCasting: Boolean,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit,
     ): Boolean {
         val tmdb = TmdbUrlParser.parseTmdbUrl(data) ?: run {
             android.util.Log.w("IndStream", "loadLinks: not a TMDB url: $data")
@@ -303,8 +341,19 @@ class IndStreamProvider : MainAPI() {
         // probes: labels come from the cached quality tags. Emission order is the
         // arrival order the list was built in; the app's own quality-profile
         // (the USER's priority settings) decides what auto-plays.
+        // F6 (Sept 2026 audit): the live tail must ALSO attach to a PLAY-PATH
+        // farm still resolving this exact episode — warmFarms only ever held
+        // movie pre-warms, so every TV re-tap replayed its partial cache and
+        // returned, freezing the change-server list while the rest of the farm
+        // kept landing (the "re-tap shows many servers but nothing more
+        // arrives" half of the bug report).
+        val liveFarm = inFlightFarm.get()?.takeIf { it.key == cacheKey && it.job.isActive }?.job
+        val warm = liveFarm ?: warmFarms[cacheKey]
         val cached = StreamEngine.FastStartCache.get(cacheKey)
         if (cached != null && cached.isNotEmpty()) {
+            android.util.Log.i("IndStream", "TAP#$tap replay from FastStartCache " +
+                "(age=${StreamEngine.FastStartCache.ageMs(cacheKey)}ms, ${cached.size} streams, " +
+                "farmStillRunning=${warm != null})")
             val replayPushed = Collections.synchronizedSet(HashSet<String>())
             cached.forEach { replayPushed += it.url }
             StreamEngine.emit(
@@ -323,7 +372,6 @@ class IndStreamProvider : MainAPI() {
             // still-growing FastStartCache and forward newly-landed servers
             // straight to the player (already-fetched — zero new probes) until
             // the farm finishes or the live window caps out.
-            val warm = warmFarms[cacheKey]
             if (warm != null) {
                 val fillStart = System.currentTimeMillis()
                 while (warm.isActive && System.currentTimeMillis() - fillStart < StreamEngine.LIVE_FILL_MS) {
@@ -347,7 +395,8 @@ class IndStreamProvider : MainAPI() {
                     probeManifests = false,
                 )
             }
-            android.util.Log.i("IndStream", "loadLinks: replay from warm cache (+live tail: ${if (warm != null) "yes" else "no"}), ${emitted.get()} streams for tmdb=$tmdbId/$type")
+            android.util.Log.i("IndStream", "TAP#$tap replay done (+live tail: ${if (warm != null) "yes" else "no"}), " +
+                "${emitted.get()} streams for tmdb=$tmdbId/$type s=$season e=$episode")
             return emitted.get() > 0
         }
 
@@ -367,9 +416,57 @@ class IndStreamProvider : MainAPI() {
         val windowOpen = java.util.concurrent.atomic.AtomicBoolean(true)
         val loadStartMs = System.currentTimeMillis()
 
+        // A farm for this EXACT key already in flight (this provider's live
+        // path, or a movie pre-warm)? JOIN it instead of launching a second
+        // full farm — same title+episode twice is the double bandwidth/API
+        // hammer the Sept 2026 audit flagged (RC-G). Forwarding works purely
+        // from the growing FastStartCache the owner keeps writing — the exact
+        // mechanism the partial-warm replay already proves, no shared
+        // callback needed.
+        run {
+            val running: kotlinx.coroutines.Job? =
+                inFlightFarm.get()?.takeIf { it.key == cacheKey && it.job.isActive }?.job
+                    ?: warmFarms[cacheKey]?.takeIf { it.isActive }
+            if (running != null) {
+                android.util.Log.i("IndStream", "TAP#$tap joining in-flight farm for $cacheKey (no second launch)")
+                val joined = Collections.synchronizedSet(HashSet<String>())
+                suspend fun tail(): Boolean {
+                    val fresh = StreamEngine.FastStartCache.get(cacheKey)
+                        ?.filter { joined.add(it.url) }.orEmpty()
+                    if (fresh.isEmpty()) return false
+                    StreamEngine.emit(
+                        fresh,
+                        { emitted.incrementAndGet(); callback(it) },
+                        originalLangNow(),
+                        probeManifests = false,
+                    )
+                    return true
+                }
+                while (System.currentTimeMillis() - loadStartMs < StreamEngine.LIVE_FILL_MS) {
+                    delay(250)
+                    tail()
+                    if (!running.isActive) { tail(); break }
+                    if (emitted.get() == 0 &&
+                        System.currentTimeMillis() - loadStartMs > StreamEngine.FAST_START_MAX_MS
+                    ) {
+                        android.util.Log.w("IndStream", "TAP#$tap joined farm produced nothing in " +
+                            "${StreamEngine.FAST_START_MAX_MS}ms")
+                        return false
+                    }
+                }
+                if (emitted.get() > 0) {
+                    val imdb = runCatching { withTimeoutOrNull(2500L) { imdbDeferred.await() } }.getOrNull()
+                    runCatching { topUpSubtitles(imdb, season, episode, originalLangNow(), subtitleCallback) }
+                }
+                android.util.Log.i("IndStream", "TAP#$tap joined farm -> ${emitted.get()} live links " +
+                    "in ${System.currentTimeMillis() - loadStartMs}ms")
+                return emitted.get() > 0
+            }
+        }
+
         val farmDone = fastStartScope.async {
             try {
-                StreamEngine.resolveRealtime(tmdbId, type, season, episode, imdbIdProvider = { imdbDeferred.await() }) { _, streams ->
+                StreamEngine.resolveRealtime(tmdbId, type, season, episode, imdbIdProvider = { imdbDeferred.await() }) { sid, streams ->
                     // Subtitle-only carriers are dead weight now (server subs are
                     // not used — fallback is the provider): links only.
                     val fresh = streams.filter { it.url.isNotBlank() && pushedUrls.add(it.url) }
@@ -379,6 +476,8 @@ class IndStreamProvider : MainAPI() {
                     // LIVE push (the whole point of staying alive): each batch
                     // is emitted the instant it resolves, in arrival order —
                     // the player's own quality profile decides what plays.
+                    android.util.Log.i("IndStream", "TAP#$tap +${fresh.size} from $sid at " +
+                        "${System.currentTimeMillis() - loadStartMs}ms (window open)")
                     StreamEngine.emit(
                         fresh,
                         { emitted.incrementAndGet(); callback(it) },
@@ -388,6 +487,14 @@ class IndStreamProvider : MainAPI() {
             } catch (t: Throwable) {
                 android.util.Log.w("IndStream", "live resolve failed: ${t.message}")
             }
+        }
+        // F6: OWNERSHIP of this title's farm is published so a re-tap that
+        // catches a PARTIAL cache can still tail the running farm (the replay
+        // branch reads this via inFlightFarm), not just complete-and-return.
+        run {
+            val handle = FarmHandle(cacheKey, farmDone)
+            inFlightFarm.set(handle)
+            farmDone.invokeOnCompletion { inFlightFarm.compareAndSet(handle, null) }
         }
 
         // Keep loadLinks ALIVE (bounded): the change-server list only grows
@@ -401,7 +508,8 @@ class IndStreamProvider : MainAPI() {
         }
 
         if (withTimeoutOrNull(StreamEngine.FAST_START_MAX_MS) { firstStreamArrived.await() } == null) {
-            android.util.Log.w("IndStream", "loadLinks: farm produced no streams in ${StreamEngine.FAST_START_MAX_MS}ms")
+            android.util.Log.w("IndStream", "TAP#$tap farm produced no streams in ${StreamEngine.FAST_START_MAX_MS}ms " +
+                "(detached farm keeps filling FastStartCache; next tap replays + tails it)")
             arrivalWatcher.cancel()
             windowOpen.set(false)
             return false
@@ -437,7 +545,7 @@ class IndStreamProvider : MainAPI() {
         // profile ranks first. The farm has (usually) already finished inside
         // the window; anything straggling past it still lands in
         // FastStartCache for the full-list replay on the next open.
-        android.util.Log.i("IndStream", "loadLinks: tmdb=$tmdbId/$type s=$season e=$episode -> " +
+        android.util.Log.i("IndStream", "TAP#$tap live window: tmdb=$tmdbId/$type s=$season e=$episode -> " +
             "${emitted.get()} links live in ${System.currentTimeMillis() - loadStartMs}ms (farm=${if (farmDone.isCompleted) "done" else "capped at LIVE_FILL"})")
         return emitted.get() > 0
     }

@@ -203,6 +203,40 @@ class MultimoviesProvider : MainAPI() {
     private val mmDocCache = ConcurrentHashMap<String, Document>()
     /** Maps "tmdbId|type" to (name, year) so load() can slug-guess the MM page. */
     private val tmdbSearchCache = ConcurrentHashMap<String, Pair<String, String?>>()
+
+    /** In-flight link farm per EXACT load url: mirrors
+     *  [com.indstream.IndStreamProvider]'s warmFarms/single-flight model
+     *  (Sept 2026 live-window audit). Value completes when every detached
+     *  pull resolved. Its jobs: (1) a re-tap while the first farm is still
+     *  resolving TAILS it — late arrivals reach the live change-server list
+     *  instead of only the next replay; (2) no second full farm ever launches
+     *  over the same hosts while the player is using the bandwidth. */
+    private val liveFarms = ConcurrentHashMap<String, Deferred<Unit>>()
+
+    /** Poll a running farm's growing FastStartCache entry, pushing only URLs
+     *  [pushed] has not seen yet; returns the number newly delivered. Bounded
+     *  by [MultimoviesProvider.LIVE_FILL_MS] and stops when [farm] finishes. */
+    private suspend fun tailLiveFarm(
+        data: String,
+        farm: Deferred<Unit>,
+        pushed: MutableSet<String>,
+        callback: (ExtractorLink) -> Unit,
+    ): Int {
+        var added = 0
+        val deadline = System.currentTimeMillis() + LIVE_FILL_MS
+        suspend fun diff(): Int {
+            val fresh = FastStartCache.get(data)?.filter { pushed.add(it.url) }.orEmpty()
+            fresh.forEach { link -> runCatching { callback(link) }; }
+            added += fresh.size
+            return fresh.size
+        }
+        while (System.currentTimeMillis() < deadline) {
+            delay(250)
+            diff()
+            if (!farm.isActive) { diff(); break }
+        }
+        return added
+    }
     override val hasMainPage = true
     override val hasQuickSearch = true
     override val supportedTypes = setOf(
@@ -1030,6 +1064,17 @@ class MultimoviesProvider : MainAPI() {
         FastStartCache.get(data)?.let { cached ->
             if (cached.isNotEmpty()) {
                 cached.forEach { runCatching { callback(it) } }
+                // Live tail (Sept 2026 audit): the first tap's farm may still
+                // be resolving — forwarding its arrivals keeps the change-server
+                // list GROWING during this play, not frozen at the partial
+                // replay set (the CSX job-liveness rule).
+                val farm = liveFarms[data]
+                if (farm != null && farm.isActive) {
+                    val pushed = HashSet<String>().apply { cached.forEach { add(it.url) } }
+                    val extra = tailLiveFarm(data, farm, pushed, callback)
+                    android.util.Log.i("Multimovies", "loadLinks: replay ${cached.size} + live tail " +
+                        "$extra links (first-tap farm still resolving)")
+                }
                 if (meta != null) {
                     // Fallback subtitles ARE the subtitle provider (user spec
                     // Sept 2026 rewrite #2): fetch the wanted set on every
@@ -1038,6 +1083,22 @@ class MultimoviesProvider : MainAPI() {
                 }
                 return@withDomainRetry true
             }
+        }
+
+        // Single-flight join (Sept 2026 audit, mirrors IndStream RC-G): this
+        // url's farm is ALREADY launching from an earlier tap. Never start a
+        // second full fleet over the same hosts — forward the running farm's
+        // arrivals from its shared FastStartCache landing zone instead.
+        liveFarms[data]?.takeIf { it.isActive }?.let { farm ->
+            val pushed = HashSet<String>()
+            val extra = tailLiveFarm(data, farm, pushed, callback)
+            if (extra > 0) {
+                android.util.Log.i("Multimovies", "loadLinks: joined in-flight farm -> $extra live links")
+                if (meta != null) deliverFallbackSubs(meta, subtitleCallback)
+                return@withDomainRetry true
+            }
+            // Farm finished with nothing cached — fall through to a fresh
+            // resolve on this tap.
         }
 
         // Fast path 2: embeds prefetched in the background while the detail page
@@ -1108,6 +1169,12 @@ class MultimoviesProvider : MainAPI() {
         val remainingPulls = java.util.concurrent.atomic.AtomicInteger(globalSources.size + embeds.size)
         val allPullsDone = CompletableDeferred<Unit>()
         if (globalSources.isEmpty() && embeds.isEmpty()) allPullsDone.complete(Unit)
+
+        // Publish this tap's farm so later taps on the SAME url can tail it
+        // live and never re-launch the fleet (Sept 2026 live-window audit).
+        val farm = searchScope.async { allPullsDone.await() }
+        liveFarms[data] = farm
+        farm.invokeOnCompletion { if (liveFarms[data] === farm) liveFarms.remove(data) }
 
         globalSources.forEach { g ->
             searchScope.launch {

@@ -112,6 +112,31 @@ object HttpKit {
     }
 
     /**
+     * Cheap liveness check for REPLAYED (possibly stale/expired) stream URLs:
+     * one tiny ranged request. Returns TRUE (alive — 2xx/3xx/416), FALSE (dead —
+     * explicit 4xx/5xx, e.g. an expired `?sign=` URL rejecting with 403) and
+     * null (UNKNOWN — any timeout/exception): callers must only drop links on
+     * an explicit FALSE so a slow-but-live CDN is never mistaken for a dead one.
+     */
+    suspend fun aliveCheck(
+        url: String,
+        referer: String? = null,
+        extraHeaders: Map<String, String> = emptyMap(),
+        timeoutSec: Long = 2,
+    ): Boolean? = withTimeoutOrNull((timeoutSec + 1) * 1000L) {
+        runCatching {
+            val headers = LinkedHashMap<String, String>().apply {
+                put("User-Agent", userAgent)
+                putAll(extraHeaders)
+                if (!referer.isNullOrBlank() && !containsKey("Referer")) put("Referer", referer)
+                put("Range", "bytes=0-0")
+            }
+            val code = app.get(url, timeout = timeoutSec, headers = headers).code
+            code in 200..399 || code == 416
+        }.getOrNull()
+    }
+
+    /**
      * Measure the REAL pixel height of a direct (non-HLS) media file by parsing its
      * ISO-BMFF (MP4/MOV) container. Fetches the `moov` box — front for faststart,
      * tail otherwise — and reads the first video `tkhd` width/height. Returns 0 when
