@@ -1,0 +1,37 @@
+SHALLOW — 20 sites (home probe)
+
+site                 HTTP  t(s) CFchal WP dual multi pgmax cats  filehosts / watch
+----------------------------------------------------------------------------------
+bollygold.com         301  0.83  FalseFalse    0     0     0    0  
+cinevood.bingo        200  1.13  FalseTrue    2     2  1211    0  gdrivepro|watch:embed,iframe
+cinevood.loan         200   0.2  FalseTrue   48     3  1085   84  |watch:iframe
+cinevoods.com         200  0.51  FalseTrue   48     3  1085   84  |watch:iframe
+hdhub.cfd             403  0.11  FalseFalse    0     0     0    0  
+hdhubflix.xyz           0  0.56  FalseFalse    0     0     0    0  
+hdmoviezclub.com      301  0.92  FalseFalse    0     0     0    0  
+mlfbd.best            200  0.87  FalseTrue   88     0     0   36  |watch:dooplay,plyr
+mlsbd.click           200   1.0  FalseTrue    6     0     2   42  |watch:iframe
+morimoflix.xyz        200  1.16  FalseTrue    0     0     0   19  |watch:iframe
+moviesflixi.com       200  0.28  FalseTrue   55     3  1084   87  |watch:iframe
+movieshb.com          301  1.32  FalseFalse    0     0     0    0  
+multimovies           200  0.44  FalseTrue    0     0     0   54  |watch:dooplay,iframe,plyr
+mvhub24.com           200  1.81  FalseTrue   22     8     0   32  |watch:dooplay
+ofilmywap.pet         200  1.41  FalseFalse    3     0     0   46  |watch:iframe
+scloudx.lol           403  0.25  FalseFalse    0     0     0    0  
+vegamoviee.com        200   0.4  FalseFalse   58     5    10    0  
+vegamoviese.co        200  0.57  FalseFalse   58     5    10    0  
+vegamoviess.cfd       200  0.09  FalseFalse  119     1   647    0  
+xflixbd.org           200  1.21  FalseTrue   53     4     0   46  |watch:dooplay,iframe,plyr
+
+DEEP — best 5 ['cinevood.loan', 'mlfbd.best', 'mlsbd.click', 'vegamoviess.cfd', 'xflixbd.org'] 
+
+{"name": "cinevood.loan", "rest": "403 0.12s", "post_candidates": ["https://cinevood.loan/download-mirzapur-the-movie-2026-hd-full-movie/", "https://cinevood.loan/download-im-game-2026-hindi-hdtc-480p-720p-1080p/", "https://cinevood.loan/download-dc-2026-hindi-clear-dubbed-web-dl-480p-720p-1080p/"], "post": {"url": "https://cinevood.loan/download-mirzapur-the-movie-2026-hd-full-movie/", "status": 200, "ttfb": 0.12, "ext_hosts": [["schema.org", 3], ["imghost.rest", 3], ["mobilejsr.rest", 3], ["secure.gravatar.com", 2], ["s.w.org", 2], ["ogp.me", 1], ["gmpg.org", 1], ["rankmath.com", 1]], "dl_markers": [], "watch_markers": ["embed", "iframe"], "iframe_n": 4}} 
+
+{"name": "mlfbd.best", "rest": "200 0.42s", "post_candidates": ["https://mlfbd.best/index.php/movies/hello-mummy-2024/", "https://mlfbd.best/index.php/movies/kd-the-devil-2026/", "https://mlfbd.best/index.php/movies/tom-clancys-jack-ryan-ghost-war-2026/"], "post": {"url": "https://mlfbd.best/index.php/movies/hello-mummy-2024/", "status": 200, "ttfb": 0.78, "ext_hosts": [["schema.org", 18], ["image.tmdb.org", 11], ["ibb.co.com", 3], ["i.ibb.co.com", 3], ["s2.googleusercontent.com", 3], ["www.w3.org", 2], ["t.me", 2], ["ogp.me", 1]], "dl_markers": ["gdflix"], "watch_markers": ["dooplay", "embed", "plyr"], "iframe_n": 0}} 
+
+{"name": "mlsbd.click", "rest": "200 0.33s", "post_candidates": []} 
+
+{"name": "vegamoviess.cfd", "rest": "200 0.11s", "post_candidates": ["https://vegamoviess.cfd/mirzapur-the-movie-2026-v2-hindi-telugu-audio-hqhdts-720p-480p-1080p.html", "https://vegamoviess.cfd/call-my-agent-the-movie-2026-hindi-dual-audio-web-dl-720p-480p-1080p.html", "https://vegamoviess.cfd/paw-patrol-the-dino-movie-2026-hindi-english-audio-webdl-720p-480p-1080p.html"], "post": {"url": "https://vegamoviess.cfd/mirzapur-the-movie-2026-v2-hindi-telugu-audio-hqhdts-720p-480p-1080p.html", "status": 200, "ttfb": 0.08, "ext_hosts": [["nexdrive.help", 5], ["t.me", 3], ["www.w3.org", 2], ["ogp.me", 1], ["cdnjs.cloudflare.com", 1], ["code.jquery.com", 1], ["static.cloudflareinsights.com", 1]], "dl_markers": [], "watch_markers": ["iframe"], "iframe_n": 1}} 
+
+{"name": "xflixbd.org", "rest": "200 13.03s", "post_candidates": ["https://xflixbd.org/movies/manamey-2024-unofficial-hindi-dubbed-hdts-480p-720p-1080p-full-movie-download-watch-online/", "https://xflixbd.org/movies/heart-eyes-2025-bluray-hindienglish-480p-720p-1080p-full-movie-download-watch-online/", "https://xflixbd.org/movies/the-court-2026-s01-ep01-4-hindi-tamil-jiohotstar-web-dl-720p-1080p-full-movie-download-watch-online/"], "post": {"url": "https://xflixbd.org/movies/manamey-2024-unofficial-hindi-dubbed-hdts-480p-720p-1080p-full-movie-download-watch-online/", "status": 200, "ttfb": 0.3, "ext_hosts": [["image.tmdb.org", 49], ["schema.org", 18], ["www.facebook.com", 2], ["cdnjs.cloudflare.com", 2], ["xflixbd.xyz", 2], ["upload.wikimedia.org", 2], ["ogp.me", 1], ["www.googletagmanager.com", 1]], "dl_markers": [], "watch_markers": ["dooplay", "embed", "iframe", "plyr"], "iframe_n": 6}} 
+

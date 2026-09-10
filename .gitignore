@@ -18,5 +18,6 @@ local.properties
 /tmp_chunks/
 /.kotlin/
 /gradle_out.txt
+__pycache__/
 
 

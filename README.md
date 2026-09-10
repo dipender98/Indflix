@@ -15,14 +15,10 @@ https://raw.githubusercontent.com/dipender98/Indflix/builds/repo.json
 
 ## Features
 
-- ⚡ **Instant play** — servers are probed in real time and the link most
-  likely to start playing immediately is picked first (fast HLS streams,
-  no waiting on slow sources); the rest fill in in the background
-- 🎬 **Multi-server streaming** — 9 live servers including VidLink,
-  VaPlayer, VidRock, MovieBox, Videasy Hindi, VidNest (7 sub-server
-  fan-out with per-stream language labels), VidUp, VidCore, Allmovieland
-  and more — every source is health-monitored with an automatic circuit
-  breaker, and flaky hosts fail over without breaking playback
+- 🎬 **Streaming** — use **Multimovies** and **IndStream** for online
+  streaming
+- ⬇️ **Download & watch offline** — use **CineVood** to download titles
+  and watch them offline
 - 🌐 **Multi-language audio** — Hindi, English, Tamil, Telugu, Kannada,
   Malayalam, Bengali, dual-audio; each stream is labelled with its
   actual audio language
