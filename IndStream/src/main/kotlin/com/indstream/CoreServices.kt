@@ -24,6 +24,10 @@ import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -219,6 +223,13 @@ object TmdbService {
     private const val IMG_BASE = "https://image.tmdb.org/t/p/w500"
     private const val IMG_BACKDROP = "https://image.tmdb.org/t/p/w1280"
 
+    /** Search-result cache TTL / bounds. Results don't change minute-to-minute;
+     *  a hit makes history re-clicks instant and immune to upstream blips. */
+    private const val SEARCH_CACHE_TTL_MS = 15 * 60 * 1000L
+    private const val SEARCH_CACHE_MAX = 64
+    /** Cap on riding someone else's in-flight search before giving up. */
+    private const val SEARCH_INFLIGHT_WAIT_MS = 8_000L
+
     private val detailCache = ConcurrentHashMap<String, TmdbDetail>()
     private val imdbFindCache = ConcurrentHashMap<String, Pair<Int, String>>()
     private val seasonCache = ConcurrentHashMap<String, List<TmdbEpisode>>()
@@ -263,18 +274,77 @@ object TmdbService {
         val rating: Double? = null,
     )
 
-    /** Search movies + series via TMDB /search/multi. */
+    /** Search movies + series via TMDB /search/multi — cached + deduplicated.
+     *
+     *  Both plugins key every search on ONE shared TMDB api key against one
+     *  endpoint, so transient 429/latency blips blank BOTH providers at the
+     *  same moment (the "search-history click shows nothing" bug). Two
+     *  defenses live here:
+     *  - 15-min positive result cache: re-clicking a previously-successful
+     *    history query answers from memory — never touches upstream again.
+     *  - In-flight dedup: quickSearch and search firing concurrently for the
+     *    SAME query (the app runs both paths on a history click) share ONE
+     *    request instead of stacking identical hits onto a rate-limited key. */
     suspend fun search(query: String): List<TmdbItem> {
         if (query.isBlank()) return emptyList()
+        val key = query.trim().lowercase()
+        searchCache[key]?.let {
+            if (System.currentTimeMillis() <= it.expiresAt) return it.items
+            searchCache.remove(key)
+        }
+        // putIfAbsent: first caller LEADS, everyone else rides its request.
+        // The leader runs on [searchScope], so it still completes (and fills
+        // the cache) even if the app cancels the caller's own budget.
+        val mine = searchScope.async {
+            val found = searchRemote(query)
+            if (found.isNotEmpty()) {
+                if (searchCache.size >= SEARCH_CACHE_MAX) {
+                    val oldest = searchCache.entries.minByOrNull { e -> e.value.expiresAt }
+                    oldest?.let { e -> searchCache.remove(e.key) }
+                }
+                searchCache[key] = SearchEntry(found, System.currentTimeMillis() + SEARCH_CACHE_TTL_MS)
+            }
+            found
+        }
+        val existing = searchInFlight.putIfAbsent(key, mine)
+        if (existing == null) {
+            mine.invokeOnCompletion { searchInFlight.remove(key, mine) }
+        } else {
+            mine.cancel()
+        }
+        val job = existing ?: mine
+        return withTimeoutOrNull(SEARCH_INFLIGHT_WAIT_MS) { runCatching { job.await() }.getOrNull() }
+            ?: emptyList()
+    }
+
+    /** The actual single /search/multi round-trip (never throw — errors/429s
+     *  arrive as an empty list, with a log line to make them visible). */
+    private suspend fun searchRemote(query: String): List<TmdbItem> {
         val encoded = URLEncoder.encode(query.trim(), "UTF-8")
         val json = runCatching {
             app.get(
                 "$API/search/multi?api_key=$API_KEY&query=$encoded&language=en-US&include_adult=false&page=1",
                 timeout = 5,
             ).text
-        }.getOrNull() ?: return emptyList()
-        return parseTmdbMultiSearch(json)
+        }.getOrElse { t ->
+            // DIAG(search-blank): timeouts / connection resets / thrown HTTP errors land
+            // here invisibly today — proves or kills that theory in logcat.
+            android.util.Log.w("IndStream", "tmdb search NET-FAIL q='$query': ${t.javaClass.simpleName}: ${t.message?.take(200)}")
+            return emptyList()
+        }
+        val items = parseTmdbMultiSearch(json)
+        // TMDB error bodies (e.g. 429 "rate-limit exceeded" on a shared key) carry a
+        // status_code and parse to ZERO results — identical to a genuine no-hit.
+        if (items.isEmpty() && json.contains("status_code"))
+            android.util.Log.w("IndStream", "tmdb search UPSTREAM-ERR q='$query': ${json.take(200)}")
+        return items
     }
+
+    private data class SearchEntry(val items: List<TmdbItem>, val expiresAt: Long)
+
+    private val searchCache = ConcurrentHashMap<String, SearchEntry>()
+    private val searchInFlight = ConcurrentHashMap<String, kotlinx.coroutines.Deferred<List<TmdbItem>>>()
+    private val searchScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /** Trending this week — powers the home page. [type] is "movie" or "tv". */
     suspend fun trending(type: String, page: Int = 1): List<TmdbItem> {

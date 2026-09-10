@@ -445,7 +445,12 @@ class MultimoviesProvider : MainAPI() {
                 }.sortedByDescending { it.first }
                     .take(SEARCH_MAX_RESULTS)
                     .ifEmpty { null }
-            } ?: return@withDomainRetry null
+            } ?: run {
+                // DIAG(search-blank): null here means the 2.5s budget EXPIRED on a slow
+                // (but fine) TMDB reply, or every hit was empty/filtered out.
+                android.util.Log.w("Multimovies", "search NULL q='$query': ${SEARCH_TOTAL_BUDGET_MS}ms budget expired or no relevant hits (check tmdb search NET-FAIL/UPSTREAM-ERR lines above)")
+                return@withDomainRetry null
+            }
 
         // Remember (name, year) per hit so load() can slug-guess its MM page.
         ranked.forEach { (_, item) ->

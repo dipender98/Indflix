@@ -31,10 +31,13 @@ import java.util.concurrent.TimeUnit
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -215,6 +218,8 @@ object TmdbService {
 
     private const val TMDB_API_KEY = "e6333b32409e02a4a6eba6fb7ff866bb"
     private const val SIMKL_CLIENT_ID = ""
+    /** Cap on riding someone else's in-flight TMDB search before giving up. */
+    private const val SEARCH_INFLIGHT_WAIT_MS = 8_000L
     private const val TMDB_API = "https://api.themoviedb.org/3"
     private const val SIMKL_API = "https://api.simkl.com"
     private const val IMG_BASE = "https://image.tmdb.org/t/p/w500"
@@ -260,10 +265,40 @@ object TmdbService {
         val rating: Double? = null,
     )
 
-    /** Search movies + series. SIMKL takes priority when its client_id is set. */
+    /** Search movies + series. SIMKL takes priority when its client_id is set.
+     *
+     *  The TMDB branch is deduplicated IN-FLIGHT: quickSearch and search can
+     *  fire concurrently for the SAME query (a history click drives both paths),
+     *  and the provider's 2.5s budget cancel-and-retry re-enters here — every
+     *  caller rides ONE upstream request instead of stacking identical hits on
+     *  the shared rate-limited key (transient 429/latency there blanks both
+     *  providers at once; see IndStream TmdbService/search). */
     suspend fun search(query: String): List<TmdbItem> {
         if (query.isBlank()) return emptyList()
-        return if (SIMKL_CLIENT_ID.isNotBlank()) searchSimkl(query) else searchTmdb(query)
+        return when {
+            SIMKL_CLIENT_ID.isNotBlank() -> searchSimkl(query)
+            else -> searchTmdbShared(query.trim().lowercase(), query)
+        }
+    }
+
+    private val searchScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val searchInFlight = ConcurrentHashMap<String, Deferred<List<TmdbItem>>>()
+
+    /** One /search/multi per in-flight query; the leader runs on [searchScope]
+     *  so it still completes (serving late riders and the retryer) after any
+     *  individual caller's budget is cancelled. Never throws: upstream errors
+     *  arrive as an empty list, logged on the GET itself. */
+    private suspend fun searchTmdbShared(key: String, query: String): List<TmdbItem> {
+        val mine = searchScope.async { searchTmdb(query) }
+        val existing = searchInFlight.putIfAbsent(key, mine)
+        if (existing == null) {
+            mine.invokeOnCompletion { searchInFlight.remove(key, mine) }
+        } else {
+            mine.cancel()
+        }
+        val job = existing ?: mine
+        return withTimeoutOrNull(SEARCH_INFLIGHT_WAIT_MS) { runCatching { job.await() }.getOrNull() }
+            ?: emptyList()
     }
 
     /** Fetch full TMDB metadata for [tmdbId] of [type] ("movie"|"series"). */
@@ -343,8 +378,17 @@ object TmdbService {
                 "$TMDB_API/search/multi?api_key=$TMDB_API_KEY&query=$encoded&language=en-US&include_adult=false&page=1",
                 timeout = 5,
             ).text
-        }.getOrNull() ?: return emptyList()
-        return parseTmdbMultiSearch(json)
+        }.getOrElse { t ->
+            // DIAG(search-blank): timeouts / resets / thrown HTTP errors vanish here today.
+            android.util.Log.w("Multimovies", "tmdb search NET-FAIL q='$query': ${t.javaClass.simpleName}: ${t.message?.take(200)}")
+            return emptyList()
+        }
+        val items = parseTmdbMultiSearch(json)
+        // A TMDB error body (429 rate-limit on the shared key, invalid key, …) parses
+        // to zero results — log it so logcat can tell it apart from a real no-hit.
+        if (items.isEmpty() && json.contains("status_code"))
+            android.util.Log.w("Multimovies", "tmdb search UPSTREAM-ERR q='$query': ${json.take(200)}")
+        return items
     }
 
     private suspend fun searchSimkl(query: String): List<TmdbItem> {

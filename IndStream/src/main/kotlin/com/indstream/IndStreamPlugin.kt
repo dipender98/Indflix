@@ -161,8 +161,10 @@ class IndStreamProvider : MainAPI() {
         page: Int,
         request: MainPageRequest
     ): HomePageResponse? {
-        val (type, kind) = request.data.split("|").let { it[0] to it.getOrElse(1) { "trending" } }
-        val tmdbType = if (type == "movie") "movie" else "tv"
+        // Catalog keys are "<category>|<media>" (see mainPage): category FIRST.
+        val parts = request.data.split("|")
+        val kind = parts[0].trim()                                       // "trending" | "popular"
+        val tmdbType = if (parts.getOrNull(1)?.trim() == "tv") "tv" else "movie"
         val items = withTimeoutOrNull(6000L) {
             when (kind) {
                 "popular" -> TmdbService.popular(tmdbType, page)
