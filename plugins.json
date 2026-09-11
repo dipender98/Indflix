@@ -2,14 +2,14 @@
     {
         "url": "https://raw.githubusercontent.com/dipender98/Indflix/builds/CineVood.cs3",
         "status": 1,
-        "version": 2,
+        "version": 3,
         "name": "CineVood",
         "internalName": "CineVood",
         "authors": [
             "Indflix"
         ],
         "description": "Multi-audio movies & series (720p-4K) from the cinevood network via its JSON API; direct-drive links for download & offline watching.",
-        "fileSize": 40821,
+        "fileSize": 41260,
         "repositoryUrl": "https://github.com/dipender98/Indflix",
         "language": "hi",
         "tvTypes": [
@@ -18,7 +18,7 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/dipender98/Indflix/main/CineVood/icon.png",
         "apiVersion": 1,
-        "fileHash": "sha256-95993fd6401f3d4e2cff73d067fa0c221a72fb7f174b514233097bb69e57dce4"
+        "fileHash": "sha256-9567e091e01d0a4ead43aa71700999c246d7cc5291747746afe8fc3f7536ae7a"
     },
     {
         "url": "https://raw.githubusercontent.com/dipender98/Indflix/builds/IndStream.cs3",
@@ -39,7 +39,7 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/dipender98/Indflix/main/IndStream/icon.png",
         "apiVersion": 1,
-        "fileHash": "sha256-eb0a7612daa7972c4f58878d8ae4643ccc1c87a6e0d13d66834b00027d28ec88"
+        "fileHash": "sha256-a20deb7a92c807b5494e8b69f47bc1406e8c2a88ccee0b05fb425efd926455df"
     },
     {
         "url": "https://raw.githubusercontent.com/dipender98/Indflix/builds/Multimovies.cs3",
@@ -63,6 +63,6 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/dipender98/Indflix/main/Multimovies/icon.png",
         "apiVersion": 1,
-        "fileHash": "sha256-d662b5fb4eeb526fef8919ae82ab90ee53eb2baf8a0408ccb966cc5a56b5d57c"
+        "fileHash": "sha256-8cd2af5544c9c710631325ef7f378d7baf9165252bd4059f57b0457bf2792e80"
     }
 ]
