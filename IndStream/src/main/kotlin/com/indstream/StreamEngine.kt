@@ -1866,15 +1866,13 @@ object StreamEngine {
         val headers = okHeaders("https://net27.cc/")
         val tvParams = if (type == "tv") "&se=$season&ep=$episode" else ""
 
-        /** GET embed-tmdb for one (optional dubbed) subject. null = no usable answer. */
+        /** GET embed-tmdb for one (optional dubbed) subject. null = no usable answer.
+         *  The web player ALWAYS sends type= (movie included) — mirror it exactly. */
         suspend fun fetchEmbed(dub: String?, dubdp: String?): org.json.JSONObject? {
             val query = buildString {
-                if (type == "tv") {
-                    append("?type=tv").append(tvParams)
-                    if (dub != null) { append("&dub=").append(dub); append("&dubdp=").append(dubdp) }
-                } else {
-                    if (dub != null) { append("?dub=").append(dub); append("&dubdp=").append(dubdp) }
-                }
+                if (type == "tv") append("?type=tv").append(tvParams)
+                else append("?type=movie")
+                if (dub != null) { append("&dub=").append(dub); append("&dubdp=").append(dubdp) }
             }
             val jsonText = withTimeoutOrNull(12_000L) {
                 runCatching {
