@@ -45,18 +45,52 @@ class SiteApi {
 
     // ---------------------------------------------------------------- core
 
-    private suspend fun getText(path: String, referer: String? = null): Pair<Int, String>? =
-        try {
-            val res = app.get(
+    private val CF_BODY = Regex("""_cf_chl_opt|Just a moment""")
+
+    /**
+     * PLAIN-FIRST: most mirrors answer normally to bare HTTP; only when the
+     * response actually looks like a Cloudflare challenge (or the request
+     * died) do we re-issue it through the shared WebView killer. Solving
+     * every call up-front stalls search past the app's provider timeout.
+     */
+    private suspend fun getText(
+        path: String, referer: String? = null, allowKiller: Boolean = true
+    ): Pair<Int, String>? = try {
+        val plain = app.get(
+            base + path,
+            headers = SharedServices.browserHeaders(referer),
+            timeout = 15
+        )
+        val challenged = plain.code == 403 || plain.code == 429 || plain.code == 503 ||
+            CF_BODY.containsMatchIn(plain.text.take(4000))
+        if (!challenged || !allowKiller) {
+            plain.code to plain.text
+        } else {
+            SharedServices.diag("CF-RETRY $base$path")
+            val solved = app.get(
                 base + path,
                 headers = SharedServices.browserHeaders(referer),
                 interceptor = CfHolder.killer,
-                timeout = 15
+                timeout = 45
             )
-            res.code to res.text
-        } catch (e: Exception) {
+            solved.code to solved.text
+        }
+    } catch (e: Exception) {
+        if (!allowKiller) {
+            null
+        } else try {
+            SharedServices.diag("NET-RETRY ${e.javaClass.simpleName} $base$path")
+            val solved = app.get(
+                base + path,
+                headers = SharedServices.browserHeaders(referer),
+                interceptor = CfHolder.killer,
+                timeout = 45
+            )
+            solved.code to solved.text
+        } catch (e2: Exception) {
             null
         }
+    }
 
     /**
      * Run [call] against the current mirror; on failure/4xx rotate to the next
@@ -110,12 +144,13 @@ class SiteApi {
         SharedServices.diag("MIRROR all seeds unhealthy, keeping $base")
     }
 
+    // health probes stay PLAIN (fast): a challenged mirror is simply not the
+    // healthy one; solving belongs to the real calls, not the probe loop
     private suspend fun probe(url: String): Boolean = try {
         val res = app.get(
             "$url/wp-json/",
             headers = SharedServices.browserHeaders(json = true),
-            interceptor = CfHolder.killer,
-            timeout = 8
+            timeout = 5
         )
         res.code == 200
     } catch (e: Exception) {

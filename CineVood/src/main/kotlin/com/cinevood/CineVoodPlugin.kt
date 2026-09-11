@@ -45,9 +45,14 @@ class CineVoodProvider : MainAPI() {
     override var lang = "hi"
     override val hasMainPage = true
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
+    override val hasDownloadSupport = true // this is a download-first provider
     override val instantLinkLoading = true // play the first link while the rest arrive
     override val usesWebView = true // gate solving may need the app WebView (RC-1A)
-    override val loadLinksTimeoutMs = 90_000L
+    override val searchTimeoutMs: Long? = 60_000L // first CF WebView solve is slow
+    override val quickSearchTimeoutMs: Long? = 30_000L
+    override val loadTimeoutMs: Long? = 60_000L
+    override val getMainPageTimeoutMs: Long? = 60_000L
+    override val loadLinksTimeoutMs = 120_000L
 
     private val api = SiteApi()
     private val gate = CineVoodGate(refererProvider = { api.base })
@@ -378,7 +383,7 @@ class CineVoodProvider : MainAPI() {
 
     companion object {
         const val DEFAULT_BASE = "https://cinevood.loan"
-        private const val BUILD = "v3"
+        private const val BUILD = "v4"
         private const val LATEST_TOKEN = "__latest__"
         private const val MIN_QUALITY = 720
         private val ADULT_SLUG = Regex(
