@@ -15,6 +15,16 @@ import java.util.concurrent.ConcurrentHashMap
 
 class GateResult(val finalUrl: String, val pageText: String)
 
+/**
+ * ONE shared CloudflareKiller for the whole provider: the cinevood.loan
+ * network started serving CF managed challenges on the SITE itself (not just
+ * the download gates), so listing, post JSON, HTML fallback, gates and file
+ * hosts all ride the same solved cookie jar.
+ */
+object CfHolder {
+    val killer: CloudflareKiller by lazy { CloudflareKiller() }
+}
+
 class CineVoodGate(private val refererProvider: () -> String) {
 
     companion object {
@@ -49,9 +59,8 @@ class CineVoodGate(private val refererProvider: () -> String) {
             metaRefreshUrl(html) ?: jsRedirectUrl(html)
     }
 
-    // lazy: CloudflareKiller needs the app's WebView and must not be built at
-    // plugin-registration time (RC-1A)
-    private val killer by lazy { CloudflareKiller() }
+    // shared lazy killer (RC-1A: never built at provider-registration time)
+    private val killer get() = CfHolder.killer
     private val resolved = ConcurrentHashMap<String, GateResult>()
 
     fun isGate(url: String): Boolean {

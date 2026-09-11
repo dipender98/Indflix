@@ -50,6 +50,7 @@ class SiteApi {
             val res = app.get(
                 base + path,
                 headers = SharedServices.browserHeaders(referer),
+                interceptor = CfHolder.killer,
                 timeout = 15
             )
             res.code to res.text
@@ -113,6 +114,7 @@ class SiteApi {
         val res = app.get(
             "$url/wp-json/",
             headers = SharedServices.browserHeaders(json = true),
+            interceptor = CfHolder.killer,
             timeout = 8
         )
         res.code == 200

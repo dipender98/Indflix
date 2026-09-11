@@ -54,6 +54,10 @@ class CineVoodProvider : MainAPI() {
     private val catMutex = Mutex()
     private val mirrorsLearned = AtomicBoolean(false)
 
+    init {
+        SharedServices.diag("BOOT CineVood build $BUILD base=$mainUrl")
+    }
+
     // ---------------------------------------------------------------- tabs
 
     private data class Tab(val label: String, val slug: String?)
@@ -281,7 +285,10 @@ class CineVoodProvider : MainAPI() {
                 "LINKS id=${post.id} season=$season resolved=${groups.size}/${all.size} " +
                     "gates=${groups.count { gate.isGate(it.url) }}"
             )
-            if (groups.isEmpty()) return@attempt false
+            if (groups.isEmpty()) {
+                SharedServices.diag("LINKS ZERO raw-groups=${all.size} season=$season -> no links")
+                return@attempt false
+            }
 
             val emitted = AtomicInteger(0)
             withContext(Dispatchers.IO) {
@@ -371,6 +378,7 @@ class CineVoodProvider : MainAPI() {
 
     companion object {
         const val DEFAULT_BASE = "https://cinevood.loan"
+        private const val BUILD = "v3"
         private const val LATEST_TOKEN = "__latest__"
         private const val MIN_QUALITY = 720
         private val ADULT_SLUG = Regex(

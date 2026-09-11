@@ -38,8 +38,15 @@ object LinkExtractors {
     ): Boolean {
         val resolved = if (gate.isGate(link.url)) gate.resolve(link.url)?.finalUrl else link.url
         if (resolved.isNullOrBlank()) {
-            gate.diag("EMIT SKIP gate-unsolved ${link.url}")
-            return false
+            // second chance: core's redirector walk may pass where the
+            // WebView solve did not
+            val via = runCatching { unshortenLinkSafe(link.url) }.getOrNull()
+            if (via.isNullOrBlank() || via == link.url) {
+                gate.diag("EMIT SKIP gate-unsolved ${link.url}")
+                return false
+            }
+            gate.diag("EMIT gate-fail unshorten -> $via")
+            return dispatch(via, link, referer, gate, subtitleCallback, callback)
         }
         return dispatch(resolved, link, referer, gate, subtitleCallback, callback)
     }
