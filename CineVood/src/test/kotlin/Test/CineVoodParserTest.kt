@@ -277,4 +277,39 @@ class CineVoodParserTest {
     fun decodeUrlsNoKeyReturnsEmpty() {
         assertTrue(com.cinevood.SiteCipher.decodeUrls("<html>no cipher here</html>").isEmpty())
     }
+
+    // ---- PageScan (token interstitial structural scan) -----------------------
+
+    @Test
+    fun pageScanSplitsHopsFromAbsolutes() {
+        val body = """
+            <html><body>
+            <a href="/token/rhje6d.1789113600.e5754800a66c31d2/">Next</a>
+            <a href="https://gdflix.io/file/abc123/">Download Now</a>
+            <form action="/go/verify" method="post"></form>
+            <a href="#top">top</a>
+            <a href="mailto:x@y.z">mail</a>
+            <iframe src="https://drive.google.com/file/d/abc12345678/view"></iframe>
+            </body></html>
+        """.trimIndent()
+        val url = "https://mobilejsr.rest/token/rhje6a.1789113600.c629cf81656fdbb6/"
+        val hops = com.cinevood.PageScan.hops(body, url)
+        val abs = com.cinevood.PageScan.absolutes(body, url)
+        assertTrue(hops.any { it.endsWith("/token/rhje6d.1789113600.e5754800a66c31d2/") })
+        assertTrue(hops.any { it.endsWith("/go/verify") })
+        assertTrue(abs.any { it.contains("gdflix.io") })
+        assertTrue(abs.any { it.contains("drive.google.com") })
+        assertFalse(abs.any { it.contains("mobilejsr.rest") })
+    }
+
+    @Test
+    fun downloadRegionFindsButtonArea() {
+        val pad = "x".repeat(3000)
+        val body = "$pad" +
+            "<div class=\"btns\"><a href=\"https://gdflix.io/file/xyz/\">Download Now</a>" +
+            "<p>How to download steps here</p></div>"
+        val region = com.cinevood.PageScan.downloadRegion(body)
+        assertNotNull(region)
+        assertTrue(region!!.contains("gdflix.io"))
+    }
 }

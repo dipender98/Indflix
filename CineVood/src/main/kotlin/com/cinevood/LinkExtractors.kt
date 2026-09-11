@@ -52,25 +52,47 @@ object LinkExtractors {
         if (resolved.isNullOrBlank()) return false
 
         // The gate now lands on a JS token interstitial (mobilejsr.rest/token/
-        // <id>.<ts>.<hash>) served with HTTP 200. If we are STILL on the gate
-        // host, the real target is inside the fetched page body: scan it for
-        // external file-host/media links before giving up.
+        // <id>.<ts>.<hash>) served with HTTP 200 — a full WP page whose real
+        // download button sits deep in the body. Structural scan: absolute
+        // file-host targets + relative same-site hops (followed via the gate's
+        // cookie jar, max one hop).
         if (gate.isGate(resolved)) {
             val body = gr?.pageText.orEmpty()
-            val candidates = collectPageTargets(body).filterNot { gate.isGate(it) }
-            gate.diag("TOKENPAGE candidates=${candidates.size} for $resolved")
-            for (t in candidates) {
+            val cands = (collectPageTargets(body) + PageScan.absolutes(body, resolved))
+                .filterNot { gate.isGate(it) }
+                .distinct()
+            val hops = PageScan.hops(body, resolved)
+            gate.diag("TOKENPAGE abs=${cands.size} hops=${hops.size} for $resolved")
+            for (t in cands) {
                 if (dispatchSafe(t, link, resolved, gate, subtitleCallback, callback, true)) {
                     return true
                 }
             }
-            // reveal the obfuscation for the next debug round (chunked for logcat)
-            val compact = body.replace(Regex("\\s+"), " ")
-            var i = 0
-            while (i < minOf(compact.length, 3600)) {
-                gate.diag("TOKENPAGE[$i] ${compact.substring(i, minOf(i + 1200, compact.length))}")
-                i += 1200
+            for (hop in hops.take(2)) {
+                val page2 = gate.fetchText(hop, resolved) ?: continue
+                val body2 = page2.second
+                if (CHALLENGE.containsMatchIn(body2)) {
+                    gate.diag("TOKENPAGE hop challenged $hop")
+                    continue
+                }
+                val c2 = (collectPageTargets(body2) + PageScan.absolutes(body2, hop))
+                    .filterNot { gate.isGate(it) }
+                    .distinct()
+                gate.diag("TOKENPAGE hop=$hop abs=${c2.size}")
+                for (t in c2) {
+                    if (dispatchSafe(t, link, hop, gate, subtitleCallback, callback, true)) {
+                        return true
+                    }
+                }
             }
+            // reveal the button markup for the next debug round
+            PageScan.downloadRegion(body)?.let { region ->
+                var i = 0
+                while (i < minOf(region.length, 2400)) {
+                    gate.diag("DLREGION[$i] ${region.substring(i, minOf(i + 1200, region.length))}")
+                    i += 1200
+                }
+            } ?: gate.diag("DLREGION none found")
             return false
         }
         return dispatch(resolved, link, referer, gate, subtitleCallback, callback)
@@ -268,5 +290,58 @@ object SiteCipher {
             .map { if (it.startsWith("//")) "https:$it" else it }
             .distinct()
             .toList()
+    }
+}
+
+/**
+ * Structural scan of a token-interstitial page (a full WP post). Splits
+ * discovered targets into:
+ *  - absolutes: any http(s) target that is NOT the gate host itself
+ *    (anchors, form actions, iframes, data-href, plus cipher/plain regex hits)
+ *  - hops: same-site relative paths (multi-hop gate chains, e.g.
+ *    /token/... -> /go/... -> file host) — followed with the gate cookie jar
+ * Pure + unit-testable.
+ */
+object PageScan {
+    private val SELECTOR = "a[href], form[action], iframe[src], embed[src], [data-href]"
+    private val SKIP_PREFIX = Regex("""(?i)^(#|javascript:|mailto:|tel:)""")
+
+    fun absolutes(body: String, pageUrl: String): List<String> = scan(body, pageUrl).second
+
+    fun hops(body: String, pageUrl: String): List<String> = scan(body, pageUrl).first
+
+    fun scan(body: String, pageUrl: String): Pair<List<String>, List<String>> {
+        val doc = org.jsoup.Jsoup.parse(body, pageUrl)
+        val gateHost = pageUrl.substringAfter("://").substringBefore("/")
+        val hops = LinkedHashSet<String>()
+        val abs = LinkedHashSet<String>()
+        for (el in doc.select(SELECTOR)) {
+            val raw = when {
+                el.hasAttr("href") -> el.attr("href")
+                el.hasAttr("action") -> el.attr("action")
+                el.hasAttr("src") -> el.attr("src")
+                else -> el.attr("data-href")
+            }.trim()
+            if (raw.isBlank() || SKIP_PREFIX.containsMatchIn(raw)) continue
+            val full = if (raw.startsWith("http")) raw
+            else if (raw.startsWith("//")) "https:$raw"
+            else pageUrl.trimEnd('/') + "/" + raw.trimStart('/')
+            val host = full.substringAfter("://").substringBefore("/")
+            if (host == gateHost) {
+                if (raw.startsWith("/")) hops.add(full)
+            } else if (full.startsWith("http")) {
+                abs.add(full)
+            }
+        }
+        return hops.toList() to abs.toList()
+    }
+
+    /** The page region around the download button, for diagnostics. */
+    fun downloadRegion(body: String): String? {
+        val m = Regex("""(?i)download|get\s*link|generate|verify|continue""").find(body)
+            ?: return null
+        val start = (m.range.first - 100).coerceAtLeast(0)
+        val end = (m.range.first + 1500).coerceAtMost(body.length)
+        return body.substring(start, end).replace(Regex("""\s+"""), " ").trim()
     }
 }
