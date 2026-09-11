@@ -64,6 +64,7 @@ object SharedServices {
         val imdbId: String?,
         val tmdbId: Int?,
         val isMovie: Boolean,
+        val name: String?,
         val poster: String?,
         val backdrop: String?,
         val plot: String?,
@@ -95,15 +96,28 @@ object SharedServices {
         val preferred = if (isSeries) "tv" else "movie"
         val other = if (isSeries) "movie" else "tv"
         cinemetaMeta(imdbId, preferred)?.let { return it }
-        cinemetaMeta(imdbId, other)?.let { return it }
+        // cross-type hits are only accepted when title+year corroborate them
+        // (Reacher/tv missed and a 1984 movie shared the id -> wrong art/year)
+        cinemetaMeta(imdbId, other)?.takeIf { metaAcceptable(it, name, year) }?.let { return it }
         diag("META cinemeta miss imdb=$imdbId name=$name")
         return null
+    }
+
+    /** Sanity gate for a metadata hit: name overlap and/or close year. */
+    fun metaAcceptable(info: MetadataInfo, name: String, year: Int?): Boolean {
+        val metaName = info.name?.lowercase()?.trim()
+        val want = name.lowercase().trim()
+        val nameOk = metaName != null && metaName.isNotBlank() &&
+            (metaName == want || metaName.contains(want) || want.contains(metaName))
+        val yearOk = info.year != null && year != null && kotlin.math.abs(info.year - year) <= 1
+        return nameOk || yearOk
     }
 
     private fun TmdbInfo.asMetadata() = MetadataInfo(
         imdbId = null,
         tmdbId = tmdbId,
         isMovie = isMovie,
+        name = null,
         poster = poster,
         backdrop = backdrop,
         plot = null,
@@ -154,6 +168,7 @@ object SharedServices {
             imdbId = meta.optString("imdb_id").ifBlank { null },
             tmdbId = meta.optInt("moviedb_id").takeIf { it > 0 },
             isMovie = type == "movie",
+            name = meta.optString("name").ifBlank { null },
             poster = meta.optString("poster").ifBlank { null },
             backdrop = meta.optString("background").ifBlank { null },
             plot = meta.optString("description").ifBlank { null },

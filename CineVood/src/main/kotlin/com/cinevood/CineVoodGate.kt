@@ -3,6 +3,8 @@ package com.cinevood
 import com.lagradost.api.Log
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.network.CloudflareKiller
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.ConcurrentHashMap
 
 /*
@@ -59,9 +61,21 @@ class CineVoodGate(private val refererProvider: () -> String) {
             metaRefreshUrl(html) ?: jsRedirectUrl(html)
     }
 
-    // shared lazy killer (RC-1A: never built at provider-registration time)
-    private val killer get() = CfHolder.killer
+    // rebuildable killer: a STALE cf_clearance cookie makes Cloudflare stall
+    // requests (60s hangs) instead of re-challenging; after repeated stalls
+    // we throw the instance away and solve fresh.
+    @Volatile
+    private var killer: CloudflareKiller = CloudflareKiller()
+    private val stallCount = java.util.concurrent.atomic.AtomicInteger(0)
+    private val solveMutex = Mutex()
     private val resolved = ConcurrentHashMap<String, GateResult>()
+
+    private fun rebuildKiller() {
+        killer = CloudflareKiller()
+        stallCount.set(0)
+        resolved.clear()
+        diag("KILLER rebuilt (stale clearance suspected)")
+    }
 
     fun isGate(url: String): Boolean {
         val host = url.substringAfter("://").substringBefore("/")
@@ -69,48 +83,90 @@ class CineVoodGate(private val refererProvider: () -> String) {
             GATE_PATH.containsMatchIn(url)
     }
 
-    /** Solve gate -> final URL behind Cloudflare. Null when unresolvable. */
+    /**
+     * Solve gate -> final URL behind Cloudflare. Null when unresolvable.
+     * PLAIN-FIRST: a fresh client often gets the redirect/200 with no
+     * challenge at all; the WebView solve (serialized) is only used when an
+     * actual challenge appears. Repeated stalls/challenges rebuild the killer
+     * to discard a stale cf_clearance (stale cookies make CF stall us).
+     */
     suspend fun resolve(gateUrl: String): GateResult? {
         resolved[gateUrl]?.let { return it }
         if (!isGate(gateUrl)) return null
         var url = gateUrl
-        repeat(4) { attempt ->
-            val body = try {
+        repeat(3) { attempt ->
+            // 1) plain attempt (no clearance cookies)
+            var body: String? = null
+            var challenged = false
+            try {
                 val res = app.get(
                     url,
                     headers = SharedServices.browserHeaders(refererProvider()),
-                    interceptor = killer,
-                    timeout = 45
+                    timeout = 20
                 )
                 url = res.url
-                res.text
+                body = res.text
+                challenged = res.code == 403 || res.code == 429 || res.code == 503 ||
+                    isChallenge(body!!)
             } catch (e: Exception) {
-                diag("GATE try#${attempt + 1} EXC ${typeOf(e)} $gateUrl")
-                return null
-            }
-            val challenged = isChallenge(body)
-            diag(
-                "GATE try#${attempt + 1} code-ok cf=$challenged " +
-                    "final=$url left=${body.length}"
-            )
-            if (!isGate(url)) {
-                val r = GateResult(url, body)
-                if (resolved.size > 500) resolved.clear()
-                resolved[gateUrl] = r
-                diag("GATE SOLVED $gateUrl -> $url")
-                return r
+                challenged = true
+                diag("GATE plain EXC ${typeOf(e)} $url")
             }
             if (!challenged) {
-                val next = redirectTarget(body)
-                if (next == null) {
-                    diag("GATE STUCK no-redirect $url")
-                    return GateResult(url, body)
-                }
+                stallCount.set(0)
+                val done = finish(url, body!!, gateUrl)
+                if (done != null) return done
+                val next = redirectTarget(body!!) ?: return GateResult(url, body!!)
                 url = absolutize(url, next)
+                return@repeat
             }
+            // 2) WebView solve, one at a time
+            var solveBody: String? = null
+            var solveOk = false
+            solveMutex.withLock {
+                try {
+                    val res = app.get(
+                        url,
+                        headers = SharedServices.browserHeaders(refererProvider()),
+                        interceptor = killer,
+                        timeout = 35
+                    )
+                    url = res.url
+                    solveBody = res.text
+                    stallCount.set(0)
+                    solveOk = true
+                    diag("GATE solved-attempt#${attempt + 1} cf=${isChallenge(solveBody!!)} $url")
+                } catch (e: Exception) {
+                    diag("GATE solve EXC ${typeOf(e)} $url")
+                    if (stallCount.incrementAndGet() >= 2) rebuildKiller()
+                }
+            }
+            if (!solveOk) return@repeat
+            val body2 = solveBody!!
+            if (isChallenge(body2)) {
+                if (stallCount.incrementAndGet() >= 3) rebuildKiller()
+                return@repeat
+            }
+            val done2 = finish(url, body2, gateUrl)
+            if (done2 != null) return done2
+            val next = redirectTarget(body2)
+            if (next == null) {
+                diag("GATE STUCK no-redirect $url")
+                return GateResult(url, body2)
+            }
+            url = absolutize(url, next)
         }
-        diag("GATE FAIL after 4 attempts $gateUrl")
+        diag("GATE FAIL after attempts $gateUrl")
         return null
+    }
+
+    private fun finish(url: String, body: String, gateUrl: String): GateResult? {
+        if (isGate(url)) return null
+        val r = GateResult(url, body)
+        if (resolved.size > 500) resolved.clear()
+        resolved[gateUrl] = r
+        diag("GATE SOLVED $gateUrl -> $url")
+        return r
     }
 
     /**

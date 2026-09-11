@@ -312,4 +312,22 @@ class CineVoodParserTest {
         assertNotNull(region)
         assertTrue(region!!.contains("gdflix.io"))
     }
+
+    // ---- metadata cross-type sanity (Reacher bug) ---------------------------
+
+    private fun meta(name: String?, year: Int?) = SharedServices.MetadataInfo(
+        null, null, false, name, null, null, null, null, year, null, emptyList()
+    )
+
+    @Test
+    fun wrongTitleCrossTypeHitRejected() {
+        assertFalse(SharedServices.metaAcceptable(meta("21ch", 1984), "Reacher", 2022))
+    }
+
+    @Test
+    fun corroboratedCrossTypeHitAccepted() {
+        assertTrue(SharedServices.metaAcceptable(meta("Reacher", 2022), "Reacher", 2022))
+        assertTrue(SharedServices.metaAcceptable(meta("RRR", 2022), "RRR: Rise Roar Revolt", 2022))
+        assertTrue(SharedServices.metaAcceptable(meta("Guru Dutt", 1984), "Reacher", 1984)) // year match
+    }
 }
