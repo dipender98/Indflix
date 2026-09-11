@@ -14,15 +14,20 @@ import com.lagradost.cloudstream3.utils.unshortenLinkSafe
  *   1. Google Drive file links -> drive.usercontent direct download/stream
  *   2. Direct media URLs (.mkv/.mp4/.webm/.m3u8) -> passthrough
  *   3. GDFlix-family file pages -> scan for drive/direct links (grounded
- *      patterns only; nothing is fabricated)
+ *      patterns only; nothing is fabricated), fetched through the gate's
+ *      solved Cloudflare cookie jar
  *   4. Anything else -> CloudStream core extractors (345 hosts built-in),
  *      with a single unshorten retry for bare redirect pages.
+ *
+ * Every decision is logged (tag CineVood) so a device "no link found" always
+ * has a per-stage paper trail.
  */
 
 object LinkExtractors {
 
     private val DIRECT_MEDIA = Regex("""(?i)\.(mkv|mp4|webm|m3u8|ts)(\?|$)""")
     private val DRIVE_ID = Regex("""(?:/file/d/|[?&]id=)([a-zA-Z0-9_-]{10,})""")
+    private val CHALLENGE = Regex("""_cf_chl_opt|Just a moment""")
 
     suspend fun emit(
         link: GroupInfo,
@@ -32,14 +37,18 @@ object LinkExtractors {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val resolved = if (gate.isGate(link.url)) gate.resolve(link.url)?.finalUrl else link.url
-        if (resolved.isNullOrBlank()) return false
-        return dispatch(resolved, link, referer, subtitleCallback, callback)
+        if (resolved.isNullOrBlank()) {
+            gate.diag("EMIT SKIP gate-unsolved ${link.url}")
+            return false
+        }
+        return dispatch(resolved, link, referer, gate, subtitleCallback, callback)
     }
 
     private suspend fun dispatch(
         url: String,
         link: GroupInfo,
         referer: String,
+        gate: CineVoodGate,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
         allowGeneric: Boolean = true
@@ -52,11 +61,10 @@ object LinkExtractors {
                 val direct =
                     "https://drive.usercontent.google.com/download?id=$id&export=download&confirm=t"
                 return push(
-                    direct, "Google Drive", link,
-                    referer = "https://drive.google.com/",
-                    type = ExtractorLinkType.VIDEO,
-                    headers = mapOf("User-Agent" to SharedServices.userAgent()),
-                    callback = callback
+                    direct, "Google Drive", link, "https://drive.google.com/",
+                    ExtractorLinkType.VIDEO,
+                    mapOf("User-Agent" to SharedServices.userAgent()),
+                    callback
                 )
             }
         }
@@ -68,22 +76,19 @@ object LinkExtractors {
             return push(url, hostLabel(host), link, referer, type, emptyMap(), callback)
         }
 
-        // 3) GDFlix-family file pages
+        // 3) GDFlix-family file pages (fetched with the solved cookie jar)
         if (host.contains("gdflix")) {
-            val text = runCatching {
-                val res = com.lagradost.cloudstream3.app.get(
-                    url,
-                    headers = SharedServices.browserHeaders(referer),
-                    timeout = 30
-                )
-                if (res.code in 200..399) res.text else null
-            }.getOrNull()
-            if (!text.isNullOrBlank()) {
+            val page = gate.fetchText(url, referer)
+            val text = page?.second
+            if (text.isNullOrBlank() || CHALLENGE.containsMatchIn(text)) {
+                gate.diag("GDFLIX page blocked/empty code=${page?.first} $url")
+            } else {
                 for (href in collectAnchors(text)) {
-                    if (dispatchSafe(href, link, url, subtitleCallback, callback, allowGeneric = false)) {
+                    if (dispatchSafe(href, link, url, gate, subtitleCallback, callback, false)) {
                         return true
                     }
                 }
+                gate.diag("GDFLIX no usable anchors $url")
             }
         }
 
@@ -109,22 +114,28 @@ object LinkExtractors {
             val found = runCatching {
                 loadExtractor(url, referer, subtitleCallback, tagged)
             }.getOrDefault(false)
+            gate.diag("GENERIC $url found=$found")
             if (found) return true
 
             // one redirect retry, then re-dispatch without recursion
             val unshortened = runCatching { unshortenLinkSafe(url) }.getOrNull()
             if (!unshortened.isNullOrBlank() && unshortened != url) {
-                return dispatchSafe(unshortened, link, referer, subtitleCallback, callback, allowGeneric = false)
+                return dispatchSafe(
+                    unshortened, link, referer, gate, subtitleCallback, callback, false
+                )
             }
         }
+        gate.diag("EMIT DEAD-END $url (host=$host generic=$allowGeneric)")
         return false
     }
 
     private suspend fun dispatchSafe(
-        url: String, link: GroupInfo, referer: String,
+        url: String, link: GroupInfo, referer: String, gate: CineVoodGate,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit, allowGeneric: Boolean
-    ): Boolean = runCatching { dispatch(url, link, referer, subtitleCallback, callback, allowGeneric) }
+    ): Boolean = runCatching {
+        dispatch(url, link, referer, gate, subtitleCallback, callback, allowGeneric)
+    }.onFailure { gate.diag("DISPATCH EXC ${it.javaClass.simpleName} $url") }
         .getOrDefault(false)
 
     private suspend fun push(
@@ -132,10 +143,11 @@ object LinkExtractors {
         type: ExtractorLinkType, headers: Map<String, String>,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
+        val name = displayName(link, hostName)
         callback(
             newExtractorLink(
                 source = "CineVood",
-                name = displayName(link, hostName),
+                name = name,
                 url = url,
                 type = type
             ) {
@@ -144,7 +156,12 @@ object LinkExtractors {
                 this.headers = headers + mapOf("User-Agent" to SharedServices.userAgent())
             }
         )
+        gatelessDiag("EMIT $name $url")
         return true
+    }
+
+    private fun gatelessDiag(msg: String) {
+        runCatching { com.lagradost.api.Log.d("CineVood", msg) }
     }
 
     private fun displayName(link: GroupInfo, fallback: String): String {

@@ -28,6 +28,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 @CloudstreamPlugin
@@ -45,11 +46,13 @@ class CineVoodProvider : MainAPI() {
     override val hasMainPage = true
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
     override val instantLinkLoading = true // play the first link while the rest arrive
+    override val usesWebView = true // gate solving may need the app WebView (RC-1A)
     override val loadLinksTimeoutMs = 90_000L
 
     private val api = SiteApi()
     private val gate = CineVoodGate(refererProvider = { api.base })
     private val catMutex = Mutex()
+    private val mirrorsLearned = AtomicBoolean(false)
 
     // ---------------------------------------------------------------- tabs
 
@@ -93,6 +96,7 @@ class CineVoodProvider : MainAPI() {
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse =
         attempt("main") {
+            learnOnce()
             learnCategories()
             val wpPage = page.coerceAtLeast(1)
             val items: List<PostListItem> = if (request.data == LATEST_TOKEN) {
@@ -111,6 +115,7 @@ class CineVoodProvider : MainAPI() {
 
     override suspend fun search(query: String, page: Int): SearchResponseList {
         if (query.isBlank()) return newSearchResponseList(emptyList(), false)
+        learnOnce()
         learnCategories()
         val adult = adultCategoryIds()
         val q = query.trim()
@@ -119,6 +124,7 @@ class CineVoodProvider : MainAPI() {
             runCatching { api.postsSearch(q, wpPage) }
                 .getOrElse { api.searchHtmlFallback(q, wpPage) }
         }
+        SharedServices.diag("SEARCH '$q' p$wpPage -> ${items.size} raw")
         val parsed = items.mapNotNull { item ->
             val t = runCatching { TitleParser.parse(item.title) }.getOrNull() ?: return@mapNotNull null
             if (t.isAdult || t.isTrailer || adultItem(item, adult)) return@mapNotNull null
@@ -130,7 +136,7 @@ class CineVoodProvider : MainAPI() {
                 compareBy({ rankName(ql, it.second.name) },
                     { -(it.second.year ?: 0) })
             )
-            .distinctBy { "${it.second.name.lowercase()}|${it.second.year}" }
+            .distinctBy { it.first.url } // dedupe by post, never lose V1/V2 variants
         return newSearchResponseList(
             ranked.map { searchResponseFor(it.first, it.second) },
             hasNext = items.size >= 20
@@ -150,6 +156,7 @@ class CineVoodProvider : MainAPI() {
     // ------------------------------------------------------------------ load
 
     override suspend fun load(url: String): LoadResponse {
+        learnOnce()
         learnCategories()
         val adult = adultCategoryIds()
         return attempt("load") {
@@ -160,18 +167,30 @@ class CineVoodProvider : MainAPI() {
             }
             val groups = PostParser.parseDownloadGroups(post.content)
             val imdbId = PostParser.extractImdbId(post.content)
+            SharedServices.diag(
+                "LOAD '${t.name}' id=${post.id} groups=${groups.size} " +
+                    "imdb=$imdbId poster=${post.poster != null}"
+            )
             val isSeries = t.isSeries || post.categories.any { slug ->
                 api.slugOf(slug)?.contains("series") == true
             }
-            val tmdb = runCatching {
-                SharedServices.tmdbLookup(imdbId, t.name, t.year, isSeries)
+            val meta = runCatching {
+                SharedServices.metadataLookup(imdbId, t.name, t.year, isSeries)
+            }.onFailure {
+                SharedServices.diag("LOAD meta EXC ${it.javaClass.simpleName}")
             }.getOrNull()
+
             val type = when {
                 isSeries -> TvType.TvSeries
-                tmdb != null && !tmdb.isMovie -> TvType.TvSeries
+                meta?.isMovie == false -> TvType.TvSeries
                 else -> TvType.Movie
             }
-            val poster = post.poster ?: tmdb?.poster
+            // F8 poster chain: featured media -> metadata -> first content image
+            val poster = post.poster ?: meta?.poster ?: PostParser.parseFirstImage(post.content)
+            // F7 plot chain: plot box -> excerpt (tag-strip only) -> metadata
+            val plot = PostParser.parsePlot(post.content)
+                ?: post.excerpt.takeIf { it.length > 20 }
+                ?: meta?.plot
 
             if (type == TvType.TvSeries) {
                 val bySeason = LinkedHashMap<Int, MutableList<GroupInfo>>()
@@ -190,19 +209,19 @@ class CineVoodProvider : MainAPI() {
                     }
                 }
                 newTvSeriesLoadResponse(t.name, post.url, TvType.TvSeries, episodes) {
-                    this.plot = cleanPlot(post.excerpt)
+                    this.plot = plot
                     this.posterUrl = poster
-                    this.year = t.year
-                    this.tags = tmdb?.genres ?: emptyList()
-                    applyTmdbExtras(tmdb)
+                    this.year = t.year ?: meta?.year
+                    this.tags = meta?.genres ?: emptyList()
+                    applyMetaExtras(meta, imdbId)
                 }
             } else {
                 newMovieLoadResponse(t.name, post.url, TvType.Movie, post.url) {
-                    this.plot = cleanPlot(post.excerpt)
+                    this.plot = plot
                     this.posterUrl = poster
-                    this.year = t.year
-                    this.tags = tmdb?.genres ?: emptyList()
-                    applyTmdbExtras(tmdb)
+                    this.year = t.year ?: meta?.year
+                    this.tags = meta?.genres ?: emptyList()
+                    applyMetaExtras(meta, imdbId)
                 }
             }
         }
@@ -216,16 +235,20 @@ class CineVoodProvider : MainAPI() {
         return "Season $season$ep"
     }
 
-    private fun LoadResponse.applyTmdbExtras(info: SharedServices.TmdbInfo?) {
-        if (info == null) return
-        backgroundPosterUrl = info.backdrop ?: backgroundPosterUrl
-        info.rating10?.let { score = Score.from10(it) }
-        if (info.year != null && year == null) year = info.year
-        if (info.runtimeMinutes != null) duration = info.runtimeMinutes
+    private fun LoadResponse.applyMetaExtras(
+        meta: SharedServices.MetadataInfo?,
+        imdbId: String?
+    ) {
+        backgroundPosterUrl = meta?.backdrop ?: backgroundPosterUrl
+        meta?.rating10?.let { score = Score.from10(it) }
+        if (meta?.year != null && year == null) year = meta.year
+        if (meta?.runtimeMinutes != null) duration = meta.runtimeMinutes
+        // sync ids for library tracking even when art came from the site itself
+        syncData = syncData.toMutableMap().apply {
+            imdbId?.let { put("imdb_id", it) }
+            meta?.tmdbId?.let { put("tmdb_id", it.toString()) }
+        }
     }
-
-    private fun cleanPlot(excerpt: String): String? =
-        excerpt.replace(Regex("(?i)\\bdownload\\b.*"), "").trim().takeIf { it.length > 20 }
 
     // ----------------------------------------------------------------- links
 
@@ -237,15 +260,27 @@ class CineVoodProvider : MainAPI() {
     ): Boolean {
         val url = data.substringBefore('|')
         val season = data.substringAfter('|', "").toIntOrNull()
+        learnOnce()
         learnCategories()
         return attempt("links") {
             val post = api.postByLink(DomainResolver.rewriteTo(url, api.base))
-            var groups = PostParser.parseDownloadGroups(post.content)
-                .filter { it.quality >= MIN_QUALITY }
+            val all = PostParser.parseDownloadGroups(post.content)
+            // F2: quality floor with fallback — a 480p-only post still plays
+            var groups = all.filter { it.quality >= MIN_QUALITY }
+            if (groups.isEmpty() && all.isNotEmpty()) {
+                SharedServices.diag(
+                    "LINKS quality-floor fallback: keeping all ${all.size} (none >= ${MIN_QUALITY}p)"
+                )
+                groups = all
+            }
             if (season != null) {
                 val pick = groups.filter { (it.season ?: season) == season }
                 if (pick.isNotEmpty()) groups = pick
             }
+            SharedServices.diag(
+                "LINKS id=${post.id} season=$season resolved=${groups.size}/${all.size} " +
+                    "gates=${groups.count { gate.isGate(it.url) }}"
+            )
             if (groups.isEmpty()) return@attempt false
 
             val emitted = AtomicInteger(0)
@@ -259,19 +294,22 @@ class CineVoodProvider : MainAPI() {
                                     emitted.incrementAndGet()
                                     Unit // callback returns Unit in this CS API
                                 }
+                            }.onFailure {
+                                SharedServices.diag("EMIT EXC ${it.javaClass.simpleName} ${group.url}")
                             }.getOrDefault(false)
-                            if (ok) Unit else false
+                            ok
                         }
                     }.awaitAll()
                 }
             }
+            SharedServices.diag("LINKS DONE emitted=${emitted.get()}/${groups.size}")
             emitted.get() > 0
         }
     }
 
     // ------------------------------------------------------------- plumbing
 
-    private val categoryLearn = java.util.concurrent.atomic.AtomicBoolean(false)
+    private val categoryLearn = AtomicBoolean(false)
 
     private suspend fun learnCategories() {
         if (categoryLearn.get()) return
@@ -279,6 +317,12 @@ class CineVoodProvider : MainAPI() {
             if (categoryLearn.get()) return
             runCatching { api.ensureCategories() }.onSuccess { categoryLearn.set(true) }
         }
+    }
+
+    /** Banner-driven fresh-TLD discovery, once per session. */
+    private suspend fun learnOnce() {
+        if (mirrorsLearned.getAndSet(true)) return
+        runCatching { api.learnMirrors() }
     }
 
     private fun adultCategoryIds(): Set<Int> =
@@ -298,6 +342,7 @@ class CineVoodProvider : MainAPI() {
                 return call()
             } catch (e: Exception) {
                 last = e
+                SharedServices.diag("ATTEMPT $tag fail#${it + 1} ${e.javaClass.simpleName}: ${e.message?.take(90)}")
                 runCatching { api.ensureHealthy() }
                 api.rotate()
                 if (mainUrl != api.base) mainUrl = api.base

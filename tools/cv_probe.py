@@ -11,7 +11,9 @@ Checks, in order:
 Exit code 0 when the primary search path (wp-json search) works from this
 machine; 1 otherwise. Run before/after provider releases or when the site
 "breaks":
-    python tools/cv_probe.py
+    python tools/cv_probe.py                      # full health sweep
+    python tools/cv_probe.py --post <slug>        # one post: groups/imdb/gates
+    python tools/cv_probe.py --gate <gate-url>    # classify a single gate URL
 """
 import ssl
 import sys
@@ -58,7 +60,57 @@ def classify(status, body):
     return f"HTTP-{status}"
 
 
+def gate_probe(url):
+    st, t, b = head(url, timeout=20)
+    tag = classify(st, b)
+    print(f"{url[:70]:<70} {tag:<14} {t:>6.2f}s")
+    sys.exit(0 if tag == "OK" else 1)
+
+
+def post_probe(slug, base="https://cinevood.loan"):
+    import re
+    print(f"== post probe: {slug} on {base} ==")
+    st, t, body = head(
+        f"{base}/wp-json/wp/v2/posts?slug={slug}&_embed", timeout=20
+    )
+    print(f"wp-json status {st} ttfb={t}s bytes={len(body)}")
+    if st != 200:
+        print("RESULT: JSON FAIL")
+        sys.exit(1)
+    try:
+        arr = json.loads(body)
+        o = arr[0]
+    except Exception as e:
+        print("RESULT: JSON parse fail", e)
+        sys.exit(1)
+    content = o.get("content", {}).get("rendered", "")
+    embedded = "_embedded" in o and bool(o.get("_embedded"))
+    imdb = (re.search(r"imdb\.com/title/(tt\d+)", content) or [None, None])[1]
+    labels = re.findall(r"mfx-quality-title[^>]*>([^<]{5,160})<", content)
+    gates = sorted(set(re.findall(r'https?://[^"\']*?/genx[a-z]*\d+', content)))
+    hd = sum(1 for lb in labels if re.search(r"(?i)\b(720|1080|2160)\s*p\b", lb))
+    print(f"title      : {o.get('title', {}).get('rendered', '')[:80]}")
+    print(f"featured   : {embedded}")
+    print(f"imdb       : {imdb}")
+    print(f"groups     : {len(labels)} raw, {hd} hd(>=720p)")
+    for lb in labels[:8]:
+        print(f"  - {lb[:90]}")
+    print(f"gate hosts : {gates[:3]}")
+    ok = st == 200 and len(labels) > 0 and hd > 0
+    print("RESULT:", "post healthy (groups + hd + gate present)" if ok
+          else "POST DEGRADED (no groups or no hd links)")
+    sys.exit(0 if ok else 1)
+
+
 def main():
+    argv = sys.argv
+    if "--gate" in argv:
+        gate_probe(argv[argv.index("--gate") + 1])
+    if "--post" in argv:
+        i = argv.index("--post")
+        slug = argv[i + 1]
+        base = argv[argv.index("--base") + 1] if "--base" in argv else MIRRORS[0]
+        post_probe(slug, base)
     ok_search = False
     print("== mirrors (wp-json probe) ==")
     for m in MIRRORS:

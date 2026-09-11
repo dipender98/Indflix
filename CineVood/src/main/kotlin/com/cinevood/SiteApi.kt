@@ -101,10 +101,12 @@ class SiteApi {
         if (probe(base)) return
         for (candidate in DomainResolver.SEED_MIRRORS + extraMirrors.toList()) {
             if (candidate != base && probe(candidate)) {
+                SharedServices.diag("MIRROR failover $base -> $candidate")
                 base = candidate
                 return
             }
         }
+        SharedServices.diag("MIRROR all seeds unhealthy, keeping $base")
     }
 
     private suspend fun probe(url: String): Boolean = try {
@@ -255,7 +257,9 @@ class SiteApi {
     /** HTML search fallback (uses the site's real ?s= page) when JSON fails. */
     suspend fun searchHtmlFallback(query: String, page: Int): List<PostListItem> {
         val q = URLEncoder.encode(query, "UTF-8").replace("+", "%20")
-        val (code, html) = getText("/?s=$q&page=$page") ?: throw java.io.IOException("no html search")
+        // WP search pagination is ?paged=N (page= is ignored by WP search)
+        val paging = if (page > 1) "&paged=$page" else ""
+        val (code, html) = getText("/?s=$q$paging") ?: throw java.io.IOException("no html search")
         if (code != 200) throw java.io.IOException("html search $code")
         val doc = Jsoup.parse(html)
         val out = LinkedHashMap<String, PostListItem>()

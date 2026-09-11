@@ -1,19 +1,27 @@
 package com.cinevood
 
+import com.lagradost.api.Log
 import com.lagradost.cloudstream3.app
 import org.json.JSONObject
 import kotlin.random.Random
 
 /*
- * HTTP header helpers + the single-call TMDB JSON-API lookup.
- * TMDB enrichment is metadata-only: poster/backdrop/score/ids. If no API key
- * is configured the provider still works (site art is used instead).
+ * HTTP header helpers + the metadata pipeline (debug-plan F6).
+ *
+ * Chain: Cinemeta-by-IMDb (keyless, uses the post's own .mfx-imdb link)
+ *        -> TMDB JSON API (only when a key is configured)
+ *        -> null (caller falls back to site-only metadata).
+ * Cinemeta has NO search resource (manifest: catalog|meta|addon_catalog), so
+ * the IMDb id from the post is the only entry point; a missing id means
+ * site-only metadata unless a TMDB key is set.
  */
 
 object SharedServices {
 
-    // Fill with your own v3 key to enable TMDB backdrops/scores; the plugin
-    // degrades gracefully when empty.
+    private const val TAG = "CineVood"
+
+    // Fill with your own v3 key to enable TMDB as first-choice metadata; the
+    // provider works fully without it (Cinemeta + site art).
     const val TMDB_API_KEY = ""
 
     private val UAS = listOf(
@@ -36,6 +44,10 @@ object SharedServices {
         return h
     }
 
+    fun diag(msg: String) {
+        runCatching { Log.d(TAG, msg) }
+    }
+
     data class TmdbInfo(
         val tmdbId: Int,
         val isMovie: Boolean,
@@ -48,8 +60,122 @@ object SharedServices {
         val genres: List<String>
     )
 
-    /** One TMDB request: IMDb find when possible, else movie/tv text search. */
-    suspend fun tmdbLookup(imdbId: String?, name: String, year: Int?, isSeries: Boolean): TmdbInfo? {
+    data class MetadataInfo(
+        val imdbId: String?,
+        val tmdbId: Int?,
+        val isMovie: Boolean,
+        val poster: String?,
+        val backdrop: String?,
+        val plot: String?,
+        val rating10: Double?,
+        val year: Int?,
+        val runtimeMinutes: Int?,
+        val genres: List<String>
+    )
+
+    /**
+     * Full chain: TMDB (when keyed) -> Cinemeta-by-IMDb -> null.
+     * Cinemeta serves meta for the IMDb id in one call; unknown ids return an
+     * empty object or 404 (both treated as a miss). The preferred type is
+     * tried first, then the other (RC: old/TV ids can 404 on the wrong path).
+     */
+    suspend fun metadataLookup(
+        imdbId: String?,
+        name: String,
+        year: Int?,
+        isSeries: Boolean
+    ): MetadataInfo? {
+        if (!TMDB_API_KEY.isBlank()) {
+            tmdbLookup(imdbId, name, year, isSeries)?.let { return it.asMetadata() }
+        }
+        if (imdbId.isNullOrBlank()) {
+            diag("META no-imdb no-key site-only name=$name")
+            return null
+        }
+        val preferred = if (isSeries) "tv" else "movie"
+        val other = if (isSeries) "movie" else "tv"
+        cinemetaMeta(imdbId, preferred)?.let { return it }
+        cinemetaMeta(imdbId, other)?.let { return it }
+        diag("META cinemeta miss imdb=$imdbId name=$name")
+        return null
+    }
+
+    private fun TmdbInfo.asMetadata() = MetadataInfo(
+        imdbId = null,
+        tmdbId = tmdbId,
+        isMovie = isMovie,
+        poster = poster,
+        backdrop = backdrop,
+        plot = null,
+        rating10 = rating10,
+        year = year,
+        runtimeMinutes = runtimeMinutes,
+        genres = genres
+    )
+
+    private suspend fun cinemetaMeta(imdbId: String, type: String): MetadataInfo? {
+        val text = try {
+            val t = app.get(
+                "https://v3-cinemeta.strem.io/meta/$type/$imdbId.json",
+                headers = browserHeaders(json = true),
+                timeout = 12
+            ).text
+            if (t.isBlank()) null else t
+        } catch (e: Exception) {
+            diag("META cinemeta EXC ${e.javaClass.simpleName} $type/$imdbId")
+            null
+        } ?: return null
+        return parseCinemetaMeta(type, text).also {
+            if (it == null) diag("META cinemeta miss $type/$imdbId")
+        }
+    }
+
+    /** Pure: build MetadataInfo from a Cinemeta meta JSON body. */
+    fun parseCinemetaMeta(type: String, jsonText: String): MetadataInfo? {
+        val meta = try {
+            JSONObject(jsonText).optJSONObject("meta")
+        } catch (e: Exception) {
+            null
+        } ?: return null
+        if (meta.length() == 0) return null
+
+        val year = meta.optString("releaseInfo").let { r ->
+            Regex("""\d{4}""").find(r)?.value?.toIntOrNull()
+        } ?: meta.optString("year").toIntOrNull()
+        val rating = meta.optString("imdbRating").toDoubleOrNull()
+        val genres = ArrayList<String>()
+        for (key in listOf("genres", "genre")) {
+            meta.optJSONArray(key)?.let { g ->
+                for (i in 0 until g.length()) g.optString(i).takeIf { it.isNotBlank() }
+                    ?.let { if (!genres.contains(it)) genres.add(it) }
+            }
+        }
+        val info = MetadataInfo(
+            imdbId = meta.optString("imdb_id").ifBlank { null },
+            tmdbId = meta.optInt("moviedb_id").takeIf { it > 0 },
+            isMovie = type == "movie",
+            poster = meta.optString("poster").ifBlank { null },
+            backdrop = meta.optString("background").ifBlank { null },
+            plot = meta.optString("description").ifBlank { null },
+            rating10 = rating?.takeIf { it > 0 },
+            year = year,
+            runtimeMinutes = meta.optString("runtime").let { rt ->
+                Regex("""(\d{2,4})""").find(rt)?.groupValues?.get(1)?.toIntOrNull()
+                    ?.takeIf { it in 5..600 }
+            },
+            genres = genres
+        )
+        diag("META cinemeta hit $type/${info.imdbId} name=${info.plot?.length ?: 0}ch year=${info.year}")
+        return info
+    }
+
+    /** TMDB lookup — used only when TMDB_API_KEY is configured. */
+    suspend fun tmdbLookup(
+        imdbId: String?,
+        name: String,
+        year: Int?,
+        isSeries: Boolean
+    ): TmdbInfo? {
         if (TMDB_API_KEY.isBlank()) return null
         return try {
             if (!imdbId.isNullOrBlank()) {

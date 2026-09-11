@@ -1,7 +1,6 @@
 package com.cinevood
 
 import org.jsoup.Jsoup
-import org.jsoup.nodes.Element
 
 /*
  * Pure parsing of CineVood post bodies (from wp-json `content.rendered` or
@@ -17,10 +16,15 @@ data class PostLinks(
 object PostParser {
 
     private val IMDB_HREF = Regex("""imdb\.com/title/(tt\d+)""")
+    private val GATE_HREF = Regex("""genx|mobilejsr""", RegexOption.IGNORE_CASE)
 
     fun extractImdbId(html: String): String? = IMDB_HREF.find(html)?.groupValues?.get(1)
 
-    /** Parse the `.mfx-download-group` blocks into (label, gate-url) pairs. */
+    /**
+     * Parse the `.mfx-download-group` blocks into labelled link groups.
+     * Falls back to a wider scan when the wrapper classes drift (RC-1D):
+     * any download-labelled container anchor, then any gate-shaped href.
+     */
     fun parseDownloadGroups(contentHtml: String): List<GroupInfo> {
         val body = Jsoup.parseBodyFragment(contentHtml).body()
         val out = ArrayList<GroupInfo>()
@@ -31,17 +35,45 @@ object PostParser {
                 TitleParser.parseGroup(label, href)?.let { out.add(it) }
             }
         }
-        // Fall back to a flat scan when the wrapper class layout ever changes.
         if (out.isEmpty()) {
+            // fallback 1: any anchor inside a download-labelled container
+            for (a in body.select("div[class*=download] a[href], a[class*=download][href]")) {
+                val href = a.attr("href").trim()
+                val label = a.text().ifBlank { a.parent()?.text() ?: "" }
+                TitleParser.parseGroup(label, href)?.let { out.add(it) }
+            }
+        }
+        if (out.isEmpty()) {
+            // fallback 2: any gate-shaped href anywhere in the body
             for (a in body.select("a[href]")) {
-                val href = a.attr("href")
-                if (href.contains("genx") || href.contains("mobilejsr")) {
+                val href = a.attr("href").trim()
+                if (GATE_HREF.containsMatchIn(href)) {
                     val label = a.text().ifBlank { a.parent()?.text() ?: "" }
                     TitleParser.parseGroup(label, href)?.let { out.add(it) }
                 }
             }
         }
         return out
+    }
+
+    /** Real synopsis from the site's plot box (F7), when present. */
+    fun parsePlot(contentHtml: String): String? {
+        val text = Jsoup.parseBodyFragment(contentHtml)
+            .selectFirst(".mfx-plot-box, div[class*=plot]")?.text()?.trim()
+        return text?.takeIf { it.length > 20 }
+    }
+
+    /** First content image — last-resort poster when featured media is absent (F8). */
+    fun parseFirstImage(contentHtml: String): String? {
+        val body = Jsoup.parseBodyFragment(contentHtml)
+        for (img in body.select("img[src], img[data-src], img[data-lazy-src]")) {
+            val src = (img.attr("src").ifBlank { img.attr("data-src") }
+                .ifBlank { img.attr("data-lazy-src") }).trim()
+            if (src.startsWith("http") &&
+                !src.contains("emoji") && !src.contains("gravatar")
+            ) return src
+        }
+        return null
     }
 
     /** Parse a full post (content.rendered or page body). */
