@@ -1835,23 +1835,24 @@ object StreamEngine {
 
     /**
      * NetMirror resolver (net27.cc embed-tmdb port, verified live 2026-09-11):
-     * one-shot TMDB-keyed GET -> `{ok:true, streams:[{url, resolution, size}],
-     * mp4, captions:[{lang,name,url}]}`. URLs are signed NETFLIX-GRADE
-     * PROGRESSIVE MP4s (360/480/1080) — direct play, no manifest fetch, no
-     * crypto, no captcha. Playable on 6/6 probe titles (RRR/Jailer/Family Man
-     * dubs included).
+     * TMDB-keyed JSON API — Netflix-grade direct MP4 ladders (360?1080p),
+     * ZERO crypto, zero captcha.
      *
-     * The MP4 audio is MUXED single-language per title with NO language field
-     * in the API, so streams are emitted UNLABELLED (audioLabel="") — the
-     * never-guess rule: VidNest/MovieBox/Allmovieland already carry labelled
-     * Hindi/Tamil/Telugu dubs, adding a guess here would mislabel English/
-     * Tamil playback. Captions are parsed by shape but NOT emitted (Subtiles
-     * is the only subtitle source — user spec Sept 2026). Playback Referer is
-     * the capture host (videodownloader.site), distinct from the API Referer.
+     * 2026-09-11 dub discovery (user report "original only"): the web player's
+     * audio menu is served by /api/variants-tmdb/{type}/{id}[?se=&ep=] ->
+     * {variants: [{dubSubjectId, language:"Hindi dub", detailPath}]} — every
+     * dub is its OWN subject and each resolves to a DISTINCT file at
+     * /api/embed-tmdb/{id}?type=…&dub={dubSubjectId}&dubdp={detailPath}
+     * (verified: RRR hi/te/bn + Family Man hi/ta/te dubs all differ from the
+     * default ladder). "* dub" variants = dubbed AUDIO; "* sub" variants =
+     * subtitle-only (original audio) and are skipped. The default (no params)
+     * ladder carries the original audio and stays UNLABELLED — the never-guess
+     * rule; labelled dubs come from the host's own language fields.
      *
-     * Budget: one API GET (12s kill inside) + zero stream re-probe (progressive
-     * MP4 — the CDN answers Range 206 but throttles repeat fetches; one tap per
-     * title). Total < the farm's 20s kill.
+     * Fan-out budget: default-embed ? variants GET in parallel (12s/6s) then
+     * N dub embeds in PARALLEL (12s) -> worst ? 24s under the 50s farm kill
+     * (user spec round-3: generous headroom above the chain — a canned
+     * timeout is a breaker strike, allmovieland's flap lesson).
      */
     private suspend fun resolveNetmirror(
         spec: ServerSpec,
@@ -1861,49 +1862,163 @@ object StreamEngine {
         episode: Int,
     ): List<RawStream> {
         val id = tmdbId?.toString() ?: return emptyList()
-        val apiUrl = if (type == "movie")
-            "https://net27.cc/api/embed-tmdb/$id"
-        else
-            "https://net27.cc/api/embed-tmdb/$id?type=tv&se=$season&ep=$episode"
         val playReferer = "https://videodownloader.site/"
-        Log.d("NetMirror", "GET $apiUrl")
-        val jsonText = withTimeoutOrNull(12_000L) {
-            runCatching { app.get(apiUrl, timeout = 12, headers = okHeaders("https://net27.cc/")).text }.getOrNull()
-        } ?: run { Log.w("NetMirror", "no API response"); return emptyList() }
-        val root = runCatching { org.json.JSONObject(jsonText) }.getOrElse {
-            Log.w("NetMirror", "non-JSON response: ${safeSnippet(jsonText)}")
+        val headers = okHeaders("https://net27.cc/")
+        val tvParams = if (type == "tv") "&se=$season&ep=$episode" else ""
+
+        /** GET embed-tmdb for one (optional dubbed) subject. null = no usable answer. */
+        suspend fun fetchEmbed(dub: String?, dubdp: String?): org.json.JSONObject? {
+            val query = buildString {
+                if (type == "tv") {
+                    append("?type=tv").append(tvParams)
+                    if (dub != null) { append("&dub=").append(dub); append("&dubdp=").append(dubdp) }
+                } else {
+                    if (dub != null) { append("?dub=").append(dub); append("&dubdp=").append(dubdp) }
+                }
+            }
+            val jsonText = withTimeoutOrNull(12_000L) {
+                runCatching {
+                    app.get("https://net27.cc/api/embed-tmdb/$id$query",
+                        timeout = 12, headers = headers).text
+                }.getOrNull()
+            } ?: return null
+            return runCatching { org.json.JSONObject(jsonText) }.getOrNull()
+        }
+
+        fun streamsOf(root: org.json.JSONObject?, label: String?): List<RawStream> {
+            if (root == null || !root.optBoolean("ok", false)) return emptyList()
+            val out = mutableListOf<RawStream>()
+            val arr = root.optJSONArray("streams")
+            if (arr != null) {
+                for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    val url = o.optString("url").takeIf { it.isNotBlank() && it.startsWith("http") } ?: continue
+                    out += RawStream(
+                        serverId = spec.id, serverName = spec.name,
+                        url = url, isM3u8 = false, referer = playReferer,
+                        qualityHint = o.optInt("resolution", 0),
+                        audioLabel = label ?: "",
+                    )
+                }
+            }
+            if (out.isEmpty()) {
+                root.optString("mp4").takeIf { it.isNotBlank() && it.startsWith("http") }?.let { u ->
+                    out += RawStream(
+                        serverId = spec.id, serverName = spec.name,
+                        url = u, isM3u8 = false, referer = playReferer,
+                        qualityHint = root.optInt("resolution", 0),
+                        audioLabel = label ?: "",
+                    )
+                }
+            }
+            return out
+        }
+
+        // 1+2. Default ladder (original audio) and the variant list (web
+        //        player's audio menu) fetched in PARALLEL: max(12,6) + 12 dub
+        //        fan-out ? 24s chain under the 50s farm kill (user spec
+        //        round-3). A variants failure is NOT fatal —
+        //        the default ladder keeps the old (verified) single-server
+        //        contract alive.
+        val (defaultRoot, vText) = coroutineScope {
+            val rootA = async { fetchEmbed(null, null) }
+            val varsA = async {
+                withTimeoutOrNull(6_000L) {
+                    runCatching {
+                        val vQuery = if (type == "tv") "?se=$season&ep=$episode" else ""
+                        app.get("https://net27.cc/api/variants-tmdb/$type/$id$vQuery",
+                            timeout = 6, headers = headers).text
+                    }.getOrNull()
+                }
+            }
+            rootA.await() to varsA.await()
+        }
+        // The default ladder's audio is NOT host-declared anywhere (sampled
+        // variants carry isOriginal=false even for originals), so it stays
+        // BLANK-labelled — honest unknown (never-guess rule). Originals get
+        // the "Original" tag only when the host's variant says so.
+        val defaultStreams = streamsOf(defaultRoot, null)
+
+        val dubList = runCatching {
+            org.json.JSONObject(vText ?: return@runCatching emptyList()).optJSONArray("variants").let { arr ->
+                (0 until (arr?.length() ?: 0)).mapNotNull { i ->
+                    val v = arr?.optJSONObject(i) ?: return@mapNotNull null
+                    val lang = v.optString("language")
+                    val sid = v.optString("dubSubjectId")
+                    val dp = v.optString("detailPath")
+                    // LANGUAGE POLICY (user spec 2026-09-11 round-3):
+                    // [netmirrorDubLabel]. Unmatched variants (Japanese dub on
+                    // a Korean film, "ptbr dub", "* sub" subtitle-only rows)
+                    // are DROPPED — they would clutter rows Indflix viewers
+                    // never select; the ORIGINAL never drops (default ladder or
+                    // an isOriginal variant), and "* sub" rows carry the
+                    // default's audio anyway.
+                    val label = netmirrorDubLabel(lang, v.optBoolean("isOriginal", false))
+                    if (label != null && sid.isNotBlank() && dp.isNotBlank()) Triple(sid, dp, label) else null
+                }
+            }
+        }.getOrDefault(emptyList())
+        val seen = HashSet<String>()
+        val dubs = coroutineScope {
+            dubList.filter { (sid, _, _) -> seen.add(sid) }.take(12)
+                .map { (sid, dp, lang) ->
+                    async {
+                        runCatching { streamsOf(fetchEmbed(sid, dp), lang) }.getOrDefault(emptyList())
+                    }
+                }.awaitAll().flatten()
+        }
+
+        // Dedupe by FILE (signed query stripped). When the blank default row
+        // collides with an explicitly labelled dub (same file), the LABEL wins
+        // — the host told us what that audio is.
+        val byFile = LinkedHashMap<String, RawStream>()
+        for (st in defaultStreams + dubs) {
+            val key = st.url.substringBefore("?")
+            val prev = byFile[key]
+            when {
+                prev == null -> byFile[key] = st
+                prev.audioLabel.isBlank() && st.audioLabel.isNotBlank() -> byFile[key] = st
+            }
+        }
+        val out = ArrayList<RawStream>(byFile.size)
+        out += byFile.values
+        if (out.isEmpty()) {
+            if (defaultRoot == null) {
+                Log.w("NetMirror", "no API response for $id ($type)")
+                return emptyList() // network failure -> strike (host really down)
+            }
+            if (!defaultRoot.optBoolean("ok", false)) {
+                throw CleanMissException("netmirror: not mirrored (ok=false) for $id")
+            }
+            Log.w("NetMirror", "ok=true but no stream urls; keys=${namesOf(defaultRoot)}")
             return emptyList()
         }
-        if (!root.optBoolean("ok", false)) {
-            throw CleanMissException("netmirror: not mirrored (ok=false) for ${jsonText.take(40)}")
-        }
-        val arr = root.optJSONArray("streams")
-        val out = mutableListOf<RawStream>()
-        if (arr != null) {
-            for (i in 0 until arr.length()) {
-                val o = arr.optJSONObject(i) ?: continue
-                val url = o.optString("url").takeIf { it.isNotBlank() && it.startsWith("http") } ?: continue
-                val res = o.optInt("resolution", 0)
-                out += RawStream(
-                    serverId = spec.id, serverName = spec.name,
-                    url = url, isM3u8 = false, referer = playReferer,
-                    qualityHint = res,
-                )
-            }
-        }
-        // single-`mp4` fallback shape (no streams[])
-        if (out.isEmpty()) {
-            root.optString("mp4").takeIf { it.isNotBlank() && it.startsWith("http") }?.let { u ->
-                out += RawStream(
-                    serverId = spec.id, serverName = spec.name,
-                    url = u, isM3u8 = false, referer = playReferer,
-                    qualityHint = root.optInt("resolution", 0),
-                )
-            }
-        }
-        if (out.isEmpty()) Log.w("NetMirror", "ok=true but no stream urls; keys=${namesOf(root)}")
+        Log.d("NetMirror",
+            "default=${defaultStreams.size} dubs=[${dubs.map { it.audioLabel }.filter { it.isNotBlank() }.distinct()}]")
         out.sortByDescending { it.qualityHint }
         return out
+    }
+
+    /**
+     * NetMirror variant-language policy (user spec 2026-09-11 round-3):
+     * keep the ORIGINAL (any country — anime keeps Japanese, a Korean title
+     * keeps Korean — displayed via the TMDB original language), ENGLISH, and
+     * every official INDIAN dub language mapped to its canonical name
+     * ([ManifestKit.INDIAN_DUB_LANGUAGES]: Hindi/Tamil/Telugu/Bengali/
+     * Malayalam/Kannada/Marathi/Punjabi/Gujarati). Everything else is dropped
+     * — German/French/Spanish/Russian/"ptbr"/"esla" dubs and "* sub"
+     * (subtitle-only, same audio as the default) rows only clutter the sheet.
+     * Pure mapping from the host's OWN fields — never guesses a language.
+     */
+    internal fun netmirrorDubLabel(language: String?, isOriginal: Boolean): String? {
+        if (isOriginal) return "Original"
+        val m = Regex("""^(.*\S)\s+dub$""", RegexOption.IGNORE_CASE)
+            .find(language?.trim().orEmpty())?.groupValues?.get(1)?.trim().orEmpty()
+        if (m.isBlank()) return null
+        if (m.equals("english", true) || m.equals("eng", true) || m.equals("en", true)) return "English"
+        return ManifestKit.INDIAN_DUB_LANGUAGES.firstOrNull { d ->
+            d.names.any { it.equals(m, ignoreCase = true) }
+        }?.canonical
     }
 
     /**

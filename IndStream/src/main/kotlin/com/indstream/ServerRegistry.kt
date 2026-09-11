@@ -410,26 +410,35 @@ object ServerFarm {
         ),
         // NetMirror (net27.cc — Netflix-grade OTT mirror captured by the
         // TMDB-Embed-API project, ported + verified live 2026-09-11):
-        // TMDB-keyed one-shot JSON GET /api/embed-tmdb/{tmdb}
-        // [?type=tv&se=&ep=] → {ok, streams:[{url, resolution, size}], captions}.
-        // Playable on 6/6 probe titles (Inception/RRR/Jailer + GoT/Reacher/
-        // Family Man), 360→1080p progressive MP4 ladders, ~4s answered. The
-        // audio is muxed per-title (no per-track language field) — so
-        // declaredLanguages stays EMPTY and streams emit UNLABELLED rather
-        // than guessing (the never-guess rule; per-language labelled dubs
-        // already come from VidNest/MovieBox/Allmovieland). API Referer is
-        // net27.cc, playback Referer videodownloader.site (per the port);
-        // the CDN answers Range 206s but hard-throttles sustained repeat
-        // fetches (429) — the farm taps it ONCE per title, so this is fine.
-        // timeoutSec 20: one GET (12s) + response parse; the kill must fit
-        // the resolver chain like the rest of the farm.
+        // TMDB-keyed JSON API. Default GET /api/embed-tmdb/{tmdb}
+        // [?type=tv&se=&ep=] → {ok, streams:[{url, resolution, size}]} =
+        // Netflix-ladder MP4 360→1080p (original audio, ONE row). The web
+        // player's multi-language audio menu (user report "original only",
+        // 2026-09-11 round 3) is /api/variants-tmdb/{type}/{id} →
+        // variants[{dubSubjectId, language:"Hindi dub", detailPath}] — each
+        // dub re-resolves embed-tmdb with ?dub=&dubdp= and yields a DISTINCT
+        // file (verified: RRR Hindi/Telugu/Bengali + Family Man
+        // Hindi/Tamil/Telugu, all different hashes) → one labelled row per
+        // dub, exactly the official-OTT dub list; LANGUAGE POLICY (user spec
+        // round-3): keep the ORIGINAL (any country — anime's Japanese, a
+        // Korean title's Korean), ENGLISH, and every official INDIAN dub
+        // (hi/ta/te/bn/ml/kn/mr/pa/gu); all other foreign dubs (ptbr/esla/
+        // russian/…) are dropped. declaredLanguages stays EMPTY (labelling
+        // is per-response, and the default ladder's audio is never guessed).
+        // API Referer is net27.cc, playback Referer videodownloader.site (the
+        // CDN 429s everything else, 206 with it — any UA incl. ExoPlayer);
+        // the farm taps the API once (default‖variants) + dubs in parallel.
+        // timeoutSec 50 (user spec round-3): fan-out worst ≈ 24s must fit the
+        // kill with generous air — a canned resolve is a breaker strike, and a
+        // dub fan-out over up to 12 subjects on a slow link needs the headroom
+        // (allmovieland's flap lesson — kill sits ABOVE the chain, not at it).
         ServerSpec(
             id = "netmirror", name = "NetMirror",
             idType = ServerIdType.TMDB,
             movieUrl = "https://net27.cc/api/embed-tmdb/{id}",
             tvUrl = "https://net27.cc/api/embed-tmdb/{id}?type=tv&se={season}&ep={episode}",
             isJsonApi = true, referer = "https://net27.cc/",
-            hasSubtitles = true, maxQuality = 1080, timeoutSec = 20,
+            hasSubtitles = true, maxQuality = 1080, timeoutSec = 50,
             declaredLanguages = emptySet(),
         ),
     )

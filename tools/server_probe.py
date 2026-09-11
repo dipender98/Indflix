@@ -1209,76 +1209,85 @@ NM_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
          "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 
 
-def test_netmirror(t):
-    """Two paths (mirrors the netmirror port): 1) Netflix direct JSON API
-    net27.cc/api/embed-tmdb/{tmdb}[?type=tv&se=&ep=] → streams[]/mp4/captions;
-    2) NewTV OTT mirror discovery: rotated mobiledetect* domains → /checknewtv.php
-    → api base → search.php → post.php → player.php → video_link."""
-    s = sess()
-    base_url = f"https://net27.cc/api/embed-tmdb/{t['tmdb']}"
-    if t["kind"] == "tv":
-        base_url += f"?type=tv&se={t['season']}&ep={t['episode']}"
+NM_INDIAN = {"hindi", "tamil", "telugu", "malayalam", "kannada",
+             "bengali", "marathi", "punjabi", "gujarati"}
+
+
+def nm_dub_label(language, is_orig):
+    """Mirror of StreamEngine.netmirrorDubLabel (user policy round-3):
+    keep Original (any country) + English + Indian dubs; drop other foreign
+    dubs and the subtitle-only '* sub' rows."""
+    if is_orig:
+        return "Original"
+    lang = (language or "").strip()
+    if not lang.lower().endswith(" dub"):
+        return None
+    tok = lang[:-4].strip().lower()
+    if tok in ("english", "eng", "en") :
+        return "English"
+    return tok[0].upper() + tok[1:] if tok in NM_INDIAN else None
+
+
+def _json_or_none(r):
     try:
-        r = s.get(base_url, headers={"Accept": "application/json", "Referer": "https://net27.cc/",
-                                    "User-Agent": NM_UA}, timeout=20)
-        data = r.json() if r.status_code == 200 else {}
+        return r.json()
     except Exception:
-        data = {}
-    streams = []
-    if data.get("ok") is True:
-        for st in data.get("streams") or []:
-            if st.get("url"):
-                streams.append((f"Netflix {st.get('resolution') or ''}p".strip(),
-                                st["url"], ".m3u8" in st["url"]))
-        if not streams and data.get("mp4"):
-            streams.append(("Netflix mp4", data["mp4"], False))
-    # NewTV path (hotstar/prime capture): domain rotation → token_hash api
+        return None
+
+
+def test_netmirror(t):
+    """Mirrors resolveNetmirror (round-3): default embed-tmdb ladder (audio
+    undeclared) ‖ /api/variants-tmdb/{type}/{id} → each policy-kept "dub"
+    variant re-resolves embed-tmdb with &dub=&dubdp= (own subject = DISTINCT
+    file = dubbed audio — verified per-language hashes on RRR/Family Man).
+    Netflix-grade MP4 ladders; playback needs the videodownloader.site Referer
+    (the CDN 429-gates everything else)."""
+    s = sess()
+    hdrs = {"User-Agent": NM_UA, "Accept": "application/json",
+            "Referer": "https://net27.cc/"}
+    q = (f"type=tv&se={t['season']}&ep={t['episode']}" if t["kind"] == "tv" else "type=movie")
+    base = f"https://net27.cc/api/embed-tmdb/{t['tmdb']}"
+    try:
+        root = _json_or_none(s.get(f"{base}?{q}", headers=hdrs, timeout=25))
+    except Exception as e:
+        return ("DOWN", f"{type(e).__name__}: {str(e)[:60]}", 0, None)
+    if root is None:
+        return ("FAIL", "no JSON from embed-tmdb", 0, None)
+    if not root.get("ok"):
+        return ("MISS", "ok=false (not mirrored)", 0, None)
+    streams = [("Default", st["url"], ".m3u8" in st["url"])
+               for st in root.get("streams") or [] if st.get("url")]
+    vq = f"?se={t['season']}&ep={t['episode']}" if t["kind"] == "tv" else ""
+    dubs = []
+    try:
+        van = _json_or_none(s.get(
+            f"https://net27.cc/api/variants-tmdb/{t['kind']}/{t['tmdb']}{vq}",
+            headers=hdrs, timeout=15))
+        for v in (van or {}).get("variants") or []:
+            label = nm_dub_label(v.get("language"), bool(v.get("isOriginal")))
+            sid, dp = str(v.get("dubSubjectId") or ""), v.get("detailPath") or ""
+            if label and sid and dp:
+                dubs.append((label, sid, dp))
+    except Exception:
+        dubs = []
+    for label, sid, dp in dubs[:12]:
+        try:
+            dr = _json_or_none(s.get(
+                f"{base}?{q}&dub={sid}&dubdp={requests.utils.quote(dp)}",
+                headers=hdrs, timeout=25))
+            for st in (dr or {}).get("streams") or []:
+                if st.get("url"):
+                    streams.append((label, st["url"], ".m3u8" in st["url"]))
+        except Exception:
+            continue
     if not streams:
-        api = None
-        for dom in ["https://mobiledetects.com", "https://mobidetect.art",
-                    "https://mobidetect.cc", "https://mobidetect.vip"]:
-            try:
-                rr = s.get(dom + "/checknewtv.php", headers={
-                    "X-Requested-With": "NetmirrorNewTV v1.0", "Ott": "nf",
-                    "User-Agent": NM_UA, "Accept": "application/json"}, timeout=10)
-                th = rr.json().get("token_hash")
-                if th:
-                    import base64 as b64m
-                    api = b64m.b64decode(th).decode().rstrip("/")
-                    break
-            except Exception:
-                continue
-        if api:
-            nh = {"X-Requested-With": "NetmirrorNewTV v1.0", "Ott": "hs",
-                  "User-Agent": NM_UA, "Accept": "application/json"}
-            try:
-                sr = s.get(f"{api}/newtv/search.php?s={requests.utils.quote(t['title'])}",
-                           headers=nh, timeout=15).json()
-                first = (sr.get("searchResult") or [None])[0]
-                if first and first.get("id"):
-                    pid = first["id"]
-                    if t["kind"] == "tv":
-                        pr = s.get(f"{api}/newtv/post.php?id={pid}",
-                                   headers={**nh, "Lastep": "", "Usertoken": ""},
-                                   timeout=15).json()
-                        eps = pr.get("episodes") or []
-                        tmap = {int(e["ep"]): e["id"] for e in eps
-                                if isinstance(e, dict) and str(e.get("ep") or "").isdigit()}
-                        pid = tmap.get(t["episode"], pid)
-                    pl = s.get(f"{api}/newtv/player.php?id={pid}",
-                               headers={**nh, "Usertoken": ""}, timeout=15).json()
-                    if pl.get("video_link"):
-                        streams.append(("NewTV", pl["video_link"],
-                                        ".m3u8" in pl["video_link"]))
-            except Exception:
-                pass
-    if not streams:
-        return ("MISS", f"no netflix streams / no newtv link (net27={data.get('ok')})",
-                0, None)
-    hdrs = {"User-Agent": NM_UA, "Referer": "https://videodownloader.site/"} \
-        if streams[0][0].startswith("Netflix") else {"User-Agent": NM_UA, "Referer": api + "/"}
-    ok, detail = deep_ok(streams[0][1], streams[0][2], hdrs)
-    return ("OK" if ok else "DEAD", f"{len(streams)} streams; first: {detail}",
+        return ("MISS", "ok=true but no stream urls", 0, None)
+    hdrs_play = {"User-Agent": NM_UA, "Referer": "https://videodownloader.site/"}
+    sample = streams[-1] if dubs else streams[0]
+    ok, detail = deep_ok(sample[1], sample[2], hdrs_play)
+    langs = sorted({x[0] for x in streams})
+    return ("OK" if ok else "DEAD",
+            f"{len(streams)} streams langs={langs[:10]}; {sample[0]}: {detail}",
             len(streams), streams)
 
 

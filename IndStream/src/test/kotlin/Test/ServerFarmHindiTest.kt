@@ -145,21 +145,48 @@ class ServerFarmHindiTest {
     fun netmirror_presentAndTmdbKeyed() {
         val s = ServerFarm.allServers.first { it.id == "netmirror" }
         assertEquals("NetMirror", s.name)
-        // TMDB-keyed one-shot JSON embed-tmdb API (Netflix-grade progressive
-        // MP4 ladders). Audio is muxed (no per-track language), so it must NOT
-        // declare a single language — blank-labelled streams (never guessed).
+        // TMDB-keyed embed-tmdb JSON API (Netflix-grade progressive MP4
+        // ladders) + variants-tmdb dub fan-out. The default ladder's audio is
+        // NOT host-declared, so the spec must NOT declare any language —
+        // labels come per-stream from the variant's own language field only.
         assertEquals(ServerIdType.TMDB, s.idType)
-        assertTrue(s.declaredLanguages.isEmpty(), "NetMirror audio is muxed/undeclared — never guessed")
+        assertTrue(s.declaredLanguages.isEmpty(), "default-ladder audio undeclared — never guessed")
         assertTrue(s.isJsonApi, "embed-tmdb JSON API")
         assertEquals(1080, s.maxQuality)
         assertTrue(s.hasSubtitles, "API captions carry language (incl. Bengali/Punjabi)")
         assertEquals("https://net27.cc/", s.referer)
-        // Single API GET + parse must fit the farm kill.
-        assertEquals(20, s.timeoutSec, "netmirror farm kill must fit the one-shot API chain")
+        // Round-3: the resolve chain is default-embed ‖ variants (12s/6s) then a
+        // dub fan-out (dub embeds in parallel, 12s) → ~24s worst; the kill sits
+        // 50s ABOVE the chain (user spec: a canned timeout is a breaker strike).
+        assertEquals(50, s.timeoutSec, "netmirror farm kill must sit above the 24s dub fan-out chain")
         val m = ServerFarm.buildMovieUrl(s, "27205")
         assertEquals("https://net27.cc/api/embed-tmdb/27205", m)
         val tv = ServerFarm.buildTvUrl(s, "1399", 1, 1)
         assertEquals("https://net27.cc/api/embed-tmdb/1399?type=tv&se=1&ep=1", tv)
+    }
+
+    @Test
+    fun netmirrorDubLabel_policyOriginalPlusEnglishPlusIndian() {
+        // User spec 2026-09-11 round-3: keep the ORIGINAL (any country),
+        // ENGLISH, and every official INDIAN dub — drop all other foreign
+        // dubs and the subtitle-only "* sub" rows.
+        assertEquals("Original", StreamEngine.netmirrorDubLabel("Japanese dub", isOriginal = true))
+        assertEquals("Original", StreamEngine.netmirrorDubLabel("Korean", isOriginal = true))
+        assertEquals("English", StreamEngine.netmirrorDubLabel("English dub", isOriginal = false))
+        assertEquals("Hindi", StreamEngine.netmirrorDubLabel("Hindi dub", isOriginal = false))
+        assertEquals("Tamil", StreamEngine.netmirrorDubLabel("Tamil dub", isOriginal = false))
+        assertEquals("Telugu", StreamEngine.netmirrorDubLabel("Telugu dub", isOriginal = false))
+        assertEquals("Bengali", StreamEngine.netmirrorDubLabel("Bengali dub", isOriginal = false))
+        assertEquals("Gujarati", StreamEngine.netmirrorDubLabel("Gujarati dub", isOriginal = false))
+        // Foreign non-English dubs dropped...
+        assertNull(StreamEngine.netmirrorDubLabel("ptbr dub", isOriginal = false))
+        assertNull(StreamEngine.netmirrorDubLabel("esla dub", isOriginal = false))
+        assertNull(StreamEngine.netmirrorDubLabel("Russian dub", isOriginal = false))
+        assertNull(StreamEngine.netmirrorDubLabel("French dub", isOriginal = false))
+        // ...so are subtitle-only variants (same audio as the default).
+        assertNull(StreamEngine.netmirrorDubLabel("Arabic sub", isOriginal = false))
+        assertNull(StreamEngine.netmirrorDubLabel("Default", isOriginal = false))
+        assertNull(StreamEngine.netmirrorDubLabel(null, isOriginal = false))
     }
 
     @Test
