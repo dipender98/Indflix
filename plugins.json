@@ -1,26 +1,5 @@
 [
     {
-        "url": "https://raw.githubusercontent.com/dipender98/Indflix/builds/HDHub4u.cs3",
-        "status": 1,
-        "version": 1,
-        "name": "HDHub4u",
-        "internalName": "HDHub4u",
-        "authors": [
-            "Indflix"
-        ],
-        "description": "HDHub4u scraper \u2014 search, posters, categories and stream links all come from the site itself; no external metadata services.",
-        "fileSize": 25094,
-        "repositoryUrl": "https://github.com/dipender98/Indflix",
-        "language": "hi",
-        "tvTypes": [
-            "Movie",
-            "TvSeries"
-        ],
-        "iconUrl": "https://raw.githubusercontent.com/dipender98/Indflix/main/HDHub4u/icon.png",
-        "apiVersion": 1,
-        "fileHash": "sha256-ad52e566cca24bb36cfc080f586431af96c70f835b28f766f8603f93120350f4"
-    },
-    {
         "url": "https://raw.githubusercontent.com/dipender98/Indflix/builds/IndStream.cs3",
         "status": 1,
         "version": 16,
@@ -39,7 +18,7 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/dipender98/Indflix/main/IndStream/icon.png",
         "apiVersion": 1,
-        "fileHash": "sha256-29966ec24a10fba18988786c389260377baff6362304d6ccf7c81079c83db778"
+        "fileHash": "sha256-17c176624036bc21cda885acd80cdb84a27fcc6ef48d7a8b31c1bc5ea2b1a7c0"
     },
     {
         "url": "https://raw.githubusercontent.com/dipender98/Indflix/builds/Multimovies.cs3",
@@ -63,6 +42,6 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/dipender98/Indflix/main/Multimovies/icon.png",
         "apiVersion": 1,
-        "fileHash": "sha256-25e7005f4a4f29acb60184b982ccd07e1008473a4f052769065c65c9395c6356"
+        "fileHash": "sha256-b379aad7b14b7bda7e9baf5aff941f984d0284740b6d92e086abe0037d59a3a4"
     }
 ]
