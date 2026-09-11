@@ -38,11 +38,14 @@ data class ServerSpec(
     val hasSubtitles: Boolean = false,
     val maxQuality: Int = 0,
     val timeoutSec: Int = 10,
-    /** Marks a server whose entire host serves Hindi audio (Bollywood +
-     *  Hindi-dubbed Hollywood). Ranked as Hindi (priority 4) even when the
-     *  manifest declares no labelled `hi` track, so probe-based detection —
-     *  which is unreliable for Hindi-only hosts — never buries it. */
-    val hindi: Boolean = false,
+    /** Languages this host itself declares (canonical names from
+     *  [ManifestKit.INDIAN_DUB_LANGUAGES]: "Hindi", "Tamil", "Telugu", …).
+     *  When the set holds EXACTLY ONE language, StreamEngine biases that
+     *  host's blank-labelled streams to it (display only) — probe-based
+     *  detection, which is unreliable for single-language hosts, never buries
+     *  it. Multi-language hosts stay empty/unbiased: their resolvers label
+     *  each entry from the API's own language fields (never guessed). */
+    val declaredLanguages: Set<String> = emptySet(),
 )
 
 /**
@@ -51,6 +54,39 @@ data class ServerSpec(
 object ServerFarm {
 
     val allServers: List<ServerSpec> = listOf(
+        // ── 2026-09-11 multi-language expansion audit (Telugu/Tamil/Hindi dubs) ──
+        // Live probe matrix (tools/server_probe.py): Inception + RRR (te) +
+        // Jailer (ta) movies, GoT S1E1 + Family Man S1E1 (hi) TV.
+        //  - NHD RE-ENABLED below: TV live on 2/2 probes; movie playUrl 404s
+        //    upstream → clean-missed in resolveNhd (no breaker strike).
+        //  - 8Stream re-probed: now hard-403 (astro HTML) — the public Vercel
+        //    API is gone; still disabled. VidZee: /api/server still 404.
+        //    MP4Hydra: still a maintenance page.
+        //  - Brand-new embed hosts probed and REJECTED (no harvestable stream
+        //    from the SPA shells): vidcore.org (≠ vidcore.io), vidphantom.com,
+        //    player.embed-api.stream.
+        // ── 2026-09-11 round-2 hunt (TMDB-Embed-API v1.3.0 provider ports;
+        //    HDGharTV skipped — user-confirmed dead) ──
+        //  - NETMIRROR ADDED below: net27.cc embed-tmdb JSON API, playable on
+        //    6/6 matrix titles incl. RRR/Jailer/Family Man (Netflix-ladder MP4
+        //    360→1080p + 13-language caption table incl. Bengali/Punjabi).
+        //  - CastleTV REJECTED: answers with full per-language track tables
+        //    (Tamil/Telugu/Hindi…) but the free tier only ever yields
+        //    ~5-min `index_preview_*.m3u8` clips (permissionDenied on the
+        //    rest) — nothing playable end-to-end.
+        //  - OneTouchTV REJECTED: AES-256-CBC app API carries RRR/Jailer/
+        //    Family Man, but each title yields ONE muxed "loklok" playlist
+        //    with no declared audio language (subtitles only) — nothing to
+        //    label per the never-guess rule.
+        //  - StreamFlix REJECTED: data.json catalogue matches, every CDN
+        //    mirror URL dead (no response at all). ezvidapi.com: CF 502.
+        //  - Phase-B JS-provider ports NOT needed for coverage: Tamil/Telugu
+        //    is already live in the farm (VidNest per-language streams on
+        //    RRR/Jailer, Allmovieland 2–4 per-language playlists, MovieBox
+        //    bracket-tagged audio) — all labelled by the generalized
+        //    ManifestKit.audioLanguageLabel model.
+        //  - VidLink: 200-with-`null`-body on titles without a multiLang
+        //    source (RRR) — resolveVidlink clean-misses it (no breaker strike).
         // ── JSON API (deterministic, TMDB-keyed) ────────────────────────────
         // api.shows.st (111Movies) was removed Sept 2026: Cloudflare has
         // zone-blocked shows.st entirely ("Terms of Service violations" 403
@@ -63,10 +99,11 @@ object ServerFarm {
         // VidLink: encrypted-token JSON API (XSalsa20-Poly1305, see VidlinkSource).
         // multiLang=1 returns per-quality MP4s (360→1080p) with Hindi dubs for
         // Indian titles AND the original/English track. It is NOT a Hindi-only
-        // host, so it must NOT be flagged `hindi = true` — that blanket forces
-        // every stream to label "Hindi" (StreamEngine.kt:168) even when the
-        // played track is English. Leave hindi=false and let the per-master audio
-        // probe (resolveVidlink legacy path) report the real language.
+        // host, so it must NOT declare a single language — that blanket forces
+        // every stream to label "Hindi" (StreamEngine bias) even when the
+        // played track is English. Leave declaredLanguages empty and let the
+        // per-master audio probe (resolveVidlink legacy path) report the real
+        // language.
         ServerSpec(
             id = "vidlink", name = "VidLink",
             idType = ServerIdType.TMDB,
@@ -74,7 +111,7 @@ object ServerFarm {
             tvUrl = "https://vidlink.pro/api/b/tv/{id}/{season}/{episode}?multiLang=1",
             isJsonApi = true, referer = "https://vidlink.pro/",
             hasSubtitles = true, maxQuality = 1080, timeoutSec = 15,
-            hindi = false,
+            declaredLanguages = emptySet(),
         ),
         // VaPlayer (CSX CineStream's top live server, verified Sept 2026):
         // IMDB-keyed JSON API returning 3 direct HLS master playlists (up to
@@ -121,6 +158,7 @@ object ServerFarm {
         // The decrypted /hdmovie route returns per-audio muxed HLS masters
         // labelled Hindi/English/Tamil/Telugu — the Hindi entry IS a Hindi
         // dub (verified: GOT S1E1, AOT S1E1, RRR). RANK 1 for Hindi.
+        // Single declared language: blank-labelled streams bias to Hindi.
         ServerSpec(
             id = "videasy-hindi", name = "Videasy Hindi",
             idType = ServerIdType.TMDB,
@@ -128,7 +166,7 @@ object ServerFarm {
             tvUrl = "https://api.speedracelight.com/hdmovie/sources-with-title?tmdbId={id}",
             isJsonApi = true, referer = "https://player.videasy.net/",
             hasSubtitles = false, maxQuality = 1080, timeoutSec = 15,
-            hindi = true,
+            declaredLanguages = setOf("Hindi"),
         ),
         // MyFlixer Hindi (hindi.myflixerapi.com): IMDB-keyed with the id in the
         // path (/embed/tt...). Whole host is Hindi audio.
@@ -143,7 +181,7 @@ object ServerFarm {
         //     tvUrl = "https://hindi.myflixerapi.com/embed/{id}",
         //     referer = "https://hindi.myflixerapi.com/",
         //     hasSubtitles = false, maxQuality = 1080, timeoutSec = 15,
-        //     hindi = true,
+        //     declaredLanguages = setOf("Hindi"),
         // ),
         // MovieBox (h5-api.aoneroom.com app API, ported from CSX CineStream
         // Sept 2026): title-keyed JSON API — x-user bearer token from the app
@@ -271,6 +309,8 @@ object ServerFarm {
         // /play/{imdb} → file+key → /playlist/{file}.txt (X-CSrf-Token) →
         // JSON [{title:"Hindi"|"Bengali"|..., file}] → /playlist/{lang.file}.txt
         // → direct m3u8 (360–1080p). Hindi-first, zero auth/captcha.
+        // Multi-language host: NO single-language bias (never guessed) — the
+        // resolver labels every playlist entry from its own title field.
         // DOMAIN MOVE (verified 2026-09-08): allmovieland.one now 301-redirects
         // to allmovieland.art and the full pipeline works there; the resolver
         // (StreamEngine.allmovielandHosts) still carries a host-fallback list,
@@ -293,7 +333,7 @@ object ServerFarm {
             tvUrl = "https://allmovieland.art/?do=search&subaction=search&story={id}",
             referer = "https://allmovieland.art/",
             hasSubtitles = false, maxQuality = 1080, timeoutSec = 60,
-            hindi = true,
+            declaredLanguages = setOf("Hindi", "Tamil", "Telugu", "Bengali"),
         ),
         // MP4Hydra (mp4hydra.org): title-slug keyed multipart POST to /info2
         // returns per-quality HLS sources across Beta servers with embedded
@@ -350,16 +390,48 @@ object ServerFarm {
         //     isJsonApi = true, referer = "https://streamprovider.byteful.me/",
         //     hasSubtitles = false, maxQuality = 1080, timeoutSec = 10,
         // ),
-        // NHD API: TMDB-keyed. Temporarily disabled because the service is broken
-        // (returns no streams and causes delays). Uncomment if it comes back.
-        // ServerSpec(
-        //     id = "nhd", name = "NHD",
-        //     idType = ServerIdType.TMDB,
-        //     movieUrl = "https://nhdapi.com/movie/{id}",
-        //     tvUrl = "https://nhdapi.com/tv/{id}/{season}/{episode}",
-        //     referer = "https://nhdapi.com/",
-        //     hasSubtitles = true, maxQuality = 1080, timeoutSec = 15,
-        // ),
+        // NHD API (nhdapi.com): TMDB-keyed embed + page-keyed extraction API.
+        // RE-ENABLED 2026-09-11 (multi-language expansion probe): the TV path
+        // is live again — GoT S1E1 + The Family Man S1E1 both resolved playable
+        // HLS (docs advertise a per-title audio-dub switcher + 20+ subs; the
+        // resolver maps audioTracks[] labels per entry). The MOVIE pipeline is
+        // still dead upstream (extraction succeeds, playUrl → 404 on every
+        // header variant), so resolveNhd clean-misses movies: no breaker
+        // strike, the working TV path never vanishes for movie taps. Re-visit
+        // the guard when movie playback recovers.
+        // Budget invariant: page 8s + extraction 10s = 18s ≤ kill 20s.
+        ServerSpec(
+            id = "nhd", name = "NHD",
+            idType = ServerIdType.TMDB,
+            movieUrl = "https://nhdapi.com/movie/{id}",
+            tvUrl = "https://nhdapi.com/tv/{id}/{season}/{episode}",
+            referer = "https://nhdapi.com/",
+            hasSubtitles = true, maxQuality = 1080, timeoutSec = 20,
+        ),
+        // NetMirror (net27.cc — Netflix-grade OTT mirror captured by the
+        // TMDB-Embed-API project, ported + verified live 2026-09-11):
+        // TMDB-keyed one-shot JSON GET /api/embed-tmdb/{tmdb}
+        // [?type=tv&se=&ep=] → {ok, streams:[{url, resolution, size}], captions}.
+        // Playable on 6/6 probe titles (Inception/RRR/Jailer + GoT/Reacher/
+        // Family Man), 360→1080p progressive MP4 ladders, ~4s answered. The
+        // audio is muxed per-title (no per-track language field) — so
+        // declaredLanguages stays EMPTY and streams emit UNLABELLED rather
+        // than guessing (the never-guess rule; per-language labelled dubs
+        // already come from VidNest/MovieBox/Allmovieland). API Referer is
+        // net27.cc, playback Referer videodownloader.site (per the port);
+        // the CDN answers Range 206s but hard-throttles sustained repeat
+        // fetches (429) — the farm taps it ONCE per title, so this is fine.
+        // timeoutSec 20: one GET (12s) + response parse; the kill must fit
+        // the resolver chain like the rest of the farm.
+        ServerSpec(
+            id = "netmirror", name = "NetMirror",
+            idType = ServerIdType.TMDB,
+            movieUrl = "https://net27.cc/api/embed-tmdb/{id}",
+            tvUrl = "https://net27.cc/api/embed-tmdb/{id}?type=tv&se={season}&ep={episode}",
+            isJsonApi = true, referer = "https://net27.cc/",
+            hasSubtitles = true, maxQuality = 1080, timeoutSec = 20,
+            declaredLanguages = emptySet(),
+        ),
     )
 
     fun buildMovieUrl(spec: ServerSpec, id: String): String =

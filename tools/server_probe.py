@@ -39,6 +39,14 @@ TITLE_TV = dict(kind="tv", tmdb=1399, imdb="tt0944947",
 # MovieBox library alternative verified via /subject/search rows.
 TITLE_TV_MB = dict(kind="tv", tmdb=108978, imdb="tt9288034",
                    title="Reacher", year=2022, season=1, episode=1)
+# Indian-dub matrix (user spec 2026-09-11): one Telugu, one Tamil, one Hindi
+# TV original — ids resolved via TMDB search + /external_ids (Sept 2026).
+TITLE_TE = dict(kind="movie", tmdb=579974, imdb="tt8178634",
+                title="RRR", year=2022, season=0, episode=0)
+TITLE_TA = dict(kind="movie", tmdb=937020, imdb="tt11663228",
+                title="Jailer", year=2023, season=0, episode=0)
+TITLE_TV_FM = dict(kind="tv", tmdb=93352, imdb="tt9544034",
+                   title="The Family Man", year=2019, season=1, episode=1)
 
 
 def sess():
@@ -142,6 +150,8 @@ def test_vidlink(t):
          "Origin": "https://vidlink.pro", "Referer": page}
     r = sess().get(api, headers=h, timeout=TIMEOUT)
     root = r.json()
+    if root is None:  # API answers 200 with a bare `null` (e.g. RRR, 2026-09-11)
+        return ("MISS", "api returned null body (no multiLang source)", 0, None)
     if "error" in root or "code" in root:
         return ("FAIL", f"api error: {str(root)[:80]}", 0, None)
     stream = root.get("stream") or {}
@@ -752,6 +762,526 @@ def test_vidnest(t):
             len(streams), streams)
 
 
+# ────────────────────────── NHD (TMDB, page-keyed extraction API) ──────────────────────────
+
+NHD_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+          "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+
+
+def test_nhd(t):
+    """Mirrors resolveNhd: page → var API_KEY/API_PATH → extraction JSON
+    (playUrl / audioTracks[]) with the NHD UA."""
+    id_ = str(t["tmdb"])
+    page_url = (f"https://nhdapi.com/movie/{id_}" if t["kind"] == "movie"
+                else f"https://nhdapi.com/tv/{id_}/{t['season']}/{t['episode']}")
+    h = {"User-Agent": NHD_UA, "Referer": "https://nhdapi.com/"}
+    page = sess().get(page_url, headers=h, timeout=TIMEOUT)
+    if page.status_code in (403, 503) and "cloudflare" in page.text[:2000].lower():
+        return ("FAIL", f"page HTTP {page.status_code} (cloudflare)", 0, None)
+    key = re.search(r'var\s+API_KEY\s*=\s*"([^"]+)"', page.text)
+    if not key:
+        return ("MISS", "no API_KEY in page (service down or shape changed)", 0, None)
+    path = re.search(r'var\s+API_PATH\s*=\s*"([^"]+)"', page.text)
+    api_path = path.group(1) if path else (f"/api/movie/{id_}" if t["kind"] == "movie" else f"/api/tv/{id_}")
+    api = f"https://nhdapi.com{api_path}?key={key.group(1)}"
+    r = sess().get(api, headers={"User-Agent": NHD_UA, "Referer": page_url}, timeout=TIMEOUT)
+    try:
+        root = r.json()
+    except Exception:
+        return ("FAIL", f"extraction non-JSON ({r.status_code})", 0, None)
+    if not root.get("success"):
+        return ("MISS", f"extraction success=false: {str(root)[:80]}", 0, None)
+    streams = []
+    for tr in root.get("audioTracks") or []:
+        url = tr.get("url") or ""
+        if url.startswith("http"):
+            label = tr.get("label") or tr.get("name") or "Audio"
+            streams.append((label, url, ".m3u8" in url or root.get("kind") == "hls"))
+    if not streams and root.get("playUrl"):
+        streams.append(("Default", root["playUrl"], root.get("kind") != "mp4"))
+    if not streams:
+        return ("MISS", f"no playUrl/audioTracks (keys={list(root)[:6]})", 0, None)
+    ok, detail = deep_ok(streams[0][1], streams[0][2], {"User-Agent": NHD_UA})
+    langs = sorted({s[0] for s in streams})
+    return ("OK" if ok else "DEAD", f"{len(streams)} tracks {langs[:5]}; first: {detail}",
+            len(streams), streams)
+
+
+# ────────────────────────── generic embed harvester ──────────────────────────
+
+STREAM_URL_RE = re.compile(r"https?://[^\s\"'<>\\]+?\.(?:m3u8|mp4)[^\s\"'<>\\]*", re.I)
+IFRAME_RE = re.compile(r"""<iframe[^>]+?src=["']([^"']+)["']""", re.I)
+
+
+def test_embed_generic(base_url, referer, label, unwrap=2):
+    """Generic embed-page probe: fetch page → unwrap iframes (up to `unwrap`
+    hops) → harvest direct m3u8/mp4 URLs → deep-validate the first. Mirrors
+    the generic pipeline a plain (non-isJsonApi) ServerSpec rides."""
+    s = sess()
+    cur, cur_url = None, base_url
+    for hop in range(unwrap + 1):
+        try:
+            r = s.get(cur_url, headers=ok_headers(referer), timeout=TIMEOUT)
+        except Exception as e:
+            return ("DOWN", f"{type(e).__name__}: {str(e)[:80]}", 0, None)
+        text = r.text or ""
+        if hop == 0 and r.status_code in (403, 503):
+            return ("FAIL", f"HTTP {r.status_code} ({text[:60].strip()})", 0, None)
+        cur = text
+        m = IFRAME_RE.search(cur)
+        if not m:
+            break
+        import urllib.parse
+        nxt = urllib.parse.urljoin(cur_url, m.group(1))
+        if not nxt.startswith("http"):
+            break
+        cur_url = nxt
+    urls = list(dict.fromkeys(STREAM_URL_RE.findall(cur or "")))
+    if not urls:
+        body = (cur or "")[:80].replace("\n", " ").strip()
+        return ("MISS", f"no direct stream urls ({len(cur or '')}B): {body}", 0, None)
+    first = urls[0]
+    ok, detail = deep_ok(first, ".m3u8" in first.lower(), ok_headers(referer))
+    return ("OK" if ok else "DEAD", f"{len(urls)} urls; first: {detail}", len(urls), urls)
+
+
+def test_vidcore_org(t):
+    """vidcore.org — DIFFERENT host from the farm's vidcore.io (no enc-dec
+    pipeline; a plain TMDB-keyed embed)."""
+    url = (f"https://vidcore.org/embed/movie/{t['tmdb']}" if t["kind"] == "movie"
+           else f"https://vidcore.org/embed/tv/{t['tmdb']}/{t['season']}/{t['episode']}")
+    return test_embed_generic(url, "https://vidcore.org/", "vidcore.org")
+
+
+def test_vidphantom(t):
+    url = (f"https://vidphantom.com/movie/{t['tmdb']}" if t["kind"] == "movie"
+           else f"https://vidphantom.com/tv/{t['tmdb']}/{t['season']}/{t['episode']}")
+    return test_embed_generic(url, "https://vidphantom.com/", "vidphantom")
+
+
+def test_embed_api(t):
+    url = (f"https://player.embed-api.stream/?id={t['tmdb']}" if t["kind"] == "movie"
+           else f"https://player.embed-api.stream/?id={t['tmdb']}&s={t['season']}&e={t['episode']}")
+    return test_embed_generic(url, "https://player.embed-api.stream/", "embed-api")
+
+
+# ────────────────────────── VidZee (TMDB multi-server JSON) ──────────────────────────
+
+def test_vidzee(t):
+    """player.vidzee.wtf/api/server?id={tmdb} — sr=1..10 sub-servers carry
+    per-language sources ({link,name,language}). Probes sr=1..4 and harvests
+    any http links with their language fields."""
+    h = {"User-Agent": UA_CHROME, "Referer": "https://player.vidzee.wtf/"}
+    base = (f"https://player.vidzee.wtf/api/server?id={t['tmdb']}" if t["kind"] == "movie"
+            else f"https://player.vidzee.wtf/api/server?id={t['tmdb']}&ss={t['season']}&ep={t['episode']}")
+    streams = []
+    for sr in range(1, 5):
+        try:
+            r = sess().get(f"{base}&sr={sr}", headers=h, timeout=TIMEOUT)
+            if r.status_code != 200:
+                continue
+            root = r.json()
+        except Exception:
+            continue
+        def walk(node):
+            if isinstance(node, dict):
+                link = node.get("link") or node.get("url") or node.get("file")
+                if isinstance(link, str) and link.startswith("http"):
+                    streams.append((node.get("language") or node.get("name") or f"sr{sr}",
+                                    link, ".m3u8" in link))
+                for v in node.values():
+                    walk(v)
+            elif isinstance(node, list):
+                for v in node:
+                    walk(v)
+        walk(root)
+    if not streams:
+        return ("MISS", "no sr sub-server returned links (API likely 404)", 0, None)
+    ok, detail = deep_ok(streams[0][1], streams[0][2], {"User-Agent": UA_CHROME, "Referer": "https://core.vidzee.wtf/"})
+    langs = sorted({s[0] for s in streams})
+    return ("OK" if ok else "DEAD", f"{len(streams)} sources {langs[:5]}; first: {detail}",
+            len(streams), streams)
+
+
+# ────────────────────────── MP4Hydra (title-keyed info2 POST) ──────────────────────────
+
+def test_mp4hydra(t):
+    """mp4hydra.org /info2?v=8 — title-slug multipart POST returning
+    per-quality HLS sources. Best-effort revival probe: any 200 JSON with
+    source URLs counts; a 'Back soon' page is DOWN."""
+    h = {"User-Agent": UA_CHROME, "Referer": "https://mp4hydra.org/"}
+    try:
+        home = sess().get("https://mp4hydra.org/", headers=h, timeout=TIMEOUT).text
+    except Exception as e:
+        return ("DOWN", f"{type(e).__name__}: {str(e)[:80]}", 0, None)
+    if "back soon" in home.lower() or "maintenance" in home.lower():
+        return ("DOWN", "maintenance page still up", 0, None)
+    slug = re.sub(r"[^a-z0-9]+", "-", t["title"].lower()).strip("-")
+    streams = []
+    for payload in (
+        {"v": "8", "title": t["title"]},
+        {"v": "8", "slug": slug},
+        {"v": "8", "s": slug},
+    ):
+        try:
+            r = sess().post("https://mp4hydra.org/info2?v=8", headers=h, data=payload, timeout=TIMEOUT)
+            if r.status_code != 200:
+                continue
+            try:
+                root = r.json()
+            except Exception:
+                continue
+            def walk(node):
+                if isinstance(node, dict):
+                    link = node.get("url") or node.get("file") or node.get("link")
+                    if isinstance(link, str) and link.startswith("http"):
+                        streams.append((str(node.get("title") or node.get("quality") or "src"),
+                                        link, ".m3u8" in link))
+                    for v in node.values():
+                        walk(v)
+                elif isinstance(node, list):
+                    for v in node:
+                        walk(v)
+            walk(root)
+            if streams:
+                break
+        except Exception:
+            continue
+    if not streams:
+        return ("MISS", "no /info2 payload variant returned sources", 0, None)
+    ok, detail = deep_ok(streams[0][1], streams[0][2], h)
+    return ("OK" if ok else "DEAD", f"{len(streams)} sources; first: {detail}", len(streams), streams)
+
+
+# ────────────────────────── CastleTV (api.hlowb.com, AES-128-CBC app API) ──────────────────────────
+
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives import padding as _pad
+
+
+def _cbc_decrypt(ct: bytes, key: bytes, iv: bytes) -> bytes:
+    d = Cipher(algorithms.AES(key), modes.CBC(iv)).decryptor()
+    p = _pad.PKCS7(algorithms.AES.block_size).unpadder()
+    return p.update(d.update(ct) + d.finalize()) + p.finalize()
+
+
+CASTLE_BASE = "https://api.hlowb.com"
+CASTLE_HDRS = {
+    "User-Agent": "okhttp/4.9.3", "Accept": "application/json",
+    "Accept-Language": "en-US,en;q=0.9", "Connection": "Keep-Alive",
+    "Referer": CASTLE_BASE,
+}
+
+
+def _castle_key(security_key_b64: str) -> bytes:
+    kb = base64.b64decode(security_key_b64) + b"T!BgJB"
+    return (kb[:16].ljust(16, b"\x00"))
+
+
+def _castle_get_json(s, url, sec_key):
+    r = s.get(url, headers=CASTLE_HDRS, timeout=TIMEOUT)
+    if r.status_code != 200:
+        raise RuntimeError(f"HTTP {r.status_code}")
+    text = r.text.strip()
+    try:
+        j = json.loads(text)
+        cipher = j["data"].strip() if isinstance(j.get("data"), str) else text
+    except Exception:
+        cipher = text
+    plain = _cbc_decrypt(base64.b64decode(cipher), _castle_key(sec_key),
+                         _castle_key(sec_key)).decode("utf-8", "replace")
+    # bigint ids (16+ digits) would lose precision as JS numbers — quote them
+    return json.loads(re.sub(r"([:{[,]\s*)(\d{16,})", r'\1"\2"', plain))
+
+
+def test_castletv(t):
+    """Mirrors the TMDB-Embed-API castletv port: getSecurityKey → title search
+    (AES-128-CBC) → movie detail → episode tracks[] (per-language!) → getVideo2.
+    Title-keyed like the Kotlin farm's MovieBox (no castle-side TMDB lookup),
+    so the probe searches by `title year`."""
+    s = sess()
+    try:
+        r = s.get(f"{CASTLE_BASE}/v0.1/system/getSecurityKey/1?channel=IndiaA"
+                  f"&clientType=1&lang=en-US", headers=CASTLE_HDRS, timeout=TIMEOUT)
+        sec = r.json()["data"] if r.status_code == 200 else None
+    except Exception:
+        sec = None
+    if not sec:
+        return ("FAIL", f"getSecurityKey HTTP {r.status_code}", 0, None)
+    kw = f"{t['title']} {t['year']}"
+    sr = _castle_get_json(s, f"{CASTLE_BASE}/film-api/v1.1.0/movie/searchByKeyword"
+                          f"?channel=IndiaA&clientType=1&keyword={requests.utils.quote(kw)}"
+                          "&lang=en-US&mode=1&packageName=com.external.castle&page=1&size=30", sec)
+    rows = (sr.get("data") or sr).get("rows") or []
+    title_lc = t["title"].lower()
+    match = next((x for x in rows
+                  if title_lc in (x.get("title") or x.get("name") or "").lower()), None)
+    if not match:
+        return ("MISS", f"no search rows for '{kw}' (rows={len(rows)})", 0, None)
+    mid = str(match.get("id") or match.get("redirectId") or match.get("redirectIdStr") or "")
+    det = _castle_get_json(s, f"{CASTLE_BASE}/film-api/v1.9.9/movie?channel=IndiaA"
+                           f"&clientType=1&lang=en-US&movieId={mid}"
+                           "&packageName=com.external.castle", sec)
+    dd = det.get("data") if isinstance(det.get("data"), dict) else det
+    eps = dd.get("episodes") or []
+    if t["kind"] == "tv":
+        seasons = dd.get("seasons") or []
+        se = next((x for x in seasons if x.get("number") == t["season"]
+                   and x.get("movieId")), None)
+        if se and str(se["movieId"]) != mid:
+            mid = str(se["movieId"])
+            det = _castle_get_json(s, f"{CASTLE_BASE}/film-api/v1.9.9/movie?channel=IndiaA"
+                                   f"&clientType=1&lang=en-US&movieId={mid}"
+                                   "&packageName=com.external.castle", sec)
+            dd = det.get("data") if isinstance(det.get("data"), dict) else det
+            eps = dd.get("episodes") or []
+    ep = (next((e for e in eps if e.get("number") == t["episode"]), None)
+          if t["kind"] == "tv" else (eps[0] if eps else None))
+    if not ep:
+        return ("MISS", f"no episode S{t['season']}E{t['episode']}", 0, None)
+    tracks = [tr for tr in (ep.get("tracks") or []) if tr.get("existIndividualVideo")] \
+        or (ep.get("tracks") or [])
+    body = {"mode": "1", "appMarket": "GuanWang", "clientType": "1",
+            "woolUser": "false",
+            "apkSignKey": "ED0955EB04E67A1D9F3305B95454FED485261475",
+            "androidVersion": "13", "movieId": mid, "episodeId": str(ep["id"]),
+            "isNewUser": "true", "resolution": "3",
+            "packageName": "com.external.castle"}
+    streams = []
+    for tr in (tracks or [None]):
+        b = dict(body)
+        if tr:
+            b["languageId"] = str(tr.get("languageId"))
+        h = dict(CASTLE_HDRS)
+        h["Content-Type"] = "application/json"
+        try:
+            rr = s.post(f"{CASTLE_BASE}/film-api/v2.0.1/movie/getVideo2?clientType=1"
+                        "&packageName=com.external.castle&channel=IndiaA&lang=en-US",
+                        headers=h, data=json.dumps(b), timeout=TIMEOUT)
+            text = rr.text.strip()
+            try:
+                j = json.loads(text)
+                ct = j["data"].strip() if isinstance(j.get("data"), str) else text
+            except Exception:
+                ct = text
+            v = _castle_get_json_post(ct, sec)
+        except Exception:
+            continue
+        vd = v.get("data") if isinstance(v.get("data"), dict) else v
+        label = (tr.get("languageName") or tr.get("abbreviate") or "Shared") if tr else "Shared"
+        for x in (vd.get("videos") or []):
+            u = x.get("url") or vd.get("videoUrl")
+            if u and u.startswith("http"):
+                streams.append((label, u, ".m3u8" in u))
+        if not (vd.get("videos") or []) and vd.get("videoUrl", "").startswith("http"):
+            streams.append((label, vd["videoUrl"], ".m3u8" in vd["videoUrl"]))
+    if not streams:
+        return ("MISS", f"no getVideo2 streams (tracks={len(tracks)})", 0, None)
+    ok, detail = deep_ok(streams[0][1], streams[0][2], {"User-Agent": UA_CHROME})
+    langs = sorted({x[0] for x in streams})
+    return ("OK" if ok else "DEAD", f"{len(streams)} streams {langs[:8]}; first: {detail}",
+            len(streams), streams)
+
+
+def _castle_get_json_post(cipher_b64, sec_key):
+    plain = _cbc_decrypt(base64.b64decode(cipher_b64), _castle_key(sec_key),
+                         _castle_key(sec_key)).decode("utf-8", "replace")
+    return json.loads(re.sub(r"([:{[,]\s*)(\d{16,})", r'\1"\2"', plain))
+
+
+# ────────────────────────── OneTouchTV (api3.devcorp.me, AES-256-CBC) ──────────────────────────
+
+OTT_KEY = b"im72charPasswordofdInitVectorStm"
+OTT_IV = b"im72charPassword"
+OTT_HDRS = {"User-Agent": UA_CHROME, "Referer": "https://onetouchtv.xyz/"}
+
+
+def _ott_fetch(s, path):
+    r = s.get(f"https://api3.devcorp.me{path}", headers=OTT_HDRS, timeout=TIMEOUT)
+    if r.status_code != 200:
+        raise RuntimeError(f"HTTP {r.status_code}")
+    txt = re.sub(r"\s+", "", (r.text or "").strip())
+    txt = txt.replace("-_.", "/").replace("@", "+")
+    txt += "=" * (-len(txt) % 4)
+    plain = _cbc_decrypt(base64.b64decode(txt), OTT_KEY, OTT_IV).decode("utf-8", "replace")
+    return (json.loads(plain) or {}).get("result")
+
+
+def test_onetouchtv(t):
+    """Mirrors the TMDB-Embed-API onetouchtv port: /vod/search?keyword → best
+    title match → /vod/{id}/detail → episode (number match, season in title) →
+    /vod/{id}/episode/{playId} → sources[] ({name,quality,url}). src.name
+    carries the language when the host serves per-language entries."""
+    s = sess()
+    try:
+        results = _ott_fetch(s, f"/vod/search?keyword={requests.utils.quote(t['title'])}") or []
+    except Exception as e:
+        return ("FAIL", f"search: {type(e).__name__}: {str(e)[:60]}", 0, None)
+    tl = t["title"].lower()
+    want = "movie" if t["kind"] == "movie" else None
+    cands = [r_ for r_ in results if tl in (r_.get("title") or "").lower()]
+    if want:
+        cands = [r_ for r_ in cands if (r_.get("type") or "").lower() == want] or cands
+    if t["kind"] == "tv":
+        s1 = [r_ for r_ in cands
+              if int(r_.get("year") or 0) == t["year"]
+              and f"season {t['season']}" not in (r_.get("title") or "").lower()]
+        cands = s1 or cands
+    match = next((r_ for r_ in cands if str(r_.get("year")) == str(t["year"])), None) \
+        or (cands[0] if cands else None)
+    if not match:
+        return ("MISS", f"no search match for '{t['title']}' (hits={len(results)})", 0, None)
+    try:
+        detail = _ott_fetch(s, f"/vod/{match['id']}/detail") or {}
+    except Exception as e:
+        return ("FAIL", f"detail: {type(e).__name__}", 0, None)
+    eps = detail.get("episodes") or []
+    if not eps:
+        return ("MISS", f"detail has no episodes ({match['title']!r})", 0, None)
+    tgt = (eps[0] if t["kind"] == "movie"
+           else next((e for e in eps if int(e.get("episode") or -1) == t["episode"]), None))
+    if not tgt:
+        return ("MISS", f"no ep{t['episode']} in {len(eps)} eps", 0, None)
+    try:
+        ep = _ott_fetch(s, f"/vod/{match['id']}/episode/{tgt.get('playId')}") or {}
+    except Exception as e:
+        return ("FAIL", f"episode: {type(e).__name__}", 0, None)
+    streams = []
+    for src in ep.get("sources") or []:
+        u = src.get("url")
+        if u and u.startswith("http"):
+            streams.append((src.get("name") or src.get("quality") or "src",
+                            u, ".m3u8" in u))
+    if not streams:
+        return ("MISS", f"no sources for {match['title']!r} ep={tgt.get('name')}", 0, None)
+    ok, detail_s = deep_ok(streams[0][1], streams[0][2],
+                           {"User-Agent": UA_CHROME, "Referer": "https://api3.devcorp.me/"})
+    names = sorted({x[0] for x in streams})
+    return ("OK" if ok else "DEAD",
+            f"{len(streams)} sources {names[:8]}; first: {detail_s}", len(streams), streams)
+
+
+# ────────────────────────── StreamFlix (api.streamflix.app data.json → MP4 CDNs) ──────────────────────────
+
+def test_streamflix(t):
+    """TMDB-keyed catalogue: /data.json items carry {tmdb, movielink}; mirrors
+    come from config-streamflixapp.json download[]. Direct MP4 files (dual-audio
+    when the upload is a Hindi dub)."""
+    s = sess()
+    try:
+        items = s.get("https://api.streamflix.app/data.json",
+                      headers={"User-Agent": UA_CHROME}, timeout=20).json()["data"]
+        bases = list(dict.fromkeys(s.get(
+            "https://api.streamflix.app/config/config-streamflixapp.json",
+            headers={"User-Agent": UA_CHROME}, timeout=10).json().get("download") or []))
+    except Exception as e:
+        return ("FAIL", f"catalogue: {type(e).__name__}: {str(e)[:60]}", 0, None)
+    match = next((x for x in items if x.get("tmdb") == str(t["tmdb"])), None)
+    if not match:
+        return ("MISS", f"tmdb {t['tmdb']} not in catalogue ({len(items)} items)", 0, None)
+    if t["kind"] == "tv":
+        import requests as rq
+        fb = (f"https://chilflix-410be-default-rtdb.asia-southeast1.firebasedatabase.app"
+              f"/Data/{match.get('moviekey')}/seasons/{t['season']}/episodes.json")
+        try:
+            eps = rq.get(fb, timeout=15).json() or {}
+        except Exception:
+            eps = {}
+        ep = eps.get(str(t["episode"] - 1)) or eps.get(str(t["episode"])) or \
+            next((v for v in eps.values() if isinstance(v, dict)), None)
+        link = (ep or {}).get("link")
+    else:
+        link = match.get("movielink")
+    if not link:
+        return ("MISS", "no movielink/episode link", 0, None)
+    streams = [(f"sf{i}", bases[i] + link, False) for i in range(len(bases))
+               if bases[i].startswith("http")]
+    if not streams:
+        return ("MISS", "no download CDN bases", 0, None)
+    ok, detail = deep_ok(streams[0][1], False, {"User-Agent": UA_CHROME})
+    return ("OK" if ok else "DEAD", f"{len(streams)} mirrors; first: {detail}",
+            len(streams), streams)
+
+
+# ────────────────────────── NetMirror (net27.cc embed-tmdb + NewTV mirrors) ──────────────────────────
+
+NM_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+         "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+
+
+def test_netmirror(t):
+    """Two paths (mirrors the netmirror port): 1) Netflix direct JSON API
+    net27.cc/api/embed-tmdb/{tmdb}[?type=tv&se=&ep=] → streams[]/mp4/captions;
+    2) NewTV OTT mirror discovery: rotated mobiledetect* domains → /checknewtv.php
+    → api base → search.php → post.php → player.php → video_link."""
+    s = sess()
+    base_url = f"https://net27.cc/api/embed-tmdb/{t['tmdb']}"
+    if t["kind"] == "tv":
+        base_url += f"?type=tv&se={t['season']}&ep={t['episode']}"
+    try:
+        r = s.get(base_url, headers={"Accept": "application/json", "Referer": "https://net27.cc/",
+                                    "User-Agent": NM_UA}, timeout=20)
+        data = r.json() if r.status_code == 200 else {}
+    except Exception:
+        data = {}
+    streams = []
+    if data.get("ok") is True:
+        for st in data.get("streams") or []:
+            if st.get("url"):
+                streams.append((f"Netflix {st.get('resolution') or ''}p".strip(),
+                                st["url"], ".m3u8" in st["url"]))
+        if not streams and data.get("mp4"):
+            streams.append(("Netflix mp4", data["mp4"], False))
+    # NewTV path (hotstar/prime capture): domain rotation → token_hash api
+    if not streams:
+        api = None
+        for dom in ["https://mobiledetects.com", "https://mobidetect.art",
+                    "https://mobidetect.cc", "https://mobidetect.vip"]:
+            try:
+                rr = s.get(dom + "/checknewtv.php", headers={
+                    "X-Requested-With": "NetmirrorNewTV v1.0", "Ott": "nf",
+                    "User-Agent": NM_UA, "Accept": "application/json"}, timeout=10)
+                th = rr.json().get("token_hash")
+                if th:
+                    import base64 as b64m
+                    api = b64m.b64decode(th).decode().rstrip("/")
+                    break
+            except Exception:
+                continue
+        if api:
+            nh = {"X-Requested-With": "NetmirrorNewTV v1.0", "Ott": "hs",
+                  "User-Agent": NM_UA, "Accept": "application/json"}
+            try:
+                sr = s.get(f"{api}/newtv/search.php?s={requests.utils.quote(t['title'])}",
+                           headers=nh, timeout=15).json()
+                first = (sr.get("searchResult") or [None])[0]
+                if first and first.get("id"):
+                    pid = first["id"]
+                    if t["kind"] == "tv":
+                        pr = s.get(f"{api}/newtv/post.php?id={pid}",
+                                   headers={**nh, "Lastep": "", "Usertoken": ""},
+                                   timeout=15).json()
+                        eps = pr.get("episodes") or []
+                        tmap = {int(e["ep"]): e["id"] for e in eps
+                                if isinstance(e, dict) and str(e.get("ep") or "").isdigit()}
+                        pid = tmap.get(t["episode"], pid)
+                    pl = s.get(f"{api}/newtv/player.php?id={pid}",
+                               headers={**nh, "Usertoken": ""}, timeout=15).json()
+                    if pl.get("video_link"):
+                        streams.append(("NewTV", pl["video_link"],
+                                        ".m3u8" in pl["video_link"]))
+            except Exception:
+                pass
+    if not streams:
+        return ("MISS", f"no netflix streams / no newtv link (net27={data.get('ok')})",
+                0, None)
+    hdrs = {"User-Agent": NM_UA, "Referer": "https://videodownloader.site/"} \
+        if streams[0][0].startswith("Netflix") else {"User-Agent": NM_UA, "Referer": api + "/"}
+    ok, detail = deep_ok(streams[0][1], streams[0][2], hdrs)
+    return ("OK" if ok else "DEAD", f"{len(streams)} streams; first: {detail}",
+            len(streams), streams)
+
+
 # ────────────────────────── runner ──────────────────────────
 
 # (name, fn, alt-title-per-kind overrides)
@@ -768,7 +1298,36 @@ SERVERS = [
     ("VidCore", test_vidcore, None),
     ("VidNest", test_vidnest, {"tv": TITLE_TV_MB}),
     ("Allmovieland", test_allmovieland, {"tv": TITLE_TV_MB}),
+    # ── 2026-09-11 multi-language expansion candidates ──
+    ("NHD", test_nhd, None),
+    ("VidCoreOrg", test_vidcore_org, None),
+    ("VidPhantom", test_vidphantom, None),
+    ("EmbedAPI", test_embed_api, None),
+    ("VidZee", test_vidzee, None),
+    ("MP4Hydra", test_mp4hydra, None),
+    # ── 2026-09-11 round-2 candidates (TMDB-Embed-API v1.3.0 ports). Result:
+    #    NETMIRROR ADDED to the farm (playable 6/6, 360→1080p + captions);
+    #    CastleTV = preview-clip-only on the free tier (permissionDenied),
+    #    OneTouchTV = single UNLABELLED muxed "loklok" playlist (nothing to
+    #    label per-title), StreamFlix = catalogue ok but every mirror dead.
+    #    HDGharTV deliberately excluded — user-confirmed dead.
+    ("CastleTV", test_castletv, {"tv": TITLE_TV_MB}),
+    ("OneTouchTV", test_onetouchtv, {"tv": TITLE_TV_MB}),
+    ("StreamFlix", test_streamflix, None),
+    ("NetMirror", test_netmirror, None),
 ]
+
+# Title matrix: baseline movie + TV, plus the Indian-dub set. MovieBox keeps
+# its in-library TV alternative; every other suite probes every title.
+TITLE_MATRIX = [TITLE_MOVIE, TITLE_TE, TITLE_TA, TITLE_TV, TITLE_TV_FM]
+
+# Servers whose API/library is known to answer only for a subset of the
+# matrix (same idea as the MovieBox tv override): title-alternatives per kind.
+TITLE_ALTS = {
+    "MovieBox": {"tv": TITLE_TV_MB},
+    "VidNest": {"tv": TITLE_TV_MB},
+    "Allmovieland": {"tv": TITLE_TV_MB},
+}
 
 
 def run_one(name, fn, alts, t):
@@ -779,12 +1338,16 @@ def run_one(name, fn, alts, t):
         status, detail, n, _ = fn(t)
     except Exception as e:
         status, detail, n = "DOWN", f"{type(e).__name__}: {str(e)[:100]}", 0
-    return (name, t["kind"], status, time.time() - t0, n, detail)
+    return (name, t["title"] if t["kind"] == "movie" else t["title"], t["kind"], status, time.time() - t0, n, detail)
 
 
 def main():
     which = sys.argv[1:] or ["movie", "tv"]
-    titles = [TITLE_MOVIE] * ("movie" in which) + [TITLE_TV] * ("tv" in which)
+    titles = []
+    if "movie" in which:
+        titles += [t for t in TITLE_MATRIX if t["kind"] == "movie"]
+    if "tv" in which:
+        titles += [t for t in TITLE_MATRIX if t["kind"] == "tv"]
     jobs = [(name, fn, alts, t) for t in titles for (name, fn, alts) in SERVERS]
     results = []
     with futures.ThreadPoolExecutor(max_workers=12) as ex:
@@ -797,11 +1360,11 @@ def main():
               + (f" S{t['season']}E{t['episode']}" if t['kind'] == 'tv' else "") + ") ===")
         print(f"{'SERVER':<15} {'STATUS':<9} {'TIME':>6} {'#':>3}  DETAIL")
         print("-" * 110)
-        for name, kind, status, secs, n, detail in sorted(
-                [r for r in results if r[1] == t["kind"]], key=lambda r: r[0]):
+        for name, title, kind, status, secs, n, detail in sorted(
+                [r for r in results if r[2] == t["kind"] and r[1] == t["title"]], key=lambda r: r[0]):
             print(f"{name:<15} {status:<9} {secs:5.1f}s {n:>3}  {detail}")
 
-        ok = [r[0] for r in results if r[1] == t["kind"] and r[2] == "OK"]
+        ok = [r[0] for r in results if r[2] == t["kind"] and r[1] == t["title"] and r[3] == "OK"]
         print(f"\nWORKING: {len(ok)}/{len(SERVERS)} -> {', '.join(ok) if ok else 'NONE'}")
 
 

@@ -870,6 +870,94 @@ object ManifestKit {
         rendition.default ||
             rendition.name.contains("original", ignoreCase = true)
 
+    // ── Indian dub languages (user spec 2026-09-11: label every OFFICIALLY
+    //    dubbed Indian audio, not just Hindi — Tamil/Telugu dubs previously
+    //    fell out of audioPriority's Hindi/English buckets as "Unknown") ──
+
+    /** One Indian dub language: canonical display name + ISO codes + name tokens. */
+    data class DubLanguage(val canonical: String, val codes: Set<String>, val names: Set<String>)
+
+    /** The official Indian dubbing languages, Hindi first (Hindi is the most
+     *  common host-wide dub). Detection is containment-based over codes and
+     *  names, native scripts included. */
+    val INDIAN_DUB_LANGUAGES = listOf(
+        DubLanguage("Hindi", setOf("hi", "hin"), setOf("hindi", "हिन्दी", "हिंदी")),
+        DubLanguage("Tamil", setOf("ta", "tam"), setOf("tamil", "தமிழ்")),
+        DubLanguage("Telugu", setOf("te", "tel"), setOf("telugu", "తెలుగు")),
+        DubLanguage("Malayalam", setOf("ml", "mal"), setOf("malayalam", "മലയാളം")),
+        DubLanguage("Kannada", setOf("kn", "kan"), setOf("kannada", "ಕನ್ನಡ")),
+        DubLanguage("Bengali", setOf("bn", "ben"), setOf("bengali", "bangla", "বাংলা")),
+        DubLanguage("Marathi", setOf("mr", "mar"), setOf("marathi", "मराठी")),
+        DubLanguage("Punjabi", setOf("pa", "pan"), setOf("punjabi", "ਪੰਜਾਬੀ")),
+        DubLanguage("Gujarati", setOf("gu", "guj"), setOf("gujarati", "ગુજરાતી")),
+    )
+
+    /** Canonical Indian-dub language of a rendition ("ta", "ta-IN", "Tamil",
+     *  "தமிழ்" …), or null. Hindi included — for renditions the generic
+     *  isHindi() already covers, this returns "Hindi" too. */
+    fun indianLanguageOf(rendition: MediaRendition): String? {
+        val lang = rendition.language?.lowercase()
+        if (!lang.isNullOrBlank()) {
+            val code = lang.substringBefore('-')
+            INDIAN_DUB_LANGUAGES.firstOrNull { code in it.codes }?.let { return it.canonical }
+        }
+        val name = rendition.name.lowercase()
+        if (name.isBlank()) return null
+        return INDIAN_DUB_LANGUAGES.firstOrNull { spec -> spec.names.any { name.contains(it) } }?.canonical
+    }
+
+    /** Canonical Indian-dub language token declared in a server name and/or
+     *  URL ("…tamil…", "…/te/…", "MyFlixer Hindi"), or null. The host-declared
+     *  generalization of the old isHindiFromName hint — never guesses a
+     *  language the host itself doesn't name. */
+    fun languageFromName(name: String?, url: String?): String? {
+        val hay = buildString {
+            name?.let { append(it.lowercase()); append(' ') }
+            url?.let { append(it.lowercase()); append(' ') }
+        }
+        if (hay.isBlank()) return null
+        return INDIAN_DUB_LANGUAGES.firstOrNull { spec -> spec.names.any { hay.contains(it) } }?.canonical
+    }
+
+    /**
+     * Audio-language LABEL of the track the player auto-selects — the display
+     * counterpart of [audioPriority]. Same precedence (DEFAULT=YES rendition,
+     * else the single rendition, else the aggregate), but every known Indian
+     * dub language is reported by name instead of collapsing into 0/"other":
+     * a master whose default track is Telugu now labels "Telugu", and a
+     * no-default Tamil+English master labels "Tamil" (was 1/"English").
+     * Returns null when nothing usable parses — honest unknown.
+     */
+    fun audioLanguageLabel(master: MasterPlaylist): String? {
+        if (master.audio.isEmpty()) return null
+        // Hindi/English keep their legacy buckets; an Indian dub beats the
+        // "Original" fallback (a DEFAULT=YES `te` track on an English title is
+        // a Telugu DUB, not the original) — while a non-Indian default
+        // (Japanese "Original" renditions) still reports "Original".
+        fun trackLabel(t: MediaRendition): String? = when {
+            isHindi(t) -> "Hindi"
+            isEnglish(t) -> "English"
+            indianLanguageOf(t) != null -> indianLanguageOf(t)
+            isOriginal(t) -> "Original"
+            else -> null
+        }
+        val defaultTrack = master.audio.firstOrNull { it.default }
+        if (defaultTrack != null) return trackLabel(defaultTrack)
+        // No explicit DEFAULT: a single audio rendition IS what plays — label it
+        // precisely. Several renditions with no default = true dual/multi audio.
+        if (master.audio.size == 1) return trackLabel(master.audio.first())
+        val hasHindi = master.audio.any { isHindi(it) }
+        val hasEnglish = master.audio.any { isEnglish(it) }
+        val hasOriginal = master.audio.any { isOriginal(it) }
+        return when {
+            hasHindi && hasEnglish -> "Hindi+English"
+            hasHindi -> "Hindi"
+            hasOriginal -> "Original"
+            else -> master.audio.firstNotNullOfOrNull { indianLanguageOf(it) }
+                ?: if (hasEnglish) "English" else null
+        }
+    }
+
     /** Returns priority 4(Hindi) > 3(Hindi+English) > 2(Original) > 1(English) > 0(Other).
      *  Prefers the track the player actually auto-selects — the EXT-X-MEDIA with
      *  DEFAULT=YES, or the single track when a master carries exactly one audio

@@ -213,6 +213,126 @@ class ManifestKitTest {
         assertEquals(1, ManifestKit.audioPriority(result))
     }
 
+    // ── Indian dub-language labeling (user spec 2026-09-11) ────────────────
+
+    private fun masterWithAudio(vararg mediaLines: String): ManifestKit.MasterPlaylist? {
+        val master = buildString {
+            appendLine("#EXTM3U")
+            mediaLines.forEach { appendLine(it) }
+            appendLine("""#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080,AUDIO="a"""")
+            append("1080p.m3u8")
+        }
+        return ManifestKit.parseMaster(master, "https://cdn.example.com/")
+    }
+
+    @Test
+    fun audioLanguageLabel_defaultTeluguWins() {
+        // Telugu dub is the DEFAULT track — the label must be "Telugu", which
+        // the old Hindi/English priority model collapsed to 0/"Unknown".
+        val master = masterWithAudio(
+            """#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="Telugu",LANGUAGE="te",URI="te.m3u8",DEFAULT=YES""",
+            """#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="Hindi",LANGUAGE="hi",URI="hi.m3u8"""",
+        )
+        assertNotNull(master)
+        assertEquals("Telugu", ManifestKit.audioLanguageLabel(master))
+    }
+
+    @Test
+    fun audioLanguageLabel_singleTamilRendition() {
+        val master = masterWithAudio(
+            """#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="Tamil",LANGUAGE="ta-IN",URI="ta.m3u8"""",
+        )
+        assertNotNull(master)
+        assertEquals("Tamil", ManifestKit.audioLanguageLabel(master))
+    }
+
+    @Test
+    fun audioLanguageLabel_nativeScriptName() {
+        val master = masterWithAudio(
+            """#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="తెలుగు",URI="te.m3u8"""",
+        )
+        assertNotNull(master)
+        assertEquals("Telugu", ManifestKit.audioLanguageLabel(master))
+    }
+
+    @Test
+    fun audioLanguageLabel_hindiEnglishDual() {
+        val master = masterWithAudio(
+            """#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="Hindi",LANGUAGE="hi",URI="hi.m3u8"""",
+            """#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="English",LANGUAGE="en",URI="en.m3u8"""",
+        )
+        assertNotNull(master)
+        assertEquals("Hindi+English", ManifestKit.audioLanguageLabel(master))
+    }
+
+    @Test
+    fun audioLanguageLabel_tamilEnglishNoDefaultPrefersTamil() {
+        // No DEFAULT and two languages: an Indian dub is more informative than
+        // the old "English" (priority 1) bucket for this shape.
+        val master = masterWithAudio(
+            """#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="English",LANGUAGE="en",URI="en.m3u8"""",
+            """#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="Tamil",LANGUAGE="ta",URI="ta.m3u8"""",
+        )
+        assertNotNull(master)
+        assertEquals("Tamil", ManifestKit.audioLanguageLabel(master))
+    }
+
+    @Test
+    fun audioLanguageLabel_malayalamAndBengaliCodes() {
+        val ml = masterWithAudio(
+            """#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="ML",LANGUAGE="ml",URI="ml.m3u8"""",
+        )
+        assertNotNull(ml)
+        assertEquals("Malayalam", ManifestKit.audioLanguageLabel(ml))
+        val bn = masterWithAudio(
+            """#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="BN",LANGUAGE="ben",URI="bn.m3u8"""",
+        )
+        assertNotNull(bn)
+        assertEquals("Bengali", ManifestKit.audioLanguageLabel(bn))
+    }
+
+    @Test
+    fun audioLanguageLabel_honestUnknowns() {
+        // No audio renditions → null (nothing to label).
+        val noAudio = masterWithAudio()
+        assertNotNull(noAudio)
+        assertNull(ManifestKit.audioLanguageLabel(noAudio))
+        // A rendition with no language signal at all stays unknown — never guessed.
+        val mystery = masterWithAudio(
+            """#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="Track 1",URI="t1.m3u8"""",
+        )
+        assertNotNull(mystery)
+        assertNull(ManifestKit.audioLanguageLabel(mystery))
+    }
+
+    @Test
+    fun indianLanguageOf_coversOfficialDubSet() {
+        fun rend(lang: String?, name: String) =
+            ManifestKit.MediaRendition("AUDIO", "a", name, lang, null)
+        assertEquals("Hindi", ManifestKit.indianLanguageOf(rend("hi", "x")))
+        assertEquals("Tamil", ManifestKit.indianLanguageOf(rend("tam", "x")))
+        assertEquals("Telugu", ManifestKit.indianLanguageOf(rend("te-IN", "x")))
+        assertEquals("Kannada", ManifestKit.indianLanguageOf(rend("kn", "x")))
+        assertEquals("Bengali", ManifestKit.indianLanguageOf(rend("bn", "Bangla")))
+        assertEquals("Marathi", ManifestKit.indianLanguageOf(rend(null, "Marathi")))
+        assertEquals("Punjabi", ManifestKit.indianLanguageOf(rend(null, "ਪੰਜਾਬੀ")))
+        assertEquals("Gujarati", ManifestKit.indianLanguageOf(rend("gu", "x")))
+        assertNull(ManifestKit.indianLanguageOf(rend("ja", "Japanese")))
+        assertNull(ManifestKit.indianLanguageOf(rend(null, "Track 3")))
+    }
+
+    @Test
+    fun languageFromName_hostDeclarationsOnly() {
+        assertEquals("Hindi", ManifestKit.languageFromName("MyFlixer Hindi", null))
+        assertEquals("Tamil", ManifestKit.languageFromName(null, "https://cdn.x/tamil/master.m3u8"))
+        assertEquals("Telugu", ManifestKit.languageFromName("Server Telugu 1080p", "x"))
+        // Two-letter codes must NOT match in free-form names/URLs ("note",
+        // "television"…) — only full language names count as declarations.
+        assertNull(ManifestKit.languageFromName("server-1", "https://cdn.x/te/master.m3u8"))
+        assertNull(ManifestKit.languageFromName("Nova", "https://cdn.x/a.m3u8"))
+        assertNull(ManifestKit.languageFromName(null, null))
+    }
+
     @Test
     fun resolutionFromUrl_picksHeight() {
         assertEquals(1080, ManifestKit.resolutionFromUrl("https://cdn.x/foo/1080p/movie.m3u8"))

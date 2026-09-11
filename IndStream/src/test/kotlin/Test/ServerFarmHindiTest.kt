@@ -28,14 +28,14 @@ class ServerFarmHindiTest {
         get() = ServerFarm.allServers.first { it.id == "vidlink" }
 
     @Test
-    fun vidlink_presentAndFlaggedHindi() {
+    fun vidlink_presentAndMultiLanguage() {
         assertEquals("VidLink", vidlink.name)
         assertEquals(ServerIdType.TMDB, vidlink.idType)
         // VidLink is multi-audio (Hindi + English dubs), NOT a Hindi-only host.
-        // The blanket `hindi` flag would force every stream to label "Hindi" even
-        // when the played track is English — so it must stay false and let the
-        // per-master audio probe report the real language.
-        assertTrue(!vidlink.hindi, "VidLink is multi-audio, not Hindi-only — flagging it Hindi mislabels English playback")
+        // A single declared language would blanket-bias every stream's label
+        // even when the played track is English — so it must stay EMPTY and
+        // let the per-master audio probe report the real language.
+        assertTrue(vidlink.declaredLanguages.isEmpty(), "VidLink is multi-audio, not Hindi-only — a declared language mislabels English playback")
         assertEquals(1080, vidlink.maxQuality)
         assertTrue(vidlink.hasSubtitles)
     }
@@ -124,6 +124,45 @@ class ServerFarmHindiTest {
     }
 
     @Test
+    fun nhd_presentAndTmdbKeyed() {
+        // Re-enabled 2026-09-11 (multi-language expansion probe): TV pipeline
+        // live (GoT S1E1 + Family Man S1E1 playable); the movie pipeline is
+        // dead upstream and clean-misses in resolveNhd, so no breaker strike.
+        val s = ServerFarm.allServers.first { it.id == "nhd" }
+        assertEquals("NHD", s.name)
+        assertEquals(ServerIdType.TMDB, s.idType)
+        assertEquals(1080, s.maxQuality)
+        // F8 budget invariant: page 8s + extraction 10s = 18s must fit the kill.
+        assertEquals(20, s.timeoutSec, "nhd farm kill must fit the resolver chain (8+10)")
+        assertEquals("https://nhdapi.com/", s.referer)
+        val m = ServerFarm.buildMovieUrl(s, "27205")
+        assertEquals("https://nhdapi.com/movie/27205", m)
+        val tv = ServerFarm.buildTvUrl(s, "1399", 1, 1)
+        assertEquals("https://nhdapi.com/tv/1399/1/1", tv)
+    }
+
+    @Test
+    fun netmirror_presentAndTmdbKeyed() {
+        val s = ServerFarm.allServers.first { it.id == "netmirror" }
+        assertEquals("NetMirror", s.name)
+        // TMDB-keyed one-shot JSON embed-tmdb API (Netflix-grade progressive
+        // MP4 ladders). Audio is muxed (no per-track language), so it must NOT
+        // declare a single language — blank-labelled streams (never guessed).
+        assertEquals(ServerIdType.TMDB, s.idType)
+        assertTrue(s.declaredLanguages.isEmpty(), "NetMirror audio is muxed/undeclared — never guessed")
+        assertTrue(s.isJsonApi, "embed-tmdb JSON API")
+        assertEquals(1080, s.maxQuality)
+        assertTrue(s.hasSubtitles, "API captions carry language (incl. Bengali/Punjabi)")
+        assertEquals("https://net27.cc/", s.referer)
+        // Single API GET + parse must fit the farm kill.
+        assertEquals(20, s.timeoutSec, "netmirror farm kill must fit the one-shot API chain")
+        val m = ServerFarm.buildMovieUrl(s, "27205")
+        assertEquals("https://net27.cc/api/embed-tmdb/27205", m)
+        val tv = ServerFarm.buildTvUrl(s, "1399", 1, 1)
+        assertEquals("https://net27.cc/api/embed-tmdb/1399?type=tv&se=1&ep=1", tv)
+    }
+
+    @Test
     fun farm_hasUniqueIds() {
         val ids = ServerFarm.allServers.map { it.id }
         assertEquals(ids.size, ids.toSet().size, "server ids must be unique (HealthMonitor keys by id)")
@@ -163,11 +202,14 @@ class ServerFarmHindiTest {
     }
 
     @Test
-    fun allmovieland_presentAndHindiFlagged() {
+    fun allmovieland_presentWithDeclaredLanguages() {
         val s = ServerFarm.allServers.first { it.id == "allmovieland" }
         assertEquals("Allmovieland", s.name)
         assertEquals(ServerIdType.IMDB, s.idType)
-        assertTrue(s.hindi, "Allmovieland is Hindi-first (Hindi/Bengali/Tamil/Telugu playlists)")
+        // Multi-language host (verified live: Hindi/Bengali/Tamil/Telugu
+        // playlists) — the declared set documents the coverage but must NOT
+        // be a single language (no blanket bias; per-entry resolver labels win).
+        assertEquals(setOf("Hindi", "Tamil", "Telugu", "Bengali"), s.declaredLanguages)
         assertEquals(1080, s.maxQuality)
         // timeoutSec 30→60 (Sept 2026 F8 budget-invariant audit): the
         // documented chain ceilings — search 8s×2 hosts (IMDB pass) + 8s
@@ -209,11 +251,11 @@ class ServerFarmHindiTest {
         // The fast direct-API servers (user spec Sept 2026: "click and play
         // like bullet train" — Hindi/multi-audio, no embed chain). mp4hydra,
         // vidzee, vixsrc, streamprovider and 8stream are disabled (verified
-        // dead Sept 2026: maintenance page / 404 / 403 / 502 / hard 429+403
-        // rate-limit-gate) — kept out of the farm so they don't trip their
-        // breakers and blank the whole result set.
+        // dead Sept 2026 + re-verified 2026-09-11: maintenance page / 404 /
+        // hard 403 rate-limit-gate) — kept out of the farm so they don't trip
+        // their breakers and blank the whole result set.
         val ids = setOf("vidlink", "vaplayer", "vidrock", "videasy-hindi", "moviebox", "vidnest",
-            "vidup", "vidcore", "allmovieland")
+            "vidup", "vidcore", "allmovieland", "nhd", "netmirror")
         for (id in ids) {
             assertNotNull(
                 ServerFarm.allServers.firstOrNull { it.id == id },
@@ -221,7 +263,7 @@ class ServerFarmHindiTest {
             )
         }
         // Disabled/dead servers must NOT be in the live farm.
-        val disabled = setOf("mp4hydra", "vidzee", "vixsrc", "streamprovider", "nhd", "primesrc",
+        val disabled = setOf("mp4hydra", "vidzee", "vixsrc", "streamprovider", "primesrc",
             "myflixer-hindi", "videm", "8stream")
         for (id in disabled) {
             assertNull(
@@ -229,5 +271,11 @@ class ServerFarmHindiTest {
                 "$id is dead/disabled and must not be in the farm",
             )
         }
+    }
+
+    @Test
+    fun farm_withinExpandedCap() {
+        // 2026-09-11 multi-language expansion: 11 live servers (netmirror added), cap 16.
+        assertTrue(ServerFarm.allServers.size <= 16, "farm must stay within MAX_SERVERS cap")
     }
 }
