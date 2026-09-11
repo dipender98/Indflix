@@ -36,8 +36,8 @@ object LinkExtractors {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val resolved = if (gate.isGate(link.url)) gate.resolve(link.url)?.finalUrl else link.url
-        if (resolved.isNullOrBlank()) {
+        val gr = if (gate.isGate(link.url)) gate.resolve(link.url) else null
+        if (gate.isGate(link.url) && gr == null) {
             // second chance: core's redirector walk may pass where the
             // WebView solve did not
             val via = runCatching { unshortenLinkSafe(link.url) }.getOrNull()
@@ -48,7 +48,50 @@ object LinkExtractors {
             gate.diag("EMIT gate-fail unshorten -> $via")
             return dispatch(via, link, referer, gate, subtitleCallback, callback)
         }
+        val resolved = gr?.finalUrl ?: link.url
+        if (resolved.isNullOrBlank()) return false
+
+        // The gate now lands on a JS token interstitial (mobilejsr.rest/token/
+        // <id>.<ts>.<hash>) served with HTTP 200. If we are STILL on the gate
+        // host, the real target is inside the fetched page body: scan it for
+        // external file-host/media links before giving up.
+        if (gate.isGate(resolved)) {
+            val body = gr?.pageText.orEmpty()
+            val candidates = collectPageTargets(body).filterNot { gate.isGate(it) }
+            gate.diag("TOKENPAGE candidates=${candidates.size} for $resolved")
+            for (t in candidates) {
+                if (dispatchSafe(t, link, resolved, gate, subtitleCallback, callback, true)) {
+                    return true
+                }
+            }
+            // reveal the obfuscation for the next debug round (chunked for logcat)
+            val compact = body.replace(Regex("\\s+"), " ")
+            var i = 0
+            while (i < minOf(compact.length, 3600)) {
+                gate.diag("TOKENPAGE[$i] ${compact.substring(i, minOf(i + 1200, compact.length))}")
+                i += 1200
+            }
+            return false
+        }
         return dispatch(resolved, link, referer, gate, subtitleCallback, callback)
+    }
+
+    /** External http(s) URLs inside an interstitial body, most-likely-host first. */
+    private val URL_IN_BODY = Regex("""https?://[^"'<>()\s\\]+""")
+    private val PREFERRED = Regex("""(?i)gdflix|drive\.google|usercontent|hubcloud|filepress|multicloud|vik1ng|pixeldrain|gofile|zipdisk|/file/|\.(mkv|mp4|webm|m3u8)(\?|$)""")
+    private val JUNK_EXT = Regex("""(?i)\.(js|css|png|jpg|jpeg|webp|ico|svg|woff2?|gif|json)(\?|$)""")
+
+    private fun collectPageTargets(body: String): List<String> {
+        val plain = URL_IN_BODY.findAll(body)
+            .map { it.value }
+            .filter { !it.contains("mobilejsr") && !it.contains("cinevood") &&
+                !it.contains("googleapis") && !it.contains("gstatic") &&
+                !it.contains("w3.org") && !JUNK_EXT.containsMatchIn(it) }
+        val ciphered = SiteCipher.decodeUrls(body)
+        return (plain + ciphered).distinct()
+            .sortedByDescending { PREFERRED.containsMatchIn(it) }
+            .take(8)
+            .toList()
     }
 
     private suspend fun dispatch(
@@ -195,4 +238,35 @@ object LinkExtractors {
             .distinct()
             .take(10)
             .toList()
+}
+
+/**
+ * The network's own obfuscation fingerprint (seen verbatim on cinevood pages):
+ * a 72-char alphabet where the last 36 chars map one-to-one onto the first
+ * 36. Interstitial/token pages embed their real target as a cipher-substituted
+ * string; decoding is a plain char swap. Pure + unit-testable.
+ */
+object SiteCipher {
+    private val ALPHABET = Regex("""['"]?a['"]?\s*[:=]\s*['"]([a-z0-9]{72})['"]""")
+    private val ENCODED_STR = Regex("""["']([A-Za-z0-9./:_+-]{10,})["']""")
+    private val URLISH = Regex("""//[\w.-]+\.[a-z]{2,}/""")
+
+    fun key(html: String): Pair<String, String>? =
+        ALPHABET.find(html)?.groupValues?.get(1)?.let { it.take(36) to it.drop(36) }
+
+    fun decodeString(s: String, h1: String, h2: String): String =
+        s.map { c -> h2.indexOf(c).takeIf { it >= 0 }?.let { h1[it] } ?: c }.joinToString("")
+
+    fun encodeString(s: String, h1: String, h2: String): String =
+        s.map { c -> h1.indexOf(c).takeIf { it >= 0 }?.let { h2[it] } ?: c }.joinToString("")
+
+    fun decodeUrls(html: String): List<String> {
+        val (h1, h2) = key(html) ?: return emptyList()
+        return ENCODED_STR.findAll(html)
+            .map { decodeString(it.groupValues[1], h1, h2) }
+            .filter { URLISH.containsMatchIn(it) && !it.contains("mobilejsr") }
+            .map { if (it.startsWith("//")) "https:$it" else it }
+            .distinct()
+            .toList()
+    }
 }

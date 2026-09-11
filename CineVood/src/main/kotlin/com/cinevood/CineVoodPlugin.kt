@@ -383,7 +383,7 @@ class CineVoodProvider : MainAPI() {
 
     companion object {
         const val DEFAULT_BASE = "https://cinevood.loan"
-        private const val BUILD = "v4"
+        private const val BUILD = "v5"
         private const val LATEST_TOKEN = "__latest__"
         private const val MIN_QUALITY = 720
         private val ADULT_SLUG = Regex(

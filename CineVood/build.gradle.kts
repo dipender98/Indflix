@@ -7,7 +7,7 @@ plugins {
     id("com.lagradost.cloudstream3.gradle")
 }
 
-version = 4
+version = 5
 
 cloudstream {
     language = "hi"

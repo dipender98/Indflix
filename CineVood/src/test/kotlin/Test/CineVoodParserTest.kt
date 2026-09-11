@@ -247,4 +247,34 @@ class CineVoodParserTest {
         assertNull(SharedServices.parseCinemetaMeta("tv", "{}"))
         assertNull(SharedServices.parseCinemetaMeta("tv", "not json"))
     }
+
+    // ---- SiteCipher (token interstitial obfuscation) ------------------------
+
+    private val ALPHA =
+        "abcdefghijklmnopqrstuvwxyz01234567899fx3pz16cuql0siogdnb24rtvj5m8akw7ehy"
+
+    @Test
+    fun siteCipherRoundTrip() {
+        val h1 = ALPHA.take(36)
+        val h2 = ALPHA.drop(36)
+        val target = "https://gdflix.io/file/abc123/"
+        val enc = com.cinevood.SiteCipher.encodeString(target, h1, h2)
+        assertTrue(enc != target)
+        assertEquals(target, com.cinevood.SiteCipher.decodeString(enc, h1, h2))
+    }
+
+    @Test
+    fun decodeUrlsFindsEmbeddedTarget() {
+        val h1 = ALPHA.take(36)
+        val h2 = ALPHA.drop(36)
+        val enc = com.cinevood.SiteCipher.encodeString("https://gdflix.io/file/x1/", h1, h2)
+        val html = "<script>var p={a:'$ALPHA', c:'{\"Bo\":\"$enc\"}'};</script>"
+        val urls = com.cinevood.SiteCipher.decodeUrls(html)
+        assertTrue(urls.any { it.contains("gdflix.io") }, "got $urls")
+    }
+
+    @Test
+    fun decodeUrlsNoKeyReturnsEmpty() {
+        assertTrue(com.cinevood.SiteCipher.decodeUrls("<html>no cipher here</html>").isEmpty())
+    }
 }

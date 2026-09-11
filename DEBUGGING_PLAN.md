@@ -299,11 +299,17 @@ Ranked most-likely-first; Phase 1 lines 4/6/7/8 resolve it in one reproduction:
 
 # Debugging Plan -- CineVood v1: no-link-found + empty detail metadata
 
-> STATUS: OPEN -- evidence-collection phase. Both symptoms are on the
-> installed CineVood v1 (.cs3 sha256-cbaf9ee8..., published after 9b1e94c).
-> The provider shipped same-day and was never reproduced on a device before
-> release; this ledger mirrors the IndStream v13->v14 process: instrument
-> first, rank by likelihood, close each RC with a unit/live-verified fix.
+> STATUS: PARTIALLY CLOSED -- v4 fixed search (plain-first fetch, live-verified
+> on device: SEARCH rows appear). v5 (from device logcat 09-11 09:23) closes the
+> NEW root cause for S1: the site REPLACED the /genx CF gate with a JS token
+> interstitial (mobilejsr.rest/token/<id>.<unixtime>.<hash>, HTTP 200, cf=false,
+> ~82KB body) whose redirect is invisible to meta-refresh/window.location
+> parsing -> EMIT DEAD-END, emitted=0/3. v5 adds: token-page body scan
+> (plaintext file-host URLs) + SiteCipher decoder (the network's own 72-char
+> substitution alphabet seen in its pages) + chunked TOKENPAGE body dump so any
+> remaining obfuscation is visible from one more logcat. S2 metadata: cinemeta
+> path live (Billu tt1230448 timed out once, handled); poster/plot-box path
+> active. STATUS: OPEN for final link verification on v5.
 
 Scope: link resolution (download/play taps) and detail-page metadata.
 Symptoms reported by the user (2026-09-11, CineVood v1 on device):
