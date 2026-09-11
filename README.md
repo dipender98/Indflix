@@ -17,8 +17,6 @@ https://raw.githubusercontent.com/dipender98/Indflix/builds/repo.json
 
 - 🎬 **Streaming** — use **Multimovies** and **IndStream** for online
   streaming
-- ⬇️ **Download & watch offline** — use **CineVood** to download titles
-  and watch them offline
 - 🌐 **Multi-language audio** — Hindi, English, Tamil, Telugu, Kannada,
   Malayalam, Bengali, dual-audio; each stream is labelled with its
   actual audio language
