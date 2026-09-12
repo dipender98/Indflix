@@ -1,135 +1,165 @@
 package com.vegamovies
 
-import kotlinx.coroutines.async
-import kotlinx.coroutines.coroutineScope
+import com.lagradost.cloudstream3.app
+import java.net.URLDecoder
+import java.util.concurrent.ConcurrentHashMap
 
 /**
- * NexdriveResolver.kt — turns a Vegamovies nexdrive.fit gateway page into
- * server links (verified protocol, tools/nexdrive_*.py, Sept 2026):
+ * NexdriveResolver.kt — expands a Vegamovies nexdrive gateway (genxfm) page
+ * into CONCRETE server links, and resolves fastdl embeds to direct files.
+ * (Protocol verified via tools/nexdrive_*.py + tools/vg_*.py probes, Sept 2026.)
  *
- *   GET https://<nexdrive>/genxfm{ID}/         (WP page, ~46 KB)
- *     ├─ https://fastdl.zip/embed?download=T   ← playable server
- *     │    GET embed → obfuscated JS whose cleartext holds
- *     │    var reurl = "https://fastdl.zip/dl.php?link=DIRECT media URL"
- *     │    DIRECT = https://video-downloads.googleusercontent.com/...
- *     │    VERIFIED: HTTP 200, MKV attachment.
- *     └─ https://vcloud.fit/{id}               ← browser-gated server
- *          (hubcloud Telegram-bot gateway; NOT automatable — exposed to the
- *           user as a "browser" link so ALL website servers are present.)
+ *   GET https://<nexdrive>/genxfm{ID}/  — one WP page per download chip on the
+ *   post ("⚡ G-Direct", "⚡ V-Cloud", "🗜 Batch/Zip"). Its H1 ends with the
+ *   server tag:
+ *       "... 480p x264 [200MB/E] = G-Direct"  → N x fastdl.zip/embed(.php)?download=T
+ *       "... 720p x264 [800MB/E] = V-Cloud"   → N x vcloud.fit/{id}
+ *       "... = Batch(h)"                      → 1 x zip-gate page
+ *   N == 1 on single-file (movie) gates; N == episode count on per-season
+ *   episode gates, in document order — that is how episode files are recovered.
  *
- * The countdown on the genxfm page is purely cosmetic client JS — both URLs
- * are in the raw HTML on first fetch, so resolution needs no waiting: the
- * Kotlin "first ~10s" window is the fetch + embed unwrap round-trips.
+ *   fastdl chain (verified): the embed page holds the reurl in cleartext —
+ *       https://fastdl.zip/dl.php?link=<media URL>
+ *   where <media URL> is a direct video-downloads.googleusercontent.com file
+ *   (HTTP 200, video/mp4 | video/mkv, content-disposition attachment).
+ *   Google's endpoint IGNORES Range (never 206): it STREAMS progressively
+ *   without in-player seek, and DOWNLOADS at full speed — link names say that.
  *
- * Every resolution is cached per gateway URL and deduplicated in-flight;
- * failures return the empty list so the caller can degrade gracefully.
+ *   vcloud chain is browser-gated (double-atob token loop → hubcloud Telegram
+ *   bot): NOT automatable. Emitted verbatim as a browser-download link.
  */
 
-internal data class RawServer(
-    /** Final URL for the ExtractorLink. */
-    val url: String,
-    /** Display name contribution, e.g. "Direct" / "V-Cloud". */
-    val name: String,
-    /** True = direct playable file; false = browser-gated page. */
-    val direct: Boolean,
-    /** Referer header required by the media URL. */
-    val referer: String,
-)
+
+
+/** A concrete server URL, its family, and its position within that family on
+ *  the gateway page (== episode index for per-episode series chips). */
+internal data class Concrete(val kind: String, val url: String, val idx: Int)
+
+/** Parsed content of one genxfm gateway page. */
+internal data class GatewayExpansion(
+    /** Concrete servers in document order, each tagged with its family: a
+     *  movie gate holds ONE fastdl embed + ONE vcloud page; a series chip
+     *  holds N of one family (N = episodes, document order preserved). */
+    val links: List<Concrete>,
+    /** Page H1 — e.g. "Title (S01) ... 480p x264 [200MB/E] = G-Direct". */
+    val pageTitle: String?,
+) {
+    companion object {
+        val EMPTY = GatewayExpansion(emptyList(), null)
+    }
+
+    /** Episode count this gate exposes: max link count across families. */
+    val episodeCount: Int
+        get() = links.groupingBy { it.kind }.eachCount().values.maxOrNull() ?: 0
+}
 
 internal object NexdriveResolver {
 
-    /** Verified-playable Google Drive media direct-link pattern. */
+    /** Verified direct-media host (Google Drive file server). */
     val DIRECT_REGEX = Regex("""https://video-downloads\.googleusercontent\.com/\S+""")
 
-    private const val FASTDL_EMBED = """https?://fastdl\.[a-z]{2,10}/embed\?download=[A-Za-z0-9]+"""
-    private const val VCLOUD = """https?://vcloud\.[a-z]{2,10}/[a-z0-9]{6,}"""
-    private val FASTDL_EMBED_REGEX = Regex(FASTDL_EMBED, RegexOption.IGNORE_CASE)
-    private val VCLOUD_REGEX = Regex(VCLOUD, RegexOption.IGNORE_CASE)
-
-    /** reurl survives obfuscation in cleartext (both a quoted var-init and a
-     *  string-array entry — verified on fastdl.zip). */
-    internal val REURL_REGEX = Regex(
-        """https://fastdl\.[a-z]{2,10}/dl\.php\?link=(https?://[^\s"'<>)\\]+)""",
+    /** fastdl embed forms: /embed?download= (movies) and /embed.php?download= (series). */
+    val FASTDL_REGEX = Regex(
+        """https?://fastdl\.[a-z]{2,10}/embed(?:\.php)?\?download=[A-Za-z0-9_\-]+""",
         RegexOption.IGNORE_CASE,
     )
 
-    /** genxfm pages are large WP docs; cap the fastdl reurl scan window. */
-    private const val HEAD_CHARS = 8_000
+    val VCLOUD_REGEX = Regex(
+        """https?://vcloud\.[a-z]{2,10}/[A-Za-z0-9_\-]{6,}""",
+    )
 
-    private val cache = java.util.concurrent.ConcurrentHashMap<String, List<RawServer>>()
+    /** reurl survives fastdl obfuscation in cleartext (both embed forms verified). */
+    internal val REURL_REGEX = Regex(
+        """https?://fastdl\.[a-z]{2,10}/dl\.php\?link=(https?://[^\s"'<>)\\]+)""",
+        RegexOption.IGNORE_CASE,
+    )
+
+    /** Secondary spelling: link= param inside JS string arrays (may be URL-encoded). */
+    internal val REURL_PARAM = Regex("""dl\.php\?link=([^"'<>\s\\]+)""", RegexOption.IGNORE_CASE)
 
     /**
-     * Resolve one gateway URL into up to two servers (direct first when the
-     * fastdl chain succeeds, the vcloud browser server when present).
-     * Best-effort: returns an empty list on network failure so the caller can
-     * emit the raw gateway link as the final fallback.
+     * Fetch + parse a genxfm gateway page into ordered concrete server links.
+     * Memoized; returns [GatewayExpansion.EMPTY] on failure so callers can
+     * degrade to presenting the gateway URL as a browser download.
      */
-    suspend fun resolve(
+    suspend fun expand(
         gatewayUrl: String,
         pageReferer: String,
         headers: Map<String, String>,
-    ): List<RawServer> = coroutineScope {
-        cache[gatewayUrl]?.let { return@coroutineScope it }
-        val fastdl = async { resolveFastdl(gatewayUrl, pageReferer, headers) }
-        val vcloud = async { resolveVcloud(gatewayUrl, pageReferer, headers) }
-        val result = fastdl.await() + vcloud.await()
-        if (result.isNotEmpty()) cache[gatewayUrl] = result
-        result
-    }
-
-    /** genxfm page → fastdl embed → dl.php reurl → googleusercontent direct. */
-    private suspend fun resolveFastdl(
-        gatewayUrl: String,
-        pageReferer: String,
-        headers: Map<String, String>,
-    ): List<RawServer> {
-        val page = gatewayPage(gatewayUrl, pageReferer, headers) ?: return emptyList()
-        val embed = FASTDL_EMBED_REGEX.find(page)?.value ?: return emptyList()
-        // The embed body holds the reurl; the gateway page sometimes inlines it too.
-        val embedBody = runCatching {
-            com.lagradost.cloudstream3.app
-                .get(embed, timeout = 10, headers = headers + mapOf(
-                    "Referer" to hostBase(gatewayUrl),
+    ): GatewayExpansion {
+        cache[gatewayUrl]?.let { return it }
+        val html = runCatching {
+            app.get(
+                gatewayUrl,
+                timeout = 12,
+                headers = headers + mapOf(
+                    "Referer" to pageReferer,
                     "Accept" to "text/html,application/xhtml+xml",
-                )).text
-        }.getOrNull()
-        val reurl = (embedBody?.let { REURL_REGEX.find(it)?.groupValues?.get(1) })
-            ?: REURL_REGEX.find(page?.take(HEAD_CHARS) ?: "")?.groupValues?.get(1)
-        val direct = reurl?.substringAfter("link=")?.takeIf { DIRECT_REGEX.matches(it) }
-            ?: reurl?.let { DIRECT_REGEX.find(it)?.value }
-        if (direct != null) {
-            return listOf(RawServer(url = direct, name = "Direct", direct = true, referer = "https://fastdl.zip/"))
-        }
-        // Dead/changed fastdl chain: surface the embed itself as browser link.
-        return listOf(RawServer(url = embed, name = "Fastdl", direct = false, referer = hostBase(gatewayUrl)))
+                ),
+            ).text
+        }.getOrNull() ?: return GatewayExpansion.EMPTY
+
+        val title = Regex("""<h1[^>]*>([^<]{1,260})""", RegexOption.IGNORE_CASE)
+            .find(html)?.groupValues?.get(1)?.trim()
+
+        // Classify by host, not by the title tag: a movie gate carries BOTH a
+        // fastdl embed and a vcloud page (users want every server of the page).
+        // idx = position WITHIN THE FAMILY — episode ordinal for per-episode gates.
+        val links = ArrayList<Concrete>(16)
+        FASTDL_REGEX.findAll(html).forEachIndexed { i, m -> links += Concrete(Servers.GDRIVE, m.value, i) }
+        VCLOUD_REGEX.findAll(html).forEachIndexed { i, m -> links += Concrete(Servers.VCLOUD, m.value, i) }
+        val result = GatewayExpansion(links, title)
+        if (result.links.isNotEmpty() && cache.size < 96) cache[gatewayUrl] = result
+        return result
     }
 
-    /** genxfm page → vcloud page (Telegram-gated; browser link only). */
-    private suspend fun resolveVcloud(
-        gatewayUrl: String,
-        pageReferer: String,
+    /**
+     * Resolve a fastdl embed URL to its direct googleusercontent file URL.
+     * Null when the chain fails (dead link / anti-bot) → the caller emits the
+     * embed page itself as a browser-download link instead.
+     */
+    suspend fun resolveEmbed(
+        embedUrl: String,
+        referer: String,
         headers: Map<String, String>,
-    ): List<RawServer> {
-        val page = gatewayPage(gatewayUrl, pageReferer, headers) ?: return emptyList()
-        val vc = VCLOUD_REGEX.find(page)?.value ?: return emptyList()
-        return listOf(RawServer(url = vc, name = "V-Cloud", direct = false, referer = hostBase(gatewayUrl)))
-    }
-
-    /** Fetch + memoize a genxfm/gateway page body. */
-    private val pageCache = java.util.concurrent.ConcurrentHashMap<String, String>()
-
-    private suspend fun gatewayPage(url: String, referer: String, headers: Map<String, String>): String? {
-        pageCache[url]?.let { return it }
+    ): String? {
+        directCache[embedUrl]?.let { return it.ifEmpty { null } }
         val body = runCatching {
-            com.lagradost.cloudstream3.app
-                .get(url, timeout = 12, headers = headers + mapOf("Referer" to referer))
-                .text
-        }.getOrNull() ?: return null
-        if (pageCache.size > 24) pageCache.keys.firstOrNull()?.let { pageCache.remove(it) }
-        pageCache[url] = body
-        return body
+            app.get(
+                embedUrl,
+                timeout = 10,
+                headers = headers + mapOf(
+                    "Referer" to referer,
+                    "Accept" to "text/html,application/xhtml+xml",
+                ),
+            ).text
+        }.getOrNull()
+        val direct = body?.let { extractDirect(it) }
+        // Memoize failures as "" so a dead embed isn't retried every playback.
+        if (directCache.size < 96) directCache[embedUrl] = direct ?: ""
+        return direct
     }
 
-    private fun hostBase(url: String): String =
-        Regex("""^(https?://[^/]+)""").find(url)?.groupValues?.get(1) ?: url
+    /** Pure: pull the direct media URL out of a fastdl embed / dl.php page body. */
+    internal fun extractDirect(body: String): String? {
+        // 1. Plain reurl: "https://fastdl.tld/dl.php?link=https://video-downloads.googleusercontent.com/..."
+        REURL_REGEX.find(body)?.groupValues?.get(1)?.let { cand ->
+            DIRECT_REGEX.find(cand)?.value?.let { return it }
+        }
+        // 2. link= param in JS string-array form, possibly URL-encoded.
+        REURL_PARAM.findAll(body).forEach { m ->
+            val raw = m.groupValues[1]
+            DIRECT_REGEX.find(raw)?.value?.let { return it }
+            runCatching { URLDecoder.decode(raw, "UTF-8") }.getOrNull()
+                ?.let { DIRECT_REGEX.find(it)?.value }?.let { return it }
+        }
+        // 3. A direct URL inlined anywhere in the body.
+        return DIRECT_REGEX.find(body)?.value
+    }
+
+    /** Gateway-page expansions, keyed by genxfm URL. */
+    private val cache = java.util.concurrent.ConcurrentHashMap<String, GatewayExpansion>()
+
+    /** Embed→direct resolutions; "" value = memoized failure. */
+    private val directCache = java.util.concurrent.ConcurrentHashMap<String, String>()
 }

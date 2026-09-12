@@ -109,6 +109,47 @@ object MetadataService {
         return result
     }
 
+    /** Per-episode metadata used to label series episode rows. */
+    data class TmdbEpisode(
+        val name: String? = null,
+        val overview: String? = null,
+        val thumbnail: String? = null,
+    )
+
+    private val episodeCache = ConcurrentHashMap<String, Map<Int, TmdbEpisode>>()
+
+    /**
+     * TMDB episode names/overviews/thumbnails for [season], keyed by episode
+     * number. [tmdbIdHint] wins when the detail fetch already resolved it;
+     * otherwise the IMDB id is mapped via /find. Best-effort: empty on miss.
+     */
+    suspend fun episodesForSeason(imdbId: String?, tmdbIdHint: Int?, season: Int): Map<Int, TmdbEpisode> {
+        if (season <= 0) return emptyMap()
+        val tvId = tmdbIdHint
+            ?: imdbId?.takeIf { it.startsWith("tt") }?.let { findByImdb(it)?.first }
+        if (tvId == null || tvId <= 0) return emptyMap()
+        val ck = "$tvId|$season"
+        episodeCache[ck]?.let { return it }
+        val url = "$TMDB_API/tv/$tvId/season/$season?api_key=$TMDB_API_KEY&language=en-US"
+        val map = runCatching {
+            val root = JSONObject(app.get(url, timeout = 6).text)
+            root.optJSONArray("episodes")?.let { arr ->
+                (0 until arr.length()).mapNotNull { i ->
+                    val e = arr.optJSONObject(i) ?: return@mapNotNull null
+                    val ep = e.optInt("episode_number", -1)
+                    if (ep <= 0) return@mapNotNull null
+                    ep to TmdbEpisode(
+                        name = str(e, "name"),
+                        overview = str(e, "overview"),
+                        thumbnail = str(e, "still_path")?.let { "$IMG_BASE$it" },
+                    )
+                }
+            } ?: emptyList()
+        }.getOrDefault(emptyList()).toMap()
+        if (map.isNotEmpty() && episodeCache.size < 64) episodeCache[ck] = map
+        return map
+    }
+
     /**
      * One-shot title/year → (detail) resolution used by [VegamoviesProvider.load]:
      * prefers the IMDb id scraped from the page (exact), falls back to a TMDB

@@ -9,14 +9,16 @@ package com.vegamovies
  *
  * Key facts (verified by tools/ probes, Sept 2026):
  *  - Search is a Meilisearch JSON proxy: GET {site}/ts-search.php?q=..&page=1
- *    returning {hits:[{document:{permalink,post_title,post_thumbnail,imdb_id,category}}]}.
+ *    returning {hits:[{document:{permalink,post_title,post_thumbnail,
+ *    imdb_id,category}}]}.
  *  - Category pages are server-rendered `div.poster-card` grids.
- *  - Detail pages hold per-quality download groups: an h5 label heading and a
- *    `Download Now` link to https://nexdrive.fit/genxfm{ID}/.
- *  - The genxfm page exposes BOTH server URLs in raw HTML (the countdown is
- *    cosmetic client JS): fastdl.zip/embed?download=.. (resolves to a DIRECT
- *    video-downloads.googleusercontent.com .mkv) and vcloud.fit/.. (browser
- *    gated). See [NexdriveResolver].
+ *  - Download chips ("⚡ G-Direct", "⚡ V-Cloud", "🗜 Batch/Zip") each link to a
+ *    nexdrive.fit/genxfm{ID}/ page whose H1 ends "= G-Direct | = V-Cloud |
+ *    = Batch" and whose body holds N concrete server URLs (N=1 for movies,
+ *    N=episode-count for per-episode series groups, in document order).
+ *  - fastdl embeds resolve to a DIRECT, streamable + downloadable
+ *    googleusercontent file URL (see [NexdriveResolver]); vcloud/zip stay
+ *    browser-downloads.
  */
 
 import android.content.Context
@@ -33,13 +35,10 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Semaphore
 import org.json.JSONArray
 import org.json.JSONObject
-import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
-/**
- * Registers the Vegamovies provider with CloudStream.
- */
+/** Registers the Vegamovies provider with CloudStream. */
 @CloudstreamPlugin
 class Vegamovies : Plugin() {
     override fun load(context: Context) {
@@ -47,43 +46,69 @@ class Vegamovies : Plugin() {
     }
 }
 
-/** One parsed download-group: the h5 label plus its nexdrive (or other) gateway URL. */
-internal data class DlLink(val label: String, val url: String)
+/** One download chip scraped under a heading: its gateway URL + chip text. */
+internal data class DlLink(val gatewayUrl: String, val chip: String, val heading: String)
 
-/** Everything [VegamoviesProvider.load] scrapes off a detail page, before TMDB enrichment. */
-internal data class ScrapedDetail(
-    val title: String,
-    val poster: String?,
-    val year: Int?,
-    val plot: String?,
-    val imdbId: String?,
-    val imdbRating: Double?,
-    val language: String?,
-    val isSeries: Boolean,
-    /** Per quality-resolution link groups for a movie. */
-    val links: List<DlLink>,
-    /** Episodes of a web-series post: (season, episode, links). */
-    val episodes: List<Triple<Int, Int?, List<DlLink>>>,
-    /** Season-pack links that belong to no specific episode. */
-    val packLinks: List<DlLink>,
+/** One payload entry handed to loadLinks(): concrete file URL or (gateway, idx). */
+internal data class PayloadLink(
+    val url: String,
+    /** Server family when known at scrape time (from chip), else "". */
+    val kind: String = "",
+    val heading: String = "",
+    /** Index into the gateway's ordered concrete links (series episodes). */
+    val idx: Int = 0,
+    /** True = [url] is a genxfm gateway that must be expanded. */
+    val isGateway: Boolean = true,
+    val season: Int? = null,
+    val episode: Int? = null,
 )
 
-/** The JSON payload stored in LoadResponse/Episode data for loadLinks(). */
-internal data class LinkPayload(val pageUrl: String, val links: List<DlLink>)
+internal data class LinkPayload(val pageUrl: String, val links: List<PayloadLink>) {
+    fun toJson(): String {
+        val arr = JSONArray()
+        links.forEach {
+            arr.put(
+                JSONObject().put("u", it.url).put("k", it.kind).put("h", it.heading)
+                    .put("i", it.idx).put("g", it.isGateway)
+                    .put("s", it.season ?: JSONObject.NULL).put("e", it.episode ?: JSONObject.NULL),
+            )
+        }
+        return JSONObject().put("page", pageUrl).put("links", arr).toString()
+    }
+
+    companion object {
+        fun fromJson(data: String): LinkPayload? {
+            val o = runCatching { JSONObject(data) }.getOrNull() ?: return null
+            val arr = o.optJSONArray("links") ?: return null
+            val links = (0 until arr.length()).mapNotNull { i ->
+                val l = arr.optJSONObject(i) ?: return@mapNotNull null
+                val u = l.optString("u").takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                PayloadLink(
+                    url = u,
+                    kind = l.optString("k"),
+                    heading = l.optString("h"),
+                    idx = l.optInt("i", 0),
+                    isGateway = l.optBoolean("g", true),
+                    season = l.optInt("s", -1).takeIf { it > 0 },
+                    episode = l.optInt("e", -1).takeIf { it > 0 },
+                )
+            }
+            return LinkPayload(o.optString("page"), links)
+        }
+    }
+}
 
 /**
  * Vegamovies provider — WordPress scraper with TMDB keyless enrichment and a
- * two-phase live-fill download pipeline (user spec Sept 2026):
+ * two-phase live-fill server pipeline (user spec Sept 2026):
  *
- *   Phase 1 (first ~10s): each quality group resolves its direct file URL
- *           (fastdl -> video-downloads.googleusercontent.com .mkv). The FIRST
- *           resolved link starts playback — the host begins the video as soon
- *           as one link crosses auto-skip priority while loadLinks keeps running.
- *   Phase 2 (background, 90s window): every remaining group keeps resolving;
- *           links stream into the change-server list THE MOMENT they land. A
- *           group whose direct resolution fails (dead fastdl link, missing
- *           googleusercontent, 403) gets its nexdrive/vcloud page emitted as
- *           a FILE link so the list always has ALL the website's servers.
+ *   Phase 1 (first ~10s): every server group's G-Drive chip is expanded →
+ *           embed → googleusercontent DIRECT file; the FIRST such link starts
+ *           playback while loadLinks keeps running.
+ *   Phase 2 (90s window): all remaining qualities/chips keep landing in the
+ *           change-server list in arrival order; download-only servers
+ *           (V-Cloud, Batch/Zip, dead embeds) are listed too — labeled
+ *           "[Downloadable]" so the player never auto-selects them.
  */
 class VegamoviesProvider : MainAPI() {
 
@@ -95,20 +120,29 @@ class VegamoviesProvider : MainAPI() {
         const val SEED_VEGA = "https://new2.vegamovies.futbol"
         const val SEED_ROG = "https://new2.rogmovies.click"
 
-        /** Live change-server window: loadLinks stays alive this long so the
-         *  server list keeps growing while the video plays (user spec: "after
-         *  solving give server list window in background when video keeps playing"). */
+        /** Live change-server window (user: server list must keep growing in
+         *  the background while the video plays). */
         const val LIVE_FILL_MS = 90_000L
-
-        /** How long [loadLinks] waits for the FIRST direct link before it is
-         *  (at most) this old when playback starts (user spec: "try both first
-         *  direct and after 10 sec after solving"). */
-        const val FIRST_DIRECT_BUDGET_MS = 10_000L
 
         const val SEARCH_MAX_RESULTS = 10
 
         /** Matches a nexdrive-gateway download link anywhere in a page. */
-        val GENXFM_REGEX = Regex("""https?://[a-z0-9.\-]*nexdrive\.[a-z]{2,10}/genxfm[^\s"'<>\\]+""", RegexOption.IGNORE_CASE)
+        val GENXFM_REGEX = Regex(
+            """https?://[a-z0-9.\-]*nexdrive\.[a-z]{2,10}/genxfm[^\s"'<>\\]+""",
+            RegexOption.IGNORE_CASE,
+        )
+
+        /** A genxfm anchor belongs to the CURRENT heading only when that heading
+         *  looks like a download group (quality / size / codec / pack wording) —
+         *  comment, search, sidebar and "Info:" headings never collect links. */
+        val DOWNLOAD_HEADING = Regex(
+            """(?i)(\d{3,4}p\b|4K|WEB[\s-]?DL|WEBRip|Blu\s?Ray|BD-?Rip|HD-?Rip|DVDRip|x26[45]|HEVC|AVC\b|\d+(?:\.\d+)?\s?(?:GB|MB)(?:/|\b)|/ZiP|/ZIP|\bZIP\b|Batch|Season\s*\d|\bPack\b|Complete|DUAL\s*[- ]?AUDIO|HINDI|TAMIL|TELUGU|\bEP(?:\.|ISODE)?\s*\d|S\d{1,2}[\s._-]?E\d{1,3})""",
+        )
+
+        /** Heading noise on comments/sidebar blocks that must not label links. */
+        val NOISE_HEADING = Regex(
+            """(?i)(leave a comment|search movies|recent updates|related|screenshot|official portal|vegamovies 20|comment )""",
+        )
     }
 
     override var mainUrl = SEED_VEGA
@@ -124,17 +158,13 @@ class VegamoviesProvider : MainAPI() {
     private val commonHeaders = mapOf("User-Agent" to UA, "Accept-Language" to "en-US,en;q=0.9")
     private var cfKiller: CloudflareKiller? = null
 
-    /** In-session cache: detail page URL -> parsed payload JSON (re-tap = instant). */
-    private val detailCache = ConcurrentHashMap<String, String>()
-
-    // Getter (not one-shot val): category URLs must follow the live domains
-    // whenever [DomainResolver] rotates to a fresh mirror mid-session.
+    // Getter (not one-shot val): category URLs follow the live domains.
     override val mainPage
         get() = mainPageOf(
             Pair("$mainUrl/", "Latest Releases"),
             Pair("$mainUrl/dual-audio-movies/", "Dual Audio Movies"),
             Pair("$mainUrl/hindi-dubbed-movies/", "Hindi Dubbed"),
-            Pair(bollywoodUrl + "/bollywood/", "Bollywood"),
+            Pair("$bollywoodUrl/bollywood/", "Bollywood"),
             Pair("$mainUrl/web-series/", "Web Series"),
             Pair("$mainUrl/web-series/netflix/", "Netflix"),
             Pair("$mainUrl/web-series/amazon-prime-video/", "Amazon Prime"),
@@ -152,17 +182,10 @@ class VegamoviesProvider : MainAPI() {
     /** True when [doc] is a Cloudflare interstitial. */
     internal fun isChallenge(doc: Document): Boolean {
         val t = doc.title()
-        return t.contains("just a moment", true) ||
-            t.contains("checking your browser", true) ||
-            doc.selectFirst("meta[name=robots][content*=noindex]") != null &&
-            doc.body().text().isBlank()
+        return t.contains("just a moment", true) || t.contains("checking your browser", true)
     }
 
-    /**
-     * Fetch [url]: fast path with plain headers first (CloudStream persists the
-     * cookie jar), CloudflareKiller solve on a challenge. Returns null on
-     * hard failure; callers degrade gracefully.
-     */
+    /** Fetch [url]: plain fast path, CloudflareKiller solve on challenge. */
     suspend fun fetchDoc(
         url: String,
         timeoutSeconds: Long = 12,
@@ -177,92 +200,66 @@ class VegamoviesProvider : MainAPI() {
         return try {
             val killer = cfKiller ?: CloudflareKiller().also { cfKiller = it }
             val solved = app.get(url, timeout = 20, headers = headers, interceptor = killer).document
-            if (isChallenge(solved)) {
-                cfKiller = null
-                null
-            } else solved
+            if (isChallenge(solved)) { cfKiller = null; null } else solved
         } catch (e: Exception) {
             null
         }
-    }
-
-    /** Re-point a URL whose host is a known vegamovies/rogmovies domain at the
-     *  current live domain, so cached/old-domain links keep working after a rotation. */
-    fun liveUrl(url: String): String {
-        val host = Regex("""^https?://([^/]+)""").find(url)?.groupValues?.get(1)?.lowercase() ?: return url
-        val live = when {
-            host.contains("vegamovies") -> mainUrl
-            host.contains("rogmovies") -> bollywoodUrl
-            else -> return url
-        }
-        val liveHost = Regex("""^https?://([^/]+)""").find(live)?.groupValues?.get(1) ?: return url
-        return url.replaceFirst(Regex("://$host"), "://$liveHost")
     }
 
     // ------------------------------------------------------------------
     // Domain self-healing
     // ------------------------------------------------------------------
 
-    /**
-     * Discovers the live Hollywood + Bollywood domains by scanning "OFFICIAL
-     * PORTAL HUB" cross-links on whichever seed site still answers. Both sites
-     * always announce each other, so one alive seed heals both.
-     */
+    /** Live Hollywood + Bollywood domains via the posts' own cross-links. */
     suspend fun refreshDomains() = coroutineScope {
         val a = async { fetchDoc(SEED_VEGA, timeoutSeconds = 8) }
         val b = async { fetchDoc(SEED_ROG, timeoutSeconds = 8) }
-        val docs = listOf(a.await(), b.await()).filterNotNull()
-        for (doc in docs) {
+        for (doc in listOf(a.await(), b.await()).filterNotNull()) {
             mainUrl = DomainResolver.pick(doc, "vegamovies") ?: mainUrl
             bollywoodUrl = DomainResolver.pick(doc, "rogmovies") ?: bollywoodUrl
         }
     }
 
     internal object DomainResolver {
-        /** Picks the most common href for family (vegamovies|rogmovies) with a
-         *  non-seed prefix (new3.*, live*…), falling back to any host of the family. */
-        fun pick(doc: Document, family: String): String? {
-            val hosts = doc.select("a[href]")
-                .mapNotNull { Regex("""https?://[a-z0-9.\-]*$family\.[a-z]{2,10}""", RegexOption.IGNORE_CASE)
-                    .find(it.attr("abs:href"))?.value?.lowercase() }
+        /** The most common vegamovies / rogmovies family href on the page
+         *  (the live mirror; each site always announces the other). */
+        fun pick(doc: Document, family: String): String? =
+            doc.select("a[href]")
+                .mapNotNull {
+                    Regex("""https?://[a-z0-9.\-]*$family\.[a-z]{2,10}""", RegexOption.IGNORE_CASE)
+                        .find(it.attr("abs:href"))?.value?.lowercase()
+                }
                 .filterNot { it.contains("apk") || it.endsWith(".cfd") }
-                .groupingBy { it.substringBeforeLast('/', it) }
-                .eachCount()
+                .map { it.substringBefore('/', it) }
+                .groupingBy { it }.eachCount()
                 .maxByOrNull { it.value }
-                ?.key ?: return null
-            return hosts.trimEnd('/')
-        }
+                ?.key
     }
 
     // ------------------------------------------------------------------
-    // Search — Meilisearch JSON proxy on both sites, TMDB-poster backfill
+    // Search — Meilisearch JSON proxy on both sites
     // ------------------------------------------------------------------
 
     override suspend fun search(query: String): List<SearchResponse>? = coroutineScope {
         if (query.isBlank()) return@coroutineScope null
         val vega = async { siteSearch(mainUrl, query) }
         val rog = async { siteSearch(bollywoodUrl, query) }
-        val merged = (vega.await() + rog.await())
-            .distinctBy { it.url }
-            .take(SEARCH_MAX_RESULTS)
+        var merged = (vega.await() + rog.await()).distinctBy { it.url }.take(SEARCH_MAX_RESULTS)
         if (merged.isEmpty()) {
-            // Seeds may be stale: heal domains once and retry.
             refreshDomains()
-            val retry = (listOf(mainUrl, bollywoodUrl).map { siteSearch(it, query, force = true) }.flatten())
-                .distinctBy { it.url }
-                .take(SEARCH_MAX_RESULTS)
-            if (retry.isEmpty()) return@coroutineScope null
-            postEnrich(retry)
-            return@coroutineScope retry
+            merged = listOf(mainUrl, bollywoodUrl)
+                .map { siteSearch(it, query) }.flatten()
+                .distinctBy { it.url }.take(SEARCH_MAX_RESULTS)
         }
-        postEnrich(merged)
+        if (merged.isEmpty()) return@coroutineScope null
+        backfillPosters(merged)
         merged
     }
 
     override suspend fun quickSearch(query: String): List<SearchResponse>? = search(query)
 
-    /** Calls {site}/ts-search.php and maps JSON hits to SearchResponses. */
-    internal suspend fun siteSearch(baseUrl: String, query: String, force: Boolean = false): List<SearchResponse> {
+    /** Calls {site}/ts-search.php; pure JSON mapping in [parseSearchHits]. */
+    internal suspend fun siteSearch(baseUrl: String, query: String): List<SearchResponse> {
         val url = "$baseUrl/ts-search.php?q=${URLEncoder.encode(query.trim(), "UTF-8")}&page=1"
         val text = runCatching {
             app.get(url, timeout = 7, headers = commonHeaders + mapOf("Referer" to "$baseUrl/")).text
@@ -270,62 +267,62 @@ class VegamoviesProvider : MainAPI() {
         return parseSearchHits(text, baseUrl)
     }
 
-    /**
-     * Pure: map a ts-search.php JSON response into SearchResponses. Exported
-     * (internal) so unit tests run against captured payloads without network.
-     */
+    /** Pure: map a ts-search.php JSON response into SearchResponses. */
     internal fun parseSearchHits(json: String, baseUrl: String): List<SearchResponse> {
         val root = runCatching { JSONObject(json) }.getOrNull() ?: return emptyList()
         val hits = root.optJSONArray("hits") ?: return emptyList()
         return (0 until hits.length()).mapNotNull { i ->
             val doc = hits.optJSONObject(i)?.optJSONObject("document") ?: return@mapNotNull null
-            val permalink = str(doc, "permalink") ?: return@mapNotNull null
-            val rawTitle = str(doc, "post_title") ?: return@mapNotNull null
+            val permalink = doc.optString("permalink").takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            val rawTitle = doc.optString("post_title").takeIf { it.isNotBlank() } ?: return@mapNotNull null
             val title = cleanSearchTitle(rawTitle)
             if (title.isBlank()) return@mapNotNull null
             val absolute = if (permalink.startsWith("http")) permalink else baseUrl.trimEnd('/') + permalink
-            val categories = parseCategoryArray(doc.optJSONArray("category"))
-            val poster = str(doc, "post_thumbnail")
-            val year = Regex("""\((\d{4})\)?""").find(rawTitle)?.groupValues?.get(1)?.toIntOrNull()
+            val categories = doc.optJSONArray("category")?.let { c ->
+                (0 until c.length()).mapNotNull { ci -> c.optString(ci).takeIf { it.isNotBlank() } }
+            } ?: emptyList()
+            val poster = doc.optString("post_thumbnail").takeIf { it.isNotBlank() }
+            val year = Regex("""\((\d{4})""").find(rawTitle)?.groupValues?.get(1)?.toIntOrNull()
             if (isSeries(permalink, categories, rawTitle)) {
                 newTvSeriesSearchResponse(title, absolute, TvType.TvSeries) {
-                    posterUrl = poster
-                    this.year = year
+                    posterUrl = poster; this.year = year
                 }
             } else {
                 newMovieSearchResponse(title, absolute, TvType.Movie) {
-                    posterUrl = poster
-                    this.year = year
+                    posterUrl = poster; this.year = year
                 }
             }
         }
     }
 
-    internal fun parseCategoryArray(arr: JSONArray?): List<String> =
-        arr?.let { (0 until it.length()).mapNotNull { i -> runCatching { it.getString(i) }.getOrNull() } } ?: emptyList()
-
-    /** Clean a "Download X (2019) ... qualities" title down to "X (2019)". */
+    /** Clean "Download X (2019) Dual Audio … 480p [500MB] | 720p …" to "X (2019)". */
     internal fun cleanSearchTitle(raw: String): String {
         var t = raw.trim().removePrefix("Download").trim()
-        // Cut the title at the year+quality noise: keep through the closing "(2019)".
-        Regex("""^(.*?\(\d{4}[^)]*\))[) ]*\s""").find(t + " ")?.let { m ->
-            t = m.groupValues[1].trim()
-        } ?: run {
-            t = t.substringBefore("] ").trim()
+        // Keep through the year parenthesis when present — anything after it is
+        // quality/source noise and gets dropped wholesale. Season tags BEFORE
+        // the year ("Reacher : Season 4 (2026)") survive with the kept prefix.
+        val until = Regex("""(.*?\(\d{4}[^)]*\))""").find(t)
+        if (until != null) {
+            return until.groupValues[1].trim().trimEnd(' ', '-', '|', ':', ',')
         }
-        // Strip trailing qualities/sources that survived.
-        t = t.replace(Regex("""(?i)\s*(\d{3,4}p.*|WEB-?DL.*|BluRay.*|HDTS.*|HD.*|4K.*)$"""), "").trim()
-        return t.trim(' ', '-', '|', ':')
+        // No year: trim trailing quality/source noise.
+        t = t.replace(
+            Regex("""(?i)\)\s*(\d{3,4}p[\s\S]*|WEB[\s-]?DL.*|BluRay.*|HDTS.*|HDTV.*|4K.*|Dual Audio.*|Hindi.*|S\d{2}E\d{2,}.*)$"""),
+            "",
+        ).trim()
+        return t.trim(' ', '-', '|', ':', ',').ifBlank { raw.trim().take(80) }
     }
 
-    /** Series heuristic: permalink categories or title carry series markers. */
+    /** Series heuristic for search/listing cards. */
     internal fun isSeries(permalink: String, categories: List<String>, rawTitle: String): Boolean {
         val hay = (permalink + " " + categories.joinToString(" ") + " " + rawTitle).lowercase()
-        return Regex("""season|series|s\d{1,2}e\d|-ep|episod|drama|anime|tv-show|web-?show""").containsMatchIn(hay)
+        return Regex(
+            """season|series|-series|drama|anime|s\d{1,2}e\d{1,3}|web-?show|tv-show|\beps\b|multimovies\.|complete""",
+        ).containsMatchIn(hay) && !Regex("""full movie|-movie\b""").containsMatchIn(hay)
     }
 
-    /** Fill missing posters from TMDB in parallel (bounded, best-effort). */
-    private suspend fun postEnrich(results: List<SearchResponse>) {
+    /** TMDB poster backfill for results without one (bounded, best-effort). */
+    private suspend fun backfillPosters(results: List<SearchResponse>) {
         val need = results.filter { it.posterUrl.isNullOrBlank() }.take(6)
         if (need.isEmpty()) return
         val sem = Semaphore(3)
@@ -335,13 +332,9 @@ class VegamoviesProvider : MainAPI() {
                     sem.acquire()
                     try {
                         withTimeoutOrNull(2500L) {
-                            val hit = MetadataService.search(r.name).firstOrNull()
-                            if (r.posterUrl.isNullOrBlank() && hit?.poster != null) r.posterUrl = hit.poster
-                            hit
+                            MetadataService.search(r.name).firstOrNull()?.poster?.let { r.posterUrl = it }
                         }
-                    } finally {
-                        sem.release()
-                    }
+                    } finally { sem.release() }
                 }
             }.awaitAll()
         }
@@ -353,255 +346,308 @@ class VegamoviesProvider : MainAPI() {
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         val base = request.data
-        val url = if (page > 1) "${base.trimEnd('/')}/page/$page/" else base
-        val doc = fetchDoc(url)
-            ?: run {
-                refreshDomains()
-                fetchDoc(if (page > 1) "${base.trimEnd('/')}/page/$page/" else base)
-            } ?: return newHomePageResponse(request.name, emptyList())
-        val items = parseListing(doc)
-        postEnrich(items)
-        return newHomePageResponse(request.name, items, false)
+        val target = if (page > 1) "${base.trimEnd('/')}/page/$page/" else base
+        var doc = fetchDoc(target, timeoutSeconds = 14)
+        if (doc == null) {
+            refreshDomains()
+            val healed = if (page > 1) "${base.trimEnd('/')}/page/$page/" else base
+            doc = fetchDoc(healed, timeoutSeconds = 14) ?: fetchDoc(target, timeoutSeconds = 14)
+        }
+        val items = doc?.let { parseListing(it) } ?: emptyList()
+        backfillPosters(items)
+        return newHomePageResponse(request.name, items)
     }
 
     /** Pure: scrape poster-cards from a listing page. */
     internal fun parseListing(doc: Document): List<SearchResponse> {
-        return doc.select("div.poster-card, article, div[itemprop=item]").mapNotNull { card ->
-            val href = card.selectFirst("meta[itemprop=url]")?.attr("content")
-                ?: card.selectFirst("""a[href*="/download-"]""")?.attr("abs:href")
-                ?: return@mapNotNull null
-            if (!Regex("""/download-|/[\w\-]+-\d{4}""").containsMatchIn(href)) return@mapNotNull null
-            val img = card.selectFirst("img") ?: return@mapNotNull null
-            val rawTitle = img.attr("alt").ifBlank { card.selectFirst(".poster-title, h2, h3")?.text() ?: "" }
-            if (rawTitle.isBlank()) return@mapNotNull null
-            val poster = listOf(
-                img.attr("src"), img.attr("abs:data-src"), img.attr("data-lazy-src"),
-            ).firstOrNull { it.isNotBlank() }
-            val title = cleanSearchTitle(rawTitle)
-            val year = Regex("""\((\d{4})""").find(rawTitle)?.groupValues?.get(1)?.toIntOrNull()
-            val cats = card.select(".poster-quality, .badge, .category").map { it.text() }
-            if (isSeries(href, cats, rawTitle)) {
-                newTvSeriesSearchResponse(title, href, TvType.TvSeries) {
-                    posterUrl = poster; this.year = year
-                }
-            } else {
-                newMovieSearchResponse(title, href, TvType.Movie) {
-                    posterUrl = poster; this.year = year
-                }
+        return doc.select("div.poster-card").mapNotNull { card ->
+            cardToSearch(card)
+        }.ifEmpty {
+            // Fallback theme: <a href*=/download-> + nearby img.
+            doc.select("a[href*=\"/download-\"]").mapNotNull { a ->
+                val card = a.parent() ?: return@mapNotNull null
+                cardToSearch(card, a)
             }
         }.distinctBy { it.url }
     }
 
+    private fun cardToSearch(card: Element, link: Element? = null): SearchResponse? {
+        val href = card.selectFirst("meta[itemprop=url]")?.attr("content")?.takeIf { it.isNotBlank() }
+            ?: link?.attr("abs:href")
+            ?: card.selectFirst("""a[href*="/download-"]""")?.attr("abs:href")
+            ?: return null
+        if (!GENXFM_REGEX.containsMatchIn(href) && !href.contains("/download-")) return null
+        val img = card.selectFirst("img")
+        val rawTitle = img?.attr("alt").orEmpty().ifBlank { card.selectFirst(".poster-title, h2, h3")?.text().orEmpty() }
+            .ifBlank { return null }
+        val poster = img?.let { i ->
+            listOf(i.attr("abs:src"), i.attr("abs:data-src"), i.attr("abs:data-lazy-src")).firstOrNull { it.isNotBlank() }
+        }
+        val title = cleanSearchTitle(rawTitle)
+        val year = Regex("""\((\d{4})""").find(rawTitle)?.groupValues?.get(1)?.toIntOrNull()
+        val cats = card.select(".poster-quality, .badge").map { it.text() }
+        return if (isSeries(href, cats, rawTitle)) {
+            newTvSeriesSearchResponse(title, href, TvType.TvSeries) { posterUrl = poster; this.year = year }
+        } else {
+            newMovieSearchResponse(title, href, TvType.Movie) { posterUrl = poster; this.year = year }
+        }
+    }
+
     // ------------------------------------------------------------------
-    // Load — detail page + TMDB enrichment
+    // Load — detail page, sections, gateway expansion, TMDB enrichment
     // ------------------------------------------------------------------
 
     override suspend fun load(url: String): LoadResponse? {
-        detailCache[url]?.let { return fromPayload(url, it) }
         val doc = fetchDoc(url) ?: run {
             refreshDomains()
-            fetchDoc(liveUrl(url)) ?: throw ErrorLoadingException("Could not load $url")
+            fetchDoc(url) ?: throw ErrorLoadingException("Could not load $url")
         }
-        val scraped = parseDetail(doc, url)
-            ?: throw ErrorLoadingException("Unsupported page: $url")
-
-        // TMDB enrichment: imdbId scraped from the page makes the match exact.
-        val meta = withTimeoutOrNull(6000L) {
-            MetadataService.enrich(scraped.title, scraped.year?.toString(), scraped.imdbId)
-        }
-
-        val title = meta?.name ?: scraped.title
-        val poster = scraped.poster?.takeIf { it.isNotBlank() } ?: meta?.poster
-        val plot = meta?.overview ?: scraped.plot
-        val tags = (meta?.genres ?: scraped.language?.let { listOf(it) })
-        val year = scraped.year ?: meta?.year?.toIntOrNull()
-
-        val payload = buildPayload(url, scraped)
-        detailCache[url] = payload
-
-        return if (scraped.isSeries) {
-            val episodes = scraped.episodes.map { (season, ep, links) ->
-                newEpisode(LinkPayload(url, links).toJson()) {
-                    this.name = "Episode ${ep ?: "?"}"
-                    this.season = season
-                    this.episode = ep
-                }
-            } + scraped.packLinks.map { pack ->
-                newEpisode(LinkPayload(url, listOf(pack)).toJson()) {
-                    this.name = pack.label
-                }
-            }
-            newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
-                posterUrl = poster
-                backgroundPosterUrl = meta?.backdrop
-                this.year = year
-                this.plot = plot
-                this.tags = tags
-                this.actors = meta?.cast
-                scraped.imdbId?.let { addImdbId(it) }
-                (meta?.rating ?: scraped.imdbRating)?.let { addScore(it.toString(), 10) }
-            }
-        } else {
-            newMovieLoadResponse(title, url, TvType.Movie, payload) {
-                posterUrl = poster
-                backgroundPosterUrl = meta?.backdrop
-                this.year = year
-                this.plot = plot
-                this.tags = tags
-                this.actors = meta?.cast
-                scraped.imdbId?.let { addImdbId(it) }
-                (meta?.rating ?: scraped.imdbRating)?.let { addScore(it.toString(), 10) }
-            }
-        }
-    }
-
-    /** Rebuild a LoadResponse from the cached payload (poster/title lost — refetch metadata cheaply). */
-    private suspend fun fromPayload(url: String, payload: String): LoadResponse? {
-        val json = runCatching { JSONObject(payload) }.getOrNull() ?: return null
-        val links = json.optJSONArray("links") ?: return null
-        val list = dlLinksFromJson(links)
-        val title = url.substringAfterLast('/').substringBefore("-20").replace('-', ' ').trim()
-        return if (json.optBoolean("series", false)) {
-            newTvSeriesLoadResponse(title, url, TvType.TvSeries, listOf(
-                newEpisode(LinkPayload(url, list).toJson()) { this.name = title }
-            ))
-        } else {
-            newMovieLoadResponse(title, url, TvType.Movie, payload)
-        }
-    }
-
-    private fun buildPayload(pageUrl: String, scraped: ScrapedDetail): String {
-        val arr = JSONArray()
-        (scraped.links + scraped.episodes.flatMap { it.third } + scraped.packLinks).forEach {
-            arr.put(JSONObject().put("l", it.label).put("u", it.url))
-        }
-        val o = JSONObject()
-            .put("page", pageUrl)
-            .put("links", arr)
-            .put("series", scraped.isSeries)
-        val s = o.toString()
-        return s
-    }
-
-    private fun LinkPayload.toJson(): String = JSONObject()
-        .put("page", pageUrl)
-        .put("links", JSONArray().apply {
-            links.forEach { put(JSONObject().put("l", it.label).put("u", it.url)) }
-        })
-        .toString()
-
-    /** Parses a data payload (movie payload / per-episode JSON) into LinkPayload. */
-    internal fun parsePayload(data: String): LinkPayload? {
-        val o = runCatching { JSONObject(data) }.getOrNull() ?: return null
-        val page = str(o, "page") ?: ""
-        val arr = o.optJSONArray("links") ?: return null
-        return LinkPayload(page, dlLinksFromJson(arr))
-    }
-
-    private fun dlLinksFromJson(arr: JSONArray): List<DlLink> =
-        (0 until arr.length()).mapNotNull { i ->
-            val l = arr.optJSONObject(i) ?: return@mapNotNull null
-            val u = str(l, "u") ?: return@mapNotNull null
-            DlLink(str(l, "l") ?: "", u)
-        }
-
-    // ------------------------------------------------------------------
-    // Detail-page parsing
-    // ------------------------------------------------------------------
-
-    /** Pure parse of a Vegamovies/RogMovies download post. */
-    internal fun parseDetail(doc: Document, pageUrl: String): ScrapedDetail? {
-        val h1 = doc.selectFirst("h1, entry-title, .post-title")?.text()?.trim()
+        val h1 = doc.selectFirst("h1, .entry-title, .post-title")?.text()?.trim()
             ?: doc.selectFirst("meta[property=og:title]")?.attr("content")?.trim()
-            ?: return null
+            ?: throw ErrorLoadingException("No title on $url")
+
+        val scraped = parseDetail(doc)
+        if (scraped.groups.isEmpty()) throw ErrorLoadingException("No download links on $url")
+
         val title = cleanSearchTitle(h1.removePrefix("Download").trim())
         val year = Regex("""\((\d{4})""").find(h1)?.groupValues?.get(1)?.toIntOrNull()
-        val poster = doc.selectFirst("meta[property=og:image]")?.attr("abs:content")
-            ?.ifBlank { null }
-            ?: doc.selectFirst("article img, .entry-content img")?.absUrl("src")
-
+        val poster = doc.selectFirst("meta[property=og:image]")?.attr("abs:content")?.takeIf { it.isNotBlank() }
+            ?: doc.selectFirst(".entry-content img, article img")?.absUrl("src")
         val body = doc.body().text()
-        val imdbId = Regex("""imdb\.com/title/(tt\d+)""").find(body)?.groupValues?.get(1)
-            ?: doc.select("a[href]").firstOrNull { it.attr("href").contains("imdb.com/title/") }
-                ?.let { Regex("""(tt\d+)""").find(it.attr("href"))?.value }
-        val imdbRating = Regex("""(?i)IMDb Rating:?\s*[-–]?\s*([\d.]+)""").find(body)?.groupValues?.get(1)?.toDoubleOrNull()
-        val language = Regex("""(?im)^Language:\s*(.+)$""").find(body)?.groupValues?.get(1)?.trim()
-
-        val plot = Regex("""(?i)SYNOPSIS|PLOT:""").find(body)?.let { m ->
+        val imdbId = scraped.imdbId
+        val imdbRating = Regex("""(?i)IMDb Rating:?\s*[-–]?\s*([\d.]+)""").find(body)
+            ?.groupValues?.get(1)?.toDoubleOrNull()
+        val plot = Regex("""(?i)SYNOPSIS|\bPLOT:|\bPlot\b""").find(body)?.let { m ->
             val after = body.substring(m.range.last + 1)
             val cut = after.indexOf("Screenshots", ignoreCase = true)
             (if (cut >= 0) after.substring(0, cut) else after)
-                .trim(':', '-', ' ', '\n')
-                .take(1200)
-                .takeIf { it.isNotBlank() }
+                .trim(':', '-', ' ', '\n').take(1200).takeIf { it.isNotBlank() }
         }
+        val language = Regex("""(?im)^\s*Language:\s*(.+)$""").find(body)?.groupValues?.get(1)?.trim()
 
-        // Download groups: every nexdrive link carries its nearest preceding heading.
-        val anchors = doc.select("a[href]").filter { GENXFM_REGEX.containsMatchIn(it.attr("abs:href")) }
-        if (anchors.isEmpty()) return null
-        val links = anchors.mapNotNull { a ->
-            val u = a.attr("abs:href")
-            val label = nearestHeading(a)
-                ?: a.text().takeIf { it.isNotBlank() && !it.contains("download", true) }
-                ?: "Download"
-            DlLink(label, u)
+        val meta = withTimeoutOrNull(6000L) { MetadataService.enrich(title, year?.toString(), imdbId) }
+
+        val seasonsFor = scraped.groups.mapNotNull { it.season }.distinct()
+        val isSeriesTitle = isSeries(url, emptyList(), h1)
+
+        return if (isSeriesTitle || (seasonsFor.isNotEmpty() && scraped.groups.size > 1)) {
+            buildSeriesResponse(url, title, year, poster, meta, imdbId, imdbRating, plot, language, scraped)
+        } else {
+            buildMovieResponse(url, title, year, poster, meta, imdbId, imdbRating, plot, language, scraped)
         }
-        if (links.isEmpty()) return null
-
-        // Series? Split per-episode when labels carry episode markers.
-        val epRegex = Regex("""(?i)(?:S(\d{1,2})[\s.-]*E(\d{1,3})|(\d{1,2})x(\d{2})|(?:episode|ep\.?)[\s:#-]*(\d{1,3}))""")
-        val episodes = mutableMapOf<Pair<Int, Int>, MutableList<DlLink>>()
-        val unmatched = mutableListOf<DlLink>()
-        for (l in links) {
-            val m = epRegex.find(l.label)
-            if (m != null) {
-                val s = (m.groupValues[1].ifBlank { m.groupValues[3] }).toIntOrNull() ?: 1
-                val e = (m.groupValues[2].ifBlank { m.groupValues[4] }.ifBlank { m.groupValues[5] }).toIntOrNull()
-                episodes.getOrPut(s to (e ?: 0)) { mutableListOf() }.add(l)
-            } else unmatched.add(l)
-        }
-        val isSeries = episodes.isNotEmpty() ||
-            (Regex("""(?i)season|series|drama|anime""").containsMatchIn(h1) && links.size > 2)
-
-        val epList = episodes.entries.map { (key, lks) -> Triple(key.first, key.second.takeIf { it > 0 }, lks) }
-            .sortedWith(compareBy({ it.first }, { it.second ?: 0 }))
-        return ScrapedDetail(
-            title = title, poster = poster, year = year,
-            plot = plot, imdbId = imdbId, imdbRating = imdbRating,
-            language = language, isSeries = isSeries,
-            links = if (isSeries) emptyList() else links,
-            episodes = if (isSeries) epList else emptyList(),
-            packLinks = if (isSeries && unmatched.isNotEmpty() && epList.isNotEmpty()) unmatched else emptyList(),
-        )
     }
 
-    /** The closest preceding heading (h1-h6 / strong) text for a download anchor:
-     *  walk previous siblings and their subtrees, then fall back to the earliest
-     *  heading inside an ancestor block that isn't a generic label. */
-    private fun nearestHeading(a: Element): String? {
-        fun headingText(el: Element): String? {
-            if (Regex("^h[1-6]$").matches(el.tagName()) || el.tagName() == "strong" || el.tagName() == "b") {
-                val t = el.text().trim()
-                if (t.isNotBlank() && t.length < 200) return t
+    /** Parsed detail: download groups + any IMDb id found on the page. */
+    internal data class Scraped(val imdbId: String?, val groups: List<Group>)
+    /** One quality heading block and the server chips under it. */
+    internal data class Group(val heading: String, val season: Int?, val links: List<DlLink>, val pack: Boolean)
+
+    /**
+     * Walk the post body in order: every h1-h6 sets the current heading; a
+     * genxfm anchor is a server chip belonging to that heading. Headings are
+     * quality lines ("... 720p WEB-DL x264 [800MB/E]"), season badges, or noise
+     * (comments/search) which never labels anything.
+     */
+    internal fun parseDetail(doc: Document): Scraped {
+        val imdbId = Regex("""imdb\.com/title/(tt\d+)""", RegexOption.IGNORE_CASE)
+            .find(doc.body().html())?.groupValues?.get(1)
+        val groups = ArrayList<Group>()
+        var heading = ""
+        var anchors = ArrayList<DlLink>()
+
+        fun closeGroup() {
+            if (anchors.isNotEmpty() && heading.isNotBlank()) {
+                val (season, _) = LinkNaming.seasonEpisodeFrom(heading)
+                groups += Group(heading, season, anchors.toList(), LinkNaming.isPack(heading))
             }
-            return el.select("h1,h2,h3,h4,h5,h6,strong").lastOrNull()?.text()?.trim()
-                ?.takeIf { it.isNotBlank() && it.length < 200 }
+            anchors = ArrayList()
         }
-        var el: Element? = a.previousElementSibling()
-        while (el != null) {
-            headingText(el)?.let { return it }
-            el = el.previousElementSibling()
+
+        val root = doc.selectFirst("div.entry-content, article, main") ?: doc.body()
+        for (el in root.getAllElements()) {
+            when {
+                el.tagName().matches(Regex("h[1-6]")) -> {
+                    val t = el.text().trim()
+                    if (t.isNotBlank() && t.length < 220) {
+                        if (anchors.isNotEmpty()) closeGroup()
+                        // Download-group-shaped headings take links; everything
+                        // else (Info:, Screenshots:, comments, sidebar) turns
+                        // labelling off until the next download-shaped heading.
+                        heading = if (DOWNLOAD_HEADING.containsMatchIn(t)) t else ""
+                    }
+                }
+                el.tagName() == "a" -> {
+                    val href = el.attr("abs:href")
+                    if (GENXFM_REGEX.containsMatchIn(href)) {
+                        anchors += DlLink(href.trimEnd('/') + "/", LinkNaming.kindFromChip(el.text()), heading)
+                    }
+                }
+            }
         }
-        a.parents().forEach { parent ->
-            parent.select("h1,h2,h3,h4,h5,h6,strong").firstOrNull()
-                ?.text()?.trim()?.takeIf { it.isNotBlank() && it.length < 200 && !it.contains("Download Now", true) }
-                ?.let { return it }
+        closeGroup()
+        // Merge groups sharing a heading but split by noise? Group by heading to dedupe.
+        val merged = groups.groupBy { it.heading }.map { (h, gs) ->
+            gs.first().copy(links = gs.flatMap { it.links }.distinctBy { it.gatewayUrl })
+        }.filter { it.links.isNotEmpty() }
+        return Scraped(imdbId, merged)
+    }
+
+    /** Expand all gateways of a scrap into concrete PayloadLinks (parallel). */
+    private suspend fun expandAll(scraped: Scraped, referer: String): List<Pair<Group, List<PayloadLink>>> =
+
+        coroutineScope {
+            val sem = Semaphore(6)
+            scraped.groups.map { g ->
+                async {
+                    sem.acquire()
+                    try {
+                        val concrete = g.links.flatMap { dl ->
+                            val chipKind = LinkNaming.kindFromChip(dl.chip)
+                            val exp = NexdriveResolver.expand(dl.gatewayUrl, referer, commonHeaders)
+                            when {
+                                exp.links.isEmpty() -> listOf(
+                                    PayloadLink(dl.gatewayUrl, chipKind.ifBlank { Servers.GATE }, g.heading, 0, true),
+                                )
+                                // Concrete servers of this chip. The chip's family
+                                // wins over the host guess (a Batch/Zip chip is
+                                // served by vcloud URLs but is an archive).
+                                // idx = episode ordinal within the family.
+                                else -> exp.links.map { c ->
+                                    PayloadLink(c.url, chipKind.ifBlank { c.kind }, g.heading, c.idx, false)
+                                }
+                            }
+                        }.distinctBy { it.url } // two chips may share one gateway
+                        g to concrete
+                    } finally { sem.release() }
+                }
+            }.awaitAll()
         }
-        return null
+
+    private suspend fun buildMovieResponse(
+        url: String, title: String, year: Int?, poster: String?,
+        meta: MetadataService.TmdbDetail?, imdbId: String?, imdbRating: Double?,
+        plot: String?, language: String?, scraped: Scraped,
+    ): LoadResponse {
+        val groups = expandAll(scraped, url)
+        val links = groups.flatMap { it.second }
+        val payload = LinkPayload(url, links).toJson()
+        return newMovieLoadResponse(title, url, TvType.Movie, payload) {
+            posterUrl = poster ?: meta?.poster
+            backgroundPosterUrl = meta?.backdrop
+            this.year = year ?: meta?.year?.toIntOrNull()
+            this.plot = meta?.overview ?: plot
+            this.tags = meta?.genres ?: language?.let { listOf(it) }
+            this.actors = meta?.cast
+            imdbId?.let { addImdbId(it) }
+            (meta?.rating ?: imdbRating)?.let { addScore(it.toString(), 10) }
+        }
+    }
+
+    /**
+     * How many episodes this set of concrete links reveals: the largest number
+     * of ordered links sharing ONE server family (each family lists one file
+     * per episode, in order). A quality gate with one G-Drive + one V-Cloud
+     * link is 1 episode on 2 servers (max family size 1), while a 12-episode
+     * G-Drive chip is 12. ZIP/pack links never inflate the count.
+     */
+    private fun List<PayloadLink>.familyEpisodeCount(): Int =
+        filter { it.kind != Servers.ZIP }
+            .groupBy { it.kind }
+            .maxOfOrNull { (_, same) -> same.maxOf { it.idx } + 1 }
+            ?: 0
+
+    /**
+     * Series: gateways already expanded by [expandAll]. Each group whose links
+     * are per-episode contributes one file per episode (in page order); groups
+     * with a single link or pack badges become "Season N (Pack)" episodes.
+     */
+    private suspend fun buildSeriesResponse(
+        url: String, title: String, year: Int?, poster: String?,
+        meta: MetadataService.TmdbDetail?, imdbId: String?, imdbRating: Double?,
+        plot: String?, language: String?, scraped: Scraped,
+    ): LoadResponse {
+        val groups = expandAll(scraped, url)
+
+        // Season → ordered quality groups.
+        val bySeason = LinkedHashMap<Int, MutableList<Pair<Group, List<PayloadLink>>>>()
+        for (ge in groups) {
+            val s = ge.first.season ?: 1
+            bySeason.getOrPut(s) { ArrayList() }.add(ge)
+        }
+
+        val episodes = ArrayList<Episode>()
+        for ((season, seasonGroups) in bySeason) {
+            // Per-episode structure: some server family exposes >1 ordered links
+            // (one per episode). A quality gate with one G-Drive + one V-Cloud
+            // link is a SINGLE file shown twice (two servers), NOT 2 episodes —
+            // count within the largest family, ZIP links never count.
+            val maxEps = seasonGroups
+                .filter { (g, _) -> !g.pack }
+                .maxOfOrNull { (_, c) -> c.familyEpisodeCount() } ?: 0
+
+            if (maxEps > 1) {
+                // TMDB episode names/thumbs if available.
+                val epMeta = withTimeoutOrNull(6000L) {
+                    MetadataService.episodesForSeason(imdbId, meta?.tmdbId, season)
+                } ?: emptyMap()
+                for (i in 0 until maxEps) {
+                    // A single-link ZIP family is the season pack, not episode 1.
+                    val links = seasonGroups.flatMap { (g, concrete) ->
+                        if (g.pack) emptyList()
+                        else concrete.filter { it.idx == i && it.kind != Servers.ZIP }
+                            .map { it.copy(heading = g.heading) }
+                    }
+                    if (links.isEmpty()) continue
+                    val epNum = i + 1
+                    val m = epMeta[epNum]
+                    episodes += newEpisode(LinkPayload(url, links.map { it.copy(season = season, episode = epNum) }).toJson()) {
+                        this.season = season
+                        this.episode = epNum
+                        this.name = m?.name
+                        this.description = m?.overview
+                        m?.thumbnail?.let { this.posterUrl = it }
+                    }
+                }
+            }
+            // Season-level rows: whole-season pack chips, plus every group when
+            // the season has no per-episode structure at all (crew-girl style:
+            // one quality-labeled .zip per season).
+            seasonGroups.forEach { (g, concrete) ->
+                val packLinks = concrete.filter { it.kind == Servers.ZIP }
+                val noEpisodes = maxEps <= 1
+                val rows = when {
+                    noEpisodes -> listOf(concrete to g.heading.ifBlank { "Season $season" })
+                    packLinks.isNotEmpty() -> listOf(packLinks to "${g.heading.ifBlank { "Season $season" }} (Pack)")
+                    else -> emptyList()
+                }
+                for ((rowLinks, rowName) in rows) {
+                    if (rowLinks.isEmpty()) continue
+                    val payload = LinkPayload(
+                        url,
+                        rowLinks.map { it.copy(heading = g.heading, season = season) },
+                    ).toJson()
+                    episodes += newEpisode(payload) {
+                        this.season = season
+                        this.name = rowName
+                    }
+                }
+            }
+        }
+
+        return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
+            posterUrl = poster ?: meta?.poster
+            backgroundPosterUrl = meta?.backdrop
+            this.year = year ?: meta?.year?.toIntOrNull()
+            this.plot = meta?.overview ?: plot
+            this.tags = meta?.genres ?: language?.let { listOf(it) }
+            this.actors = meta?.cast
+            imdbId?.let { addImdbId(it) }
+            (meta?.rating ?: imdbRating)?.let { addScore(it.toString(), 10) }
+        }
     }
 
     // ------------------------------------------------------------------
-    // loadLinks — two-phase live-fill (all servers, direct first)
+    // loadLinks — resolve embeds, live-fill, honest names
     // ------------------------------------------------------------------
 
     override suspend fun loadLinks(
@@ -610,87 +656,96 @@ class VegamoviesProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
     ): Boolean {
-        val payload = parsePayload(data) ?: return false
+        val payload = LinkPayload.fromJson(data) ?: return false
         if (payload.links.isEmpty()) return false
         val referer = payload.pageUrl.ifBlank { mainUrl }
         var emitted = false
 
-        // Single-flight: resolve all groups concurrently, bounded; results push
-        // to the player THE MOMENT they land (user spec: server list grows in
-        // the background while the video keeps playing).
         withTimeoutOrNull(LIVE_FILL_MS) {
             coroutineScope {
-                val sem = Semaphore(4)
-                payload.links.map { link ->
+                val sem = Semaphore(6)
+                payload.links.map { pl ->
                     async {
                         sem.acquire()
-                        try {
-                            val resolved = NexdriveResolver.resolve(link.url, referer, commonHeaders)
-                            for (r in resolved) {
-                                val quality = getQualityFromName(link.label.ifBlank { r.name })
-                                if (r.direct) {
-                                    emitted = true
-                                    callback(
-                                        ExtractorLink(
-                                            source = "Vegamovies",
-                                            name = "${link.label.ifBlank { "Direct" }}",
-                                            url = r.url,
-                                            referer = r.referer,
-                                            quality = quality,
-                                            headers = commonHeaders + mapOf("Referer" to r.referer),
-                                            extractorData = null,
-                                            type = ExtractorLinkType.VIDEO,
-                                            audioTracks = emptyList(),
-                                        )
-                                    )
-                                } else {
-                                    // Browser-gated server: still list it so ALL
-                                    // website servers appear (user: "want all links").
-                                    // Quality reads UNKNOWN so the player never
-                                    // auto-skips to a page it cannot stream.
-                                    callback(
-                                        ExtractorLink(
-                                            source = "Vegamovies",
-                                            name = "${link.label.ifBlank { "Server" }} (browser)",
-                                            url = r.url,
-                                            referer = referer,
-                                            quality = 0,
-                                            headers = commonHeaders,
-                                            extractorData = null,
-                                            type = ExtractorLinkType.VIDEO,
-                                            audioTracks = emptyList(),
-                                        )
-                                    )
-                                    emitted = true
-                                }
-                            }
-                        } finally {
-                            sem.release()
+                        val link = try {
+                            buildLink(pl, referer)
+                        } finally { sem.release() }
+                        if (link != null) {
+                            emitted = true
+                            callback(link)
                         }
                     }
                 }.awaitAll()
             }
         }
-        if (!emitted) {
-            // Total failure: surface the raw nexdrive gateways so the user at
-            // least gets the working web download.
-            payload.links.forEach { link ->
-                callback(
-                    ExtractorLink(
-                        source = "Vegamovies",
-                        name = "${link.label.ifBlank { "Server" }} (browser)",
-                        url = link.url,
-                        referer = referer,
-                        quality = 0,
-                        headers = commonHeaders,
-                        extractorData = null,
-                        type = ExtractorLinkType.VIDEO,
-                        audioTracks = emptyList(),
-                    )
-                )
-            }
-            emitted = true
-        }
         return emitted
     }
+
+    /** Resolve one payload link into an ExtractorLink (or null if hopeless). */
+    private suspend fun buildLink(pl: PayloadLink, referer: String): ExtractorLink? {
+        val kind = pl.kind.ifBlank { Servers.kindOf(pl.url) }
+        // Gateway stored unexpanded (rare — only when expansion failed at load
+        // time): re-expand now and pick the episode index.
+        val concrete: String
+        val concreteKind: String
+        if (pl.isGateway || GENXFM_REGEX.containsMatchIn(pl.url)) {
+            val exp = NexdriveResolver.expand(NexdriveGateway.normalize(pl.url), referer, commonHeaders)
+            if (exp.links.isEmpty()) {
+                // Dead gateway: list the gateway page itself as browser download.
+                return extractor(pl.url, Servers.GATE, pl, browserOnly = true)
+            }
+            val sameKind = if (pl.kind.isNotBlank()) exp.links.filter { it.kind == pl.kind } else exp.links
+            val pool = sameKind.ifEmpty { exp.links }
+            val idx = pl.idx.coerceIn(0, pool.size - 1)
+            concrete = pool[idx].url
+            concreteKind = pool[idx].kind
+        } else {
+            concrete = pl.url
+            concreteKind = kind
+        }
+
+        return when (concreteKind) {
+            Servers.GDRIVE -> {
+                // embed page -> googleusercontent direct (1 fast hop), or self as browser link.
+                val direct = NexdriveResolver.resolveEmbed(concrete, referer, commonHeaders)
+                if (direct != null) extractor(direct, Servers.GDRIVE, pl, browserOnly = false)
+                else extractor(concrete, Servers.GDRIVE, pl, browserOnly = true)
+            }
+            Servers.VCLOUD, Servers.ZIP -> extractor(concrete, concreteKind, pl, browserOnly = true)
+            else -> {
+                val direct = runCatching {
+                    if (concrete.contains("fastdl")) NexdriveResolver.resolveEmbed(concrete, referer, commonHeaders) else null
+                }.getOrNull()
+                if (direct != null) extractor(direct, Servers.GDRIVE, pl, browserOnly = false)
+                else extractor(concrete, concreteKind, pl, browserOnly = true)
+            }
+        }
+    }
+
+    private fun extractor(url: String, kind: String, pl: PayloadLink, browserOnly: Boolean): ExtractorLink {
+        val raw = RawLink(url, kind, pl.heading, browserOnly, pl.season, pl.episode)
+        return ExtractorLink(
+            source = "Vegamovies",
+            name = LinkNaming.displayName(raw),
+            url = url,
+            referer = if (kind == Servers.GDRIVE && !browserOnly) "https://fastdl.zip/" else pl.pageReferer(),
+            // Unknown quality for download-only rows so auto-play never picks them.
+            quality = if (browserOnly) 0 else getQualityFromName(pl.heading),
+            headers = commonHeaders + mapOf("Referer" to (if (kind == Servers.GDRIVE && !browserOnly) "https://fastdl.zip/" else "https://new2.vegamovies.futbol/")),
+            extractorData = null,
+            // Browser-only gate pages keep VIDEO type + UNKNOWN quality so the
+            // player's auto-selection never picks them; tapping offers the page
+            // (a real, working download source in the system browser).
+            type = ExtractorLinkType.VIDEO,
+            audioTracks = emptyList(),
+        )
+    }
+
+    private fun PayloadLink.pageReferer(): String =
+        Regex("""^https?://[^/]+""").find(url)?.value ?: "https://new2.vegamovies.futbol/"
+}
+
+/** Normalize a genxfm URL to its cache key form. */
+internal object NexdriveGateway {
+    fun normalize(url: String): String = url.trimEnd('/') + "/"
 }
