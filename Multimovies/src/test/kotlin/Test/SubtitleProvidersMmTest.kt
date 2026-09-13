@@ -70,11 +70,20 @@ class SubtitleProvidersMmTest {
     }
 
     @Test
-    fun groupRequests_priorityPlusOriginalFirst_thenChunksInOrder() {
+    fun groupRequests_englishFirst_thenOriginal_thenIndianChunked() {
         val groups = SubtilesProvider.groupRequests(setOf("hi", "en", "ta", "te", "ja"), "ja")
-        assertEquals(linkedSetOf("hi", "en", "ja"), groups[0])
-        assertEquals(linkedSetOf("ta", "te"), groups[1])
-        assertEquals(2, groups.size)
+        assertEquals(linkedSetOf("en"), groups[0])
+        assertEquals(linkedSetOf("ja"), groups[1])
+        assertEquals(linkedSetOf("hi", "ta", "te"), groups[2])
+        assertEquals(3, groups.size)
+    }
+
+    @Test
+    fun desiredLanguages_includesOriginalLang() {
+        val withOrig = SubtilesProvider.desiredLanguages("ja")
+        assertTrue(withOrig.contains("Japanese"))
+        assertTrue(withOrig.contains("Hindi"))
+        assertTrue(withOrig.contains("English"))
     }
 
     @Test

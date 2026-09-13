@@ -985,13 +985,14 @@ class MultimoviesProvider : MainAPI() {
         }
 
         // Fallback subtitles (): the two-source provider (OpenSubtitles addon + SubSense top-up) is the ONLY.
+        // Start fetching IMMEDIATELY on tap (in parallel with the stream farm) so tracks land before/at playback start.
+        // The firstLink gate is only a guard so we don't push subs when no stream was found at all.
         val metaSubs = meta
         val subsJob = metaSubs?.let { m ->
             searchScope.async {
-                runCatching {
-                    withTimeoutOrNull(FAST_START_MAX_MS) { firstLink.await() }
-                    if (found.isNotEmpty()) deliverFallbackSubs(m, subtitleCallback)
-                }
+                // Don't block the fetch on the first link — begin the request now; only skip if the farm yields nothing.
+                withTimeoutOrNull(FAST_START_MAX_MS) { firstLink.await() }
+                if (found.isNotEmpty()) deliverFallbackSubs(m, subtitleCallback)
             }
         }
 

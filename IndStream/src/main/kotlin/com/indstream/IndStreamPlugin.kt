@@ -286,7 +286,12 @@ class IndStreamProvider : MainAPI() {
                 probeManifests = false,
             )
             // Fallback subtitles ARE the subtitle provider (): the same title-keyed OpenSubtitles set every play gets.
-            topUpSubtitles(metaDeferred.await()?.imdbId, season, episode, originalLangNow(), subtitleCallback)
+            // Start the fetch immediately (don't block the emit on meta resolution) and await it before returning.
+            val subsJob = fastStartScope.async {
+                val imdb = runCatching { withTimeoutOrNull(2500L) { metaDeferred.await()?.imdbId } }.getOrNull()
+                runCatching { topUpSubtitles(imdb, season, episode, originalLangNow(), subtitleCallback) }
+                    .onFailure { android.util.Log.w("IndStream", "fallback subs failed: ${it.message}") }
+            }
             // rule: if the background warm for THIS title is still resolving, the replay above was only a PARTIAL list.
             if (warm != null) {
                 val fillStart = System.currentTimeMillis()
@@ -313,6 +318,8 @@ class IndStreamProvider : MainAPI() {
             }
             android.util.Log.i("IndStream", "TAP#$tap replay done (+live tail: ${if (warm != null) "yes" else "no"}), " +
                 "${emitted.get()} streams for tmdb=$tmdbId/$type s=$season e=$episode")
+            // Let subtitle tracks land before returning — the push IS the delivery; after return the app drops it.
+            subsJob.await()
             return emitted.get() > 0
         }
 
@@ -329,6 +336,12 @@ class IndStreamProvider : MainAPI() {
                     ?: warmFarms[cacheKey]?.takeIf { it.isActive }
             if (running != null) {
                 android.util.Log.i("IndStream", "TAP#$tap joining in-flight farm for $cacheKey (no second launch)")
+                // Subtitles start fetching immediately, in parallel with the joined farm tail.
+                val subsJob = fastStartScope.async {
+                    val imdb = runCatching { withTimeoutOrNull(2500L) { imdbDeferred.await() } }.getOrNull()
+                    runCatching { topUpSubtitles(imdb, season, episode, originalLangNow(), subtitleCallback) }
+                        .onFailure { android.util.Log.w("IndStream", "fallback subs failed: ${it.message}") }
+                }
                 val joined = Collections.synchronizedSet(HashSet<String>())
                 suspend fun tail(): Boolean {
                     val fresh = StreamEngine.FastStartCache.get(cacheKey)
@@ -351,13 +364,14 @@ class IndStreamProvider : MainAPI() {
                     ) {
                         android.util.Log.w("IndStream", "TAP#$tap joined farm produced nothing in " +
                             "${StreamEngine.FAST_START_MAX_MS}ms")
+                        subsJob.await()
                         return false
                     }
                 }
                 if (emitted.get() > 0) {
-                    val imdb = runCatching { withTimeoutOrNull(2500L) { imdbDeferred.await() } }.getOrNull()
-                    runCatching { topUpSubtitles(imdb, season, episode, originalLangNow(), subtitleCallback) }
+                    // subsJob already has the fetch in flight; just ensure it lands before returning.
                 }
+                subsJob.await()
                 android.util.Log.i("IndStream", "TAP#$tap joined farm -> ${emitted.get()} live links " +
                     "in ${System.currentTimeMillis() - loadStartMs}ms")
                 return emitted.get() > 0
@@ -392,6 +406,14 @@ class IndStreamProvider : MainAPI() {
             farmDone.invokeOnCompletion { inFlightFarm.compareAndSet(handle, null) }
         }
 
+        // Subtitles start fetching THE MOMENT the user taps play - not after the first stream resolves - so tracks are
+        // ready before/at playback start. Batch-priority order (English + original + all Indian langs first, then foreign).
+        val subsJob = fastStartScope.async {
+            val imdb = runCatching { withTimeoutOrNull(2500L) { imdbDeferred.await() } }.getOrNull()
+            runCatching { topUpSubtitles(imdb, season, episode, originalLangNow(), subtitleCallback) }
+                .onFailure { android.util.Log.w("IndStream", "fallback subs failed: ${it.message}") }
+        }
+
         // Keep loadLinks ALIVE (bounded): the change-server list only grows while this coroutine runs.
         val firstStreamArrived = CompletableDeferred<Unit>()
         val arrivalWatcher = fastStartScope.launch {
@@ -404,14 +426,9 @@ class IndStreamProvider : MainAPI() {
                 "(detached farm keeps filling FastStartCache; next tap replays + tails it)")
             arrivalWatcher.cancel()
             windowOpen.set(false)
+            // Subs still get a chance to land even if no stream arrived.
+            subsJob.await()
             return false
-        }
-
-        // Fallback subtitles: the OpenSubtitles provider IS the subtitle source () - fired the moment the stream starts, in.
-        val subsJob = fastStartScope.async {
-            val imdb = runCatching { withTimeoutOrNull(2500L) { imdbDeferred.await() } }.getOrNull()
-            runCatching { topUpSubtitles(imdb, season, episode, originalLangNow(), subtitleCallback) }
-                .onFailure { android.util.Log.w("IndStream", "fallback subs failed: ${it.message}") }
         }
 
         // LIVE_FILL window: hold until the farm resolves or the cap expires, whichever first - every server that answers.

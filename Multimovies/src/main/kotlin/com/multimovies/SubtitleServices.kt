@@ -143,7 +143,11 @@ object SubtilesProvider {
     private val cache = ConcurrentHashMap<String, Pair<Long, List<SubtitleFile>>>()
 
     /** Every language worth requesting when the video starts - Indian block, then the rest global. */
-    fun desiredLanguages(): Set<String> = CODES.keys.toCollection(LinkedHashSet())
+    fun desiredLanguages(originalLang: String? = null): Set<String> {
+        val wanted = CODES.keys.toCollection(LinkedHashSet())
+        originalLang?.let { SubtitleServices.canonicalName(it) }?.let { wanted.add(it) }
+        return wanted
+    }
 
     /** Returns requested languages not covered by stream-owned subtitles. */
     fun missingLanguages(covered: Set<String>, desired: Set<String>): Set<String> =
@@ -153,16 +157,31 @@ object SubtilesProvider {
     internal fun codesFromLangs(langs: Set<String>): Set<String> =
         langs.mapNotNull { CODES[it] }.toCollection(LinkedHashSet())
 
-    /** Priority language codes requested first. */
-    internal val PRIORITY_CODES: Set<String> = linkedSetOf("hi", "en")
+    /** ISO-1 codes for Indian languages — always batch-pulled first so they land at the top of the menu. */
+    private val INDIAN_LANG_CODES: Set<String> = linkedSetOf(
+        "hi", "ta", "te", "ml", "bn", "ur", "mr", "kn", "pa", "gu", "ne", "si",
+    )
 
-    /** Request codes into addon groups: priority {hi, en} + original first, then the rest in GROUP_SIZE chunks (input order = Indian first). */
+    /** Priority batch: English → original → all Indian langs → rest foreign. */
+    internal val PRIORITY_CODES: Set<String> = linkedSetOf("en") + INDIAN_LANG_CODES
+
+    /** Request codes into addon groups: English first, then original, then Indian block (chunked), then the rest in GROUP_SIZE chunks. */
     internal fun groupRequests(codes: Set<String>, originalCode: String? = null): List<Set<String>> {
         if (codes.isEmpty()) return emptyList()
         val groups = mutableListOf<Set<String>>()
-        val priority = codes.filterTo(LinkedHashSet()) { it in PRIORITY_CODES || it == originalCode }
-        if (priority.isNotEmpty()) groups.add(priority)
-        codes.filterTo(LinkedHashSet()) { it !in priority }
+        // 1. English (always first).
+        codes.filterTo(LinkedHashSet()) { it == "en" }
+            .takeIf { it.isNotEmpty() }?.let { groups.add(it) }
+        // 2. Original language (if not already English).
+        if (originalCode != null && originalCode != "en" && codes.contains(originalCode)) {
+            groups.add(linkedSetOf(originalCode))
+        }
+        // 3. All Indian languages still uncovered — chunked to keep each request fast.
+        codes.filterTo(LinkedHashSet()) { it in INDIAN_LANG_CODES }
+            .chunked(GROUP_SIZE)
+            .forEach { groups.add(it.toCollection(LinkedHashSet())) }
+        // 4. Everything else in GROUP_SIZE chunks.
+        codes.filterTo(LinkedHashSet()) { it !in groups.flatten().toSet() }
             .chunked(GROUP_SIZE)
             .forEach { groups.add(it.toCollection(LinkedHashSet())) }
         return groups
@@ -275,11 +294,13 @@ object SubtilesProvider {
         season: Int?,
         episode: Int?,
         missing: Set<String>,
+        originalLang: String? = null,
     ): List<SubtitleFile> {
         val imdb = imdbId?.takeIf { it.startsWith("tt") } ?: return emptyList()
         if (missing.isEmpty()) return emptyList()
         val codes = codesFromLangs(missing)
         if (codes.isEmpty()) return emptyList()
+        val originalCode = originalLang?.let { SubtitleServices.canonicalName(it) }?.let { CODES[it] }
 
         val key = "$imdb|$season|$episode|${codes.sorted().joinToString(",")}"
         cache[key]?.let { (exp, subs) ->
@@ -288,7 +309,9 @@ object SubtilesProvider {
         }
 
         val deadline = System.currentTimeMillis() + FETCH_BUDGET_MS
-        val groups = groupRequests(codes)
+        val groups = groupRequests(codes, originalCode)
+        // First group = priority batch (English + original + all Indian langs).
+        val priority = groups.firstOrNull() ?: emptySet()
         val tracks = coroutineScope {
             val jobs = groups.map { launchFetch(imdb, season, episode, it, deadline) }
             val results = jobs.map { it.await() }
