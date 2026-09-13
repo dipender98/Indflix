@@ -5,6 +5,7 @@ import com.vegamovies.LinkPayload
 import com.vegamovies.NexdriveResolver
 import com.vegamovies.RawLink
 import com.vegamovies.Servers
+import com.vegamovies.VcloudResolver
 import com.vegamovies.VegamoviesProvider
 import org.jsoup.Jsoup
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -183,6 +184,45 @@ class VegamoviesPluginTest {
             RawLink("https://vcloud.fit/xyz789", Servers.ZIP, "Season 1 Batch 22.3GB", true, 1, null)
         )
         assertTrue(pack.startsWith("Batch/Zip (Archive) [Downloadable]"), pack)
+    }
+
+    @Test
+    fun displayName_vcloudStreamCarriesServerTag() {
+        val r2 = LinkNaming.displayName(
+            RawLink(
+                "https://pub-x.r2.dev/abc?token=1", Servers.VCLOUD,
+                "Season 2 {Hindi-English} 1080p WEB-DL x264 [3.5GB/E]", false, 2, 3, "FSLv2 Server",
+            )
+        )
+        assertTrue(r2.startsWith("V-Cloud (FSLv2 Server) [Streamable+Downloadable] S02E03"), r2)
+        assertTrue(r2.contains("1080p"), r2)
+    }
+
+    // ───────────────────── vcloud R2 chain parsing ─────────────────────
+
+    @Test
+    fun decodeDoubleAtob_roundTripsTokenLink() {
+        // atob(atob(X)) == "https://vcloud.fit/abc123?token=xyz":
+        val inner = java.util.Base64.getEncoder()
+            .encodeToString("https://vcloud.fit/abc123?token=xyz".toByteArray())
+        val outer = java.util.Base64.getEncoder().encodeToString(inner.toByteArray())
+        assertEquals("https://vcloud.fit/abc123?token=xyz", VcloudResolver.decodeDoubleAtob(outer))
+        assertNull(VcloudResolver.decodeDoubleAtob("not base64 at all ~~~"))
+    }
+
+    @Test
+    fun btnRegex_picksFslR2AndSkipsGofile() {
+        val tokenPage = """
+            <div class="card-header">Show S02E01 1080p</div><i id="size">211.53 MB</i>
+            <h2><a class="btn" href="https://x.r2.cloudflarestorage.com/hub2/Show.S02E01.mkv?sig=1">Download [FSLv2 Server]</a></h2>
+            <h2><a class="btn" href="https://gofile.io/d/Ab1">Download [Gofile Server]</a></h2>
+        """
+        val hits = VcloudResolver.BTN.findAll(tokenPage).toList()
+        assertEquals(2, hits.size)
+        val r2 = hits.first { it.groupValues[1].contains("cloudflarestorage") }
+        assertTrue(r2.groupValues[2].contains("FSLv2"), r2.groupValues.toString())
+        assertTrue(VcloudResolver.STREAMABLE_HOST.containsMatchIn(r2.groupValues[1]))
+        assertTrue(hits.none { VcloudResolver.STREAMABLE_HOST.containsMatchIn(it.groupValues[1]) && it.groupValues[1].contains("gofile") })
     }
 
     @Test

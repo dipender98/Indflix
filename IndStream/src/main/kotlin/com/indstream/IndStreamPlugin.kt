@@ -1,19 +1,7 @@
 ﻿package com.indstream
 
 import com.lagradost.cloudstream3.*
-/**
-
- * FILE: IndStreamPlugin.kt — the IndStream plugin (entry + TMDB catalog provider).
- *
- *  - [IndStream]          plugin entrypoint (@CloudstreamPlugin).
- *  - [IndStreamProvider]  TMDB-keyed MainAPI: no catalog of its own — every
- *                         title is resolved on demand against TMDB metadata,
- *                         then handed to the resolution engine in
- *                         StreamEngine.kt.
- *
- * Shared services live in CoreServices.kt; the VidLink stream source in
- * VidLinkSource.kt.
- */
+/** FILE: IndStreamPlugin.kt — the IndStream plugin (entry + TMDB catalog provider). - IndStream plugin entrypoint. */
 
 import android.content.Context
 import com.lagradost.cloudstream3.*
@@ -35,26 +23,19 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeoutOrNull
 
-/**
- * Registers the IndStream provider with CloudStream.
- */
+/** Registers the IndStream provider with CloudStream. */
 @CloudstreamPlugin
 class IndStream : Plugin() {
     override fun load(context: Context) {
         registerMainAPI(IndStreamProvider())
-        // MovieBox bearer pre-warm: the x-user token lives for hours, so one
-        // background GET now removes a serial round-trip (~0.5-1s) from the
-        // first resolve of the session — one more chunk of the 5-7s startup.
+        // MovieBox bearer pre-warm: the x-user token lives for hours, so one background GET now removes a serial round-trip.
         CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
             runCatching { StreamEngine.prewarmMovieBoxToken() }
         }
     }
 }
 
-/**
- * Pure TMDB URL parser, extractable from [IndStreamProvider] for unit testing.
- * No CloudStream dependency — safe for JVM unit tests.
- */
+/** Pure TMDB URL parser, extractable from IndStreamProvider for unit testing. */
 object TmdbUrlParser {
     private val tmdbWebUrl = Regex("""themoviedb\.org/(movie|tv)/(\d+)""")
 
@@ -67,41 +48,22 @@ object TmdbUrlParser {
     }
 }
 
-/**
- * IndStream — a federated embed-server resolver keyed by TMDB/IMDB id.
- *
- * The plugin has no catalog of its own: search and metadata come from TMDB, and
- * every title is resolved on demand by racing dozens of independent HLS/DASH
- * embed servers (see [ServerFarm]) that all accept TMDB/IMDB ids. The resolver
- * pushes EVERY server that answers straight into the player's live change-server
- * list (arrival order — the USER's quality/source profile decides what
- * auto-plays), so playback fills instantly while the list keeps growing.
- */
+/** IndStream — a federated embed-server resolver keyed by TMDB/IMDB id. */
 class IndStreamProvider : MainAPI() {
 
-    /**
-     * Detached scope for the fast-start background pull: survives [loadLinks]
-     * returning so the slower servers keep resolving into [StreamEngine.FastStartCache]
-     * (and, during the fill window, feed the player) after playback has begun.
-     */
+    /** Detached scope for the fast-start background pull: survives loadLinks returning so the slower servers keep resolving. */
     private val fastStartScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /** Titles whose movie pre-warm already ran (or is running) — repeated
      *  detail-page visits must not re-resolve the whole farm. */
     private val prewarmed = java.util.Collections.synchronizedSet(HashSet<String>())
 
-    /** Farm keys (FastStartCache keys) whose background pre-warm is STILL
-     *  resolving. A Play tap that replays a PARTIAL warm registers its key
-     *  here as a waiter target, so late warm arrivals still reach the live
-     *  change-server list instead of only the cache (loadLinks must stay
-     *  alive for the app to record pushes — the CSX/CineStream rule). */
+    /** Farm keys (FastStartCache keys) whose background pre-warm is STILL resolving. */
     private val warmFarms = java.util.concurrent.ConcurrentHashMap<String, kotlinx.coroutines.Job>()
 
     override var mainUrl = "https://www.themoviedb.org"
     override var name = "IndStream"
-    // India flag in the search-provider picker (three-dot menu) and provider
-    // lists — MainAPI.lang defaults to "en" (UK flag) unless overridden.
-    // CloudStream's SubtitleHelper maps "hi" -> IN.
+    // India flag in the search-provider picker (three-dot menu) and provider lists — MainAPI.lang defaults to "en" (UK.
     override var lang = "hi"
     override val hasMainPage = true
     override val hasQuickSearch = true
@@ -119,9 +81,7 @@ class IndStreamProvider : MainAPI() {
             Pair("popular|tv", "Popular Series"),
         )
 
-    // ------------------------------------------------------------------
-    // Search
-    // ------------------------------------------------------------------
+    // ------------------------------------------------------------------ Search.
 
     override suspend fun search(query: String): List<SearchResponse>? {
         val items = withTimeoutOrNull(6000L) { TmdbService.search(query) }.orEmpty()
@@ -153,9 +113,7 @@ class IndStreamProvider : MainAPI() {
         }
     }
 
-    // ------------------------------------------------------------------
-    // Main page (TMDB-powered rows)
-    // ------------------------------------------------------------------
+    // ------------------------------------------------------------------ Main page (TMDB-powered rows).
 
     override suspend fun getMainPage(
         page: Int,
@@ -177,9 +135,7 @@ class IndStreamProvider : MainAPI() {
         return newHomePageResponse(request.name, responses)
     }
 
-    // ------------------------------------------------------------------
-    // Load (detail page)
-    // ------------------------------------------------------------------
+    // ------------------------------------------------------------------ Load (detail page).
 
     override suspend fun load(url: String): LoadResponse? {
         val tmdb = TmdbUrlParser.parseTmdbUrl(url) ?: return null
@@ -197,10 +153,7 @@ class IndStreamProvider : MainAPI() {
         val score = meta?.rating
         val imdbId = meta?.imdbId
 
-        // Movie pre-warm (fast-start tier 2): resolve the whole farm while the
-        // user reads the detail page, landing links in FastStartCache so the
-        // Play tap replays instantly. TV episodes can't be keyed ahead (their
-        // season/episode isn't known here) — they keep the fast-start path.
+        // Movie pre-warm (fast-start tier 2): resolve the whole farm while the user reads the detail page, landing links in.
         if (isMovie) prewarm(tmdbId, imdbId, type)
 
         if (isMovie) {
@@ -254,26 +207,17 @@ class IndStreamProvider : MainAPI() {
         }
     }
 
-    // ------------------------------------------------------------------
-    // Load links (the resolver)
-    // ------------------------------------------------------------------
+    // ------------------------------------------------------------------ Load links (the resolver).
 
     /** Correlation id so every line of ONE Play tap strings together in
      *  logcat (live-window debug, Sept 2026 audit): "TAP#7 …". */
     private val tapSeq = java.util.concurrent.atomic.AtomicInteger(0)
 
-    /** A farm resolution already running for a cacheKey — from THIS provider's
-     *  live path OR a detail-page pre-warm. A second Play tap on the SAME
-     *  title must JOIN it (forward its arrivals) instead of launching a second
-     *  full farm: double launches half the bandwidth while a video is already
-     *  streaming and hammer the same APIs (RC-G, Sept 2026 audit). */
+    /** A farm resolution already running for a cacheKey — from THIS provider's live path OR a detail-page pre-warm. */
     private class FarmHandle(val key: String, val job: kotlinx.coroutines.Job)
     private val inFlightFarm = java.util.concurrent.atomic.AtomicReference<FarmHandle?>(null)
 
-    /** Live-window audit entry: logs TAP start/end and surfaces APP-SIDE
-     *  CANCELLATION — the field report "buffered 7–8 s then no link" cannot be
-     *  produced by the plugin's own 45/90 s gates, so whether the app kills
-     *  loadLinks early is the open question this answers (RC-L, Sept 2026). */
+    /** Live-window audit entry: logs TAP start/end and surfaces APP-SIDE CANCELLATION — the field report "buffered 7–8 s. */
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -314,14 +258,7 @@ class IndStreamProvider : MainAPI() {
         val episode = epMatch?.groupValues?.get(3)?.toIntOrNull() ?: -1
 
         val needsImdb = ServerFarm.allServers.any { it.idType == ServerIdType.IMDB }
-        // No serial TMDB round-trip here: load() already warmed TmdbService's
-        // detail cache for this exact (tmdbId, type), so fetchMeta below returns
-        // instantly in the common case. On a cold cache (deep link straight to
-        // an episode URL) it costs ≤3s — the IMDB-keyed servers wait on it
-        // lazily while the TMDB-keyed farm already runs.
-        // Atomic holder so the concurrent TMDB lookup can publish the original
-        // language when it lands (usually instantly — load() warms the cache),
-        // while every emit site keeps a non-blocking snapshot read.
+        // No serial TMDB round-trip here: load() already warmed TmdbService's detail cache for this exact (tmdbId, type), so.
         val originalLangRef = java.util.concurrent.atomic.AtomicReference<String?>()
         val metaDeferred = fastStartScope.async {
             val d = withTimeoutOrNull(3000L) { TmdbService.fetchMeta(tmdbId, type) }
@@ -335,18 +272,7 @@ class IndStreamProvider : MainAPI() {
         }
         val emitted = java.util.concurrent.atomic.AtomicInteger(0)
 
-        // Instant replay: this title's farm already resolved (a prior play, or a
-        // background pull from the detail page that finished meanwhile) — emit the
-        // FULL server list instantly so the player opens with everything. No new
-        // probes: labels come from the cached quality tags. Emission order is the
-        // arrival order the list was built in; the app's own quality-profile
-        // (the USER's priority settings) decides what auto-plays.
-        // F6 (Sept 2026 audit): the live tail must ALSO attach to a PLAY-PATH
-        // farm still resolving this exact episode — warmFarms only ever held
-        // movie pre-warms, so every TV re-tap replayed its partial cache and
-        // returned, freezing the change-server list while the rest of the farm
-        // kept landing (the "re-tap shows many servers but nothing more
-        // arrives" half of the bug report).
+        // Instant replay: this title's farm already resolved (a prior play, or a background pull from the detail page that.
         val liveFarm = inFlightFarm.get()?.takeIf { it.key == cacheKey && it.job.isActive }?.job
         val warm = liveFarm ?: warmFarms[cacheKey]
         val cached = StreamEngine.FastStartCache.get(cacheKey)
@@ -362,16 +288,9 @@ class IndStreamProvider : MainAPI() {
                 originalLangNow(),
                 probeManifests = false,
             )
-            // Fallback subtitles ARE the subtitle provider (user spec Sept 2026):
-            // the same title-keyed OpenSubtitles set every play gets — sync-safe
-            // after any in-player server switch.
+            // Fallback subtitles ARE the subtitle provider ( Sept 2026): the same title-keyed OpenSubtitles set every play gets —.
             topUpSubtitles(metaDeferred.await()?.imdbId, season, episode, originalLangNow(), subtitleCallback)
-            // CSX rule: if the background warm for THIS title is still resolving,
-            // the replay above was only a PARTIAL list — return now and the app
-            // drops every later arrival from the live list. So poll the
-            // still-growing FastStartCache and forward newly-landed servers
-            // straight to the player (already-fetched — zero new probes) until
-            // the farm finishes or the live window caps out.
+            // CSX rule: if the background warm for THIS title is still resolving, the replay above was only a PARTIAL list —.
             if (warm != null) {
                 val fillStart = System.currentTimeMillis()
                 while (warm.isActive && System.currentTimeMillis() - fillStart < StreamEngine.LIVE_FILL_MS) {
@@ -400,29 +319,13 @@ class IndStreamProvider : MainAPI() {
             return emitted.get() > 0
         }
 
-        // Live window (user spec Sept 2026 rewrite #2): the whole farm
-        // launches at once and EVERY stream is pushed to the player the
-        // moment it lands — arrival order, no hold, no winner selection.
-        // loadLinks STAYS ALIVE until the farm finishes or [LIVE_FILL_MS]
-        // elapses: the app records callback pushes only while this coroutine
-        // is running, so returning early froze the change-server list at the
-        // first 1-2 arrivals. Everything that resolves during the window is
-        // switchable WITHOUT re-entering the player; the full list keeps
-        // landing in FastStartCache so a re-open replays it instantly.
+        // Live window ( Sept 2026 rewrite #2): the whole farm launches at once and EVERY stream is pushed to the player the.
         val pushedUrls = Collections.synchronizedSet(HashSet<String>())
-        // Window gate: once loadLinks has returned the player ignores pushes,
-        // so late arrivals land in FastStartCache only — no wasted
-        // manifest-probes against streams nobody will watch this session.
+        // Window gate: once loadLinks has returned the player ignores pushes, so late arrivals land in FastStartCache only —.
         val windowOpen = java.util.concurrent.atomic.AtomicBoolean(true)
         val loadStartMs = System.currentTimeMillis()
 
-        // A farm for this EXACT key already in flight (this provider's live
-        // path, or a movie pre-warm)? JOIN it instead of launching a second
-        // full farm — same title+episode twice is the double bandwidth/API
-        // hammer the Sept 2026 audit flagged (RC-G). Forwarding works purely
-        // from the growing FastStartCache the owner keeps writing — the exact
-        // mechanism the partial-warm replay already proves, no shared
-        // callback needed.
+        // A farm for this EXACT key already in flight (this provider's live path, or a movie pre-warm)?
         run {
             val running: kotlinx.coroutines.Job? =
                 inFlightFarm.get()?.takeIf { it.key == cacheKey && it.job.isActive }?.job
@@ -473,9 +376,7 @@ class IndStreamProvider : MainAPI() {
                     if (fresh.isEmpty()) return@resolveRealtime
                     StreamEngine.FastStartCache.put(cacheKey, fresh)
                     if (!windowOpen.get()) return@resolveRealtime
-                    // LIVE push (the whole point of staying alive): each batch
-                    // is emitted the instant it resolves, in arrival order —
-                    // the player's own quality profile decides what plays.
+                    // LIVE push (the whole point of staying alive): each batch is emitted the instant it resolves, in arrival order — the.
                     android.util.Log.i("IndStream", "TAP#$tap +${fresh.size} from $sid at " +
                         "${System.currentTimeMillis() - loadStartMs}ms (window open)")
                     StreamEngine.emit(
@@ -488,19 +389,14 @@ class IndStreamProvider : MainAPI() {
                 android.util.Log.w("IndStream", "live resolve failed: ${t.message}")
             }
         }
-        // F6: OWNERSHIP of this title's farm is published so a re-tap that
-        // catches a PARTIAL cache can still tail the running farm (the replay
-        // branch reads this via inFlightFarm), not just complete-and-return.
+        // F6: OWNERSHIP of this title's farm is published so a re-tap that catches a PARTIAL cache can still tail the running.
         run {
             val handle = FarmHandle(cacheKey, farmDone)
             inFlightFarm.set(handle)
             farmDone.invokeOnCompletion { inFlightFarm.compareAndSet(handle, null) }
         }
 
-        // Keep loadLinks ALIVE (bounded): the change-server list only grows
-        // while this coroutine runs. First-arrival detection bounds the
-        // "nothing works" case at FAST_START_MAX_MS; the LIVE_FILL cap below
-        // (not the first arrival) bounds the whole window.
+        // Keep loadLinks ALIVE (bounded): the change-server list only grows while this coroutine runs.
         val firstStreamArrived = CompletableDeferred<Unit>()
         val arrivalWatcher = fastStartScope.launch {
             while (emitted.get() == 0 && !farmDone.isCompleted) delay(50)
@@ -515,47 +411,28 @@ class IndStreamProvider : MainAPI() {
             return false
         }
 
-        // Fallback subtitles: the OpenSubtitles provider IS the subtitle
-        // source (user spec) — fired the moment the stream starts, in
-        // PARALLEL with the fill window, and AWAITED before the return:
-        // subtitleCallback pushes are only recorded while loadLinks is alive
-        // (the same job-liveness rule the change-server list rides on; a
-        // detached post-return push is silently dropped). Self-bounded:
-        // ≤2.5s IMDB wait + the provider's 13s fetch budget (90s LIVE_FILL
-        // window leaves both pushes ample room to land before loadLinks ends).
+        // Fallback subtitles: the OpenSubtitles provider IS the subtitle source () — fired the moment the stream starts, in.
         val subsJob = fastStartScope.async {
             val imdb = runCatching { withTimeoutOrNull(2500L) { imdbDeferred.await() } }.getOrNull()
             runCatching { topUpSubtitles(imdb, season, episode, originalLangNow(), subtitleCallback) }
                 .onFailure { android.util.Log.w("IndStream", "fallback subs failed: ${it.message}") }
         }
 
-        // LIVE_FILL window: hold until the farm resolves or the cap expires,
-        // whichever first — every server that answers inside the window is
-        // pushed live (above) and stays tappable in the change-server list.
+        // LIVE_FILL window: hold until the farm resolves or the cap expires, whichever first — every server that answers.
         withTimeoutOrNull(StreamEngine.LIVE_FILL_MS) { farmDone.await() }
         // Window closing: the app stops recording pushes the moment we return,
         // so late farm arrivals now land in FastStartCache only.
         windowOpen.set(false)
-        // Let the subtitle tracks land BEFORE returning — the push IS the
-        // delivery; after the return the app drops it (bug: first play came
-        // up subtitle-less while this fetch ran detached past the return).
+        // Let the subtitle tracks land BEFORE returning — the push IS the delivery; after the return the app drops it (bug.
         subsJob.await()
 
-        // Return → the app auto-starts on whichever link its own quality
-        // profile ranks first. The farm has (usually) already finished inside
-        // the window; anything straggling past it still lands in
-        // FastStartCache for the full-list replay on the next open.
+        // Return → the app auto-starts on whichever link its own quality profile ranks first.
         android.util.Log.i("IndStream", "TAP#$tap live window: tmdb=$tmdbId/$type s=$season e=$episode -> " +
             "${emitted.get()} links live in ${System.currentTimeMillis() - loadStartMs}ms (farm=${if (farmDone.isCompleted) "done" else "capped at LIVE_FILL"})")
         return emitted.get() > 0
     }
 
-    /** Fire-and-forget farm resolution into [StreamEngine.FastStartCache] while
-     *  the detail page is open so a later Play tap replays instantly. Never
-     *  blocks [load], swallows all errors, and runs at most once per title. The
-     *  job is registered in [warmFarms] so a Play tap that catches a PARTIAL
-     *  warm stays alive and forwards each later arrival into the live
-     *  change-server list instead of freezing at the partial set. */
+    /** Fire-and-forget farm resolution into StreamEngine.FastStartCache while the detail page is open so a later Play tap. */
     private fun prewarm(tmdbId: Int, imdbId: String?, type: String) {
         val key = StreamEngine.FastStartCache.key(tmdbId, type, -1, -1)
         if (!prewarmed.add(key)) return
@@ -573,13 +450,7 @@ class IndStreamProvider : MainAPI() {
         job.invokeOnCompletion { warmFarms.remove(key, job) }
     }
 
-    /** Subtitle provider (user spec Sept 2026 rewrite): server captions are
-     *  NOT used — the OpenSubtitles fallback IS the subtitle provider. Runs
-     *  when the stream starts (and on every replay), fetching the wanted
-     *  languages (Hindi/English/original) — budgeted so it can never hold up
-     *  playback, deduped by SubtilesProvider's per-title cache so repeat
-     *  plays and instant replays never re-download. Title-keyed to a standard
-     *  cut, so tracks stay in sync after any in-player server switch. */
+    /** Subtitle provider ( Sept 2026 rewrite): server captions are NOT used — the OpenSubtitles fallback IS the subtitle. */
     private suspend fun topUpSubtitles(
         imdbId: String?,
         season: Int,

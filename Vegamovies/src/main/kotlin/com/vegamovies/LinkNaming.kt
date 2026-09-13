@@ -58,6 +58,8 @@ internal data class RawLink(
     val browserOnly: Boolean,
     val season: Int? = null,
     val episode: Int? = null,
+    /** Concrete CDN name behind a resolved row, e.g. "FSLv2 Server" (V-Cloud chain). */
+    val serverTag: String = "",
 )
 
 internal object LinkNaming {
@@ -65,6 +67,7 @@ internal object LinkNaming {
     /** Final ExtractorLink display name — see file header for format. */
     fun displayName(l: RawLink): String {
         val sb = StringBuilder(Servers.labelFor(l.kind))
+        if (l.serverTag.isNotBlank()) sb.append(' ').append('(').append(l.serverTag).append(')')
         sb.append(" [").append(if (l.browserOnly) Servers.CAP_DL else Servers.CAP_BOTH).append(']')
         when {
             l.season != null && l.episode != null ->

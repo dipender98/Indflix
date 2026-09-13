@@ -1,25 +1,5 @@
 package com.vegamovies
-/**
-
- * FILE: VegamoviesPlugin.kt — the Vegamovies plugin and provider engine.
- *
- * Scrapes the Vegamovies WordPress network:
- *  - vegamovies.*  — Hollywood / South dubbed / web series
- *  - rogmovies.*   — Bollywood
- *
- * Key facts (verified by tools/ probes, Sept 2026):
- *  - Search is a Meilisearch JSON proxy: GET {site}/ts-search.php?q=..&page=1
- *    returning {hits:[{document:{permalink,post_title,post_thumbnail,
- *    imdb_id,category}}]}.
- *  - Category pages are server-rendered `div.poster-card` grids.
- *  - Download chips ("⚡ G-Direct", "⚡ V-Cloud", "🗜 Batch/Zip") each link to a
- *    nexdrive.fit/genxfm{ID}/ page whose H1 ends "= G-Direct | = V-Cloud |
- *    = Batch" and whose body holds N concrete server URLs (N=1 for movies,
- *    N=episode-count for per-episode series groups, in document order).
- *  - fastdl embeds resolve to a DIRECT, streamable + downloadable
- *    googleusercontent file URL (see [NexdriveResolver]); vcloud/zip stay
- *    browser-downloads.
- */
+/** FILE: VegamoviesPlugin.kt — the Vegamovies plugin and provider engine. */
 
 import android.content.Context
 import com.lagradost.cloudstream3.*
@@ -98,18 +78,7 @@ internal data class LinkPayload(val pageUrl: String, val links: List<PayloadLink
     }
 }
 
-/**
- * Vegamovies provider — WordPress scraper with TMDB keyless enrichment and a
- * two-phase live-fill server pipeline (user spec Sept 2026):
- *
- *   Phase 1 (first ~10s): every server group's G-Drive chip is expanded →
- *           embed → googleusercontent DIRECT file; the FIRST such link starts
- *           playback while loadLinks keeps running.
- *   Phase 2 (90s window): all remaining qualities/chips keep landing in the
- *           change-server list in arrival order; download-only servers
- *           (V-Cloud, Batch/Zip, dead embeds) are listed too — labeled
- *           "[Downloadable]" so the player never auto-selects them.
- */
+/** Vegamovies provider — WordPress scraper with TMDB keyless enrichment and a two-phase live-fill server pipeline (. */
 class VegamoviesProvider : MainAPI() {
 
     companion object {
@@ -132,9 +101,7 @@ class VegamoviesProvider : MainAPI() {
             RegexOption.IGNORE_CASE,
         )
 
-        /** A genxfm anchor belongs to the CURRENT heading only when that heading
-         *  looks like a download group (quality / size / codec / pack wording) —
-         *  comment, search, sidebar and "Info:" headings never collect links. */
+        /** A genxfm anchor belongs to the CURRENT heading only when that heading looks like a download group (quality / size /. */
         val DOWNLOAD_HEADING = Regex(
             """(?i)(\d{3,4}p\b|4K|WEB[\s-]?DL|WEBRip|Blu\s?Ray|BD-?Rip|HD-?Rip|DVDRip|x26[45]|HEVC|AVC\b|\d+(?:\.\d+)?\s?(?:GB|MB)(?:/|\b)|/ZiP|/ZIP|\bZIP\b|Batch|Season\s*\d|\bPack\b|Complete|DUAL\s*[- ]?AUDIO|HINDI|TAMIL|TELUGU|\bEP(?:\.|ISODE)?\s*\d|S\d{1,2}[\s._-]?E\d{1,3})""",
         )
@@ -175,9 +142,7 @@ class VegamoviesProvider : MainAPI() {
             Pair("$mainUrl/korean-series/", "K-Drama"),
         )
 
-    // ------------------------------------------------------------------
-    // HTTP helpers
-    // ------------------------------------------------------------------
+    // ------------------------------------------------------------------ HTTP helpers.
 
     /** True when [doc] is a Cloudflare interstitial. */
     internal fun isChallenge(doc: Document): Boolean {
@@ -206,9 +171,7 @@ class VegamoviesProvider : MainAPI() {
         }
     }
 
-    // ------------------------------------------------------------------
-    // Domain self-healing
-    // ------------------------------------------------------------------
+    // ------------------------------------------------------------------ Domain self-healing.
 
     /** Live Hollywood + Bollywood domains via the posts' own cross-links. */
     suspend fun refreshDomains() = coroutineScope {
@@ -236,9 +199,7 @@ class VegamoviesProvider : MainAPI() {
                 ?.key
     }
 
-    // ------------------------------------------------------------------
-    // Search — Meilisearch JSON proxy on both sites
-    // ------------------------------------------------------------------
+    // ------------------------------------------------------------------ Search — Meilisearch JSON proxy on both sites.
 
     override suspend fun search(query: String): List<SearchResponse>? = coroutineScope {
         if (query.isBlank()) return@coroutineScope null
@@ -298,9 +259,7 @@ class VegamoviesProvider : MainAPI() {
     /** Clean "Download X (2019) Dual Audio … 480p [500MB] | 720p …" to "X (2019)". */
     internal fun cleanSearchTitle(raw: String): String {
         var t = raw.trim().removePrefix("Download").trim()
-        // Keep through the year parenthesis when present — anything after it is
-        // quality/source noise and gets dropped wholesale. Season tags BEFORE
-        // the year ("Reacher : Season 4 (2026)") survive with the kept prefix.
+        // Keep through the year parenthesis when present — anything after it is quality/source noise and gets dropped wholesale.
         val until = Regex("""(.*?\(\d{4}[^)]*\))""").find(t)
         if (until != null) {
             return until.groupValues[1].trim().trimEnd(' ', '-', '|', ':', ',')
@@ -340,9 +299,7 @@ class VegamoviesProvider : MainAPI() {
         }
     }
 
-    // ------------------------------------------------------------------
-    // Main page — server-rendered poster-card grids
-    // ------------------------------------------------------------------
+    // ------------------------------------------------------------------ Main page — server-rendered poster-card grids.
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         val base = request.data
@@ -393,9 +350,7 @@ class VegamoviesProvider : MainAPI() {
         }
     }
 
-    // ------------------------------------------------------------------
-    // Load — detail page, sections, gateway expansion, TMDB enrichment
-    // ------------------------------------------------------------------
+    // ------------------------------------------------------------------ Load — detail page, sections, gateway expansion.
 
     override suspend fun load(url: String): LoadResponse? {
         val doc = fetchDoc(url) ?: run {
@@ -442,12 +397,7 @@ class VegamoviesProvider : MainAPI() {
     /** One quality heading block and the server chips under it. */
     internal data class Group(val heading: String, val season: Int?, val links: List<DlLink>, val pack: Boolean)
 
-    /**
-     * Walk the post body in order: every h1-h6 sets the current heading; a
-     * genxfm anchor is a server chip belonging to that heading. Headings are
-     * quality lines ("... 720p WEB-DL x264 [800MB/E]"), season badges, or noise
-     * (comments/search) which never labels anything.
-     */
+    /** Walk the post body in order: every h1-h6 sets the current heading; a genxfm anchor is a server chip belonging to. */
     internal fun parseDetail(doc: Document): Scraped {
         val imdbId = Regex("""imdb\.com/title/(tt\d+)""", RegexOption.IGNORE_CASE)
             .find(doc.body().html())?.groupValues?.get(1)
@@ -470,9 +420,7 @@ class VegamoviesProvider : MainAPI() {
                     val t = el.text().trim()
                     if (t.isNotBlank() && t.length < 220) {
                         if (anchors.isNotEmpty()) closeGroup()
-                        // Download-group-shaped headings take links; everything
-                        // else (Info:, Screenshots:, comments, sidebar) turns
-                        // labelling off until the next download-shaped heading.
+                        // Download-group-shaped headings take links; everything else (Info:, Screenshots:, comments, sidebar) turns labelling.
                         heading = if (DOWNLOAD_HEADING.containsMatchIn(t)) t else ""
                     }
                 }
@@ -508,12 +456,22 @@ class VegamoviesProvider : MainAPI() {
                                 exp.links.isEmpty() -> listOf(
                                     PayloadLink(dl.gatewayUrl, chipKind.ifBlank { Servers.GATE }, g.heading, 0, true),
                                 )
-                                // Concrete servers of this chip. The chip's family
-                                // wins over the host guess (a Batch/Zip chip is
-                                // served by vcloud URLs but is an archive).
-                                // idx = episode ordinal within the family.
+                                // Concrete links are classified by HOST, never
+                                // by chip: the G-Direct and V-Cloud chips of
+                                // one quality group often open the SAME
+                                // gateway whose body interleaves both
+                                // families; chip-based labels then marked
+                                // vcloud URLs "G-Drive" (and vice versa),
+                                // breaking per-server resolution. Only a
+                                // Batch/Zip chip forces ZIP — its files ARE
+                                // the season archive. idx = ordinal within
+                                // the link's own host family (== episode).
                                 else -> exp.links.map { c ->
-                                    PayloadLink(c.url, chipKind.ifBlank { c.kind }, g.heading, c.idx, false)
+                                    PayloadLink(
+                                        c.url,
+                                        if (chipKind == Servers.ZIP) Servers.ZIP else c.kind,
+                                        g.heading, c.idx, false,
+                                    )
                                 }
                             }
                         }.distinctBy { it.url } // two chips may share one gateway
@@ -543,24 +501,14 @@ class VegamoviesProvider : MainAPI() {
         }
     }
 
-    /**
-     * How many episodes this set of concrete links reveals: the largest number
-     * of ordered links sharing ONE server family (each family lists one file
-     * per episode, in order). A quality gate with one G-Drive + one V-Cloud
-     * link is 1 episode on 2 servers (max family size 1), while a 12-episode
-     * G-Drive chip is 12. ZIP/pack links never inflate the count.
-     */
+    /** How many episodes this set of concrete links reveals: the largest number of ordered links sharing ONE server family. */
     private fun List<PayloadLink>.familyEpisodeCount(): Int =
         filter { it.kind != Servers.ZIP }
             .groupBy { it.kind }
             .maxOfOrNull { (_, same) -> same.maxOf { it.idx } + 1 }
             ?: 0
 
-    /**
-     * Series: gateways already expanded by [expandAll]. Each group whose links
-     * are per-episode contributes one file per episode (in page order); groups
-     * with a single link or pack badges become "Season N (Pack)" episodes.
-     */
+    /** Series: gateways already expanded by expandAll. */
     private suspend fun buildSeriesResponse(
         url: String, title: String, year: Int?, poster: String?,
         meta: MetadataService.TmdbDetail?, imdbId: String?, imdbRating: Double?,
@@ -577,17 +525,14 @@ class VegamoviesProvider : MainAPI() {
 
         val episodes = ArrayList<Episode>()
         for ((season, seasonGroups) in bySeason) {
-            // Per-episode structure: some server family exposes >1 ordered links
-            // (one per episode). A quality gate with one G-Drive + one V-Cloud
-            // link is a SINGLE file shown twice (two servers), NOT 2 episodes —
-            // count within the largest family, ZIP links never count.
+            // Per-episode structure: some server family exposes >1 ordered links (one per episode).
             val maxEps = seasonGroups
                 .filter { (g, _) -> !g.pack }
                 .maxOfOrNull { (_, c) -> c.familyEpisodeCount() } ?: 0
 
             if (maxEps > 1) {
                 // TMDB episode names/thumbs if available.
-                val epMeta = withTimeoutOrNull(6000L) {
+                val epMeta = withTimeoutOrNull(9000L) {
                     MetadataService.episodesForSeason(imdbId, meta?.tmdbId, season)
                 } ?: emptyMap()
                 for (i in 0 until maxEps) {
@@ -603,15 +548,15 @@ class VegamoviesProvider : MainAPI() {
                     episodes += newEpisode(LinkPayload(url, links.map { it.copy(season = season, episode = epNum) }).toJson()) {
                         this.season = season
                         this.episode = epNum
-                        this.name = m?.name
+                        this.name = m?.name ?: "Episode $epNum"
                         this.description = m?.overview
+                        m?.runTime?.let { this.runTime = it }
                         m?.thumbnail?.let { this.posterUrl = it }
+                        m?.aired?.let { this.addDate(it) }
                     }
                 }
             }
-            // Season-level rows: whole-season pack chips, plus every group when
-            // the season has no per-episode structure at all (crew-girl style:
-            // one quality-labeled .zip per season).
+            // Season-level rows: whole-season pack chips, plus every group when the season has no per-episode structure at all.
             seasonGroups.forEach { (g, concrete) ->
                 val packLinks = concrete.filter { it.kind == Servers.ZIP }
                 val noEpisodes = maxEps <= 1
@@ -646,9 +591,7 @@ class VegamoviesProvider : MainAPI() {
         }
     }
 
-    // ------------------------------------------------------------------
-    // loadLinks — resolve embeds, live-fill, honest names
-    // ------------------------------------------------------------------
+    // ------------------------------------------------------------------ loadLinks — resolve embeds, live-fill, honest.
 
     override suspend fun loadLinks(
         data: String,
@@ -667,12 +610,12 @@ class VegamoviesProvider : MainAPI() {
                 payload.links.map { pl ->
                     async {
                         sem.acquire()
-                        val link = try {
-                            buildLink(pl, referer)
+                        val links = try {
+                            buildLinks(pl, referer)
                         } finally { sem.release() }
-                        if (link != null) {
+                        links.forEach {
                             emitted = true
-                            callback(link)
+                            callback(it)
                         }
                     }
                 }.awaitAll()
@@ -681,8 +624,8 @@ class VegamoviesProvider : MainAPI() {
         return emitted
     }
 
-    /** Resolve one payload link into an ExtractorLink (or null if hopeless). */
-    private suspend fun buildLink(pl: PayloadLink, referer: String): ExtractorLink? {
+    /** Resolve one payload link into 0..n ExtractorLinks. */
+    private suspend fun buildLinks(pl: PayloadLink, referer: String): List<ExtractorLink> {
         val kind = pl.kind.ifBlank { Servers.kindOf(pl.url) }
         // Gateway stored unexpanded (rare — only when expansion failed at load
         // time): re-expand now and pick the episode index.
@@ -692,7 +635,7 @@ class VegamoviesProvider : MainAPI() {
             val exp = NexdriveResolver.expand(NexdriveGateway.normalize(pl.url), referer, commonHeaders)
             if (exp.links.isEmpty()) {
                 // Dead gateway: list the gateway page itself as browser download.
-                return extractor(pl.url, Servers.GATE, pl, browserOnly = true)
+                return listOf(extractor(pl.url, Servers.GATE, pl, browserOnly = true))
             }
             val sameKind = if (pl.kind.isNotBlank()) exp.links.filter { it.kind == pl.kind } else exp.links
             val pool = sameKind.ifEmpty { exp.links }
@@ -708,22 +651,39 @@ class VegamoviesProvider : MainAPI() {
             Servers.GDRIVE -> {
                 // embed page -> googleusercontent direct (1 fast hop), or self as browser link.
                 val direct = NexdriveResolver.resolveEmbed(concrete, referer, commonHeaders)
-                if (direct != null) extractor(direct, Servers.GDRIVE, pl, browserOnly = false)
-                else extractor(concrete, Servers.GDRIVE, pl, browserOnly = true)
+                if (direct != null) return listOf(extractor(direct, Servers.GDRIVE, pl, browserOnly = false))
+                listOf(extractor(concrete, Servers.GDRIVE, pl, browserOnly = true))
             }
-            Servers.VCLOUD, Servers.ZIP -> extractor(concrete, concreteKind, pl, browserOnly = true)
+            Servers.VCLOUD -> {
+                // CSX-grade chain: vcloud.fit -> atob(atob) token page ->
+                // FSLv2/FSL R2 files (206-seekable in-app streams). Browser
+                // page only when the chain yields nothing.
+                val fs = runCatching { VcloudResolver.resolve(concrete, referer, commonHeaders) }
+                    .getOrDefault(emptyList())
+                if (fs.isEmpty()) listOf(extractor(concrete, Servers.VCLOUD, pl, browserOnly = true))
+                else fs.map { extractor(it.url, Servers.VCLOUD, pl, browserOnly = false, serverTag = it.tag) }
+            }
+            Servers.ZIP -> listOf(extractor(concrete, concreteKind, pl, browserOnly = true))
             else -> {
                 val direct = runCatching {
                     if (concrete.contains("fastdl")) NexdriveResolver.resolveEmbed(concrete, referer, commonHeaders) else null
                 }.getOrNull()
-                if (direct != null) extractor(direct, Servers.GDRIVE, pl, browserOnly = false)
-                else extractor(concrete, concreteKind, pl, browserOnly = true)
+                if (direct != null) return listOf(extractor(direct, Servers.GDRIVE, pl, browserOnly = false))
+                val v = runCatching {
+                    if (concrete.contains("vcloud")) VcloudResolver.resolve(concrete, referer, commonHeaders) else emptyList()
+                }.getOrDefault(emptyList())
+                if (v.isNotEmpty()) {
+                    return v.map { extractor(it.url, Servers.VCLOUD, pl, browserOnly = false, serverTag = it.tag) }
+                }
+                listOf(extractor(concrete, concreteKind, pl, browserOnly = true))
             }
         }
     }
 
-    private fun extractor(url: String, kind: String, pl: PayloadLink, browserOnly: Boolean): ExtractorLink {
-        val raw = RawLink(url, kind, pl.heading, browserOnly, pl.season, pl.episode)
+    private fun extractor(
+        url: String, kind: String, pl: PayloadLink, browserOnly: Boolean, serverTag: String = "",
+    ): ExtractorLink {
+        val raw = RawLink(url, kind, pl.heading, browserOnly, pl.season, pl.episode, serverTag)
         return ExtractorLink(
             source = "Vegamovies",
             name = LinkNaming.displayName(raw),
@@ -733,9 +693,7 @@ class VegamoviesProvider : MainAPI() {
             quality = if (browserOnly) 0 else getQualityFromName(pl.heading),
             headers = commonHeaders + mapOf("Referer" to (if (kind == Servers.GDRIVE && !browserOnly) "https://fastdl.zip/" else "https://new2.vegamovies.futbol/")),
             extractorData = null,
-            // Browser-only gate pages keep VIDEO type + UNKNOWN quality so the
-            // player's auto-selection never picks them; tapping offers the page
-            // (a real, working download source in the system browser).
+            // Browser-only gate pages keep VIDEO type + UNKNOWN quality so the player's auto-selection never picks them; tapping.
             type = ExtractorLinkType.VIDEO,
             audioTracks = emptyList(),
         )

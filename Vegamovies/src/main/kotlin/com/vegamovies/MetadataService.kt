@@ -114,6 +114,10 @@ object MetadataService {
         val name: String? = null,
         val overview: String? = null,
         val thumbnail: String? = null,
+        /** Runtime in minutes, when TMDB knows it. */
+        val runTime: Int? = null,
+        /** ISO air date ("2025-11-28"), when present. */
+        val aired: String? = null,
     )
 
     private val episodeCache = ConcurrentHashMap<String, Map<Int, TmdbEpisode>>()
@@ -131,9 +135,14 @@ object MetadataService {
         val ck = "$tvId|$season"
         episodeCache[ck]?.let { return it }
         val url = "$TMDB_API/tv/$tvId/season/$season?api_key=$TMDB_API_KEY&language=en-US"
-        val map = runCatching {
-            val root = JSONObject(app.get(url, timeout = 6).text)
-            root.optJSONArray("episodes")?.let { arr ->
+        // Mobile networks routinely need >6s for the first api.themoviedb.org
+        // handshake; a cold season fetch must not silently mean "no episode
+        // names". 8s + one retry, and carry runtime + air date so episode
+        // rows are fully labelled like CSX's cinemeta path.
+        var map: Map<Int, TmdbEpisode> = emptyMap()
+        for (attempt in 1..2) {
+            val root = runCatching { JSONObject(app.get(url, timeout = 8).text) }.getOrNull() ?: continue
+            map = root.optJSONArray("episodes")?.let { arr ->
                 (0 until arr.length()).mapNotNull { i ->
                     val e = arr.optJSONObject(i) ?: return@mapNotNull null
                     val ep = e.optInt("episode_number", -1)
@@ -142,10 +151,13 @@ object MetadataService {
                         name = str(e, "name"),
                         overview = str(e, "overview"),
                         thumbnail = str(e, "still_path")?.let { "$IMG_BASE$it" },
+                        runTime = e.optInt("runtime", -1).takeIf { it > 0 },
+                        aired = str(e, "air_date"),
                     )
                 }
-            } ?: emptyList()
-        }.getOrDefault(emptyList()).toMap()
+            }.orEmpty().toMap()
+            if (map.isNotEmpty()) break
+        }
         if (map.isNotEmpty() && episodeCache.size < 64) episodeCache[ck] = map
         return map
     }

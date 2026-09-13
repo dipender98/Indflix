@@ -1,22 +1,5 @@
 ﻿package com.multimovies
-/**
-
- * FILE: MultimoviesPlugin.kt — the Multimovies plugin and provider engine.
- *
- * Everything Multimovies-site-specific lives here:
- *  - [Multimovies]          plugin entrypoint (@CloudstreamPlugin); registers
- *                           the provider with CloudStream.
- *  - [MultimoviesProvider]  MainAPI — scrapes multimovies.motorcycles
- *                           (search / load / loadLinks, dooplayer servers).
- *  - [MultiSourcePuller]    parallel-pull engine: races every source with a
- *                           per-source timeout, unwraps embeds, pushes links
- *                           live in arrival order (no ranking).
- *  - [GlobalSources]        registry of id-keyed global embed sources
- *                           (2embed, VidSrc, 111Movies, ...).
- *
- * Reusable shared services live in core/SharedServices.kt; third-party stream
- * APIs live in sources/ExternalSources.kt.
- */
+/** FILE: MultimoviesPlugin.kt — the Multimovies plugin and provider engine. */
 
 import android.content.Context
 import com.lagradost.cloudstream3.*
@@ -46,9 +29,7 @@ import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
-/**
- * Registers the Multimovies provider with CloudStream.
- */
+/** Registers the Multimovies provider with CloudStream. */
 @CloudstreamPlugin
 class Multimovies : Plugin() {
     override fun load(context: Context) {
@@ -57,9 +38,7 @@ class Multimovies : Plugin() {
     }
 }
 
-/** Tiny in-memory cache for search results so repeated searches (and quick-search
- *  typing) are instant instead of re-fetching the site. Bounded in size, TTL per
- *  entry — search results don't change minute-to-minute. */
+/** Tiny in-memory cache for search results so repeated searches (and quick-search typing) are instant instead of. */
 internal object SearchCache {
     private const val TTL_MS = MultimoviesProvider.SEARCH_CACHE_TTL_MS
     private const val MAX_SIZE = 128
@@ -88,9 +67,7 @@ internal object SearchCache {
     private fun key(query: String) = query.trim().lowercase()
 }
 
-/** Matches any multimovies.* host (the site rotates its TLD, so URL checks must
- *  never pin the hostname — old cached-domain URLs still count as on-site after
- *  [MultimoviesDomainResolver] points at a fresh mirror). */
+/** Matches any multimovies.* host (the site rotates its TLD, so URL checks must never pin the hostname — old. */
 private val MULTIMOVIES_HOST_REGEX =
     Regex("""^https?://(?:www\.)?multimovies\.[a-z]{2,10}(?:/|$)""", RegexOption.IGNORE_CASE)
 
@@ -105,9 +82,7 @@ private fun Element.posterUrl(): String? =
             img.attr("data-original"), img.attr("data-lazyload")).firstOrNull { it.isNotBlank() }
     }?.takeIf { it.isNotBlank() }
 
-/** Cheap, no-network parse of the per-item rating badge (as a number) from
- *  list/search markup. Returns null when absent so search never makes extra
- *  network calls. Pure function, testable on the JVM without Score. */
+/** Cheap, no-network parse of the per-item rating badge (as a number) from list/search markup. */
 internal fun parseRating(item: Element): Double? {
     val raw = item.selectFirst(
         "span.dt_rating_vgs, span.imdb, div.imdb-rating, " +
@@ -118,29 +93,7 @@ internal fun parseRating(item: Element): Double? {
         .takeIf { it.isNotBlank() }?.toDoubleOrNull()
 }
 
-/** Server names as they appear on the Multimovies "Video Sources" list, used
- *  ONLY to pick the ORDER in which the movie detail page's background prefetch
- *  resolves dooplayer servers — EVERY server is prefetched and each result is
- *  published to the prefetch cache THE MOMENT it lands (warm-up optimization,
- *  never the play path). Cineverse is index 0, so its fully-resolved +
- *  unwrapped stream URL is the first warm entry a Play tap can reuse. Play-time
- *  behavior is fully NEUTRAL (user spec Sept 2026 rewrite #2): every source
- *  launches in parallel, links push in ARRIVAL order, and the user's own
- *  CloudStream quality/source profile decides what auto-plays.
- *
- *  Nxsha (index 1) expands internally into its own server fleet resolved by
- *  [NxshaExtractor] through nxsha.space's encrypted /api/servers+/api/sources:
- *  Nitro, MbPly, MhPly, Citadel, AwsPly, StremFx, VidHindi(4K embed),
- *  CastVid, Lolly, Prvibd, Stvvid, Ophm, AsiaLug, TunWatch, Gbru.
- *
- *  The tail lists the id-based GlobalSources (2embed.cc, VidSrc, 111Movies) —
- *  verified-responding public hosts; Nxsha's own sources match the "nxsha"
- *  entry above. Nxsha's hardcoded player fallbacks (videasy/vidnest/vidfast/
- *  moviesapi/vidzee) were probed Aug 2026: all JS-rendered SPAs or 403 for
- *  non-browsers, so they are NOT added here; their upstreams still arrive via
- *  Nxsha's own provider pipeline.
- *  Note: gdmirror was removed entirely (host refused TCP, no alt TLD resolves);
- *  add it back here if it ever comes back to life. */
+/** Server names as they appear on the Multimovies "Video Sources" list, used ONLY to pick the ORDER in which the movie. */
 internal val SOURCE_PRIORITY: List<String> = listOf(
     "Cineverse",
     "nxsha",
@@ -156,40 +109,17 @@ internal val SOURCE_PRIORITY: List<String> = listOf(
 /** CSS selector for the item containers on a Multimovies search-results page. */
 private val SEARCH_ITEMS_SELECTOR = "div#archive-content div.item, div.search-page div.result-item, article.item, div.ml-items div.item, div.results div.result, ul.ml-posts li, div#content div.post, div.items div.item"
 
-/**
- * Multimovies - a CloudStream provider that scrapes the Multimovies site. The site
- * rotates its live domain every few days (announced on the multimovies.wtf gateway);
- * [MultimoviesDomainResolver] keeps mainUrl pointed at the current mirror.
- *
- * Source handling policy (user spec Sept 2026 rewrite #2 — NEUTRAL):
- *  - Multiple streaming sources are pulled in PARALLEL with a per-source
- *    TIMEOUT (SOURCE_TIMEOUT_MS).
- *  - EVERY resolved link is pushed to the player immediately, in ARRIVAL
- *    order — no plugin-side prioritization of any kind. loadLinks stays
- *    alive for [MultimoviesProvider.LIVE_FILL_MS] so the change-server list
- *    keeps growing while the player is open.
- *  - [SOURCE_PRIORITY] orders the dooplayer servers a movie detail page
- *    PREFETCHES in the background — all of them, fastest-first (warm-up,
- *    never the play path).
- *  - KNOWN sub-720p fixed files are dropped ([passesQualityFloor]); adaptive
- *    (m3u8) links always pass.
- *  - Server captions are ignored; the OpenSubtitles fallback
- *    ([SubtilesProvider]) is the only subtitle source.
- */
+/** Multimovies - a CloudStream provider that scrapes the Multimovies site. */
 class MultimoviesProvider : MainAPI() {
 
     override var mainUrl = MultimoviesDomainResolver.SEED_DOMAIN
     override var name = "Multimovies"
-    // India flag in the search-provider picker (three-dot menu) and provider
-    // lists — MainAPI.lang defaults to "en" (UK flag) unless overridden.
-    // CloudStream's SubtitleHelper maps "hi" -> IN.
+    // India flag in the search-provider picker (three-dot menu) and provider lists — MainAPI.lang defaults to "en" (UK.
     override var lang = "hi"
 
     private val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
     private val commonHeaders = mapOf("User-Agent" to userAgent)
-    // Solves the Cloudflare managed challenge on the live multimovies.* domain. Created
-    // on first use (not at plugin install) so CookieManager/WebView setup happens
-    // during a network call. Cached so solved cookies persist across calls.
+    // Solves the Cloudflare managed challenge on the live multimovies.* domain.
     private var cfKiller: CloudflareKiller? = null
     private fun getCfKiller(): CloudflareKiller {
         return cfKiller ?: CloudflareKiller().also { cfKiller = it }
@@ -204,18 +134,10 @@ class MultimoviesProvider : MainAPI() {
     /** Maps "tmdbId|type" to (name, year) so load() can slug-guess the MM page. */
     private val tmdbSearchCache = ConcurrentHashMap<String, Pair<String, String?>>()
 
-    /** In-flight link farm per EXACT load url: mirrors
-     *  [com.indstream.IndStreamProvider]'s warmFarms/single-flight model
-     *  (Sept 2026 live-window audit). Value completes when every detached
-     *  pull resolved. Its jobs: (1) a re-tap while the first farm is still
-     *  resolving TAILS it — late arrivals reach the live change-server list
-     *  instead of only the next replay; (2) no second full farm ever launches
-     *  over the same hosts while the player is using the bandwidth. */
+    /** In-flight link farm per EXACT load url: mirrors com.indstream.IndStreamProvider's warmFarms/single-flight model. */
     private val liveFarms = ConcurrentHashMap<String, Deferred<Unit>>()
 
-    /** Poll a running farm's growing FastStartCache entry, pushing only URLs
-     *  [pushed] has not seen yet; returns the number newly delivered. Bounded
-     *  by [MultimoviesProvider.LIVE_FILL_MS] and stops when [farm] finishes. */
+    /** Poll a running farm's growing FastStartCache entry, pushing only URLs pushed has not seen yet; returns the number. */
     private suspend fun tailLiveFarm(
         data: String,
         farm: Deferred<Unit>,
@@ -275,9 +197,7 @@ class MultimoviesProvider : MainAPI() {
         Pair("$mainUrl/genre/anime-movies/", "Anime Movies"),
     )
 
-    // ------------------------------------------------------------------
-    // Source priority / timeout configuration
-    // ------------------------------------------------------------------
+    // ------------------------------------------------------------------ Source priority / timeout configuration.
 
     /** Per-source timeout in milliseconds. */
     companion object {
@@ -297,33 +217,13 @@ class MultimoviesProvider : MainAPI() {
         /** Worst-case budget for an uncached search before giving up. */
         const val SEARCH_TOTAL_BUDGET_MS = 2500L
 
-        /** Live change-server window (user spec Sept 2026 rewrite #5 — CSX/
-         *  CineStream model, matches IndStream [com.indstream.StreamEngine.LIVE_FILL_MS]).
-         *  loadLinks stays ALIVE until EVERY pull answers or this cap elapses
-         *  (whichever first) and pushes each resolved link to the player THE
-         *  MOMENT it lands, in arrival order. WHY long, not short: the host
-         *  records callback pushes ONLY while loadLinks runs (return freezes the
-         *  change-server list at whatever landed so far), yet it starts the
-         *  VIDEO as soon as the FIRST link crosses AUTO_SKIP_PRIORITY —
-         *  loadLinks still running. So a wide window does NOT delay first play
-         *  (warm prefetch + parallel pulls bring that first link up in
-         *  seconds), it just keeps the server list growing live for the whole
-         *  farm, exactly like CineStream's "grows past 30 s while the video is
-         *  already at 5-7 s". Anything still resolving past the cap lands in
-         *  [FastStartCache]/[LinkCache] for the instant full-list replay. */
+        /** Live change-server window ( Sept 2026 rewrite #5 — CSX/ CineStream model, matches IndStream. */
         const val LIVE_FILL_MS = 90_000L
 
-        /** Hard cap on how long [loadLinks] waits before returning, regardless of
-         *  whether the farm has finished. Safety net so a totally dead farm still
-         *  surfaces "no link found" instead of hanging. */
+        /** Hard cap on how long loadLinks waits before returning, regardless of whether the farm has finished. */
         const val FAST_START_MAX_MS = 45_000L
 
-        /** Quality floor (user spec Sept 2026 rewrite #2): a FIXED (non-HLS)
-         *  stream whose resolved quality is a KNOWN height below 720p is
-         *  dropped at emission. Adaptive (m3u8) masters ALWAYS pass — they
-         *  ABR-ramp to their best rendition even when the measured height
-         *  reads low/0 — and unknown heights (0) can't be proven sub-720.
-         *  Pure function — unit-tested in Test/QualityFloorMmTest.kt. */
+        /** Quality floor ( Sept 2026 rewrite #2): a FIXED (non-HLS) stream whose resolved quality is a KNOWN height below 720p. */
         fun passesQualityFloor(isAdaptive: Boolean, height: Int): Boolean =
             isAdaptive || height <= 0 || height >= 720
 
@@ -337,18 +237,13 @@ class MultimoviesProvider : MainAPI() {
         return if (idx == -1) SOURCE_PRIORITY.size else idx
     }
 
-    /** True when [url] belongs to any multimovies.* domain. The site rotates its
-     *  TLD, so the check must not pin the hostname — URLs from a doc cached under
-     *  an old domain still count after [MultimoviesDomainResolver] self-heals. */
+    /** True when url belongs to any multimovies.* domain. */
     private fun isMultimoviesUrl(url: String?): Boolean {
         if (url.isNullOrBlank()) return false
         return MULTIMOVIES_HOST_REGEX.containsMatchIn(url)
     }
 
-    /** Rewrite [url]'s scheme+host to the current live domain when it's a
-     *  multimovies.* URL, so old-domain URLs (session caches, home-page requests
-     *  built before a rotation) fetch from the live mirror. Other hosts pass
-     *  through untouched. */
+    /** Rewrite url's scheme+host to the current live domain when it's a multimovies.* URL, so old-domain URLs (session. */
     private fun liveUrl(url: String): String {
         val m = URL_HOST_REGEX.find(url) ?: return url
         if (!m.groupValues[1].substringAfter("://").startsWith("multimovies.", ignoreCase = true)) return url
@@ -356,13 +251,7 @@ class MultimoviesProvider : MainAPI() {
         return liveHost + url.substring(m.range.last + 1)
     }
 
-    /**
-     * Run [block] against the current [mainUrl]. When the result fails (null or
-     * [retryIf] returns true) or an exception escapes, force a fresh gateway
-     * resolve and retry once — so a rotated/parked domain self-heals without a
-     * plugin republish. Only runs the extra resolve on an actual failure, never
-     * on the happy path.
-     */
+    /** Run block against the current mainUrl. */
     private suspend fun <T> withDomainRetry(
         retryIf: (T) -> Boolean,
         block: suspend () -> T,
@@ -378,16 +267,7 @@ class MultimoviesProvider : MainAPI() {
         }
     }
 
-    /**
-     * Fetch [url] without the Cloudflare solver first: when solved cookies are
-     * already valid (CloudStream persists the cookie jar across calls), this is
-     * a fast ~1–3s path. Only if the response is a challenge (or the fast path
-     * errors) do we re-request with a fresh [CloudflareKiller] solve.
-     *
-     * [required]=true (used by [solveDocument] for detail/link pages) surfaces an
-     * [ErrorLoadingException] instead of null so CloudStream doesn't retry
-     * forever. [required]=false returns null to let callers degrade gracefully.
-     */
+    /** Fetch url without the Cloudflare solver first: when solved cookies are already valid (CloudStream persists the. */
     internal suspend fun fetchDoc(
         url: String,
         timeoutSeconds: Long = 12,
@@ -444,9 +324,7 @@ class MultimoviesProvider : MainAPI() {
     ): Document = fetchDoc(url, timeoutSeconds = timeoutSeconds, required = true)
         ?: throw ErrorLoadingException("Failed to fetch $url")
 
-    /** Reuses the memoized detail-page doc when present; otherwise fetches,
-     *  memoizes, and returns it — so main-page card taps get the same doc reuse
-     *  as search taps. Returns null on failure (never throws). */
+    /** Reuses the memoized detail-page doc when present; otherwise fetches, memoizes, and returns it — so main-page card. */
     internal suspend fun cachedDocOrFetch(url: String): Document? {
         mmDocCache[url]?.let { return it }
         val doc = runCatching { solveDocument(url) }.getOrNull() ?: return null
@@ -457,17 +335,12 @@ class MultimoviesProvider : MainAPI() {
         return doc
     }
 
-    // ------------------------------------------------------------------
-    // Search (TMDB/SIMKL-driven; Multimovies is only touched in the background
-    // to resolve each hit to its real page URL, never for metadata).
-    // ------------------------------------------------------------------
+    // ------------------------------------------------------------------ Search (TMDB/SIMKL-driven; Multimovies is only.
 
     override suspend fun search(query: String): List<SearchResponse>? = withDomainRetry(retryIf = { it == null }) {
         SearchCache.get(query)?.let { return@withDomainRetry it }
 
-        // One request to TMDB /search/multi (or SIMKL search when its client_id is
-        // set) returns posters + ratings inline — no enrichment round-trips. The
-        // strict relevance gate still removes every non-matching hit.
+        // One request to TMDB /search/multi (or SIMKL search when its client_id is set) returns posters + ratings inline — no.
         val ranked: List<Pair<Double, TmdbService.TmdbItem>> =
             withTimeoutOrNull(SEARCH_TOTAL_BUDGET_MS) {
                 val raw = TmdbService.search(query)
@@ -542,10 +415,7 @@ class MultimoviesProvider : MainAPI() {
         }
     }
 
-    /** Resolve a TMDB hit to its real Multimovies page Document (cached). Slugs are
-     *  guessed first so load() avoids the site's `?s=` search endpoint entirely;
-     *  the site search is only a fallback when the guess misses. [title] is the
-     *  search-result title (from [tmdbSearchCache]); when blank nothing is fetched. */
+    /** Resolve a TMDB hit to its real Multimovies page Document (cached). */
     private suspend fun resolveMultimoviesDoc(
         tmdbId: Int?,
         imdbId: String?,
@@ -561,9 +431,7 @@ class MultimoviesProvider : MainAPI() {
 
         // Slug-guess first (/{movies|tvshows}/{slug}-{year}/), validated by title.
         val base = if (type == "movie") "$mainUrl/movies/" else "$mainUrl/tvshows/"
-        // Emit slugs for every common spelling of the title ("&" vs "and",
-        // apostrophes dropped, punctuation stripped) so a TMDB title still
-        // guesses the site's URL.
+        // Emit slugs for every common spelling of the title ("&" vs "and", apostrophes dropped, punctuation stripped) so a.
         val slugVariants = titleVariants(title)
             .map { t -> t.lowercase().trim().replace(Regex("[^a-z0-9]+"), "-").trim('-') }
             .distinct()
@@ -588,10 +456,7 @@ class MultimoviesProvider : MainAPI() {
             }
         }
 
-        // Fallback: site search by title, pick the closest title match. The
-        // server drops queries carrying a literal "&" or certain punctuation
-        // ("?s=Locke+%26+Key" returns nothing), so retry the alternative
-        // spellings until one returns results.
+        // Fallback: site search by title, pick the closest title match.
         val searchTerms = titleVariants(title)
         var searchDoc: Document? = null
         for (term in searchTerms) {
@@ -623,10 +488,7 @@ class MultimoviesProvider : MainAPI() {
         return if (itemTitle.isNullOrBlank()) null else href to itemTitle
     }
 
-    /** Concurrently resolve TMDB posters for main-page results that are missing one
-     *  or still carry a thumbnail size marker. Bounded to 3 concurrent lookups with
-     *  a 3s per-item timeout, AND an overall 2.5s budget so a page is never stalled
-     *  by many poster-less items. */
+    /** Concurrently resolve TMDB posters for main-page results that are missing one or still carry a thumbnail size marker. */
     private suspend fun backfillPosters(results: List<SearchResponse>) {
         val toFetch = results.mapNotNull { r ->
             val poster = r.posterUrl
@@ -691,9 +553,7 @@ class MultimoviesProvider : MainAPI() {
         }
     }
 
-    // ------------------------------------------------------------------
-    // Main page
-    // ------------------------------------------------------------------
+    // ------------------------------------------------------------------ Main page.
 
     override suspend fun getMainPage(
         page: Int,
@@ -708,9 +568,7 @@ class MultimoviesProvider : MainAPI() {
         newHomePageResponse(request.name, items)
     }
 
-    // ------------------------------------------------------------------
-    // Load (detail page)
-    // ------------------------------------------------------------------
+    // ------------------------------------------------------------------ Load (detail page).
 
     override suspend fun load(url: String): LoadResponse? =
         withDomainRetry(retryIf = { it == null }) { loadInternal(url) }
@@ -751,9 +609,7 @@ class MultimoviesProvider : MainAPI() {
             val isMovie = tmdb?.second == "movie" || realUrl.contains("/movies/")
             val pageType = if (isMovie) "movie" else "series"
 
-            // Fire-and-forget: pre-resolve the top-priority player servers while
-            // the user reads the detail page, so tapping Play emits links without
-            // waiting for a page fetch + admin-ajax round-trips.
+            // Fire-and-forget: pre-resolve the top-priority player servers while the user reads the detail page, so tapping Play.
             if (isMovie) prefetchEmbeds(realUrl, doc)
 
             // Direct MM page (main-page card): ids come from the page markup, then
@@ -803,9 +659,7 @@ class MultimoviesProvider : MainAPI() {
                 SourceMetaCache.put(realUrl, SourceMeta(imdbId ?: "", tmdbId?.toString(), null, null))
             }
 
-            // Global id-based sources (2embed / VidSrc / 111Movies / Nxsha / VidEm)
-            // need exactly the ids we now hold — pre-resolve them while the user
-            // reads the detail page so the global path is as warm as the embed path.
+            // Global id-based sources (2embed / VidSrc / 111Movies / Nxsha / VidEm) need exactly the ids we now hold — pre-resolve.
             if (isMovie) prefetchGlobals(
                 SourceMeta(imdbId ?: "", tmdbId?.toString(), null, null), realUrl,
             )
@@ -895,10 +749,7 @@ class MultimoviesProvider : MainAPI() {
         }
     }
 
-    /** Resolve the IMDB id from the site's first (non-trailer) dooplayer embed
-     *  URL. Every dooplayer admin-ajax response carries an embed_url that embeds
-     *  the IMDB id (e.g. tt1979320), so this is a very reliable fallback when the
-     *  detail page doesn't expose the id directly. */
+    /** Resolve the IMDB id from the site's first (non-trailer) dooplayer embed URL. */
     private suspend fun firstEmbedImdbId(doc: Document): String? {
         val option = doc.selectFirst("li.dooplay_player_option:not([data-nume='trailer'])") ?: return null
         val post = doc.selectFirst("meta#dooplay-ajax-counter")?.attr("data-postid")
@@ -926,10 +777,7 @@ class MultimoviesProvider : MainAPI() {
         return extractImdbIdFromUrl(resp)
     }
 
-    /** Parse the Dooplay "Video Sources" list: each li.dooplay_player_option
-     *  carries data-nume (source index) and data-type; the post id comes from
-     *  meta#dooplay-ajax-counter with the li's own data-post as fallback.
-     *  Trailers (YouTube embeds) are excluded — they are not playable sources. */
+    /** Parse the Dooplay "Video Sources" list: each li.dooplay_player_option carries data-nume (source index) and. */
     private fun parsePlayerOptions(doc: Document, pageUrl: String): List<Pair<String, Triple<String, String, String>>> {
         val postId = doc.selectFirst("meta#dooplay-ajax-counter")
             ?.attr("data-postid")
@@ -949,15 +797,7 @@ class MultimoviesProvider : MainAPI() {
             }
     }
 
-    /** Background movie-only prefetch: resolve EVERY dooplayer server through
-     *  admin-ajax and unwrap it to its final stream/relay URL, publishing each
-     *  result into [EmbedPrefetchCache] THE MOMENT it lands (fastest-first per
-     *  [SOURCE_PRIORITY], so Cineverse — index 0 — is warm within the first
-     *  round-trips). A Play tap then replays the already-resolved servers and
-     *  only tops-up the few still missing, instead of re-resolving the whole
-     *  page. [EmbedPrefetchCache.resolveOrJoin] deduplicates concurrent
-     *  starts; any error simply leaves the cache empty. Never blocks or fails
-     *  load(). */
+    /** Background movie-only prefetch: resolve EVERY dooplayer server through admin-ajax and unwrap it to its final. */
     private fun prefetchEmbeds(pageUrl: String, doc: Document) {
         searchScope.launch {
             runCatching {
@@ -966,13 +806,7 @@ class MultimoviesProvider : MainAPI() {
         }
     }
 
-    /** Movie-only pre-warm of the GLOBAL id-based sources into [FastStartCache]
-     *  (the dooplayer embed path has [prefetchEmbeds]; without this the global
-     *  path only resolved on the Play tap). Runs with the gate closed — results
-     *  only land in the cache, nothing touches a player. The five sources are
-     *  independent network calls, so each gets its own launch: the warm-up now
-     *  takes as long as the SLOWEST source instead of the SUM of all of them
-     *  (the old sequential forEach could burn ~5 × 15 s). Never blocks load(). */
+    /** Movie-only pre-warm of the GLOBAL id-based sources into FastStartCache (the dooplayer embed path has prefetchEmbeds. */
     private fun prefetchGlobals(meta: SourceMeta, pageUrl: String) {
         if (meta.imdbId.isBlank() && meta.tmdbId == null) return
         if (FastStartCache.get(pageUrl)?.isNotEmpty() == true) return
@@ -997,12 +831,7 @@ class MultimoviesProvider : MainAPI() {
         }
     }
 
-    /** Resolve EVERY player server for [pageUrl] to its final post-unwrap URL.
-     *  Each completed server is published to [EmbedPrefetchCache] immediately
-     *  (see [publish]) so the Play tap never waits on the slowest host. The
-     *  [SOURCE_PRIORITY] order here only picks WHICH background prefetch runs
-     *  first (warm-up, never the play path); the Play-tap pipeline itself is
-     *  fully neutral. Empty when the page exposes no usable options. */
+    /** Resolve EVERY player server for pageUrl to its final post-unwrap URL. */
     private suspend fun resolveAllEmbeds(pageUrl: String, doc: Document): List<ResolvedEmbed> {
         val options = parsePlayerOptions(doc, pageUrl)
             .sortedBy { priorityOf(it.first) }
@@ -1025,9 +854,7 @@ class MultimoviesProvider : MainAPI() {
         }
     }
 
-    // ------------------------------------------------------------------
-    // Load links - parallel pulling with per-source timeout + priority
-    // ------------------------------------------------------------------
+    // ------------------------------------------------------------------ Load links - parallel pulling with per-source.
 
     override suspend fun loadLinks(
         data: String,
@@ -1037,12 +864,7 @@ class MultimoviesProvider : MainAPI() {
     ): Boolean = withDomainRetry(retryIf = { !it }) {
         var meta = SourceMetaCache.get(data)
 
-        // USER SPEC (Sept 2026 rewrite #2): NO plugin-side ranking anywhere —
-        // not on the fresh path, not on replays. The user's CloudStream
-        // quality/source-profile setting alone decides what auto-plays. Server
-        // subtitles are ignored entirely (the OpenSubtitles fallback below is
-        // THE subtitle provider), and KNOWN sub-720p fixed files are dropped
-        // (adaptive masters always pass — see [passesQualityFloor]).
+        // USER SPEC (Sept 2026 rewrite #2): NO plugin-side ranking anywhere — not on the fresh path, not on replays.
 
         // Fast path 1: cached links replay instantly, in stored (arrival)
         // order — no winner pick, no re-sort.
@@ -1050,9 +872,7 @@ class MultimoviesProvider : MainAPI() {
             LinkCache.get(meta.imdbId, meta.season, meta.episode)?.let { cached ->
                 if (cached.first.isNotEmpty()) {
                     cached.first.forEach { runCatching { callback(it) } }
-                    // SubtilesProvider is the ONLY subtitle source — replayed
-                    // titles must get their tracks too (the 15-min per-title
-                    // cache makes this near-instant on repeat).
+                    // SubtilesProvider is the ONLY subtitle source — replayed titles must get their tracks too (the 15-min per-title cache.
                     deliverFallbackSubs(meta, subtitleCallback)
                     return@withDomainRetry true
                 }
@@ -1064,10 +884,7 @@ class MultimoviesProvider : MainAPI() {
         FastStartCache.get(data)?.let { cached ->
             if (cached.isNotEmpty()) {
                 cached.forEach { runCatching { callback(it) } }
-                // Live tail (Sept 2026 audit): the first tap's farm may still
-                // be resolving — forwarding its arrivals keeps the change-server
-                // list GROWING during this play, not frozen at the partial
-                // replay set (the CSX job-liveness rule).
+                // Live tail (Sept 2026 audit): the first tap's farm may still be resolving — forwarding its arrivals keeps the.
                 val farm = liveFarms[data]
                 if (farm != null && farm.isActive) {
                     val pushed = HashSet<String>().apply { cached.forEach { add(it.url) } }
@@ -1076,19 +893,14 @@ class MultimoviesProvider : MainAPI() {
                         "$extra links (first-tap farm still resolving)")
                 }
                 if (meta != null) {
-                    // Fallback subtitles ARE the subtitle provider (user spec
-                    // Sept 2026 rewrite #2): fetch the wanted set on every
-                    // replay — the provider's own cache makes repeats instant.
+                    // Fallback subtitles ARE the subtitle provider ( Sept 2026 rewrite #2): fetch the wanted set on every replay — the.
                     deliverFallbackSubs(meta, subtitleCallback)
                 }
                 return@withDomainRetry true
             }
         }
 
-        // Single-flight join (Sept 2026 audit, mirrors IndStream RC-G): this
-        // url's farm is ALREADY launching from an earlier tap. Never start a
-        // second full fleet over the same hosts — forward the running farm's
-        // arrivals from its shared FastStartCache landing zone instead.
+        // Single-flight join (Sept 2026 audit, mirrors IndStream RC-G): this url's farm is ALREADY launching from an earlier tap.
         liveFarms[data]?.takeIf { it.isActive }?.let { farm ->
             val pushed = HashSet<String>()
             val extra = tailLiveFarm(data, farm, pushed, callback)
@@ -1101,23 +913,13 @@ class MultimoviesProvider : MainAPI() {
             // resolve on this tap.
         }
 
-        // Fast path 2: embeds prefetched in the background while the detail page
-        // was open — skips the page fetch AND admin-ajax entirely. The prefetch
-        // resolves EVERY server and publishes each arrival the moment it lands,
-        // so on tap we use whatever has completed (Cineverse is resolved first):
-        // a finished job gives the full list; a still-running one gives its
-        // partial arrivals and we top-up ONLY the missing servers here — no
-        // more waiting 1.2 s and then re-resolving the entire page.
+        // Fast path 2: embeds prefetched in the background while the detail page was open — skips the page fetch AND.
         val awaited = EmbedPrefetchCache.awaitInFlight(data, timeoutMs = 1200L)
         var embeds: List<ResolvedEmbed> =
             (awaited.orEmpty() + EmbedPrefetchCache.arrived(data)).distinctBy { it.name }
 
         if (awaited == null) {
-            // No complete prefetch (cold tap or warm-up still running): resolve
-            // the servers not already in hand. On a cold page that is ALL of
-            // them — same work as the old full path, launched in parallel, and
-            // a failed page fetch no longer aborts the whole load because the
-            // id-keyed global sources launched below are site-independent.
+            // No complete prefetch (cold tap or warm-up still running): resolve the servers not already in hand.
             val doc = cachedDocOrFetch(data)
             if (doc != null) {
                 val have = embeds.mapTo(HashSet()) { it.name }
@@ -1145,27 +947,16 @@ class MultimoviesProvider : MainAPI() {
             }
         }
 
-        // LIVE-FILL pipeline (user spec Sept 2026 rewrite #5 — CSX model): every
-        // source (global id-keyed + each dooplayer embed) is pulled
-        // concurrently; each resolved link is pushed to the player THE MOMENT
-        // it lands, in arrival order — no hold window, no buffering, no winner
-        // selection. loadLinks stays alive for [LIVE_FILL_MS] so the WHOLE farm
-        // keeps appending to the change-server list DURING playback (the host
-        // already auto-started on the first eligible push), then anything still
-        // resolving lands detached in [FastStartCache] — the next open replays
-        // the FULL list instantly.
+        // LIVE-FILL pipeline ( Sept 2026 rewrite #5 — CSX model): every source (global id-keyed + each dooplayer embed) is.
         val emitted = Collections.synchronizedSet(HashSet<String>())
         val found = Collections.synchronizedList(mutableListOf<ExtractorLink>())
         val firstLink = CompletableDeferred<Unit>()
         val labelCounter = ConcurrentHashMap<String, Int>()
-        // Server-caption NO-OP (user spec rewrite #2): extractor caption lists
-        // are ignored everywhere — nothing is collected, cached, or pushed.
+        // Server-caption NO-OP ( rewrite #2): extractor caption lists are ignored everywhere — nothing is collected, cached.
         val noopSubtitle: (SubtitleFile) -> Unit = { }
 
         val globalSources = buildGlobalSources(meta)
-        // Completion accounting: the pulls run detached so they keep landing
-        // in FastStartCache even after loadLinks returns; this counter lets
-        // the fill wait (and the LinkCache finalizer) react when the farm ends.
+        // Completion accounting: the pulls run detached so they keep landing in FastStartCache even after loadLinks returns.
         val remainingPulls = java.util.concurrent.atomic.AtomicInteger(globalSources.size + embeds.size)
         val allPullsDone = CompletableDeferred<Unit>()
         if (globalSources.isEmpty() && embeds.isEmpty()) allPullsDone.complete(Unit)
@@ -1187,21 +978,14 @@ class MultimoviesProvider : MainAPI() {
             }
         }
 
-        // Embed pulls: launch order is the site's own option order (no
-        // priority re-ranking — user spec rewrite #2: neutral). Arrival
-        // order of the LINKS decides list position, not launch order.
+        // Embed pulls: launch order is the site's own option order (no priority re-ranking — rewrite #2: neutral).
         embeds.forEach { e ->
             searchScope.launch {
                 try {
-                    // Prefetched entries are already unwrapped (resolveAllEmbeds)
-                    // — skip a redundant iframe walk; only cold-resolved embeds
-                    // need the unwrap here.
+                    // Prefetched entries are already unwrapped (resolveAllEmbeds) — skip a redundant iframe walk; only cold-resolved.
                     val finalUrl = if (e.unwrapped) e.url
                     else MultiSourcePuller.unwrapEmbed(e.url, referer = data, headers = commonHeaders)
-                    // After unwrap, the URL may now point at a downstream CDN
-                    // (Cineverse -> vibuxer / serve_m3u8 proxy). Augment headers
-                    // with the host-specific pair the proxy requires so the
-                    // link the player replays against doesn't 403.
+                    // After unwrap, the URL may now point at a downstream CDN (Cineverse -> vibuxer / serve_m3u8 proxy).
                     val srcHeaders = commonHeaders + MultiSourcePuller.headersFor(finalUrl, referer = data)
                     val src = MultiSourcePuller.Source(
                         name = e.name,
@@ -1222,15 +1006,7 @@ class MultimoviesProvider : MainAPI() {
             }
         }
 
-        // Fallback subtitles (user spec rewrite #3): the two-source provider
-        // (OpenSubtitles addon + SubSense top-up) is the ONLY subtitle
-        // source. Kicked off in PARALLEL with the pulls
-        // (gated on the first link so a dead farm never fetches) and AWAITED
-        // before any `true` return below: the app records subtitleCallback
-        // pushes only while loadLinks is alive — a detached post-return push
-        // is silently dropped (bug: the fast-farm race returned before the
-        // slow fetch landed, losing the tracks for this play; the provider
-        // budget is 13s now - see SubtilesProvider.FETCH_BUDGET_MS).
+        // Fallback subtitles ( rewrite #3): the two-source provider (OpenSubtitles addon + SubSense top-up) is the ONLY.
         val metaSubs = meta
         val subsJob = metaSubs?.let { m ->
             searchScope.async {
@@ -1241,24 +1017,13 @@ class MultimoviesProvider : MainAPI() {
             }
         }
 
-        // LIVE FILL, CSX-style (rewrite #5) — two gates mirroring [com.indstream.IndStreamProvider]’s proven flow:
-        // 1. FIRST-STREAM gate: if NOTHING has landed within FAST_START_MAX_MS, stop
-        //    early — replay a background warm from a previous visit if there is
-        //    one, otherwise surface "no link found". A working farm never waits here.
-        // 2. GROW gate: once the first link is live the player has already started
-        //    (the host auto-skips loading on the first eligible push while this
-        //    coroutine is still running), so loadLinks stays alive until every
-        //    pull answers or the LIVE_FILL_MS cap — every straggler server
-        //    appends to the change-server list DURING playback instead of
-        //    freezing it at the first arrivals.
+        // LIVE FILL, CSX-style (rewrite #5) — two gates mirroring com.indstream.IndStreamProvider’s proven flow: 1.
         val loadStartMs = System.currentTimeMillis()
         val nothingToPull = embeds.isEmpty() && globalSources.isEmpty()
         val firstStream = !nothingToPull &&
             withTimeoutOrNull(FAST_START_MAX_MS) { firstLink.await() } != null
         if (!firstStream) {
-            // (a prior visit's prefetch or background pulls), else surface "no
-            // link found" — and drop a stale prefetch so the next attempt
-            // re-resolves instead of replaying the same dead entry.
+            // (a prior visit's prefetch or background pulls), else surface "no link found" — and drop a stale prefetch so the next.
             if (awaited != null && awaited.isNotEmpty()) EmbedPrefetchCache.invalidate(data)
             val bg = FastStartCache.get(data)
             if (bg != null && bg.isNotEmpty()) {
@@ -1272,17 +1037,10 @@ class MultimoviesProvider : MainAPI() {
         // All pulls answer, or the cap (whichever first) — pushes land live.
         withTimeoutOrNull(LIVE_FILL_MS) { allPullsDone.await() }
 
-        // Subtitle tracks must land BEFORE the return (the app drops
-        // subtitleCallback pushes from a dead loadLinks job). Started
-        // parallel with the pulls above, so on a normal farm this await
-        // costs less than the fill window already spent; hard budgeted by
-        // the provider's fetch timeout either way.
+        // Subtitle tracks must land BEFORE the return (the app drops subtitleCallback pushes from a dead loadLinks job).
         subsJob?.await()
 
-        // Full-list landing for the LinkCache instant replay: once the farm is
-        // done, cache the deduped arrival-order list (host+quality dedupe only
-        // — no ranking; no subs — the subtitle provider owns captions).
-        // Detached, so a capped return never races it.
+        // Full-list landing for the LinkCache instant replay: once the farm is done, cache the deduped arrival-order list.
         val metaFinal = meta
         if (metaFinal != null) {
             searchScope.launch {
@@ -1299,14 +1057,7 @@ class MultimoviesProvider : MainAPI() {
         return@withDomainRetry true
     }
 
-    /** Subtitle provider (user spec rewrite #3): the two-source OpenSubtitles +
-     *  SubSense fallback
-     *  ([SubtilesProvider]) is the SOLE subtitle source — server captions are
-     *  never pushed. Fetches the wanted languages and emits them through the
-     *  player's `subtitleCallback`. MUST be called (and awaited) while
-     *  loadLinks is still running: the app drops subtitle pushes made after
-     *  the provider coroutine returns. Budgeted inside the provider (13s FETCH_BUDGET_MS)
-     *  and cached per title (15 min), so repeat plays return instantly. */
+    /** Subtitle provider ( rewrite #3): the two-source OpenSubtitles + SubSense fallback (SubtilesProvider) is the SOLE. */
     private suspend fun deliverFallbackSubs(
         meta: SourceMeta,
         subtitleCallback: (SubtitleFile) -> Unit,
@@ -1319,20 +1070,7 @@ class MultimoviesProvider : MainAPI() {
         }.onFailure { android.util.Log.w("Multimovies", "fallback subs failed: ${it.message}") }
     }
 
-    /** Pull a single source, streaming found links to [callback] as they arrive and
-     *  collecting them (deduped at emission time) into [found] for the final
-     *  cache. Links arrive already carrying their stable identity
-     *  (`source == name == "<Server>[ (Hindi)]"`, set at origin in
-     *  MultiSourcePuller) — no renaming happens here.
-     *
-     *  User spec rewrite #2: links push to the player IMMEDIATELY, in arrival
-     *  order — the old hold-window/playerGate/buffer machinery is gone; the
-     *  user's own CloudStream quality/source profile decides what auto-plays.
-     *
-     *  Cineverse fast path: if [src] is a Cineverse CDN URL that already points
-     *  straight at a stream (the `serve_m3u8=1` proxy URL that `unwrapEmbed`
-     *  surfaces), the playable link is emitted immediately via [callback] — no
-     *  second `pull()` round-trip, no registry lookup, no `loadExtractor` step. */
+    /** Pull a single source, streaming found links to callback as they arrive and collecting them (deduped at emission. */
     private suspend fun pullSource(
         src: MultiSourcePuller.Source,
         labelCounter: ConcurrentHashMap<String, Int>,
@@ -1347,15 +1085,10 @@ class MultimoviesProvider : MainAPI() {
         /** When set, every resolved link is also merged into [FastStartCache] (keyed
          *  by the load url) so a re-tap replays instantly. */
         cacheKey: String? = null,
-        /** Prewarm mode: links land in [found]/[FastStartCache] only — the
-         *  callback is never invoked, so a background pull can't reach into a
-         *  player it was not started from. */
+        /** Prewarm mode: links land in found/FastStartCache only — the callback is never invoked, so a background pull can't. */
         cacheOnly: Boolean = false,
     ): List<ExtractorLink> {
-        /** Disambiguate duplicate labels within a single load: the first link
-         *  with a given label keeps it; subsequent links with the same label
-         *  get "-2", "-3" … appended. Both source and name are rewritten so
-         *  priority entries and the player list stay in sync. */
+        /** Disambiguate duplicate labels within a single load: the first link with a given label keeps it; subsequent links. */
         fun disambiguate(l: ExtractorLink): ExtractorLink {
             val label = l.source
             val n = labelCounter.compute(label) { _, v -> (v ?: 0) + 1 }!!
@@ -1369,22 +1102,14 @@ class MultimoviesProvider : MainAPI() {
             )
         }
 
-        /** Quality floor (user spec rewrite #2): drop KNOWN sub-720p fixed
-         *  files. Adaptive (m3u8) links and unknown heights (0) always pass.
-         *  Sub-720 entries never reach the player OR the caches. */
+        /** Quality floor ( rewrite #2): drop KNOWN sub-720p fixed files. */
         fun passesFloor(l: ExtractorLink): Boolean =
             MultimoviesProvider.passesQualityFloor(
                 l.type == ExtractorLinkType.M3U8,
                 l.quality,
             )
 
-        /** Emit one disambiguated link: quality-floor it (sub-720 fixed files
-         *  never reach the player OR the caches), then enrich the label with
-         *  the PROBED language + resolution (user spec: whatever lands in the
-         *  server name must come from probing/parsing the stream itself or
-         *  the host's own declaration — never a guess), record it, cache it,
-         *  and push it to the player IMMEDIATELY (arrival order) — unless
-         *  [cacheOnly] (prewarm pulls never touch a player). */
+        /** Emit one disambiguated link: quality-floor it (sub-720 fixed files never reach the player OR the caches), then. */
         suspend fun emitOne(l: ExtractorLink) {
             if (!passesFloor(l)) return
             val key = "${hostOf(l.url ?: "")}|${l.quality}"
@@ -1414,11 +1139,7 @@ class MultimoviesProvider : MainAPI() {
         )
     }
 
-    /** Build the ExtractorLink emitted by the Cineverse fast path. Mirrors
-     *  [MultiSourcePuller.directStreamLink]'s labeling + header logic so the
-     *  link shape matches what the registry path would have produced. The
-     *  label stays the BASE server name here — [enrichLabel] (in [pullSource]'s
-     *  emitOne) appends the probed language + resolution. */
+    /** Build the ExtractorLink emitted by the Cineverse fast path. */
     private fun buildDirectLink(
         src: MultiSourcePuller.Source,
     ): ExtractorLink {
@@ -1499,12 +1220,7 @@ class MultimoviesProvider : MainAPI() {
         }
     }
 
-    /** Normalize a raw dooplayer embed_url: unescape JSON slashes/quotes, pull the
-     *  iframe src when the value is an HTML snippet, and HTML-decode entities
-     *  (`&amp;` -> `&`) that the admin-ajax JSON embeds inside query strings.
-     *  Without the entity decode, multi-param embeds like
-     *  `?imdb=tt1&amp;type=movie` break because the server sees a literal
-     *  `&amp;` separator instead of `&`. */
+    /** Normalize a raw dooplayer embed_url: unescape JSON slashes/quotes, pull the iframe src when the value is an HTML. */
     private fun cleanEmbedUrl(raw: String): String {
         var url = raw.replace("\\/", "/").replace("\\\"", "\"").trim()
         if (url.contains("<iframe", ignoreCase = true)) {
@@ -1521,29 +1237,14 @@ class MultimoviesProvider : MainAPI() {
     private fun hostOf(url: String): String =
         url.substringAfter("://").substringBefore("/").lowercase()
 
-    /** Light dedupe (user spec rewrite #2): keep the FIRST arrival per
-     *  (host, quality) so the same final host reached through multiple paths
-     *  doesn't duplicate entries. Deliberately NOT a ranking — order within
-     *  the list is untouched (arrival order). */
+    /** Light dedupe ( rewrite #2): keep the FIRST arrival per (host, quality) so the same final host reached through. */
     private fun dedupeByHostQuality(links: List<ExtractorLink>): List<ExtractorLink> {
         val seen = HashSet<String>()
         return links.filter { l -> seen.add("${hostOf(l.url ?: "")}|${l.quality}") }
     }
 }
 
-/**
- * Self-healing live-domain resolver for the Multimovies Dooplay site.
- *
- * `multimovies.wtf` is a static gateway page that always links to the CURRENT
- * live domain (rotated every few days: `.motorcycles` -> `.beer` -> ...). The
- * provider's old hardcoded `mainUrl` silently pointed at the old domain after
- * every rotation, requiring a manual republish.
- *
- * This object resolves the live domain from the gateway, caches it (6 h TTL)
- * and only re-fetches when forced (a request failed) or the cache expires.
- * Pure extraction ([extractLiveDomain]) is JVM-testable; [resolve] needs the
- * CloudStream runtime (`app`).
- */
+/** Self-healing live-domain resolver for the Multimovies Dooplay site. `multimovies.wtf` is a static gateway page that. */
 internal object MultimoviesDomainResolver {
 
     /** Stable gateway URL that always announces the current live domain. */
@@ -1596,11 +1297,7 @@ internal object MultimoviesDomainResolver {
     /** The last known live domain (or the seed when never resolved) — no network. */
     internal fun currentDomain(): String = cached ?: SEED_DOMAIN
 
-    /**
-     * Current live domain: cached value (6 h TTL) unless [forceRefresh] or the
-     * cache is stale. A failed gateway fetch falls back to the last cached value,
-     * then the seed, so the provider always gets a usable domain. Thread-safe.
-     */
+    /** Current live domain: cached value (6 h TTL) unless forceRefresh or the cache is stale. */
     suspend fun resolve(forceRefresh: Boolean = false): String = mutex.withLock {
         val now = System.currentTimeMillis()
         val fresh = !forceRefresh && cached != null && (now - resolvedAt) < CACHE_TTL_MS
@@ -1625,24 +1322,7 @@ internal object MultimoviesDomainResolver {
     }
 }
 
-/**
- * MultiSourcePuller - the parallel-pull / timeout engine (NEUTRAL, user spec
- * rewrite #2: no plugin-side ranking of any kind).
- *
- * Given a list of (serverName, url) pairs it:
- *   1. Launches ALL of them concurrently (parallel pulling) in caller order.
- *   2. Wraps each individual source in a [timeoutMs] timeout (default 15s).
- *      A single slow/dead source can never block the others.
- *   3. Returns the successfully extracted links in ARRIVAL order — the
- *      player's own quality/source profile decides what auto-plays.
- *
- * Per source it runs a unified extraction pipeline:
- *     a. CloudStream's extractor registry (loadExtractor)
- *     b. a generic m3u8/mp4 sniff of the player page
- *
- * This is intentionally decoupled from the provider so the strategy can be
- * tuned (timeouts, concurrency limits) in one place.
- */
+/** MultiSourcePuller - the parallel-pull / timeout engine (NEUTRAL, rewrite #2: no plugin-side ranking of any kind). */
 object MultiSourcePuller {
 
     data class Source(
@@ -1668,10 +1348,7 @@ object MultiSourcePuller {
         Regex("""https?://[^\s"'<>\\]+\.mkv[^\s"'<>\\]*"""),
     )
 
-    /**
-     * Pure helper: pull the first stream URL (m3u8/mp4/webm/mkv) from raw page text.
-     * Testable without network access.
-     */
+    /** Pure helper: pull the first stream URL (m3u8/mp4/webm/mkv) from raw page text. */
     internal fun extractStreamUrl(text: String): String? {
         if (text.isBlank()) return null
         // Normalize JSON-escaped slashes/backslashes so the plain `https?://` regex
@@ -1686,10 +1363,7 @@ object MultiSourcePuller {
         return null
     }
 
-    /** Detect a modiplay-style proxy player endpoint in page text, e.g.
-     *  `\/proxy.php?serve_m3u8=1&ref=...&url=<url-encoded m3u8>&ebd=...`.
-     *  The proxy endpoint serves the playlist directly (Content-Type mpegurl),
-     *  so the returned URL is playable as-is. Returns null when absent. */
+    /** Detect a modiplay-style proxy player endpoint in page text, e.g. `\/proxy.php?serve_m3u8=1&ref=...&url=<url-encoded. */
     internal fun buildProxyStreamUrl(text: String, baseUrl: String): String? {
         if (text.isBlank()) return null
         val normalized = text.replace("\\/", "/")
@@ -1710,9 +1384,7 @@ object MultiSourcePuller {
         return resolveRelative(baseUrl, src).takeIf { it.startsWith("http") }
     }
 
-    /** Pull a stream URL from common JS player config shapes embedded in the page:
-     *  `sources:[{file:"...m3u8"}]`, `file:"...m3u8"`, `url:"...m3u8"`,
-     *  `hlsUrl:"..."`, `streamUrl:"..."`. Returns null when absent. */
+    /** Pull a stream URL from common JS player config shapes embedded in the page: `sources:{file:"...m3u8"}`. */
     internal fun extractFromJsConfig(text: String): String? {
         if (text.isBlank()) return null
         val normalized = text.replace("\\/", "/")
@@ -1746,14 +1418,7 @@ object MultiSourcePuller {
         "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
     )
 
-    /** Hosts that back the Cineverse modiplay/vibuxer serve_m3u8=1 proxy. The
-     *  proxy returns 403 to bare requests; it requires a same-site Referer and
-     *  Origin (it was handed out by the Multimovies dooplayer player) or it
-     *  won't sign the playlist. Used by [headersFor] so every Cineverse call
-     *  - admin-ajax wrap, unwrap, and the final proxy fetch - carries the
-     *  required pair. The set is a best-effort list; [isCineverseHost] also
-     *  matches any URL carrying `serve_m3u8` so a CDN host rotation can't
-     *  silently drop the required headers. */
+    /** Hosts that back the Cineverse modiplay/vibuxer serve_m3u8=1 proxy. */
     private val cineverseCdnHosts = setOf(
         "vibuxer.com",
         "www.vibuxer.com",
@@ -1768,26 +1433,15 @@ object MultiSourcePuller {
     private fun hostOf(url: String): String =
         url.substringAfter("://").substringBefore("/").lowercase()
 
-    /** True when the URL belongs to the Cineverse modiplay/vibuxer CDN, or is a
-     *  `serve_m3u8=1` proxy relay (the signature of the Cineverse flow) on any
-     *  host. The URL-wide marker check makes header injection survive CDN host
-     *  rotation. */
+    /** True when the URL belongs to the Cineverse modiplay/vibuxer CDN, or is a `serve_m3u8=1` proxy relay (the signature. */
     internal fun isCineverseHost(url: String): Boolean =
         cineverseCdnHosts.contains(hostOf(url)) ||
             hostOf(url).let { h -> cineverseCdnHosts.any { h == it || h.endsWith(".$it") } } ||
             url.contains("serve_m3u8", ignoreCase = true)
 
-    /** Deterministic identity base for an emitted link: the server's own
-     *  stable name. Every ExtractorLink must carry this exact string in BOTH
-     *  `source` and `name`: CloudStream saves player priorities keyed on an
-     *  exact match of `source` while the server list displays `name`, so any
-     *  drift (CDN suffixes, quality suffixes, per-load counters) breaks the
-     *  user's ranking. The probed (language) + resolution suffix is appended
-     *  by [enrichLabel] — derived from probing/parsing the stream itself, or
-     *  the host's own declaration; NEVER guessed. */
+    /** Deterministic identity base for an emitted link: the server's own stable name. */
 
-    // ── Probed label enrichment (user spec: language + resolution ON the
-    //    server name, derived from probing/parsing — NEVER guessed) ──────
+    // ── Probed label enrichment (: language + resolution ON the server name, derived from probing/parsing — NEVER.
 
     /** One parsed audio rendition of an HLS master (#EXT-X-MEDIA:AUDIO). */
     data class AudioRendition(val language: String?, val name: String, val isDefault: Boolean)
@@ -1795,9 +1449,7 @@ object MultiSourcePuller {
     /** Parsed HLS master: tallest variant height + audio renditions. */
     data class MasterFacts(val bestHeight: Int, val audio: List<AudioRendition>)
 
-    /** Pure parse of an HLS master playlist text (JVM-testable): variant
-     *  heights from RESOLUTION=WxH, audio languages from #EXT-X-MEDIA.
-     *  Returns null when the text isn't a multi-variant master. */
+    /** Pure parse of an HLS master playlist text (JVM-testable): variant heights from RESOLUTION=WxH, audio languages from. */
     internal fun parseMasterFacts(text: String?): MasterFacts? {
         if (text.isNullOrBlank() || !text.contains("#EXT-X-STREAM-INF")) return null
         var best = 0
@@ -1824,9 +1476,7 @@ object MultiSourcePuller {
         return MasterFacts(best, audio)
     }
 
-    /** Canonical language tag from a probed rendition — full display names
-     *  only (IndStream [com.indstream.LinkNaming.canonicalSubtitleName]
-     *  convention); unknown code → null (no guess). */
+    /** Canonical language tag from a probed rendition — full display names only (IndStream. */
     private fun languageTagOf(lang: String?, name: String): String? {
         val s = (lang ?: name).trim().lowercase()
         if (s.isEmpty()) return null
@@ -1861,7 +1511,7 @@ object MultiSourcePuller {
         return hay.contains("hindi") || hay.contains("हिन्दी") || hay.contains("हिंदी")
     }
 
-    /** Height→display token (mirrors IndStream [com.indstream.LinkNaming.qualityLabel]). */
+    /** Height→display token (mirrors IndStream com.indstream.LinkNaming.qualityLabel). */
     internal fun qualityLabel(height: Int): String = when {
         height >= 2160 -> "4K"
         height >= 1440 -> "1440p"
@@ -1889,10 +1539,7 @@ object MultiSourcePuller {
      *  same source never re-fetches the same master. */
     private val labelProbeCache = java.util.concurrent.ConcurrentHashMap<String, MasterFacts?>()
 
-    /** PROBE the stream for its real (language, height) facts: HLS masters
-     *  are fetched (2.5s budget) and parsed (variants + #EXT-X-MEDIA audio);
-     *  direct files report their DECLARED URL height only. A stream that
-     *  yields no facts gets NO tag — never a guess. */
+    /** PROBE the stream for its real (language, height) facts: HLS masters are fetched (2.5s budget) and parsed (variants +. */
     internal suspend fun probeLabelFacts(l: ExtractorLink): MasterFacts? {
         val url = l.url ?: return null
         if (url.isBlank()) return null
@@ -1916,16 +1563,7 @@ object MultiSourcePuller {
         return facts
     }
 
-    /** Enrich a link's label with probed language — the user's "language in
-     *  server name" rule (resolution is NOT named here: CloudStream's quality
-     *  badge is the only resolution print, user spec Sept 2026 revision).
-     *  Sources of truth, in order: 1) the master playlist itself (EXT-X-MEDIA
-     *  language of the track that actually autoplays: DEFAULT=YES, else the
-     *  single track; multi-language masters → "Multi"; variant heights →
-     *  ExtractorLink.quality only); 2) the link's own quality tag (registry
-     *  extractors' real parse); 3) host declarations in the URL/name. Nothing
-     *  derivable → label is left untouched (stays "Unknown"/badge-less) —
-     *  never guessed. */
+    /** Enrich a link's label with probed language — the user's "language in server name" rule (resolution is NOT named. */
     internal suspend fun enrichLabel(l: ExtractorLink): ExtractorLink {
         val facts = probeLabelFacts(l)
         val height = facts?.bestHeight?.takeIf { it > 0 }
@@ -1944,11 +1582,7 @@ object MultiSourcePuller {
             else -> null
         }
 
-        // Rebuild the label: base (minus any existing tag/res token), then the
-        // (Language) bracket. NO resolution token is appended — CloudStream
-        // renders the link's quality badge itself (ExtractorLink.quality), so
-        // printing it here showed it twice on many servers (user spec Sept
-        // 2026, second revision).
+        // Rebuild the label: base (minus any existing tag/res token), then the (Language) bracket.
         var base = (l.source ?: l.name ?: "Server").trim()
         base = base.replace(Regex("""\s*\((?:Hindi|English|Multi|Urdu|Tamil|Telugu|Malayalam|Kannada|Marathi|Bengali|Japanese|Korean|Chinese|Spanish|French|Arabic|Unknown)\)\s*$""", RegexOption.IGNORE_CASE), "")
             .replace(Regex("""\s+\d{3,4}p\s*$|\s+4K\s*$""", RegexOption.IGNORE_CASE), "")
@@ -1965,11 +1599,7 @@ object MultiSourcePuller {
         )
     }
 
-    /**
-     * Collapse a duplicated resolution token inside a server label so the player
-     * never shows e.g. "VidSrc 1080p 1080p". Keeps the first occurrence of each
-     * token ("1080p", "4K", "2160p", …) and drops later repeats.
-     */
+    /** Collapse a duplicated resolution token inside a server label so the player never shows e.g. */
     private fun String.dedupeResolution(): String {
         val token = Regex("""\d{3,4}p|4K|2160p""", RegexOption.IGNORE_CASE)
         val seen = mutableSetOf<String>()
@@ -1980,9 +1610,7 @@ object MultiSourcePuller {
         return out.replace(Regex("""\s{2,}"""), " ").trim()
     }
 
-    /** Build the header set for a request to [url]. The Cineverse CDN requires
-     *  the page that linked to it as Referer/Origin; for other hosts the
-     *  caller-supplied headers and shared UA are used as-is. Pure / cheap. */
+    /** Build the header set for a request to url. */
     internal fun headersFor(
         url: String,
         referer: String?,
@@ -1993,10 +1621,7 @@ object MultiSourcePuller {
         out.putAll(extra)
         if (!referer.isNullOrBlank()) out["Referer"] = referer
         if (isCineverseHost(url) || url.contains("serve_m3u8", ignoreCase = true)) {
-            // vibuxer.com / proxy.php signs only when it sees the originating
-            // site as Referer and a matching Origin. The plugin's embed URL
-            // comes from the dooplayer player on the live multimovies.* mirror,
-            // so that's the referer we advertise.
+            // vibuxer.com / proxy.php signs only when it sees the originating site as Referer and a matching Origin.
             val ref = referer?.takeIf { it.isNotBlank() } ?: "${MultimoviesDomainResolver.currentDomain()}/"
             out["Referer"] = ref
             val origin = ref.substringBefore("/seasons/")
@@ -2017,14 +1642,7 @@ object MultiSourcePuller {
         return if (path.startsWith("/")) "$schemeHost$path" else "$schemeHost/$path"
     }
 
-    /**
-     * Recursively follow iframes until the deepest player URL is found. A wrapper
-     * page (e.g. an aggregator/redirector) is fetched and its first iframe src
-     * followed, up to [MAX_UNWRAP_LEVELS]. Direct stream URLs (.m3u8/.mp4) and
-     * proxy relay URLs (serve_m3u8=1) short-circuit: the page that exposes them
-     * IS the stream, so [MultiSourcePuller.pull] can emit it directly without
-     * re-fetching.
-     */
+    /** Recursively follow iframes until the deepest player URL is found. */
     suspend fun unwrapEmbed(
         url: String,
         referer: String? = null,
@@ -2032,11 +1650,7 @@ object MultiSourcePuller {
     ): String {
         var current = url
         repeat(MAX_UNWRAP_LEVELS) {
-            // Terminal: a URL that IS a stream — direct m3u8/mp4 file, or a
-            // modiplay/proxy relay (serve_m3u8=1) that serves the playlist
-            // directly. Checked on the whole URL string (not just the host)
-            // because these markers live in the path/query; fetching them as
-            // HTML would only re-download a playlist and risk misparsing it.
+            // Terminal: a URL that IS a stream — direct m3u8/mp4 file, or a modiplay/proxy relay (serve_m3u8=1) that serves the.
             if (current.contains(".m3u8", ignoreCase = true) ||
                 current.contains(".mp4", ignoreCase = true) ||
                 current.contains("serve_m3u8=", ignoreCase = true)
@@ -2057,17 +1671,7 @@ object MultiSourcePuller {
         return current
     }
 
-    /**
-     * @param sources   raw server list (launch order = caller order)
-     * @param timeoutMs per-source hard timeout in ms (project default: 15_000)
-     * @param onSubtitle called for each subtitle found
-     * @param onLink optional suspend callback, invoked immediately for every extracted
-     *        link (streaming — the player's change-server list fills in ARRIVAL
-     *        order; suspend so label probing can run inside the emit path)
-     * @return list of extractor links in ARRIVAL order (user spec rewrite #2:
-     *         no plugin-side ranking — the player's own quality/source profile
-     *         decides what auto-plays)
-     */
+    /** @param sources raw server list (launch order = caller order) @param timeoutMs per-source hard timeout in ms (project. */
     suspend fun pull(
         sources: List<Source>,
         timeoutMs: Long = MultimoviesProvider.SOURCE_TIMEOUT_MS,
@@ -2104,9 +1708,7 @@ object MultiSourcePuller {
         links.toList()
     }
 
-    /** Wrap a raw extractor link with the source's headers/referer defaults.
-     *  Identity is NOT touched here: every extractSource branch already emits
-     *  final `source == name == <base server name>` labels. */
+    /** Wrap a raw extractor link with the source's headers/referer defaults. */
     private fun toExtractorLink(src: Source, l: ExtractorLink): ExtractorLink =
         ExtractorLink(
             source = l.source,
@@ -2135,9 +1737,7 @@ object MultiSourcePuller {
         // Trailers/YouTube embeds are not streams — never surface them as sources.
         if (isYouTubeHost(src.url)) return emptyList()
 
-        // Nxsha: the web player resolves servers/sources through same-origin
-        // CryptoJS-AES envelopes (no stream URL in any HTML), so it needs the
-        // dedicated extractor too.
+        // Nxsha: the web player resolves servers/sources through same-origin CryptoJS-AES envelopes (no stream URL in any.
         if (hostOf(src.url).contains("nxsha")) {
             val subs = mutableListOf<SubtitleFile>()
             val nxLinks = NxshaExtractor.extract(src) { subs.add(SubtitleFile(it.lang, it.url)) }
@@ -2169,9 +1769,7 @@ object MultiSourcePuller {
             }
         }
 
-        // VidEm (videm.xyz): signed-token multi-server HLS player. The embed page
-        // is server-rendered, so the dedicated extractor reproduces the
-        // embed -> sources -> play flow deterministically (no browser needed).
+        // VidEm (videm.xyz): signed-token multi-server HLS player.
         if (hostOf(src.url).contains("videm")) {
             return VidemExtractor.extract(src).map { s ->
                 // BASE label only — emitOne's enrichLabel appends the probed
@@ -2220,10 +1818,6 @@ object MultiSourcePuller {
         directStreamLink(src)?.let { return listOf(it) }
 
         // Stage a: CloudStream extractor registry (installed/built-in extractors).
-        // Relabeled to the source's stable identity — registry links carry bare
-        // extractor names that drift whenever extensions are installed or
-        // removed; the stable label keeps the player's per-source priority
-        // entries (the USER's settings) working across loads.
         val found = mutableListOf<ExtractorLink>()
         val registryOk = runCatching {
             loadExtractor(
@@ -2256,9 +1850,7 @@ object MultiSourcePuller {
         return sniff(src)
     }
 
-    /** When [src.url] is itself a playable stream (serve_m3u8 proxy relay, m3u8 or
-     *  mp4), build the ExtractorLink right away. Returns null otherwise so the
-     *  generic pipeline runs. */
+    /** When src.url is itself a playable stream (serve_m3u8 proxy relay, m3u8 or mp4), build the ExtractorLink right away. */
     private fun directStreamLink(src: Source): ExtractorLink? {
         val u = src.url
         val isStream = u.contains("serve_m3u8=1", ignoreCase = true) ||
@@ -2271,9 +1863,7 @@ object MultiSourcePuller {
         val label = src.name
         val type = if (u.contains(".m3u8", ignoreCase = true)) ExtractorLinkType.M3U8
         else ExtractorLinkType.VIDEO
-        // Use headersFor so the Cineverse serve_m3u8 proxy request, which the
-        // player will replay against the emitted link, carries the same
-        // Referer/Origin pair the embed originally needed.
+        // Use headersFor so the Cineverse serve_m3u8 proxy request, which the player will replay against the emitted link.
         val headers = headersFor(u, src.referer, src.headers)
         return ExtractorLink(
             source = label,
@@ -2288,9 +1878,7 @@ object MultiSourcePuller {
         )
     }
 
-    /** Generic fallback: fetch the player page and harvest the first stream URL
-     *  using a multi-strategy approach (direct regex, proxy pattern, video/source
-     *  tags, JS config objects, URL-encoded m3u8). */
+    /** Generic fallback: fetch the player page and harvest the first stream URL using a multi-strategy approach (direct. */
     private suspend fun sniff(src: Source): List<ExtractorLink> {
         val headers = headersFor(src.url, src.referer, src.headers)
         val text = runCatching {
@@ -2337,22 +1925,14 @@ data class SourceMeta(
     val episode: Int? = null,
 )
 
-/** Maps the exact url passed to loadLinks() (episode url / movie url) to its ids
- *  and season/episode, populated during load() so loadLinks() never re-solves
- *  Cloudflare just to get an IMDB/TMDB id. */
+/** Maps the exact url passed to loadLinks() (episode url / movie url) to its ids and season/episode, populated during. */
 object SourceMetaCache {
     private val map = ConcurrentHashMap<String, SourceMeta>()
     fun put(key: String, meta: SourceMeta) = map.put(key, meta)
     fun get(key: String): SourceMeta? = map[key]
 }
 
-/** One resolved dooplayer server: its display name, the final (post-unwrap)
- *  stream/embed URL, the admin-ajax round-trip latency as a speed hint, the
- *  raw pre-unwrap embed URL (still carrying the IMDB id) used only for
- *  last-resort meta recovery, and whether [url] is already fully unwrapped
- *  (prefetch path) so the Play tap can skip a redundant iframe walk. Lives
- *  here so [EmbedPrefetchCache] and MultimoviesProvider share a single
- *  definition. */
+/** One resolved dooplayer server: its display name, the final (post-unwrap) stream/embed URL, the admin-ajax round-trip. */
 data class ResolvedEmbed(
     val name: String,
     val url: String,
@@ -2361,27 +1941,13 @@ data class ResolvedEmbed(
     val unwrapped: Boolean = false,
 )
 
-/** Session-level cache of player sources prefetched in the background while a
- *  movie's detail page is open, keyed by the page URL loadLinks() receives.
- *  EVERY dooplayer server is prefetched and each finished one is published
- *  incrementally (see [publish]/[arrived]), so playback can start from the
- *  fast hosts (Cineverse first) even mid-warm-up — with a completed hit it
- *  skips the page fetch AND admin-ajax entirely. TTL is short because
- *  embed/stream URLs carry expiring signed tokens; bounded with evict-oldest
- *  like SearchCache.
- *
- *  While a prefetch is still running the entry holds its coroutine, so a Play
- *  tap (or a detail-page revisit) awaits/joins the same job instead of
- *  duplicating the network work. */
+/** Session-level cache of player sources prefetched in the background while a movie's detail page is open, keyed by the. */
 object EmbedPrefetchCache {
     private class Entry(
         val embeds: List<ResolvedEmbed>?,
         val inFlight: Deferred<List<ResolvedEmbed>>?,
         val expiresAt: Long,
-        /** Servers a still-running prefetch has already resolved, published
-         *  one-by-one in arrival order so a Play tap mid-warm-up can start
-         *  from the fast hosts (Cineverse first) instead of waiting for the
-         *  whole fleet or re-resolving everything. */
+        /** Servers a still-running prefetch has already resolved, published one-by-one in arrival order so a Play tap. */
         val partial: MutableList<ResolvedEmbed> =
             Collections.synchronizedList(mutableListOf()),
     )
@@ -2401,9 +1967,7 @@ object EmbedPrefetchCache {
         return e.embeds
     }
 
-    /** Publish ONE resolved server into a still-running prefetch's partial
-     *  list (called from [resolveAllEmbeds] as each embed+unwrap finishes).
-     *  No-op when the entry is gone, expired, or already finalized. */
+    /** Publish ONE resolved server into a still-running prefetch's partial list (called from resolveAllEmbeds as each. */
     fun publish(key: String, embed: ResolvedEmbed) {
         val e = map[key] ?: return
         if (System.currentTimeMillis() > e.expiresAt || e.embeds != null) return
@@ -2412,9 +1976,7 @@ object EmbedPrefetchCache {
         }
     }
 
-    /** Snapshot of the servers arrived so far for an IN-FLIGHT prefetch
-     *  (empty once the entry is complete — [get]/[awaitInFlight] carry the
-     *  final list then). */
+    /** Snapshot of the servers arrived so far for an IN-FLIGHT prefetch (empty once the entry is complete —. */
     fun arrived(key: String): List<ResolvedEmbed> {
         val e = map[key] ?: return emptyList()
         if (System.currentTimeMillis() > e.expiresAt) {
@@ -2425,10 +1987,7 @@ object EmbedPrefetchCache {
         return synchronized(e.partial) { e.partial.toList() }
     }
 
-    /** Runs [resolve] for [key] unless one is already running or completed, in
-     *  which case it joins that work. Exactly one caller executes [resolve];
-     *  the result is cached (or the entry invalidated when empty) and shared
-     *  with every concurrent caller. */
+    /** Runs resolve for key unless one is already running or completed, in which case it joins that work. */
     suspend fun resolveOrJoin(
         key: String,
         resolve: suspend () -> List<ResolvedEmbed>,
@@ -2456,9 +2015,7 @@ object EmbedPrefetchCache {
         return map[key]?.inFlight?.await() ?: get(key) ?: emptyList()
     }
 
-    /** Wait up to [timeoutMs] for an in-flight prefetch of [key] to finish.
-     *  Returns completed results if present or finished within the wait, else
-     *  null (caller falls back to the full resolution path). */
+    /** Wait up to timeoutMs for an in-flight prefetch of key to finish. */
     suspend fun awaitInFlight(key: String, timeoutMs: Long = 1500L): List<ResolvedEmbed>? {
         get(key)?.let { return it }
         val e = map[key] ?: return null
@@ -2480,10 +2037,7 @@ object EmbedPrefetchCache {
     }
 }
 
-/** Session-level cache of resolved stream links per (imdbId, season, episode).
- *  Reopening the same title/episode reuses cached streams (zero probe latency);
- *  entries expire so stale URLs/tokens don't linger forever. TTL is short (5 min)
- *  because most stream URLs carry expiring signed tokens. */
+/** Session-level cache of resolved stream links per (imdbId, season, episode). */
 object LinkCache {
     private data class Entry(
         val links: List<ExtractorLink>,
@@ -2510,12 +2064,7 @@ object LinkCache {
     }
 }
 
-/** Per-load-url cache of resolved stream links for the fast-start path. Keyed by
- *  the exact url loadLinks() receives (episode/movie page), so a re-tap — or a
- *  Play tapped while a background pull from a prior visit is still warm — emits
- *  instantly with zero head. Also the landing zone for servers that were still
- *  resolving when playback started: they keep streaming into this cache so the
- *  next play already has the full list. Short TTL (stream URLs are signed/expiring). */
+/** Per-load-url cache of resolved stream links for the fast-start path. */
 object FastStartCache {
     private data class Entry(val links: List<ExtractorLink>, val expiresAt: Long)
     private const val TTL_MS = 5 * 60 * 1000L
@@ -2538,9 +2087,7 @@ object FastStartCache {
     fun clear() = map.clear()
 }
 
-/** A curated, id-based public streaming source. Extensible — add more hosts by
- *  appending entries; the runtime probe (in loadLinks/pull) keeps only the ones
- *  that actually respond from the user's network. */
+/** A curated, id-based public streaming source. */
 class GlobalSource(
     val name: String,
     val idType: SourceId,
@@ -2548,19 +2095,7 @@ class GlobalSource(
     val headers: Map<String, String> = emptyMap(),
 )
 
-/** Curated global source registry (dooplayer-independent). URL patterns verified
- *  from public documentation / health-checked provider lists. Note: many public
- *  embed hosts rotate/expire fast (vixsrc.to went Next.js, vidsrc.net died,
- *  vidlink.pro API 404, multiembed.mov 403), so the list is kept to hosts that
- *  actually respond; the dooplayer embeds resolved from the site remain the
- *  primary source path. Append new hosts as they become available — the runtime
- *  probe (in loadLinks/pull) keeps only the ones that answer from the user's
- *  network.
- *
- *  Aug 2026 live diagnostic: each host is called on its final hop so we skip
- *  any 301 chain at runtime (vidsrc-embed.su -> vsembed.ru, 111movies.com ->
- *  111movies.net -> player.vidlove.cc). The Referer matches the live final
- *  host so the player page actually renders. */
+/** Curated global source registry (dooplayer-independent). */
 object GlobalSources {
     val list: List<GlobalSource> = listOf(
         GlobalSource(
@@ -2584,13 +2119,7 @@ object GlobalSources {
             headers = mapOf("Referer" to "https://vsembed.ru/"),
         ),
         GlobalSource(
-            // Aug 2026: 111Movies backend — the player.vidlove.cc SPA is JS-only,
-            // but its data API at api.shows.st is fully deterministic: the JSON
-            // response carries source.url (adaptive HLS master playlist) and
-            // subtitles. IMDB-keyed: /movie accepts an IMDB id directly, /tv
-            // requires a TMDB id (used only when already resolved during load()'s
-            // metadata fetch — no extra TMDB public-API call). Dedicated
-            // ShowsExtractor branch in MultiSourcePuller.
+            // Aug 2026: 111Movies backend — the player.vidlove.cc SPA is JS-only, but its data API at api.shows.st is fully.
             name = "111Movies",
             idType = SourceId.IMDB,
             buildUrl = { id, s, e ->
@@ -2600,10 +2129,7 @@ object GlobalSources {
             headers = mapOf("Referer" to "https://player.vidlove.cc/"),
         ),
         GlobalSource(
-            // Aug 2026: Nxsha's own player API (nitro, MbPly, Citadel, StremFx,
-            // ...). IMDB-keyed: NxshaExtractor resolves an IMDB id to TMDB through
-            // Nxsha's own fk.nxsha.xyz proxy (not the TMDB public API), then
-            // decrypts the encrypted /api/servers + /api/sources.
+            // Aug 2026: Nxsha's own player API (nitro, MbPly, Citadel, StremFx, ...).
             name = "Nxsha",
             idType = SourceId.IMDB,
             buildUrl = { id, s, e ->
@@ -2613,11 +2139,7 @@ object GlobalSources {
             headers = mapOf("Referer" to "https://nxsha.space/"),
         ),
         GlobalSource(
-            // Aug 2026: VidEm (videm.xyz) is a fast, multi-server HLS player
-            // discovered via the vidapi.xyz aggregator. IMDB-keyed: its embed page
-            // normalizes the id internally, so an IMDB id works directly. The
-            // dedicated VidemExtractor branch in MultiSourcePuller resolves its
-            // signed-token /api.php sources + play endpoints without a browser.
+            // Aug 2026: VidEm (videm.xyz) is a fast, multi-server HLS player discovered via the vidapi.xyz aggregator.
             name = "VidEm",
             idType = SourceId.IMDB,
             buildUrl = { id, s, e ->
