@@ -19,8 +19,8 @@ object StreamEngine {
 
     // One slot per host: the live farm is =16 servers, so a smaller cap only made fast resolvers QUEUE behind slow.
 // multi-chain hosts (MovieBox /.
-    private const val MAX_CONCURRENT = 16
-    private const val MAX_SERVERS = 16
+    // Socket guard only (the farm itself is uncapped); sub-fan-outs add up.
+    private const val MAX_CONCURRENT = 32
     private const val MAX_UNWRAP = 4
 
     /** MovieBox bearer token cache (): the x-user token lives for hours; caching it removes one serial round-trip. */
@@ -72,7 +72,7 @@ object StreamEngine {
                 ServerFarm.allServers
             }
         } else healthy
-        val servers = candidates.take(MAX_SERVERS)
+        val servers = candidates
         Log.d("IndStream", "selectServers tmdb=$tmdbId type=$type s=$season e=$episode -> ${servers.size} servers (neutral order)")
         return servers
     }
@@ -210,6 +210,7 @@ object StreamEngine {
             val raw: RawStream,
             val fullHeight: Int,
             val tagLabel: String,
+            val fetchMs: Long? = null,
         )
         // Pre-resolve CONCURRENTLY: serial map added up to 4s PER unprobed HLS master (VaPlayer/VidUp/VidCore arrive without.
 // height) BEFORE the first link.
@@ -227,9 +228,13 @@ object StreamEngine {
                                 val lh = LinkedHashMap<String, String>()
                                 lh.putAll(raw.extraHeaders)
                                 if (!lh.containsKey("Referer") && !raw.referer.isNullOrBlank()) lh["Referer"] = raw.referer!!
+                                // Fetch latency doubles as the speed signal (fastest-first rank).
+                                val t0 = System.currentTimeMillis()
                                 val masterText = raw.inlineManifest ?: withTimeoutOrNull(3000L) {
                                     runCatching { app.get(raw.url, timeout = 3, headers = lh).text }.getOrNull()
                                 }
+                                val fetchMs = if (raw.inlineManifest != null) 0
+                                else masterText?.let { System.currentTimeMillis() - t0 }
                                 // Dispatch HLS/MPD: bestHeightOf parses the DASH MPD too, so a MovieBox DASH ladder gets its real peak (e. g. 2160).
 // not 0. Adaptive guard (): an.
                                 val h = (ManifestKit.bestHeightOf(masterText, raw.url).takeIf { it > 0 } ?: raw.qualityHint).coerceAtLeast(0)
@@ -241,19 +246,22 @@ object StreamEngine {
                                 else if (master != null) ManifestKit.audioLanguageLabel(master).orEmpty()
                                 else raw.audioLabel)
                                     .ifBlank { declaredLanguageHint(raw) ?: "" }
-                                ResolvedEmit(raw, h, tag)
+                                ResolvedEmit(raw, h, tag, fetchMs)
                             }
                         }
                         // Direct file: moov height is width-normalized; keep server hint.
                         !raw.isM3u8 && probeManifests -> {
+                            val t0 = System.currentTimeMillis()
                             val measured = HttpKit.resolveHeight(raw.url, raw.referer, raw.extraHeaders)
+                            // Only a parsed moov proves a fast live file; declared-only stays unranked.
+                            val fetchMs = (System.currentTimeMillis() - t0).takeIf { measured > 0 }
                             val h = maxOf(measured, raw.qualityHint).takeIf { it > 0 }
                                 ?: run {
                                 val fromUrl = ManifestKit.resolutionFromUrl(raw.url)
                                 if (fromUrl > 0) fromUrl else -1   // 1 = Auto (unknown direct file).
                             }
                             val tag = raw.audioLabel.ifBlank { declaredLanguageHint(raw) ?: "" }
-                            ResolvedEmit(raw, h, tag)
+                            ResolvedEmit(raw, h, tag, fetchMs)
                         }
                         // Background/off path: trust the RawStream's own qualityHint (no new probes). For direct files (non-adaptive) with no.
 // known height, use -1 so they.
@@ -273,8 +281,9 @@ object StreamEngine {
                 }
             }.awaitAll()
         }
-        // India-first: Hindi/Indian-dub/Multi rows surface first. Stable.
-        val ordered = preResolved.sortedByDescending { indiaBoostRank(it.tagLabel) }
+        // Fastest-first: lowest effective fetch latency wins (Hindi gets a small
+        // bonus, not a free pass). Stable: unmeasured ties keep arrival order.
+        val ordered = preResolved.sortedBy { speedRankMs(it.fetchMs, it.tagLabel) }
         val resolvedForKey = ordered.map { it.raw.copy(qualityHint = it.fullHeight) }
         val numbers = LinkNaming.dedupeNames(resolvedForKey, originalLang)
 
@@ -339,14 +348,16 @@ object StreamEngine {
     }
 
     /** Quality floor (): a FIXED (non-HLS) stream whose resolved height is a KNOWN value below 720p is dropped. Adaptive. HLS masters always pass (they. */
-    /** India-first boost: Hindi 4, Indian dubs + Multi 3, rest 0. Pure. */
-    internal fun indiaBoostRank(tagLabel: String): Int {
-        return when (LinkNaming.languageTag(tagLabel)) {
-            "Hindi" -> 4
-            "Multi" -> 3
-            in ManifestKit.INDIAN_DUB_LANGUAGES.map { it.canonical } -> 3
-            else -> 0
+    /** Effective fetch latency for fastest-first rank; null sorts last. Pure. */
+    internal fun speedRankMs(fetchMs: Long?, tagLabel: String): Double {
+        if (fetchMs == null) return Double.MAX_VALUE
+        val boost = when (LinkNaming.languageTag(tagLabel)) {
+            "Hindi" -> 1.1
+            "Multi" -> 1.05
+            in ManifestKit.INDIAN_DUB_LANGUAGES.map { it.canonical } -> 1.05
+            else -> 1.0
         }
+        return fetchMs / boost
     }
 
     fun passesQualityFloor(isAdaptive: Boolean, height: Int): Boolean {

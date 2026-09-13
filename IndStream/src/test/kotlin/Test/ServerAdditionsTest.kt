@@ -207,21 +207,25 @@ class ServerAdditionsTest {
     }
 
     @Test
-    fun indiaBoostRank_tiers() {
-        assertEquals(4, StreamEngine.indiaBoostRank("Hindi"))
-        assertEquals(4, StreamEngine.indiaBoostRank("hi"))
-        assertEquals(3, StreamEngine.indiaBoostRank("Multi"))
-        assertEquals(3, StreamEngine.indiaBoostRank("Hindi+English"))
-        assertEquals(3, StreamEngine.indiaBoostRank("Tamil"))
-        assertEquals(3, StreamEngine.indiaBoostRank("Telugu"))
-        assertEquals(3, StreamEngine.indiaBoostRank("Bengali"))
-        assertEquals(0, StreamEngine.indiaBoostRank("English"))
-        assertEquals(0, StreamEngine.indiaBoostRank("Original"))
-        assertEquals(0, StreamEngine.indiaBoostRank(""))
+    fun speedRankMs_unmeasuredLast_hindiDiscount() {
+        // Unmeasured sorts after everything measured.
+        assertEquals(Double.MAX_VALUE, StreamEngine.speedRankMs(null, "Hindi"))
+        assertTrue(StreamEngine.speedRankMs(1000L, "English") < Double.MAX_VALUE)
+        // Same latency: Hindi wins outright.
+        assertTrue(StreamEngine.speedRankMs(1000L, "Hindi") < StreamEngine.speedRankMs(1000L, "English"))
+        // Small bonus only: a 2x-faster English stream still beats Hindi.
+        assertTrue(StreamEngine.speedRankMs(500L, "English") < StreamEngine.speedRankMs(1000L, "Hindi"))
+        // Near-tie flips to Hindi: 1000/1.1 = 909 < 950.
+        assertTrue(StreamEngine.speedRankMs(1000L, "Hindi") < StreamEngine.speedRankMs(950L, "English"))
+        // Multi + Indian dubs get the smaller bonus.
+        assertTrue(StreamEngine.speedRankMs(1000L, "Multi") < StreamEngine.speedRankMs(1000L, "English"))
+        assertTrue(StreamEngine.speedRankMs(1000L, "Tamil") < StreamEngine.speedRankMs(1000L, "English"))
+        // Zero-latency inline manifests top everything.
+        assertEquals(0.0, StreamEngine.speedRankMs(0L, "Unknown"))
     }
 
     @Test
-    fun emit_indiaBoost_hindiFirst_thenStable() = runBlocking {
+    fun emit_unmeasuredKeepsArrivalRegardlessOfLanguage() = runBlocking {
         fun raw(id: String, label: String) = StreamEngine.RawStream(
             serverId = id, serverName = id,
             url = "https://x.example/$id.m3u8", isM3u8 = true, audioLabel = label,
@@ -238,13 +242,14 @@ class ServerAdditionsTest {
             onLink = { out.add(it) },
             probeManifests = false,
         )
+        // Nothing measured: stable arrival order wins over language.
         assertEquals(
             listOf(
+                "https://x.example/eng.m3u8",
+                "https://x.example/unk.m3u8",
                 "https://x.example/hin.m3u8",
                 "https://x.example/mul.m3u8",
                 "https://x.example/tam.m3u8",
-                "https://x.example/eng.m3u8",
-                "https://x.example/unk.m3u8",
             ),
             out.map { it.url },
         )
