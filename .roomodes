@@ -1,0 +1,5 @@
+# Indflix Project Rules
+
+## Code style
+- Comments: 1-2 lines max. No paragraph explanations or long doc blocks.
+- Explain what/why briefly; let the code show the how.
