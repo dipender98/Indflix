@@ -83,7 +83,7 @@ class IndStreamProvider : MainAPI() {
     // Search.
 
     override suspend fun search(query: String): List<SearchResponse>? {
-        val items = withTimeoutOrNull(6000L) { TmdbService.search(query) }.orEmpty()
+        val items = withTimeoutOrNull(12000L) { TmdbService.search(query) }.orEmpty()
         if (items.isEmpty()) return null
         return items.mapNotNull { it.toSearchResponse() }
     }
@@ -122,7 +122,7 @@ class IndStreamProvider : MainAPI() {
         val parts = request.data.split("|")
         val kind = parts[0].trim()                                       // "trending" | "popular".
         val tmdbType = if (parts.getOrNull(1)?.trim() == "tv") "tv" else "movie"
-        val items = withTimeoutOrNull(6000L) {
+        val items = withTimeoutOrNull(12000L) {
             when (kind) {
                 "popular" -> TmdbService.popular(tmdbType, page)
                 else -> TmdbService.trending(tmdbType, page)
@@ -141,7 +141,7 @@ class IndStreamProvider : MainAPI() {
         val (tmdbId, type) = tmdb
         val isMovie = type == "movie"
 
-        val meta = withTimeoutOrNull(7000L) { TmdbService.fetchMeta(tmdbId, type) }
+        val meta = withTimeoutOrNull(12000L) { TmdbService.fetchMeta(tmdbId, type) }
 
         val title = meta?.name ?: return null
         val poster = meta?.poster
@@ -175,7 +175,7 @@ class IndStreamProvider : MainAPI() {
         val episodes = coroutineScope {
             seasons.map { season ->
                 async {
-                    withTimeoutOrNull(6000L) { TmdbService.fetchSeasonPublic(tmdbId, season) }
+                    withTimeoutOrNull(10000L) { TmdbService.fetchSeasonPublic(tmdbId, season) }
                 }
             }.awaitAll().filterNotNull().flatten()
         }
@@ -258,7 +258,7 @@ class IndStreamProvider : MainAPI() {
         // No serial TMDB round-trip here: load() already warmed TmdbService's detail cache for this exact (tmdbId, type), so.
         val originalLangRef = java.util.concurrent.atomic.AtomicReference<String?>()
         val metaDeferred = fastStartScope.async {
-            val d = withTimeoutOrNull(3000L) { TmdbService.fetchMeta(tmdbId, type) }
+            val d = withTimeoutOrNull(4000L) { TmdbService.fetchMeta(tmdbId, type) }
             originalLangRef.set(d?.originalLanguage)
             d
         }

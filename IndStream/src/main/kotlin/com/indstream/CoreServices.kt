@@ -210,16 +210,18 @@ object HttpKit {
 /** TMDB metadata engine for. Search, detail, episodes, IMDB→TMDB lookup. */
 object TmdbService {
 
-    private const val API_KEY = "e6333b32409e02a4a6eba6fb7ff866bb"
+    private const val API_KEY_PRIMARY = "e6333b32409e02a4a6eba6fb7ff866bb"
+    private const val API_KEY_FALLBACK = "a721dd910292becd0d78ed436463db21"
     private const val API = "https://api.themoviedb.org/3"
     private const val IMG_BASE = "https://image.tmdb.org/t/p/w500"
     private const val IMG_BACKDROP = "https://image.tmdb.org/t/p/w1280"
+    private const val LOG_TAG = "IndStream"
 
     /** Search-result cache TTL / bounds. Results don't change minute-to-minute; a hit makes history re-clicks instant and. immune to upstream blips. */
     private const val SEARCH_CACHE_TTL_MS = 15 * 60 * 1000L
     private const val SEARCH_CACHE_MAX = 64
-    /** Cap on riding someone else's in-flight search before giving up. */
-    private const val SEARCH_INFLIGHT_WAIT_MS = 8_000L
+    /** Cap on riding someone else's in-flight search before giving up. Sized for a primary→fallback key retry. */
+    private const val SEARCH_INFLIGHT_WAIT_MS = 11_000L
 
     private val detailCache = ConcurrentHashMap<String, TmdbDetail>()
     private val imdbFindCache = ConcurrentHashMap<String, Pair<Int, String>>()
@@ -263,7 +265,7 @@ object TmdbService {
         val rating: Double? = null,
     )
 
-    /** Search movies + series via TMDB /search/multi - cached + deduplicated. Both plugins key every search on ONE shared. TMDB api key against one. */
+    /** Search movies + series via TMDB /search/multi - cached + deduplicated. All three plugins share the TMDB key set. */
     suspend fun search(query: String): List<TmdbItem> {
         if (query.isBlank()) return emptyList()
         val key = query.trim().lowercase()
@@ -295,27 +297,86 @@ object TmdbService {
             ?: emptyList()
     }
 
-    /** The actual single /search/multi round-trip (never throw - errors/429s arrive as an empty list, with a log line to. make them visible). */
+    /** The /search/multi round-trip; never throws — key trips/rate-limits are logged inside tmdbGet and arrive as an empty list. */
     private suspend fun searchRemote(query: String): List<TmdbItem> {
         val encoded = URLEncoder.encode(query.trim(), "UTF-8")
-        val json = runCatching {
-            app.get(
-                "$API/search/multi?api_key=$API_KEY&query=$encoded&language=en-US&include_adult=false&page=1",
-                timeout = 5,
-            ).text
-        }.getOrElse { t ->
-            // DIAG(search-blank): timeouts / connection resets / thrown HTTP errors land here invisibly today - proves or kills.
-// that theory in logcat.
-            android.util.Log.w("IndStream", "tmdb search NET-FAIL q='$query': ${t.javaClass.simpleName}: ${t.message?.take(200)}")
-            return emptyList()
-        }
-        val items = parseTmdbMultiSearch(json)
-        // TMDB error bodies (e. g. 429 "rate-limit exceeded" on a shared key) carry a status_code and parse to ZERO results.
-// identical to a genuine no-hit.
-        if (items.isEmpty() && json.contains("status_code"))
-            android.util.Log.w("IndStream", "tmdb search UPSTREAM-ERR q='$query': ${json.take(200)}")
-        return items
+        val json = tmdbGet(
+            "search q='$query'",
+            "/search/multi",
+            "query=$encoded&language=en-US&include_adult=false&page=1",
+        ) ?: return emptyList()
+        return parseTmdbMultiSearch(json)
     }
+
+    /** Decide whether to fall through to the next key. Network failure (handled separately as responded==null),
+     * HTTP 401/403/429/5xx, or a 2xx body whose JSON reports a *key* failure (`success=false` with one of the
+     * TMDB invalid/suspended/`rate-limit exceeded` status codes — see [tmdbKeyTripCode]). A 400/404 or a 200
+     * that isn't a key trip is NOT retried with a second key — those are resource-level answers callers already
+     * treat as empty/no-hit. */
+    internal fun shouldTryNextKey(httpCode: Int, tmdbTripStatus: Int?): Boolean =
+        tmdbTripStatus != null ||
+            httpCode == 401 ||
+            httpCode == 403 ||
+            httpCode == 429 ||
+            httpCode >= 500
+
+    /** GET a TMDB endpoint, falling back primary→second key on a tripped/rate-limited/broken key.
+     * Logs the reason for every rejected key, and never logs the keys themselves.
+     * Returns the 2xx body on success, a genuine non-key error body untouched (so callers keep their
+     * prior empty-parse behavior for e.g. 404), or null once both keys are exhausted. */
+    private suspend fun tmdbGet(op: String, path: String, query: String, timeout: Long = 5): String? {
+        val keys = listOf("primary" to API_KEY_PRIMARY, "fallback" to API_KEY_FALLBACK)
+        var lastReason = "no keys configured"
+        for ((index, pair) in keys.withIndex()) {
+            val (label, key) = pair
+            val url = "$API$path?api_key=$key&$query"
+            val responded: Pair<Int, String>? = runCatching {
+                val r = app.get(url, timeout = timeout)
+                r.code to r.text
+            }.getOrElse { t ->
+                lastReason = "$label NET-FAIL(${t.javaClass.simpleName}: ${(t.message ?: "").take(120)})"
+                android.util.Log.w(LOG_TAG, "TMDB $op $lastReason${fallingBack(index, keys)}")
+                null
+            }
+            if (responded == null) continue
+            val (code, body) = responded
+            val trip = if (code in 200..299) tmdbKeyTripCode(body) else null
+            if (shouldTryNextKey(code, trip)) {
+                lastReason = "$label HTTP $code${trip?.let { " tmdb_status=$it" } ?: ""}: ${safeSnippet(body)}"
+                android.util.Log.w(LOG_TAG, "TMDB $op API-KEY-LIMITED $lastReason${fallingBack(index, keys)}")
+                continue
+            }
+            if (code in 200..299) return body
+            // Resource-level HTTP error (400/404/…): not a key issue, so don't burn the second key. Surface the
+            // reason and hand the body to the caller, which parses it to an empty result just as before.
+            android.util.Log.w(LOG_TAG, "TMDB $op $label HTTP $code (not a key issue: no fallback): ${safeSnippet(body)}")
+            return body
+        }
+        android.util.Log.e(LOG_TAG, "TMDB $op ABANDONED after ${keys.size} keys: $lastReason")
+        return null
+    }
+
+    private fun fallingBack(index: Int, keys: List<Pair<String, String>>): String =
+        if (index < keys.lastIndex) " → trying ${keys[index + 1].first}" else " → no keys left"
+
+    /** If the 2xx error body carries `success:false` with a *key*-level TMDB status code (7 invalid, 10 suspended,
+     * 30 rate-limit exceeded) return that code; otherwise null (the response is either a valid 2xx payload or
+     * some other error the caller can treat as an empty result). */
+    internal fun tmdbKeyTripCode(body: String): Int? {
+        val root = runCatching { JSONObject(body) }.getOrNull() ?: return null
+        if (root.optBoolean("success", true)) return null
+        return when (val sc = root.optInt("status_code", 0)) {
+            7, 10, 30 -> sc
+            else -> null
+        }
+    }
+
+    private fun safeSnippet(s: String): String =
+        s.filter { !it.isISOControl() }
+            .replace(API_KEY_PRIMARY, "***")
+            .replace(API_KEY_FALLBACK, "***")
+            .take(200)
+            .trim()
 
     private data class SearchEntry(val items: List<TmdbItem>, val expiresAt: Long)
 
@@ -325,23 +386,22 @@ object TmdbService {
 
     /** Trending this week - powers the home page. is "movie" or "tv". */
     suspend fun trending(type: String, page: Int = 1): List<TmdbItem> {
-        val url = "$API/trending/$type/week?api_key=$API_KEY&language=en-US&page=$page"
-        val json = runCatching { app.get(url, timeout = 5).text }.getOrNull() ?: return emptyList()
+        val json = tmdbGet("trending $type", "/trending/$type/week", "language=en-US&page=$page")
+            ?: return emptyList()
         return parseResults(json, type)
     }
 
     /** Popular titles - extra home page row. is "movie" or "tv". */
     suspend fun popular(type: String, page: Int = 1): List<TmdbItem> {
-        val url = "$API/$type/popular?api_key=$API_KEY&language=en-US&page=$page"
-        val json = runCatching { app.get(url, timeout = 5).text }.getOrNull() ?: return emptyList()
+        val json = tmdbGet("popular $type", "/$type/popular", "language=en-US&page=$page")
+            ?: return emptyList()
         return parseResults(json, type)
     }
 
     /** Season numbers for a TV show (excludes specials/season 0). */
     suspend fun fetchTvSeasons(tmdbId: Int): List<Int> {
         if (tmdbId <= 0) return emptyList()
-        val url = "$API/tv/$tmdbId?api_key=$API_KEY&language=en-US"
-        val json = runCatching { app.get(url, timeout = 5).text }.getOrNull() ?: return emptyList()
+        val json = tmdbGet("seasons tv=$tmdbId", "/tv/$tmdbId", "language=en-US") ?: return emptyList()
         return try {
             val root = JSONObject(json)
             root.optJSONArray("seasons")?.let { arr ->
@@ -360,8 +420,12 @@ object TmdbService {
         val cacheKey = "$tmdbId|$type"
         detailCache[cacheKey]?.let { return it }
         val path = if (type == "movie") "movie" else "tv"
-        val url = "$API/$path/$tmdbId?api_key=$API_KEY&language=en-US&append_to_response=external_ids,credits"
-        val detail = runCatching { parseTmdbDetail(app.get(url, timeout = 6).text, type) }.getOrNull()
+        val json = tmdbGet(
+            "meta $path=$tmdbId",
+            "/$path/$tmdbId",
+            "language=en-US&append_to_response=external_ids,credits",
+        )
+        val detail = json?.let { runCatching { parseTmdbDetail(it, type) }.getOrNull() }
         if (detail != null) detailCache[cacheKey] = detail
         return detail
     }
@@ -370,9 +434,9 @@ object TmdbService {
     suspend fun findByImdb(imdbId: String): Pair<Int, String>? {
         if (!imdbId.startsWith("tt")) return null
         imdbFindCache[imdbId]?.let { return it }
-        val url = "$API/find/$imdbId?api_key=$API_KEY&external_source=imdb_id&language=en-US"
-        val result = runCatching {
-            val root = JSONObject(app.get(url, timeout = 5).text)
+        val json = tmdbGet("find imdb=$imdbId", "/find/$imdbId", "external_source=imdb_id&language=en-US")
+        val result = if (json != null) runCatching {
+            val root = JSONObject(json)
             val movie = root.optJSONArray("movie_results")?.optJSONObject(0)
             val tv = root.optJSONArray("tv_results")?.optJSONObject(0)
             when {
@@ -380,7 +444,7 @@ object TmdbService {
                 tv != null -> tv.optInt("id", -1).takeIf { it > 0 }?.let { it to "series" }
                 else -> null
             }
-        }.getOrNull()
+        }.getOrNull() else null
         if (result != null) imdbFindCache[imdbId] = result
         return result
     }
@@ -486,8 +550,8 @@ object TmdbService {
     private suspend fun fetchSeason(tmdbId: Int, season: Int): List<TmdbEpisode>? {
         val cacheKey = "$tmdbId|$season"
         seasonCache[cacheKey]?.let { return it }
-        val url = "$API/tv/$tmdbId/season/$season?api_key=$API_KEY&language=en-US"
-        val json = runCatching { app.get(url, timeout = 5).text }.getOrNull() ?: return null
+        val json = tmdbGet("season tv=$tmdbId s=$season", "/tv/$tmdbId/season/$season", "language=en-US")
+            ?: return null
         val episodes = try {
             val root = JSONObject(json)
             root.optJSONArray("episodes")?.let { arr ->
