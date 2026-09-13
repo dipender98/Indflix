@@ -324,19 +324,23 @@ object StreamEngine {
             )
 
             if (isAdaptive) {
-                onLink(ExtractorLink(
+                onLink(newExtractorLink(
                     source = label, name = label,
-                    url = raw.url, referer = raw.referer ?: "",
-                    quality = quality,
-                    headers = linkHeaders, type = ExtractorLinkType.M3U8,
-                ))
+                    url = raw.url, type = ExtractorLinkType.M3U8,
+                ) {
+                    referer = raw.referer ?: ""
+                    this.quality = quality
+                    this.headers = linkHeaders
+                })
             } else {
-                onLink(ExtractorLink(
+                onLink(newExtractorLink(
                     source = label, name = label,
-                    url = raw.url, referer = raw.referer ?: "",
-                    quality = quality,
-                    headers = linkHeaders, type = ExtractorLinkType.VIDEO,
-                ))
+                    url = raw.url, type = ExtractorLinkType.VIDEO,
+                ) {
+                    referer = raw.referer ?: ""
+                    this.quality = quality
+                    this.headers = linkHeaders
+                })
             }
         }
         floorDroppedByServer.forEach { (sid, n) ->

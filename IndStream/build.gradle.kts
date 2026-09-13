@@ -45,6 +45,17 @@ dependencies {
     if (csJar.exists()) {
         testImplementation(files(csJar))
     }
+    // newExtractorLink's class-init needs the cryptography provider at runtime;
+    // same guarded pattern (globbed so artifact versions can roll).
+    val cryptoJars = fileTree(
+        mapOf(
+            "dir" to File(project.gradle.gradleUserHomeDir, "caches/modules-2/files-2.1/dev.whyoleg.cryptography"),
+            "include" to listOf("**/*.jar"),
+        )
+    ).files.filter { !it.name.contains("sources") && !it.name.contains("javadoc") }
+    if (cryptoJars.isNotEmpty()) {
+        testImplementation(files(cryptoJars))
+    }
 }
 
 // The CloudStream gradle plugin's `make` dexes the unshrunk classes with plain

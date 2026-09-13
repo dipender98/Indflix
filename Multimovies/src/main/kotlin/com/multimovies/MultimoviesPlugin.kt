@@ -998,14 +998,12 @@ class MultimoviesProvider : MainAPI() {
         }
 
         // Fallback subtitles (): the two-source provider (OpenSubtitles addon + SubSense top-up) is the ONLY.
-        // Start fetching IMMEDIATELY on tap (in parallel with the stream farm) so tracks land before/at playback start.
-        // The firstLink gate is only a guard so we don't push subs when no stream was found at all.
+        // Start fetching IMMEDIATELY on tap, in parallel with the stream farm, and emit priority tracks
+        // (hi/en) first - the fetch used to wait for the first stream, delaying subs past playback start.
         val metaSubs = meta
         val subsJob = metaSubs?.let { m ->
             searchScope.async {
-                // Don't block the fetch on the first link — begin the request now; only skip if the farm yields nothing.
-                withTimeoutOrNull(FAST_START_MAX_MS) { firstLink.await() }
-                if (found.isNotEmpty()) deliverFallbackSubs(m, subtitleCallback)
+                deliverFallbackSubs(m, subtitleCallback)
             }
         }
 
@@ -1055,10 +1053,20 @@ class MultimoviesProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
     ) {
         runCatching {
-            SubtilesProvider.fetch(
-                meta.imdbId, meta.season, meta.episode,
+            // Tmdb-only titles store "": resolve imdb via TMDB so subs still land instead of silently empty.
+            var imdb = meta.imdbId.takeIf { it.startsWith("tt") }
+            if (imdb == null) {
+                val tmdb = meta.tmdbId?.toIntOrNull()
+                if (tmdb != null) {
+                    val type = if (meta.season != null || meta.episode != null) "tv" else "movie"
+                    imdb = withTimeoutOrNull(4000L) { TmdbService.fetchMeta(tmdb, type) }
+                        ?.imdbId?.takeIf { it.startsWith("tt") }
+                }
+            }
+            SubtilesProvider.fetchAndDeliver(
+                imdb, meta.season, meta.episode,
                 SubtilesProvider.desiredLanguages(),
-            ).forEach { runCatching { subtitleCallback(it) } }
+            ) { runCatching { subtitleCallback(it) } }
         }.onFailure { android.util.Log.w("Multimovies", "fallback subs failed: ${it.message}") }
     }
 
@@ -1080,17 +1088,21 @@ class MultimoviesProvider : MainAPI() {
         cacheOnly: Boolean = false,
     ): List<ExtractorLink> {
         /** Disambiguate duplicate labels within a single load: the first link with a given label keeps it; subsequent links. */
-        fun disambiguate(l: ExtractorLink): ExtractorLink {
+        suspend fun disambiguate(l: ExtractorLink): ExtractorLink {
             val label = l.source
             val n = labelCounter.compute(label) { _, v -> (v ?: 0) + 1 }!!
             if (n == 1) return l
             val dis = "$label-$n"
-            return ExtractorLink(
+            return newExtractorLink(
                 source = dis, name = dis, url = l.url,
-                referer = l.referer, quality = l.quality,
-                headers = l.headers, extractorData = l.extractorData,
-                type = l.type, audioTracks = l.audioTracks ?: emptyList(),
-            )
+                type = l.type,
+            ) {
+                referer = l.referer
+                quality = l.quality
+                headers = l.headers
+                extractorData = l.extractorData
+                audioTracks = l.audioTracks ?: emptyList()
+            }
         }
 
         /** Quality floor (): drop KNOWN sub-720p fixed files. */
@@ -1139,7 +1151,7 @@ class MultimoviesProvider : MainAPI() {
     }
 
     /** Build the ExtractorLink emitted by the fast path. */
-    private fun buildDirectLink(
+    private suspend fun buildDirectLink(
         src: MultiSourcePuller.Source,
     ): ExtractorLink {
         val u = src.url
@@ -1147,17 +1159,18 @@ class MultimoviesProvider : MainAPI() {
         val type = if (u.contains(".m3u8", ignoreCase = true)) ExtractorLinkType.M3U8
         else ExtractorLinkType.VIDEO
         val quality = getQualityFromName(u)
-        return ExtractorLink(
+        return newExtractorLink(
             source = src.name,
             name = src.name,
             url = u,
-            referer = src.referer ?: u,
-            quality = quality,
-            headers = headers,
-            extractorData = null,
             type = type,
-            audioTracks = emptyList(),
-        )
+        ) {
+            referer = src.referer ?: u
+            this.quality = quality
+            this.headers = headers
+            extractorData = null
+            audioTracks = emptyList()
+        }
     }
 
     /** Resolve a single dooplayer server's embed URL via the site's admin-ajax endpoint. */
@@ -1574,12 +1587,16 @@ object MultiSourcePuller {
             base = "$base ($langTag)"
         }
         if (base == (l.source ?: l.name)) return l // unchanged → keep identity.
-        return ExtractorLink(
+        return newExtractorLink(
             source = base, name = base, url = l.url,
-            referer = l.referer, quality = height.takeIf { it > 0 } ?: l.quality,
-            headers = l.headers, extractorData = l.extractorData,
-            type = l.type, audioTracks = l.audioTracks ?: emptyList(),
-        )
+            type = l.type,
+        ) {
+            referer = l.referer
+            quality = height.takeIf { it > 0 } ?: l.quality
+            headers = l.headers
+            extractorData = l.extractorData
+            audioTracks = l.audioTracks ?: emptyList()
+        }
     }
 
     /** Collapse a duplicated resolution token inside a server label so the player never shows e. g. */
@@ -1690,18 +1707,19 @@ object MultiSourcePuller {
     }
 
     /** Wrap a raw extractor link with the source's headers/referer defaults. */
-    private fun toExtractorLink(src: Source, l: ExtractorLink): ExtractorLink =
-        ExtractorLink(
+    private suspend fun toExtractorLink(src: Source, l: ExtractorLink): ExtractorLink =
+        newExtractorLink(
             source = l.source,
             name = l.name,
             url = l.url,
-            referer = l.referer ?: src.url,
-            quality = l.quality,
-            headers = l.headers ?: src.headers,
-            extractorData = null,
             type = l.type,
-            audioTracks = l.audioTracks ?: emptyList(),
-        )
+        ) {
+            referer = l.referer ?: src.url
+            quality = l.quality
+            headers = l.headers ?: src.headers
+            extractorData = null
+            audioTracks = l.audioTracks ?: emptyList()
+        }
 
     /** True when points at a YouTube host (trailer embeds). */
     internal fun isYouTubeHost(url: String): Boolean {
@@ -1723,7 +1741,8 @@ object MultiSourcePuller {
             val subs = mutableListOf<SubtitleFile>()
             val nxLinks = NxshaExtractor.extract(src) { subs.add(SubtitleFile(it.lang, it.url)) }
             subs.forEach { onSubtitle(it) }
-            return nxLinks.map { s ->
+            val out = mutableListOf<ExtractorLink>()
+            for (s in nxLinks) {
                 val source = s.name
                 val type = if (s.isM3u8 || s.url.contains(".m3u8", ignoreCase = true)) {
                     ExtractorLinkType.M3U8
@@ -1731,37 +1750,42 @@ object MultiSourcePuller {
                 // Streams come back without headers.
                 val refererHeader = src.referer ?: src.url
                 val headers = src.headers + ("Referer" to refererHeader)
-                ExtractorLink(
+                out += newExtractorLink(
                     source = source,
                     name = source,
                     url = s.url,
-                    referer = refererHeader,
-                    quality = getQualityFromName(s.quality.ifEmpty { s.url }),
-                    headers = headers,
-                    extractorData = null,
                     type = type,
-                    audioTracks = emptyList(),
-                )
+                ) {
+                    referer = refererHeader
+                    quality = getQualityFromName(s.quality.ifEmpty { s.url })
+                    this.headers = headers
+                    extractorData = null
+                    audioTracks = emptyList()
+                }
             }
+            return out
         }
 
         // VidEm (videm. xyz): signed-token multi-server HLS player.
         if (hostOf(src.url).contains("videm")) {
-            return VidemExtractor.extract(src).map { s ->
+            val out = mutableListOf<ExtractorLink>()
+            for (s in VidemExtractor.extract(src)) {
                 // BASE label only - emitOne's enrichLabel appends the) + resolution for the final identity.
                 val label = "VidEm (${s.name})"
-                ExtractorLink(
+                out += newExtractorLink(
                     source = label,
                     name = label,
                     url = s.url,
-                    referer = s.headers["Referer"] ?: src.url,
-                    quality = getQualityFromName(s.quality.ifEmpty { s.url }),
-                    headers = s.headers + src.headers,
-                    extractorData = null,
                     type = if (s.isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO,
-                    audioTracks = emptyList(),
-                )
+                ) {
+                    referer = s.headers["Referer"] ?: src.url
+                    quality = getQualityFromName(s.quality.ifEmpty { s.url })
+                    this.headers = s.headers + src.headers
+                    extractorData = null
+                    audioTracks = emptyList()
+                }
             }
+            return out
         }
 
         // 111Movies (api. shows. st): deterministic JSON API behind the vidlove player SPA. Emits source. url (adaptive HLS.
@@ -1770,21 +1794,24 @@ object MultiSourcePuller {
             val subs = mutableListOf<SubtitleFile>()
             val showLinks = ShowsExtractor.extract(src, onSubtitle = { subs.add(it) })
             subs.forEach { onSubtitle(it) }
-            return showLinks.map { s ->
+            val out = mutableListOf<ExtractorLink>()
+            for (s in showLinks) {
                 // BASE label only - emitOne's enrichLabel appends the) + resolution for the final identity.
                 val label = "111Movies (${s.name})"
-                ExtractorLink(
+                out += newExtractorLink(
                     source = label,
                     name = label,
                     url = s.url,
-                    referer = s.headers["Referer"] ?: src.url,
-                    quality = getQualityFromName(s.quality.ifEmpty { s.url }),
-                    headers = s.headers + src.headers,
-                    extractorData = null,
                     type = if (s.isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO,
-                    audioTracks = emptyList(),
-                )
+                ) {
+                    referer = s.headers["Referer"] ?: src.url
+                    quality = getQualityFromName(s.quality.ifEmpty { s.url })
+                    this.headers = s.headers + src.headers
+                    extractorData = null
+                    audioTracks = emptyList()
+                }
             }
+            return out
         }
 
         // If unwrapEmbed already surfaced a playable stream or proxy relay URL, emit it directly - no extra page fetch needed.
@@ -1801,21 +1828,24 @@ object MultiSourcePuller {
             )
         }.getOrDefault(false)
         if (registryOk && found.isNotEmpty()) {
-            return found.map { l ->
+            val out = mutableListOf<ExtractorLink>()
+            for (l in found) {
                 // BASE label only - emitOne's enrichLabel appends the) + resolution for the final identity.
                 val label = src.name
-                ExtractorLink(
+                out += newExtractorLink(
                     source = label,
                     name = label,
                     url = l.url,
-                    referer = l.referer,
-                    quality = l.quality,
-                    headers = l.headers,
-                    extractorData = null,
                     type = l.type,
-                    audioTracks = l.audioTracks ?: emptyList(),
-                )
+                ) {
+                    referer = l.referer
+                    quality = l.quality
+                    this.headers = l.headers
+                    extractorData = null
+                    audioTracks = l.audioTracks ?: emptyList()
+                }
             }
+            return out
         }
 
         // Stage b: generic m3u8/mp4 sniff.
@@ -1823,7 +1853,7 @@ object MultiSourcePuller {
     }
 
     /** When src. url is itself a playable stream (serve_m3u8 proxy relay, m3u8 or mp4), build the ExtractorLink right away. */
-    private fun directStreamLink(src: Source): ExtractorLink? {
+    private suspend fun directStreamLink(src: Source): ExtractorLink? {
         val u = src.url
         val isStream = u.contains("serve_m3u8=1", ignoreCase = true) ||
             u.contains(".m3u8", ignoreCase = true) ||
@@ -1836,17 +1866,18 @@ object MultiSourcePuller {
         else ExtractorLinkType.VIDEO
         // Use headersFor so the serve_m3u8 proxy request, which the player will replay against the emitted link.
         val headers = headersFor(u, src.referer, src.headers)
-        return ExtractorLink(
+        return newExtractorLink(
             source = label,
             name = label,
             url = u,
-            referer = src.referer ?: u,
-            quality = getQualityFromName(u),
-            headers = headers,
-            extractorData = null,
             type = type,
-            audioTracks = emptyList(),
-        )
+        ) {
+            referer = src.referer ?: u
+            quality = getQualityFromName(u)
+            this.headers = headers
+            extractorData = null
+            audioTracks = emptyList()
+        }
     }
 
     /** Generic fallback: fetch the player page and harvest the first stream URL using a multi-strategy approach (direct. */
@@ -1868,17 +1899,18 @@ object MultiSourcePuller {
         val linkType = if (stream.contains(".m3u8", ignoreCase = true)) ExtractorLinkType.M3U8
         else ExtractorLinkType.VIDEO
         return listOf(
-            ExtractorLink(
+            newExtractorLink(
                 source = label,
                 name = label,
                 url = stream,
-                referer = src.url,
-                quality = getQualityFromName(stream),
-                headers = headers,
-                extractorData = null,
                 type = linkType,
-                audioTracks = emptyList(),
-            )
+            ) {
+                referer = src.url
+                quality = getQualityFromName(stream)
+                this.headers = headers
+                extractorData = null
+                audioTracks = emptyList()
+            }
         )
     }
 }

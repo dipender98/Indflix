@@ -174,7 +174,7 @@ object LinkNaming {
         "Gujarati" to "\u0A97\u0AC1\u0A9C\u0AB0\u0ABE\u0AA4\u0AC0",
         "Urdu" to "\u0627\u0631\u062F\u0648",
         "Nepali" to "\u0928\u0947\u092A\u093E\u0932\u0940",
-        "Sinhala" to "\u0DC3\u0DD2\u0D82\u0DC4\u0DCD",
+        "Sinhala" to "\u0DC3\u0DD2\u0D82\u0DC4\u0DBD",
     )
 
     /** Menu label for a parsed track: Indian languages show "English-name (native-script)" so Devanagari and the roman name read as one.

@@ -43,7 +43,7 @@ internal data class PayloadLink(
     val episode: Int? = null,
 )
 
-internal data class LinkPayload(val pageUrl: String, val links: List<PayloadLink>) {
+internal data class LinkPayload(val pageUrl: String, val links: List<PayloadLink>, val imdbId: String? = null) {
     fun toJson(): String {
         val arr = JSONArray()
         links.forEach {
@@ -53,7 +53,8 @@ internal data class LinkPayload(val pageUrl: String, val links: List<PayloadLink
                     .put("s", it.season ?: JSONObject.NULL).put("e", it.episode ?: JSONObject.NULL),
             )
         }
-        return JSONObject().put("page", pageUrl).put("links", arr).toString()
+        return JSONObject().put("page", pageUrl).put("links", arr)
+            .put("imdb", imdbId ?: JSONObject.NULL).toString()
     }
 
     companion object {
@@ -73,7 +74,7 @@ internal data class LinkPayload(val pageUrl: String, val links: List<PayloadLink
                     episode = l.optInt("e", -1).takeIf { it > 0 },
                 )
             }
-            return LinkPayload(o.optString("page"), links)
+            return LinkPayload(o.optString("page"), links, o.optString("imdb").takeIf { it.startsWith("tt") })
         }
     }
 }
@@ -441,7 +442,7 @@ class VegamoviesProvider : MainAPI() {
         val poster = doc.selectFirst("meta[property=og:image]")?.attr("abs:content")?.takeIf { it.isNotBlank() }
             ?: doc.selectFirst(".entry-content img, article img")?.absUrl("src")
         val body = doc.body().text()
-        val imdbId = scraped.imdbId
+        val scrapedImdb = scraped.imdbId
         val imdbRating = Regex("""(?i)IMDb Rating:?\s*[-–]?\s*([\d.]+)""").find(body)
             ?.groupValues?.get(1)?.toDoubleOrNull()
         val plot = Regex("""(?i)SYNOPSIS|\bPLOT:|\bPlot\b""").find(body)?.let { m ->
@@ -452,7 +453,9 @@ class VegamoviesProvider : MainAPI() {
         }
         val language = Regex("""(?im)^\s*Language:\s*(.+)$""").find(body)?.groupValues?.get(1)?.trim()
 
-        val meta = withTimeoutOrNull(6000L) { MetadataService.enrich(title, year?.toString(), imdbId) }
+        val meta = withTimeoutOrNull(6000L) { MetadataService.enrich(title, year?.toString(), scrapedImdb) }
+        // TMDB enrichment often resolves an IMDb id the page never carried: prefer scraped, fall back to enriched.
+        val imdbId = scrapedImdb ?: meta?.imdbId
 
         val seasonsFor = scraped.groups.mapNotNull { it.season }.distinct()
         val isSeriesTitle = isSeries(url, emptyList(), h1)
@@ -575,7 +578,7 @@ class VegamoviesProvider : MainAPI() {
     ): LoadResponse {
         val groups = expandAll(scraped, url)
         val links = groups.flatMap { it.second }
-        val payload = LinkPayload(url, links).toJson()
+        val payload = LinkPayload(url, links, imdbId).toJson()
         return newMovieLoadResponse(title, url, TvType.Movie, payload) {
             posterUrl = poster ?: meta?.poster
             backgroundPosterUrl = meta?.backdrop
@@ -651,7 +654,7 @@ class VegamoviesProvider : MainAPI() {
                     if (links.isEmpty()) continue
                     val epNum = i + 1
                     val m = epMeta[epNum]
-                    episodes += newEpisode(LinkPayload(url, links.map { it.copy(season = season, episode = epNum) }).toJson()) {
+                    episodes += newEpisode(LinkPayload(url, links.map { it.copy(season = season, episode = epNum) }, imdbId).toJson()) {
                         this.season = season
                         this.episode = epNum
                         this.name = m?.name ?: "Episode $epNum"
@@ -670,7 +673,7 @@ class VegamoviesProvider : MainAPI() {
                     } ?: emptyList()
                     if (links.isEmpty()) continue
                     val m = epMeta[epNum]
-                    episodes += newEpisode(LinkPayload(url, links).toJson()) {
+                    episodes += newEpisode(LinkPayload(url, links, imdbId).toJson()) {
                         this.season = season
                         this.episode = epNum
                         this.name = m?.name ?: "Episode $epNum"
@@ -689,6 +692,7 @@ class VegamoviesProvider : MainAPI() {
                     val payload = LinkPayload(
                         url,
                         concrete.map { it.copy(heading = g.heading, season = season) },
+                        imdbId,
                     ).toJson()
                     episodes += newEpisode(payload) {
                         this.season = season
@@ -720,6 +724,19 @@ class VegamoviesProvider : MainAPI() {
         if (payload.links.isEmpty()) return false
         val referer = payload.pageUrl.ifBlank { mainUrl }
         var emitted = false
+
+        // Subtitles start fetching immediately, in parallel with link resolution, so tracks land before return.
+        val subsJob = coroutineScope {
+            async {
+                val season = payload.links.firstNotNullOfOrNull { it.season }
+                val episode = payload.links.firstNotNullOfOrNull { it.episode }
+                runCatching {
+                    VegaSubtitles.fetchAndDeliver(payload.imdbId, season, episode) {
+                        runCatching { subtitleCallback(it) }
+                    }
+                }
+            }
+        }
 
         // Wave order: seekable V-Cloud first, G-Drive/ZIP (download-only) last.
         val waves = payload.links
@@ -756,6 +773,8 @@ class VegamoviesProvider : MainAPI() {
                 }
             }
         }
+        // Subtitle tracks must land BEFORE the return (the app drops pushes after it).
+        runCatching { subsJob.await() }
         return emitted
     }
 

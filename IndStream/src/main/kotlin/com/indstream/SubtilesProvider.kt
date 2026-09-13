@@ -221,45 +221,85 @@ object SubtilesProvider {
         missing: Set<String>,
         originalLang: String? = null,
     ): List<SubtitleFile> {
-        val imdb = imdbId?.takeIf { it.startsWith("tt") } ?: return emptyList()
-        if (missing.isEmpty()) return emptyList()
+        val out = mutableListOf<SubtitleFile>()
+        fetchAndDeliver(imdbId, season, episode, missing, originalLang) { out.add(it) }
+        return out
+    }
+
+    /** Progressive fetch: priority (hi/en/original) emits first so tracks land at playback start, rest + top-up follow. */
+    suspend fun fetchAndDeliver(
+        imdbId: String?,
+        season: Int,
+        episode: Int,
+        missing: Set<String>,
+        originalLang: String? = null,
+        onTrack: suspend (SubtitleFile) -> Unit,
+    ): Int {
+        val imdb = imdbId?.takeIf { it.startsWith("tt") } ?: return 0
+        if (missing.isEmpty()) return 0
         val codes = codesFromLangs(missing)
-        if (codes.isEmpty()) return emptyList()
+        if (codes.isEmpty()) return 0
         val originalCode = originalLang?.let { LinkNaming.languageTag(it) }?.let { CODES[it] }
 
         val key = "$imdb|$season|$episode|${codes.sorted().joinToString(",")}"
         cache[key]?.let { (exp, subs) ->
-            if (System.currentTimeMillis() < exp) return subs
+            if (System.currentTimeMillis() < exp) {
+                subs.forEach { onTrack(it) }
+                return subs.size
+            }
             cache.remove(key)
         }
 
         val deadline = System.currentTimeMillis() + FETCH_BUDGET_MS
         val groups = groupRequests(codes, originalCode)
-        // First group = Hindi batch (retried alone when everything else dies).
-        val priority = groups.firstOrNull() ?: emptySet()
-        val tracks = coroutineScope {
-            val jobs = groups.map { launchFetch(imdb, season, episode, it, deadline) }
-            val results = jobs.map { it.await() }
-            var merged = mergeGroups(results)
-            if (results.all { it.isEmpty() } && priority.isNotEmpty() &&
-                System.currentTimeMillis() < deadline
-            ) {
-                // cold-start tail (measured 11. 5s): every group died inside the window - one more priority attempt with what is left.
-                Log.d("SubtilesProvider", "all groups empty — one priority retry")
-                val retry = launchFetch(imdb, season, episode, priority, deadline).await()
-                merged = mergeGroups(results + listOf(retry))
+        if (groups.isEmpty()) return 0
+        // Priority singles (hi, en, original) are tiny and most-wanted: land them before the slower chunks.
+        val priorityCount = minOf(3, groups.size)
+        val seen = HashSet<String>()
+        val perLang = HashMap<String, Int>()
+        val collected = mutableListOf<SubTrack>()
+        var delivered = 0
+        suspend fun emit(tracks: List<SubTrack>) {
+            for (t in tracks) {
+                if (!seen.add(t.url)) continue
+                if ((perLang[t.lang] ?: 0) >= SENSE_MAX_PER_LANG) continue
+                perLang[t.lang] = (perLang[t.lang] ?: 0) + 1
+                collected.add(t)
+                onTrack(SubtitleFile(t.menu, t.url))
+                delivered++
             }
-            val gaps = stillMissing(missing, merged)
-            if (gaps.isNotEmpty() && System.currentTimeMillis() < deadline) {
-                val sense = fetchSubSense(imdb, season, episode, gaps, deadline)
-                merged = mergeGroups(listOf(merged, sense))
-            }
-            merged
         }
-        val subs = tracks.map { SubtitleFile(it.menu, it.url) }
-        if (subs.isNotEmpty()) put(key, subs)
-        Log.d("SubtilesProvider", "${subs.size} fallback subs for $imdb (codes=$codes)")
-        return subs
+        coroutineScope {
+            // Phase 1 (top priority): English + Hindi + original - tiny singles, land at playback start.
+            groups.take(priorityCount).map { launchFetch(imdb, season, episode, it, deadline) }
+                .map { it.await() }.forEach { emit(it) }
+            // Phase 2 (priority batch): rest of the Indian block in native-written form.
+            if (System.currentTimeMillis() < deadline) {
+                groups.drop(priorityCount)
+                    .filter { g -> g.all { it in INDIAN_LANG_CODES } }
+                    .map { launchFetch(imdb, season, episode, it, deadline) }
+                    .map { it.await() }.forEach { emit(it) }
+            }
+            // Phase 3: foreign languages.
+            if (System.currentTimeMillis() < deadline) {
+                groups.drop(priorityCount)
+                    .filterNot { g -> g.all { it in INDIAN_LANG_CODES } }
+                    .map { launchFetch(imdb, season, episode, it, deadline) }
+                    .map { it.await() }.forEach { emit(it) }
+            }
+            if (delivered == 0 && System.currentTimeMillis() < deadline) {
+                // Cold-start tail: every group died - one more priority attempt with what is left.
+                Log.d("SubtilesProvider", "all groups empty — one priority retry")
+                groups.firstOrNull()?.let { emit(launchFetch(imdb, season, episode, it, deadline).await()) }
+            }
+            val gaps = stillMissing(missing, collected)
+            if (gaps.isNotEmpty() && System.currentTimeMillis() < deadline) {
+                emit(fetchSubSense(imdb, season, episode, gaps, deadline))
+            }
+        }
+        if (collected.isNotEmpty()) put(key, collected.map { SubtitleFile(it.menu, it.url) })
+        Log.d("SubtilesProvider", "$delivered fallback subs for $imdb (codes=$codes)")
+        return delivered
     }
 
     /** Async fetch+parse of one addon group with its own timeout built). */
