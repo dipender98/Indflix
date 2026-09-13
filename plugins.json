@@ -2,14 +2,14 @@
     {
         "url": "https://raw.githubusercontent.com/dipender98/Indflix/builds/IndStream.cs3",
         "status": 1,
-        "version": 24,
+        "version": 25,
         "name": "IndStream",
         "internalName": "IndStream",
         "authors": [
             "Indflix"
         ],
         "description": "Federated embed-server resolver keyed by TMDB/IMDB id. Races dozens of independent HLS/DASH servers, picks the fastest CDN per title, and exposes multi-language audio + per-quality links.",
-        "fileSize": 157236,
+        "fileSize": 157218,
         "repositoryUrl": "https://github.com/dipender98/Indflix",
         "language": "hi",
         "tvTypes": [
@@ -18,7 +18,7 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/dipender98/Indflix/main/IndStream/icon.png",
         "apiVersion": 1,
-        "fileHash": "sha256-14e12d8a6343015d0d1dadbcff56d0d779a5a98223fef10a6fde5bdf9c52d4c2"
+        "fileHash": "sha256-df33ee45b0c5976cb0f97940e3fdeb0c16c707234abf5f0223591e2f4facc759"
     },
     {
         "url": "https://raw.githubusercontent.com/dipender98/Indflix/builds/Multimovies.cs3",
@@ -42,7 +42,7 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/dipender98/Indflix/main/Multimovies/icon.png",
         "apiVersion": 1,
-        "fileHash": "sha256-371917061b79da9d9846c714fdcbdf389250c760ae52842d47a0f0f4a5dbf6ad"
+        "fileHash": "sha256-635c510343ae482d4e1bb5266a50701a1cc85ad3768902eb6b54d06031a86409"
     },
     {
         "url": "https://raw.githubusercontent.com/dipender98/Indflix/builds/Vegamovies.cs3",
@@ -63,6 +63,6 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/dipender98/Indflix/main/Vegamovies/icon.png",
         "apiVersion": 1,
-        "fileHash": "sha256-91229e3c37311858da75fdff3484913e5f9899a60e14fe6ca7a1ee862e75ba9c"
+        "fileHash": "sha256-bec2c91de417708c4588681ad97085bc4250af42a45936aae4376218a4e77e40"
     }
 ]
