@@ -3,7 +3,7 @@ import java.util.Properties
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
-version = 4
+version = 5
 
 plugins {
     id("com.lagradost.cloudstream3.gradle")
@@ -41,6 +41,14 @@ dependencies {
     // ...and a Jackson JsonMapper (cloudstream3's NiceHttp JSON layer).
     testImplementation("com.fasterxml.jackson.core:jackson-databind:2.17.1")
     testImplementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.17.1")
+    // ExtractorLink's enclosing ExtractorApiKt static-init resolves a
+    // CryptographyProvider (CloudStream core dep) — the JVM test path needs
+    // the same libs the app process provides on device.
+    testImplementation("dev.whyoleg.cryptography:cryptography-core:0.6.0")
+    testImplementation("dev.whyoleg.cryptography:cryptography-provider-optimal:0.6.0")
+    // LoadResponse.addDate (episode air dates) statically references kotlinx-datetime
+    // — provided by the app runtime on device, needed on the JVM test path too.
+    testImplementation("org.jetbrains.kotlinx:kotlinx-datetime:0.8.0")
 }
 
 // Mirrors the Multimovies shrinkCs3 task: re-dex the R8-minified release classes

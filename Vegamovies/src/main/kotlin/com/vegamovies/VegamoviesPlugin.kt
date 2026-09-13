@@ -1,5 +1,5 @@
 package com.vegamovies
-/** FILE: VegamoviesPlugin.kt — the Vegamovies plugin and provider engine. */
+/** Vegamovies CloudStream provider and link resolver. */
 
 import android.content.Context
 import com.lagradost.cloudstream3.*
@@ -78,7 +78,7 @@ internal data class LinkPayload(val pageUrl: String, val links: List<PayloadLink
     }
 }
 
-/** Vegamovies provider — WordPress scraper with TMDB keyless enrichment and a two-phase live-fill server pipeline (. */
+/** Vegamovies provider with live link resolution. */
 class VegamoviesProvider : MainAPI() {
 
     companion object {
@@ -604,21 +604,46 @@ class VegamoviesProvider : MainAPI() {
         val referer = payload.pageUrl.ifBlank { mainUrl }
         var emitted = false
 
+        // Two-wave emit so the PROVEN-seekable source always registers before
+        // the range-hostile one. CloudStream auto-plays the first
+        // highest-quality link; G-Drive's googleusercontent file IGNORES Range
+        // (probe: 200, no content-range) → ExoPlayer can't buffer/seek →
+        // "not streaming", while V-Cloud's FSL/R2 file answers 206. Because
+        // both resolve in parallel, arrival order was a coin-flip; running the
+        // V-Cloud tier first (and highest quality within it) makes R2 win the
+        // tie, with G-Drive kept as a listed fallback.
+        val waves = payload.links
+            .groupBy {
+                when (it.kind) {
+                    Servers.VCLOUD -> 0
+                    Servers.GDRIVE -> 1
+                    Servers.ZIP -> 3
+                    else -> 2
+                }
+            }.toSortedMap().values
+            // Within a wave: the best picture registers first — CloudStream
+            // auto-plays the highest quality it saw so far (ties = first in).
+            .map { wave -> wave.sortedByDescending { LinkNaming.qualityInt(it.heading) } }
+
         withTimeoutOrNull(LIVE_FILL_MS) {
             coroutineScope {
                 val sem = Semaphore(6)
-                payload.links.map { pl ->
-                    async {
-                        sem.acquire()
-                        val links = try {
-                            buildLinks(pl, referer)
-                        } finally { sem.release() }
-                        links.forEach {
-                            emitted = true
-                            callback(it)
+                waves.forEach { wave ->
+                    // awaitAll inside each wave — the previous wave's callbacks
+                    // are ALL registered before the next one launches.
+                    wave.map { pl ->
+                        async {
+                            sem.acquire()
+                            val links = try {
+                                buildLinks(pl, referer)
+                            } finally { sem.release() }
+                            links.forEach {
+                                emitted = true
+                                callback(it)
+                            }
                         }
-                    }
-                }.awaitAll()
+                    }.awaitAll()
+                }
             }
         }
         return emitted
@@ -689,8 +714,11 @@ class VegamoviesProvider : MainAPI() {
             name = LinkNaming.displayName(raw),
             url = url,
             referer = if (kind == Servers.GDRIVE && !browserOnly) "https://fastdl.zip/" else pl.pageReferer(),
-            // Unknown quality for download-only rows so auto-play never picks them.
-            quality = if (browserOnly) 0 else getQualityFromName(pl.heading),
+            // Real resolution from the heading (stock getQualityFromName is
+            // blind to these WordPress headings and returns Unknown=400 —
+            // tying every row). Download-only rows stay 0 so auto-play
+            // never picks them.
+            quality = if (browserOnly) 0 else LinkNaming.qualityInt(pl.heading),
             headers = commonHeaders + mapOf("Referer" to (if (kind == Servers.GDRIVE && !browserOnly) "https://fastdl.zip/" else "https://new2.vegamovies.futbol/")),
             extractorData = null,
             // Browser-only gate pages keep VIDEO type + UNKNOWN quality so the player's auto-selection never picks them; tapping.

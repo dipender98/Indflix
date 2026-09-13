@@ -4,25 +4,7 @@ import com.lagradost.cloudstream3.app
 import java.util.Base64
 import java.util.concurrent.ConcurrentHashMap
 
-/**
- * VcloudResolver.kt — resolves a `vcloud.fit/<id>` shortlink to the R2/FSL
- * direct file URLs that CSX's VCloud extractor emits as playable streams.
- *
- * Protocol (verified 2026-09-12 against a live Squid Game S02 EP1 V-Cloud link):
- *   GET https://vcloud.fit/<id>/                    (UA only, no referer check)
- *     → HTML: `var url = atob(atob("BASE64_BASE64"))` → decode twice → token URL
- *   GET <token URL> (Referer=vcloud.fit/<id>)
- *     → HTML with N `<a class="btn" href="...">Download [<server>]</a>` buttons;
- *     the FSLv2/FSL entries are Cloudflare R2 signed URLs:
- *       https://<account>.r2.cloudflarestorage.com/hub2/<name>.mkv?...
- *       https://pub-<id>.r2.dev/<sha>?token=<exp>
- *     Both support Range and answer 206 video/octet-stream → fully seekable.
- *
- * The plugin emits THESE as in-app stream links and drops the browser-only
- * googleusercontent fastdl path (it ignores Range → ExoPlayer treats the
- * entire 500MB+ body as an unbreakable initial segment: movies never start;
- * this is the "movie not streaming on device but fine in browser" symptom).
- */
+/** Resolves V-Cloud shortlinks to seekable R2 stream URLs. */
 internal data class VcloudStream(val url: String, val tag: String)
 
 internal object VcloudResolver {
@@ -30,27 +12,23 @@ internal object VcloudResolver {
     private val cacheSize
         get() = 64
 
-    /** vcloud.fit/<id> page: `var url = atob(atob("<b64>"))` double-encoded link. */
+    /** Parses the double-encoded token URL from a V-Cloud page. */
     val ATOB_ATOB = Regex(
         """var\s+url\s*=\s*atob\s*\(\s*atob\s*\(\s*['"]([A-Za-z0-9+/=]{16,})['"]\s*\)\s*\)""",
     )
 
-    /** Token-page download buttons: <a href="..." class="btn">[FSLv2 Server]</a>. */
+    /** Parses download buttons from the token page. */
     val BTN = Regex(
         """<a\b[^>]*href="([^"]+)"[^>]*>\s*(?:<[^>]+>\s*)*([^<]*(?:Download|Server|File)[^<]*)(?:<[^>]+>\s*)*</a>""",
         RegexOption.IGNORE_CASE,
     )
 
-    /** Only emit R2/FSL links — pixeldrain/gofile/hubcloud-10Gbps need more extractors than the site's real files. */
+    /** Emits only R2/FSL streamable links. */
     val STREAMABLE_HOST = Regex("""(r2\.cloudflarestorage\.com|r2\.dev)""", RegexOption.IGNORE_CASE)
 
     private val directCache = ConcurrentHashMap<String, List<VcloudStream>>()
 
-    /**
-     * Chain-resolve one vcloud URL → 0..n R2 streamables. Best-effort: any
-     * failure returns empty and the caller degrades to a browser-only row.
-     * Memoised (vcloud pages are the same regardless of playback retry).
-     */
+    /** Resolves and caches one V-Cloud URL. */
     suspend fun resolve(
         vcloudUrl: String,
         referer: String,
@@ -94,7 +72,7 @@ internal object VcloudResolver {
         return emptyList()
     }
 
-    /** Pure: atob(atob(X)) — standard base64, padding-lenient (JS atob tolerates missing '='). */
+    /** Decodes a double Base64 value. */
     internal fun decodeDoubleAtob(blob: String): String? = try {
         val inner = String(decodeB64(blob.trim()))
         String(decodeB64(inner.trim()))

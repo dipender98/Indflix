@@ -14,11 +14,7 @@ import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
-/**
- * Pure-function tests for the Vegamovies parsing/naming helpers — JVM-only,
- * no network (gateway expansion + link resolution are covered by the probe
- * scripts in tools/; fixtures here mirror their verified payloads).
- */
+/** JVM tests for pure parsing and naming helpers. */
 class VegamoviesPluginTest {
 
     private val p = VegamoviesProvider()
@@ -143,6 +139,17 @@ class VegamoviesPluginTest {
     }
 
     // ───────────────────── naming (user spec) ─────────────────────
+
+    @Test
+    fun qualityInt_parsesResolutionFromHeadings() {
+        assertEquals(480, LinkNaming.qualityInt("Season 1 {Hindi-English} 480p WEB-DL [180MB/E]"))
+        assertEquals(720, LinkNaming.qualityInt("Season 1 {Hindi-English} 720p NF WEB-DL x264 [500MB/E]"))
+        assertEquals(1080, LinkNaming.qualityInt("Avengers: Endgame (2019) {Hindi-English} 1080p BluRay x264 [4.3GB]"))
+        assertEquals(2160, LinkNaming.qualityInt("Movie (2019) {Hindi-English} 2160p 4k HDR x265 [7.7GB]"))
+        // Highest token wins when a heading lists several.
+        assertEquals(1080, LinkNaming.qualityInt("Season 1 480p | 720p | 1080p WEB-DL"))
+        assertEquals(0, LinkNaming.qualityInt("Season 1 Complete Pack"))
+    }
 
     @Test
     fun tokens_parseQualityLanguageCodecSize() {

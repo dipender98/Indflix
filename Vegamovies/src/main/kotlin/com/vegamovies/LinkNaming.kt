@@ -1,21 +1,6 @@
 package com.vegamovies
 
-/**
- * LinkNaming.kt — pure helpers turning a scraped heading + server URL into the
- * human-readable link name shown in CloudStream's change-server list.
- *
- * The bracket tag states HONESTLY what the endpoint verified to do
- * (tools/vg_range.py + tools/vcloud_chain.py probes, Sept 2026):
- *   "Streamable+Downloadable" — direct video-downloads.googleusercontent.com
- *       file: plays in-app from t=0 AND downloads at full speed. (It ignores
- *       HTTP Range, so in-player seeking just restarts — still streamable.)
- *   "Downloadable"            — a gate page (fastdl embed fallback, V-Cloud,
- *       Batch/Zip): can't stream in-app; tapping opens it to download.
- *
- * Rendered as:  "G-Drive (Google Drive) [Streamable+Downloadable] 1080p {Hindi-English} BluRay x264 4.3GB"
- *               "V-Cloud  [Downloadable] 720p {Hindi-Korean} WEB-DL x264 800MB/ep"
- *               "Batch/Zip (Archive) [Downloadable] S01 Complete 22.3GB"
- */
+/** Formats resolved links for display. */
 
 /** Server families, named after their real backing storage (user spec). */
 internal object Servers {
@@ -63,6 +48,24 @@ internal data class RawLink(
 )
 
 internal object LinkNaming {
+
+    /**
+     * Resolution int for the ExtractorLink quality field, parsed from the
+     * download heading (480 / 720 / 1080 / 2160; 4K == 2160; highest token
+     * wins when several appear). CloudStream's stock getQualityFromName
+     * returns Qualities.Unknown(400) for these headings (verified in JVM
+     * probe), which leaves every row tied and lets the range-hostile G-Drive
+     * link win auto-play — so the server list must carry TRUE qualities.
+     * 0 = nothing parseable (download-only rows keep 0 so autoplayer skips).
+     */
+    fun qualityInt(heading: String?): Int {
+        if (heading.isNullOrBlank()) return 0
+        Regex("""(?i)\b(\d{3,4})p\b""").findAll(heading)
+            .mapNotNull { it.groupValues[1].toIntOrNull() }
+            .maxOrNull()?.let { return it }
+        if (Regex("""(?i)\b4K\b""").containsMatchIn(heading)) return 2160
+        return 0
+    }
 
     /** Final ExtractorLink display name — see file header for format. */
     fun displayName(l: RawLink): String {

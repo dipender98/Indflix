@@ -1,13 +1,6 @@
 package com.vegamovies
 
-/**
- * MetadataService.kt — TMDB-backed keyless metadata engine for Vegamovies.
- *
- * The site itself stores posters as TMDB images and links IMDb ids, which
- * makes TMDB the fastest enrichment path: poster, backdrop, plot, genres,
- * cast and rating in one or two HTTP calls. Same key/embedded pattern the
- * Multimovies plugin uses (the CloudStream library exposes no user-key hook).
- */
+/** TMDB metadata client with in-memory caching. */
 
 import com.lagradost.cloudstream3.Actor
 import com.lagradost.cloudstream3.ActorData
