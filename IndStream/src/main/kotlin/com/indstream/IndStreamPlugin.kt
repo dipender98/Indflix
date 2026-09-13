@@ -454,8 +454,8 @@ class IndStreamProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
     ) {
         val wanted = SubtilesProvider.desiredLanguages(originalLang)
-        SubtilesProvider.fetch(imdbId, season, episode, wanted).forEach {
-            subtitleCallback(SubtitleFile(it.lang, it.url))
+        SubtilesProvider.fetch(imdbId, season, episode, wanted, originalLang).forEach {
+            subtitleCallback(it)
         }
     }
 }

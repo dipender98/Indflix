@@ -124,7 +124,8 @@ object LinkNaming {
         if (s.isBlank()) return "Subtitle"
         val lower = s.lowercase()
         return when {
-            lower.contains("हिन्द") || lower.contains("हिंद") || lower == "hi" || lower == "hin" || lower.contains("hindi") -> "Hindi"
+            // Devanagari Hindi: native script or the script name rides along with plain "Hindi".
+            lower.contains("हिन्द") || lower.contains("हिंद") || lower.contains("देवनागरी") || lower.contains("devanagari") || lower == "hi" || lower == "hin" || lower.contains("hindi") -> "Hindi"
             lower.contains("اُردُو") || lower.contains("اردو") || lower.contains("urdu") || lower == "ur" || lower == "urd" -> "Urdu"
             lower.contains("বাংলা") || lower.contains("bengali") || lower.contains("bangla") || lower == "bn" || lower == "ben" || lower == "bang" -> "Bengali"
             lower.contains("العربية") || lower.contains("عرب") || lower.contains("arabic") || lower == "ar" || lower == "ara" || lower == "arb" -> "Arabic"
@@ -137,22 +138,55 @@ object LinkNaming {
             lower.contains("português") || lower.contains("portugues") || lower.contains("portuguese") || lower == "pt" || lower == "por" -> "Portuguese"
             lower.contains("filipino") || lower.contains("tagalog") || lower == "fil" -> "Filipino"
             lower.contains("indonesian") || lower.contains("bahasa") || lower == "id" || lower == "ind" -> "Indonesian"
+            lower.contains("malaysian") || lower == "ms" || lower == "may" || lower == "msa" -> "Malaysian"
+            lower.contains("vietnamese") || lower == "vi" || lower == "vie" -> "Vietnamese"
             lower.contains("english") || lower == "en" || lower == "eng" -> "English"
-            lower.contains("tamil") || lower == "ta" || lower == "tam" -> "Tamil"
-            lower.contains("telugu") || lower == "te" || lower == "tel" -> "Telugu"
-            lower.contains("malayalam") || lower == "ml" || lower == "mal" -> "Malayalam"
-            lower.contains("kannada") || lower == "kn" || lower == "kan" -> "Kannada"
-            lower.contains("marathi") || lower == "mr" || lower == "mar" -> "Marathi"
-            lower.contains("punjabi") || lower == "pa" || lower == "pan" -> "Punjabi"
-            lower.contains("gujarati") || lower == "gu" || lower == "guj" -> "Gujarati"
-            lower.contains("nepali") || lower == "ne" || lower == "nep" -> "Nepali"
-            lower.contains("sinhala") || lower.contains("singhalese") || lower == "si" || lower == "sin" -> "Sinhala"
-            lower.contains("thai") || lower == "th" || lower == "tha" -> "Thai"
+            lower.contains("தமழ") || lower.contains("tamil") || lower == "ta" || lower == "tam" -> "Tamil"
+            lower.contains("తెలుగు") || lower.contains("telugu") || lower == "te" || lower == "tel" -> "Telugu"
+            lower.contains("മലയാള") || lower.contains("malayalam") || lower == "ml" || lower == "mal" -> "Malayalam"
+            lower.contains("ಕನ್ನಡ") || lower.contains("kannada") || lower == "kn" || lower == "kan" -> "Kannada"
+            lower.contains("मराझ") || lower.contains("marathi") || lower == "mr" || lower == "mar" -> "Marathi"
+            lower.contains("ਪੰਜਾਬ") || lower.contains("punjabi") || lower == "pa" || lower == "pan" -> "Punjabi"
+            lower.contains("ગુજરાત") || lower.contains("gujarati") || lower == "gu" || lower == "guj" -> "Gujarati"
+            lower.contains("नेपाल") || lower.contains("nepali") || lower == "ne" || lower == "nep" -> "Nepali"
+            lower.contains("සිංහල") || lower.contains("sinhala") || lower.contains("singhalese") || lower == "si" || lower == "sin" -> "Sinhala"
+            lower.contains("ไทย") || lower.contains("thai") || lower == "th" || lower == "tha" -> "Thai"
             lower.contains("turkish") || lower == "tr" || lower == "tur" -> "Turkish"
             lower.contains("german") || lower == "de" || lower == "ger" || lower == "deu" -> "German"
             lower.contains("italian") || lower == "it" || lower == "ita" -> "Italian"
+            lower.contains("dutch") || lower == "nl" || lower == "dut" || lower == "nld" -> "Dutch"
+            lower.contains("polish") || lower == "pl" || lower == "pol" -> "Polish"
             lower.contains("hindi dubbed") || lower == "dubbed" -> "Hindi"
             else -> s.substringBefore('-').substringBefore(' ').ifBlank { "Subtitle" }
         }
+    }
+
+    /** Indian canonical name (native-script name). Devanagari escapes: verified code points, script-safe regardless of file bytes. */
+    val INDIAN_NATIVE = mapOf(
+        "Hindi" to "\u0939\u093F\u0928\u094D\u0926\u0940",
+        "Tamil" to "\u0BA4\u0BAE\u0BB4\u0BCD",
+        "Telugu" to "\u0C24\u0C46\u0C32\u0C41\u0C17\u0C41",
+        "Malayalam" to "\u0D2E\u0D32\u0D2F\u0D3E\u0D33\u0D02",
+        "Kannada" to "\u0C95\u0CA8\u0CCD\u0CA1",
+        "Marathi" to "\u092E\u0930\u093E\u091F\u0940",
+        "Bengali" to "\u09AC\u09BE\u0982\u09B2\u09BE",
+        "Punjabi" to "\u0A2A\u0A70\u0A1C\u0A3E\u0A2C\u0A40",
+        "Gujarati" to "\u0A97\u0AC1\u0A9C\u0AB0\u0ABE\u0AA4\u0AC0",
+        "Urdu" to "\u0627\u0631\u062F\u0648",
+        "Nepali" to "\u0928\u0947\u092A\u093E\u0932\u0940",
+        "Sinhala" to "\u0DC3\u0DD2\u0D82\u0DC4\u0DCD",
+    )
+
+    /** Menu label for a parsed track: Indian languages show "English-name (native-script)" so Devanagari and the roman name read as one; raw labels already carrying the English name keep it plain, roman/script Hindi splits Hinglish vs native. */
+    fun subtitleMenuName(canon: String, raw: String?): String {
+        val lower = raw?.lowercase().orEmpty()
+        if (canon == "Hindi") {
+            if (lower.contains("hinglish") || lower.contains("roman") || lower.contains("latin")) return "Hindi (Hinglish)"
+            if (lower.contains("\u0939\u093F\u0928\u094D\u0926") || lower.contains("\u0939\u093F\u0902\u0926\u0940") ||
+                lower.contains("\u0926\u0947\u0935\u0928\u093E\u0917\u0930\u0940")) return "Hindi (\u0939\u093F\u0928\u094D\u0926\u0940)"
+            return "Hindi"
+        }
+        val native = INDIAN_NATIVE[canon] ?: return canon
+        return "$canon ($native)"
     }
 }

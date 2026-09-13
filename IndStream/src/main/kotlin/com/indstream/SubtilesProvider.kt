@@ -28,30 +28,44 @@ object SubtilesProvider {
     private const val CACHE_TTL_MS = 15 * 60 * 1000L
     private const val CACHE_MAX = 64
 
-    /** Indian-market + global languages. */
-    private val LANGS = listOf("en", "hi", "ta", "te", "ml", "bn", "ur", "mr", "kn", "si")
+    /** How many codes one addon request carries; the addon slows down on big multi-language requests, so the rest is fetched in parallel chunks. */
+    internal const val GROUP_SIZE = 6
 
-    /** Canonical subtitle language -> addon code (subset of). */
+    /** Every subtitle language we request - the full available menu, Indian block first (map order = desired order + chunking). */
     private val CODES = mapOf(
-        "English" to "en", "Hindi" to "hi", "Tamil" to "ta", "Telugu" to "te",
+        "Hindi" to "hi", "English" to "en", "Tamil" to "ta", "Telugu" to "te",
         "Malayalam" to "ml", "Bengali" to "bn", "Urdu" to "ur",
-        "Marathi" to "mr", "Kannada" to "kn", "Sinhala" to "si",
+        "Marathi" to "mr", "Kannada" to "kn", "Punjabi" to "pa",
+        "Gujarati" to "gu", "Nepali" to "ne", "Sinhala" to "si",
+        "Arabic" to "ar", "Spanish" to "es", "French" to "fr",
+        "German" to "de", "Italian" to "it", "Portuguese" to "pt",
+        "Russian" to "ru", "Chinese" to "zh", "Japanese" to "ja",
+        "Korean" to "ko", "Turkish" to "tr", "Thai" to "th",
+        "Indonesian" to "id", "Malaysian" to "ms", "Vietnamese" to "vi",
+        "Filipino" to "fil", "Dutch" to "nl", "Polish" to "pl",
     )
 
     /** Canonical language -> SubSense ISO-3 codes (probe: the response `lang`/id carry ISO-3; the same request codes are. accepted). Only. */
     private val SENSE_ISO3 = mapOf(
         "English" to "eng", "Hindi" to "hin", "Tamil" to "tam", "Telugu" to "tel",
         "Malayalam" to "mal", "Bengali" to "ben", "Urdu" to "urd",
-        "Marathi" to "mar", "Kannada" to "kan", "Sinhala" to "sin",
+        "Marathi" to "mar", "Kannada" to "kan", "Punjabi" to "pan",
+        "Gujarati" to "guj", "Nepali" to "nep", "Sinhala" to "sin",
+        "Arabic" to "ara", "Spanish" to "spa", "French" to "fra",
+        "German" to "deu", "Italian" to "ita", "Portuguese" to "por",
+        "Russian" to "rus", "Chinese" to "zho", "Japanese" to "jpn",
+        "Korean" to "kor", "Turkish" to "tur", "Thai" to "tha",
+        "Indonesian" to "ind", "Malaysian" to "msa", "Vietnamese" to "vie",
+        "Filipino" to "fil", "Dutch" to "nld", "Polish" to "pol",
     )
 
     private val cache = ConcurrentHashMap<String, Pair<Long, List<SubtitleFile>>>()
 
-    /** The languages worth requesting. Everything else the user can live without. */
+    /** Every language worth requesting; the original language rides along when it isn't already in the set. */
     fun desiredLanguages(originalLang: String?): Set<String> {
-        val wanted = LinkedHashSet(setOf("Hindi", "English"))
+        val wanted = LinkedHashSet(CODES.keys)
         originalLang?.let { LinkNaming.languageTag(it) }?.let { wanted.add(it) }
-        return wanted.filter { CODES.containsKey(it) }.toSet()
+        return wanted
     }
 
     /** Which of none of the stream servers carried (= canonical names emitted by the server-owned subtitle pass). */
@@ -65,12 +79,16 @@ object SubtilesProvider {
     /** Names whose tracks decide whether a play "has subtitles" at all - measured: these two also fan out fastest on the. addon (short list = quick. */
     internal val PRIORITY_CODES: Set<String> = linkedSetOf("hi", "en")
 
-    /** Split requested into the priority ({hi, en}) group and the rest. The addon is measurably slower serving one. many-language request than two small. */
-    internal fun splitGroups(codes: Set<String>): Pair<Set<String>?, Set<String>?> {
-        if (codes.isEmpty()) return null to null
-        val priority = codes.filterTo(LinkedHashSet()) { it in PRIORITY_CODES }
-        val rest = codes.filterTo(LinkedHashSet()) { it !in PRIORITY_CODES }
-        return (priority.takeIf { it.isNotEmpty() }) to (rest.takeIf { it.isNotEmpty() })
+    /** Request codes into addon groups: the priority {hi, en} + original group first, then Indian languages, then the rest (input order), in GROUP_SIZE chunks. The addon is measurably slower serving one many-language request than several small ones fired in parallel. */
+    internal fun groupRequests(codes: Set<String>, originalCode: String? = null): List<Set<String>> {
+        if (codes.isEmpty()) return emptyList()
+        val groups = mutableListOf<Set<String>>()
+        val priority = codes.filterTo(LinkedHashSet()) { it in PRIORITY_CODES || it == originalCode }
+        if (priority.isNotEmpty()) groups.add(priority)
+        codes.filterTo(LinkedHashSet()) { it !in priority }
+            .chunked(GROUP_SIZE)
+            .forEach { groups.add(it.toCollection(LinkedHashSet())) }
+        return groups
     }
 
     /** Names still uncovered after a batch of parsed tracks came back - drives the SubSense top-up request. Pure. */
@@ -103,7 +121,7 @@ object SubtilesProvider {
     }
 
     /** One parsed subtitle track (pure test boundary): canonical display language name + download url. Mapped to only in so. group parsing, dedupe and cap. */
-    internal data class SubTrack(val lang: String, val url: String)
+    internal data class SubTrack(val lang: String, val url: String, val menu: String = lang)
 
     /** Parse the OpenSubtitles-addon response keeping per requested code. Real shape (probe): {lang_code: "en", lang. "eng", title, url: "…/sub. vtt?…"}. */
     internal fun parseOpenSubtitles(text: String, wantCodes: Set<String>): List<SubTrack> {
@@ -121,8 +139,9 @@ object SubtilesProvider {
             if (code1 !in wantCodes && code !in wantCodes) continue
             if ((perLang[code1] ?: 0) >= MAX_PER_LANG) continue
             perLang[code1] = (perLang[code1] ?: 0) + 1
-            out.add(SubTrack(LinkNaming.canonicalSubtitleName(s.optString("lang_code")
-                .ifBlank { s.optString("lang") }), url))
+            val raw = s.optString("lang_code").ifBlank { s.optString("lang") }
+            val canon = LinkNaming.canonicalSubtitleName(raw)
+            out.add(SubTrack(canon, url, LinkNaming.subtitleMenuName(canon, raw)))
         }
         return out
     }
@@ -140,19 +159,20 @@ object SubtilesProvider {
             // `lang` is authoritative; the id "subsense-srt-opensubtitles-<iso3>-<n>" is only a fallback (its LAST token is a.
 // counter, so scan segments).
             var canon = ""
-            if (s.optString("lang").isNotBlank()) {
-                canon = LinkNaming.canonicalSubtitleName(s.optString("lang"))
+            var raw = s.optString("lang")
+            if (raw.isNotBlank()) {
+                canon = LinkNaming.canonicalSubtitleName(raw)
             } else {
                 for (tok in s.optString("id").split('-')) {
                     val c = LinkNaming.canonicalSubtitleName(tok)
-                    if (c != "Subtitle" && c != tok.lowercase()) { canon = c; break }
+                    if (c != "Subtitle" && c != tok.lowercase()) { canon = c; raw = tok; break }
                 }
             }
             if (canon.isEmpty()) canon = "Subtitle"
             if (canon == "Subtitle") continue
             if ((perLang[canon] ?: 0) >= SENSE_MAX_PER_LANG) continue
             perLang[canon] = (perLang[canon] ?: 0) + 1
-            out.add(SubTrack(canon, url))
+            out.add(SubTrack(canon, url, LinkNaming.subtitleMenuName(canon, raw)))
         }
         return out
     }
@@ -179,11 +199,13 @@ object SubtilesProvider {
         season: Int,
         episode: Int,
         missing: Set<String>,
+        originalLang: String? = null,
     ): List<SubtitleFile> {
         val imdb = imdbId?.takeIf { it.startsWith("tt") } ?: return emptyList()
         if (missing.isEmpty()) return emptyList()
         val codes = codesFromLangs(missing)
         if (codes.isEmpty()) return emptyList()
+        val originalCode = originalLang?.let { LinkNaming.languageTag(it) }?.let { CODES[it] }
 
         val key = "$imdb|$season|$episode|${codes.sorted().joinToString(",")}"
         cache[key]?.let { (exp, subs) ->
@@ -192,21 +214,20 @@ object SubtilesProvider {
         }
 
         val deadline = System.currentTimeMillis() + FETCH_BUDGET_MS
-        val (priority, rest) = splitGroups(codes)
+        val priority = codes.filterTo(LinkedHashSet()) { it in PRIORITY_CODES || it == originalCode }
+        val groups = groupRequests(codes, originalCode)
         val tracks = coroutineScope {
-            val prioJob = priority?.let { launchFetch(imdb, season, episode, it, deadline) }
-            val restJob = rest?.let { launchFetch(imdb, season, episode, it, deadline) }
-            val prio = prioJob?.await() ?: emptyList()
-            val others = restJob?.await() ?: emptyList()
-            var retry = emptyList<SubTrack>()
-            if (prio.isEmpty() && others.isEmpty() && priority != null &&
+            val jobs = groups.map { launchFetch(imdb, season, episode, it, deadline) }
+            val results = jobs.map { it.await() }
+            var merged = mergeGroups(results)
+            if (results.all { it.isEmpty() } && priority.isNotEmpty() &&
                 System.currentTimeMillis() < deadline
             ) {
-                // cold-start tail (measured 11. 5s): both groups died inside the window - one more priority attempt with what is left.
-                Log.d("SubtilesProvider", "both groups empty — one priority retry")
-                retry = launchFetch(imdb, season, episode, priority, deadline).await()
+                // cold-start tail (measured 11. 5s): every group died inside the window - one more priority attempt with what is left.
+                Log.d("SubtilesProvider", "all groups empty — one priority retry")
+                val retry = launchFetch(imdb, season, episode, priority, deadline).await()
+                merged = mergeGroups(results + listOf(retry))
             }
-            var merged = mergeGroups(listOf(prio, retry, others))
             val gaps = stillMissing(missing, merged)
             if (gaps.isNotEmpty() && System.currentTimeMillis() < deadline) {
                 val sense = fetchSubSense(imdb, season, episode, gaps, deadline)
@@ -214,7 +235,7 @@ object SubtilesProvider {
             }
             merged
         }
-        val subs = tracks.map { SubtitleFile(it.lang, it.url) }
+        val subs = tracks.map { SubtitleFile(it.menu, it.url) }
         if (subs.isNotEmpty()) put(key, subs)
         Log.d("SubtilesProvider", "${subs.size} fallback subs for $imdb (codes=$codes)")
         return subs

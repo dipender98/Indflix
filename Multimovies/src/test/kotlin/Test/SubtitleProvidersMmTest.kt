@@ -61,7 +61,7 @@ class SubtitleProvidersMmTest {
         assertEquals(13_000L, SubtilesProvider.FETCH_BUDGET_MS)
     }
 
-    // codesFromLangs / splitGroups.
+    // codesFromLangs / groupRequests.
 
     @Test
     fun codesFromLangs_mapsInOrder_dropsUnmapped() {
@@ -70,30 +70,24 @@ class SubtitleProvidersMmTest {
     }
 
     @Test
-    fun splitGroups_priorityVsRest() {
-        val all = SubtilesProvider.codesFromLangs(
-            linkedSetOf("Hindi", "English", "Tamil", "Telugu"),
-        )
-        val (priority, rest) = SubtilesProvider.splitGroups(all)
-        assertEquals(linkedSetOf("hi", "en"), priority)
-        assertEquals(linkedSetOf("ta", "te"), rest)
+    fun groupRequests_priorityPlusOriginalFirst_thenChunksInOrder() {
+        val groups = SubtilesProvider.groupRequests(setOf("hi", "en", "ta", "te", "ja"), "ja")
+        assertEquals(linkedSetOf("hi", "en", "ja"), groups[0])
+        assertEquals(linkedSetOf("ta", "te"), groups[1])
+        assertEquals(2, groups.size)
     }
 
     @Test
-    fun splitGroups_priorityOnly_restNull() {
-        val (priority, rest) = SubtilesProvider.splitGroups(setOf("hi"))
-        assertEquals(setOf("hi"), priority)
-        assertEquals(null, rest)
+    fun desiredLanguages_isTheFullMenu() {
+        val all = SubtilesProvider.desiredLanguages()
+        assertTrue(all.containsAll(setOf("Hindi", "English", "Tamil", "Telugu", "Arabic", "Japanese")))
+        val codes = SubtilesProvider.codesFromLangs(all)
+        assertEquals(all.size, codes.size, "every desired name maps to a code")
     }
 
     @Test
-    fun splitGroups_restOnly_priorityNull_andEmptyBothNull() {
-        val (p2, r2) = SubtilesProvider.splitGroups(setOf("ta", "ml"))
-        assertEquals(null, p2)
-        assertEquals(linkedSetOf("ta", "ml"), r2)
-        val (p3, r3) = SubtilesProvider.splitGroups(emptySet())
-        assertEquals(null, p3)
-        assertEquals(null, r3)
+    fun groupRequests_emptyIsEmpty() {
+        assertEquals(emptyList(), SubtilesProvider.groupRequests(emptySet()))
     }
 
     // buildUrl (opensubtitles addon, nullable season).
@@ -244,5 +238,28 @@ class SubtitleProvidersMmTest {
         val tracks = listOf(SubTrack("Hindi", "https://a/1"), SubTrack("English", "https://a/2"))
         val gaps = SubtilesProvider.stillMissing(setOf("Hindi", "English", "Tamil"), tracks)
         assertEquals(setOf("Tamil"), gaps)
+    }
+
+    // native-script canonicalisation + menu labels.
+
+    @Test
+    fun canonicalName_nativeScriptsAndCodesRoundTrip() {
+        assertEquals("Hindi", SubtitleServices.canonicalName("\u0939\u093F\u0928\u094D\u0926\u0940"))
+        assertEquals("Tamil", SubtitleServices.canonicalName("\u0BA4\u0BAE\u0BB4\u0BCD"))
+        assertEquals("Telugu", SubtitleServices.canonicalName("\u0C24\u0C46\u0C32\u0C41\u0C17\u0C41"))
+        assertEquals("Malayalam", SubtitleServices.canonicalName("\u0D2E\u0D32\u0D2F\u0D3E\u0D33\u0D02"))
+        assertEquals("Kannada", SubtitleServices.canonicalName("\u0C95\u0CA8\u0CCD\u0CA8\u0CA1"))
+        assertEquals("Marathi", SubtitleServices.canonicalName("\u092E\u0930\u093E\u091F\u0940"))
+        assertEquals("Punjabi", SubtitleServices.canonicalName("\u0A2A\u0A70\u0A1C\u0A3E\u0A2C\u0A40"))
+        assertEquals("Gujarati", SubtitleServices.canonicalName("\u0A97\u0AC1\u0A9C\u0AB0\u0ABE\u0AA4\u0AC0"))
+    }
+
+    @Test
+    fun subtitleMenuName_hindiVariantsAndIndianSuffix() {
+        assertEquals("Hindi", SubtitleServices.subtitleMenuName("Hindi", "hi"))
+        assertEquals("Hindi (Hinglish)", SubtitleServices.subtitleMenuName("Hindi", "Hinglish subs"))
+        assertEquals("Hindi (\u0939\u093F\u0928\u094D\u0926\u0940)", SubtitleServices.subtitleMenuName("Hindi", "\u0939\u093F\u0928\u094D\u0926"))
+        assertEquals("Tamil (\u0BA4\u0BAE\u0BB4\u0BCD)", SubtitleServices.subtitleMenuName("Tamil", "tam"))
+        assertEquals("Arabic", SubtitleServices.subtitleMenuName("Arabic", "ar"))
     }
 }

@@ -19,32 +19,74 @@ object SubtitleServices {
         if (s.isBlank()) return "Subtitle"
         val lower = s.lowercase()
         return when {
+            // Devanagari Hindi: native script or the script name; roman-labeled Hinglish is still the Hindi bucket.
             lower.contains("\u0939\u093f\u0928\u094d\u0926") || lower.contains("\u0939\u093f\u0902\u0926") ||
-                lower == "hi" || lower == "hin" || lower.contains("hindi") -> "Hindi"
+                lower.contains("\u0926\u0947\u0935\u0928\u093e\u0917\u0930\u0940") ||
+                lower == "hi" || lower == "hin" || lower.contains("hindi") || lower.contains("hinglish") -> "Hindi"
             lower.contains("urdu") || lower == "ur" || lower == "urd" || lower.contains("\u0627\u0631\u062f\u0648") -> "Urdu"
-            lower.contains("bengali") || lower.contains("bangla") || lower == "bn" || lower == "ben" -> "Bengali"
-            lower.contains("arabic") || lower == "ar" || lower == "ara" -> "Arabic"
+            lower.contains("bengali") || lower.contains("bangla") || lower.contains("\u09ac\u09be\u0982\u09b2") ||
+                lower == "bn" || lower == "ben" -> "Bengali"
+            lower.contains("arabic") || lower == "ar" || lower == "ara" || lower == "arb" -> "Arabic"
             lower.contains("russian") || lower == "ru" || lower == "rus" -> "Russian"
-            lower.contains("chinese") || lower.contains("mandarin") || lower == "zh" || lower == "chi" -> "Chinese"
+            lower.contains("chinese") || lower.contains("mandarin") || lower == "zh" || lower == "chi" || lower == "zho" -> "Chinese"
             lower.contains("japanese") || lower == "ja" || lower == "jpn" -> "Japanese"
             lower.contains("korean") || lower == "ko" || lower == "kor" -> "Korean"
-            lower.contains("french") || lower == "fr" || lower == "fre" -> "French"
+            lower.contains("french") || lower == "fr" || lower == "fre" || lower == "fra" -> "French"
             lower.contains("spanish") || lower == "es" || lower == "spa" -> "Spanish"
             lower.contains("portuguese") || lower == "pt" || lower == "por" -> "Portuguese"
             lower.contains("english") || lower == "en" || lower == "eng" -> "English"
-            lower.contains("tamil") || lower == "ta" || lower == "tam" -> "Tamil"
-            lower.contains("telugu") || lower == "te" || lower == "tel" -> "Telugu"
-            lower.contains("malayalam") || lower == "ml" || lower == "mal" -> "Malayalam"
-            lower.contains("kannada") || lower == "kn" || lower == "kan" -> "Kannada"
-            lower.contains("marathi") || lower == "mr" || lower == "mar" -> "Marathi"
-            lower.contains("punjabi") || lower == "pa" || lower == "pan" -> "Punjabi"
-            lower.contains("gujarati") || lower == "gu" || lower == "guj" -> "Gujarati"
+            lower.contains("tamil") || lower.contains("\u0ba4\u0bae\u0bb4") || lower == "ta" || lower == "tam" -> "Tamil"
+            lower.contains("telugu") || lower.contains("\u0c24\u0c46\u0c32\u0c41\u0c17") || lower == "te" || lower == "tel" -> "Telugu"
+            lower.contains("malayalam") || lower.contains("\u0d2e\u0d32\u0d2f\u0d3e\u0d33") || lower == "ml" || lower == "mal" -> "Malayalam"
+            lower.contains("kannada") || lower.contains("\u0c95\u0ca8\u0ccd\u0ca8\u0ca1") || lower == "kn" || lower == "kan" -> "Kannada"
+            lower.contains("marathi") || lower.contains("\u092e\u0930\u093e\u091f") || lower == "mr" || lower == "mar" -> "Marathi"
+            lower.contains("punjabi") || lower.contains("\u0a2a\u0a70\u0a1c\u0a3e\u0a2c") || lower == "pa" || lower == "pan" -> "Punjabi"
+            lower.contains("gujarati") || lower.contains("\u0a97\u0ac1\u0a9c\u0ab0\u0abe\u0aa4") || lower == "gu" || lower == "guj" -> "Gujarati"
+            lower.contains("nepali") || lower.contains("\u0928\u0947\u092a\u093e\u0932") || lower == "ne" || lower == "nep" -> "Nepali"
+            lower.contains("sinhala") || lower.contains("singhalese") || lower.contains("\u0dc3\u0dd2\u0d82\u0dc4") ||
+                lower == "si" || lower == "sin" -> "Sinhala"
             lower.contains("thai") || lower == "th" || lower == "tha" -> "Thai"
             lower.contains("turkish") || lower == "tr" || lower == "tur" -> "Turkish"
-            lower.contains("german") || lower == "de" || lower == "ger" -> "German"
+            lower.contains("german") || lower == "de" || lower == "ger" || lower == "deu" -> "German"
             lower.contains("italian") || lower == "it" || lower == "ita" -> "Italian"
+            lower.contains("indonesian") || lower == "id" || lower == "ind" -> "Indonesian"
+            lower.contains("malaysian") || lower == "ms" || lower == "may" || lower == "msa" -> "Malaysian"
+            lower.contains("vietnamese") || lower == "vi" || lower == "vie" -> "Vietnamese"
+            lower.contains("filipino") || lower.contains("tagalog") || lower == "fil" -> "Filipino"
+            lower.contains("dutch") || lower == "nl" || lower == "dut" || lower == "nld" -> "Dutch"
+            lower.contains("polish") || lower == "pl" || lower == "pol" -> "Polish"
+            lower.contains("hindi dubbed") || lower == "dubbed" -> "Hindi"
             else -> s.substringBefore('-').substringBefore(' ').ifBlank { "Subtitle" }
         }
+    }
+
+    /** Indian canonical name -> native-script name (Devanagari escapes: script-safe regardless of file encoding). */
+    val INDIAN_NATIVE = mapOf(
+        "Hindi" to "\u0939\u093f\u0928\u094d\u0926\u0940",
+        "Tamil" to "\u0ba4\u0bae\u0bb4\u0bcd",
+        "Telugu" to "\u0c24\u0c46\u0c32\u0c41\u0c17\u0c41",
+        "Malayalam" to "\u0d2e\u0d32\u0d2f\u0d3e\u0d33\u0d02",
+        "Kannada" to "\u0c95\u0ca8\u0ccd\u0ca1",
+        "Marathi" to "\u092e\u0930\u093e\u091f\u0940",
+        "Bengali" to "\u09ac\u09be\u0982\u09b2\u09be",
+        "Punjabi" to "\u0a2a\u0a70\u0a1c\u0a3e\u0a2c\u0a40",
+        "Gujarati" to "\u0a97\u0ac1\u0a9c\u0ab0\u0abe\u0aa4\u0ac0",
+        "Urdu" to "\u0627\u0631\u062f\u0648",
+        "Nepali" to "\u0928\u0947\u092a\u093e\u0932\u0940",
+        "Sinhala" to "\u0dc3\u0dd2\u0d82\u0dc4\u0dcf",
+    )
+
+    /** Menu label for a parsed track: Indian languages show Roman + native-script name; roman/Devanagari Hindi splits into Hinglish vs native. */
+    fun subtitleMenuName(canon: String, raw: String?): String {
+        val lower = raw?.lowercase().orEmpty()
+        if (canon == "Hindi") {
+            if (lower.contains("hinglish") || lower.contains("roman") || lower.contains("latin")) return "Hindi (Hinglish)"
+            if (lower.contains("\u0939\u093f\u0928\u094d\u0926") || lower.contains("\u0939\u093f\u0902\u0926") ||
+                lower.contains("\u0926\u0947\u0935\u0928\u093e\u0917\u0930\u0940")) return "Hindi (\u0939\u093f\u0928\u094d\u0926\u0940)"
+            return "Hindi"
+        }
+        val native = INDIAN_NATIVE[canon] ?: return canon
+        return "$canon ($native)"
     }
 }
 
@@ -66,24 +108,41 @@ object SubtilesProvider {
     private const val CACHE_TTL_MS = 15 * 60 * 1000L
     private const val CACHE_MAX = 64
 
-    /** Canonical subtitle language -> addon code (ISO-1). */
+    /** How many codes one addon request carries; big multi-language requests are slower, so the rest is fetched in parallel chunks. */
+    internal const val GROUP_SIZE = 6
+
+    /** Every subtitle language we request - the Indian block first, then global (map order = desired order + chunking). */
     private val CODES = mapOf(
-        "English" to "en", "Hindi" to "hi", "Tamil" to "ta", "Telugu" to "te",
+        "Hindi" to "hi", "English" to "en", "Tamil" to "ta", "Telugu" to "te",
         "Malayalam" to "ml", "Bengali" to "bn", "Urdu" to "ur",
-        "Marathi" to "mr", "Kannada" to "kn", "Sinhala" to "si",
+        "Marathi" to "mr", "Kannada" to "kn", "Punjabi" to "pa",
+        "Gujarati" to "gu", "Nepali" to "ne", "Sinhala" to "si",
+        "Arabic" to "ar", "Spanish" to "es", "French" to "fr",
+        "German" to "de", "Italian" to "it", "Portuguese" to "pt",
+        "Russian" to "ru", "Chinese" to "zh", "Japanese" to "ja",
+        "Korean" to "ko", "Turkish" to "tr", "Thai" to "th",
+        "Indonesian" to "id", "Malaysian" to "ms", "Vietnamese" to "vi",
+        "Filipino" to "fil", "Dutch" to "nl", "Polish" to "pl",
     )
 
     /** Canonical language names mapped to supported SubSense ISO-3 codes. */
     private val SENSE_ISO3 = mapOf(
         "English" to "eng", "Hindi" to "hin", "Tamil" to "tam", "Telugu" to "tel",
         "Malayalam" to "mal", "Bengali" to "ben", "Urdu" to "urd",
-        "Marathi" to "mar", "Kannada" to "kan", "Sinhala" to "sin",
+        "Marathi" to "mar", "Kannada" to "kan", "Punjabi" to "pan",
+        "Gujarati" to "guj", "Nepali" to "nep", "Sinhala" to "sin",
+        "Arabic" to "ara", "Spanish" to "spa", "French" to "fra",
+        "German" to "deu", "Italian" to "ita", "Portuguese" to "por",
+        "Russian" to "rus", "Chinese" to "zho", "Japanese" to "jpn",
+        "Korean" to "kor", "Turkish" to "tur", "Thai" to "tha",
+        "Indonesian" to "ind", "Malaysian" to "msa", "Vietnamese" to "vie",
+        "Filipino" to "fil", "Dutch" to "nld", "Polish" to "pol",
     )
 
     private val cache = ConcurrentHashMap<String, Pair<Long, List<SubtitleFile>>>()
 
-    /** Canonical names of languages worth always having. */
-    fun desiredLanguages(): Set<String> = setOf("Hindi", "English")
+    /** Every language worth requesting when the video starts - Indian block, then the rest global. */
+    fun desiredLanguages(): Set<String> = CODES.keys.toCollection(LinkedHashSet())
 
     /** Returns requested languages not covered by stream-owned subtitles. */
     fun missingLanguages(covered: Set<String>, desired: Set<String>): Set<String> =
@@ -96,12 +155,16 @@ object SubtilesProvider {
     /** Priority language codes requested first. */
     internal val PRIORITY_CODES: Set<String> = linkedSetOf("hi", "en")
 
-    /** Splits request codes into priority and remaining groups for concurrent fetching. */
-    internal fun splitGroups(codes: Set<String>): Pair<Set<String>?, Set<String>?> {
-        if (codes.isEmpty()) return null to null
-        val priority = codes.filterTo(LinkedHashSet()) { it in PRIORITY_CODES }
-        val rest = codes.filterTo(LinkedHashSet()) { it !in PRIORITY_CODES }
-        return (priority.takeIf { it.isNotEmpty() }) to (rest.takeIf { it.isNotEmpty() })
+    /** Request codes into addon groups: priority {hi, en} + original first, then the rest in GROUP_SIZE chunks (input order = Indian first). */
+    internal fun groupRequests(codes: Set<String>, originalCode: String? = null): List<Set<String>> {
+        if (codes.isEmpty()) return emptyList()
+        val groups = mutableListOf<Set<String>>()
+        val priority = codes.filterTo(LinkedHashSet()) { it in PRIORITY_CODES || it == originalCode }
+        if (priority.isNotEmpty()) groups.add(priority)
+        codes.filterTo(LinkedHashSet()) { it !in priority }
+            .chunked(GROUP_SIZE)
+            .forEach { groups.add(it.toCollection(LinkedHashSet())) }
+        return groups
     }
 
     /** Returns requested languages absent. */
@@ -134,7 +197,7 @@ object SubtilesProvider {
     }
 
     /** Parsed subtitle track with canonical language and download URL. */
-    internal data class SubTrack(val lang: String, val url: String)
+    internal data class SubTrack(val lang: String, val url: String, val menu: String = lang)
 
     /** Parses and caps OpenSubtitles addon tracks for requested codes. */
     internal fun parseOpenSubtitles(text: String, wantCodes: Set<String>): List<SubTrack> {
@@ -146,14 +209,15 @@ object SubtilesProvider {
             val s = arr.optJSONObject(i) ?: continue
             val url = s.optString("url").takeIf { it.startsWith("http") && seenUrls.add(it) }
                 ?: continue
-            val code = (s.optString("lang_code").ifBlank { s.optString("lang") }).lowercase()
+            val raw = s.optString("lang_code").ifBlank { s.optString("lang") }
+            val code = raw.lowercase()
             // Prefer ISO-1 codes, falling back to ISO-3 language values.
             val code1 = code.take(2)
             if (code1 !in wantCodes && code !in wantCodes) continue
             if ((perLang[code1] ?: 0) >= MAX_PER_LANG) continue
             perLang[code1] = (perLang[code1] ?: 0) + 1
-            out.add(SubTrack(SubtitleServices.canonicalName(s.optString("lang_code")
-                .ifBlank { s.optString("lang") }), url))
+            val canon = SubtitleServices.canonicalName(raw)
+            out.add(SubTrack(canon, url, SubtitleServices.subtitleMenuName(canon, raw)))
         }
         return out
     }
@@ -170,19 +234,20 @@ object SubtilesProvider {
                 ?: continue
             // Use the language field first; fall back to ID tokens.
             var canon = ""
-            if (s.optString("lang").isNotBlank()) {
-                canon = SubtitleServices.canonicalName(s.optString("lang"))
+            var raw = s.optString("lang")
+            if (raw.isNotBlank()) {
+                canon = SubtitleServices.canonicalName(raw)
             } else {
                 for (tok in s.optString("id").split('-')) {
                     val c = SubtitleServices.canonicalName(tok)
-                    if (c != "Subtitle" && c != tok.lowercase()) { canon = c; break }
+                    if (c != "Subtitle" && c != tok.lowercase()) { canon = c; raw = tok; break }
                 }
             }
             if (canon.isEmpty()) canon = "Subtitle"
             if (canon == "Subtitle") continue
             if ((perLang[canon] ?: 0) >= SENSE_MAX_PER_LANG) continue
             perLang[canon] = (perLang[canon] ?: 0) + 1
-            out.add(SubTrack(canon, url))
+            out.add(SubTrack(canon, url, SubtitleServices.subtitleMenuName(canon, raw)))
         }
         return out
     }
@@ -222,21 +287,20 @@ object SubtilesProvider {
         }
 
         val deadline = System.currentTimeMillis() + FETCH_BUDGET_MS
-        val (priority, rest) = splitGroups(codes)
+        val groups = groupRequests(codes)
         val tracks = coroutineScope {
-            val prioJob = priority?.let { launchFetch(imdb, season, episode, it, deadline) }
-            val restJob = rest?.let { launchFetch(imdb, season, episode, it, deadline) }
-            val prio = prioJob?.await() ?: emptyList()
-            val others = restJob?.await() ?: emptyList()
-            var retry = emptyList<SubTrack>()
-            if (prio.isEmpty() && others.isEmpty() && priority != null &&
+            val jobs = groups.map { launchFetch(imdb, season, episode, it, deadline) }
+            val results = jobs.map { it.await() }
+            var merged = mergeGroups(results)
+            val priority = codes.filterTo(LinkedHashSet()) { it in PRIORITY_CODES }
+            if (results.all { it.isEmpty() } && priority.isNotEmpty() &&
                 System.currentTimeMillis() < deadline
             ) {
-                // Retry the priority group once if both initial groups fail.
-                Log.d("SubtilesProvider", "both groups empty - one priority retry")
-                retry = launchFetch(imdb, season, episode, priority, deadline).await()
+                // Retry the priority group once if every initial group failed.
+                Log.d("SubtilesProvider", "all groups empty - one priority retry")
+                val retry = launchFetch(imdb, season, episode, priority, deadline).await()
+                merged = mergeGroups(results + listOf(retry))
             }
-            var merged = mergeGroups(listOf(prio, retry, others))
             val gaps = stillMissing(missing, merged)
             if (gaps.isNotEmpty() && System.currentTimeMillis() < deadline) {
                 val sense = fetchSubSense(imdb, season, episode, gaps, deadline)
@@ -244,7 +308,7 @@ object SubtilesProvider {
             }
             merged
         }
-        val subs = tracks.map { SubtitleFile(it.lang, it.url) }
+        val subs = tracks.map { SubtitleFile(it.menu, it.url) }
         if (subs.isNotEmpty()) put(key, subs)
         Log.d("SubtilesProvider", "${subs.size} fallback subs for $imdb (codes=$codes)")
         return subs
