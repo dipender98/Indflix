@@ -74,25 +74,27 @@ class SubtitleProvidersTest {
     }
 
     @Test
-    fun groupRequests_englishFirst_thenOriginal_thenIndianChunked() {
+    fun groupRequests_hindiFirst_thenEnglishOriginal_thenIndianChunked() {
         val all = SubtilesProvider.codesFromLangs(
             linkedSetOf("English", "Hindi", "Tamil", "Telugu", "Japanese"),
         )
         val groups = SubtilesProvider.groupRequests(all, "ja")
-        assertEquals(linkedSetOf("en"), groups[0])
-        assertEquals(linkedSetOf("ja"), groups[1])
-        assertEquals(linkedSetOf("hi", "ta", "te"), groups[2])
-        assertEquals(3, groups.size)
+        assertEquals(linkedSetOf("hi"), groups[0])
+        assertEquals(linkedSetOf("en"), groups[1])
+        assertEquals(linkedSetOf("ja"), groups[2])
+        assertEquals(linkedSetOf("ta", "te"), groups[3])
+        assertEquals(4, groups.size)
     }
 
     @Test
     fun groupRequests_chunksIndianThenForeignByGroupSize() {
         val codes = SubtilesProvider.codesFromLangs(SubtilesProvider.desiredLanguages(null))
         val groups = SubtilesProvider.groupRequests(codes)
-        assertEquals(linkedSetOf("en"), groups.first())
-        // Indian block comes next in CODES order, chunked by GROUP_SIZE.
+        assertEquals(linkedSetOf("hi"), groups.first())
+        assertEquals(linkedSetOf("en"), groups[1])
+        // Rest of the Indian block comes next in CODES order, chunked by GROUP_SIZE.
         val indianCodes = setOf("hi", "ta", "te", "ml", "bn", "ur", "mr", "kn", "pa", "gu", "ne", "si")
-        var idx = 1
+        var idx = 2
         while (idx < groups.size && groups[idx].any { c -> c in indianCodes }) {
             assertTrue(groups[idx].size <= SubtilesProvider.GROUP_SIZE)
             idx++

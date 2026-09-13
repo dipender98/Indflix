@@ -84,23 +84,27 @@ object SubtilesProvider {
     /** Priority batch: English → original → all Indian langs → rest foreign. */
     internal val PRIORITY_CODES: Set<String> = linkedSetOf("en") + INDIAN_LANG_CODES
 
-    /** Request codes into addon groups: English first, then original, then Indian block (chunked), then the rest in GROUP_SIZE chunks.
-     *  The addon is measurably slower on big multi-language requests, so parallel small batches beat one giant one. */
+    /** Request codes into addon groups: Hindi first (fast single-code request + first menu row),
+     *  then English, original, rest of the Indian block (chunked), then foreign in GROUP_SIZE chunks. */
     internal fun groupRequests(codes: Set<String>, originalCode: String? = null): List<Set<String>> {
         if (codes.isEmpty()) return emptyList()
         val groups = mutableListOf<Set<String>>()
-        // 1. English (always first).
+        // 1. Hindi (always first when requested).
+        codes.filterTo(LinkedHashSet()) { it == "hi" }
+            .takeIf { it.isNotEmpty() }?.let { groups.add(it) }
+        // 2. English.
         codes.filterTo(LinkedHashSet()) { it == "en" }
             .takeIf { it.isNotEmpty() }?.let { groups.add(it) }
-        // 2. Original language (if not already English).
-        if (originalCode != null && originalCode != "en" && codes.contains(originalCode)) {
+        // 3. Original language (if neither Hindi nor English).
+        if (originalCode != null && originalCode != "en" && originalCode != "hi" && codes.contains(originalCode)) {
             groups.add(linkedSetOf(originalCode))
         }
-        // 3. All Indian languages still uncovered — chunked to keep each request fast.
-        codes.filterTo(LinkedHashSet()) { it in INDIAN_LANG_CODES }
+        // 4. Rest of the Indian block, chunked (already-grouped codes excluded).
+        val grouped = groups.flatten().toSet()
+        codes.filterTo(LinkedHashSet()) { it in INDIAN_LANG_CODES && it !in grouped }
             .chunked(GROUP_SIZE)
             .forEach { groups.add(it.toCollection(LinkedHashSet())) }
-        // 4. Everything else in GROUP_SIZE chunks (preserves CODES insertion order = Indian→foreign).
+        // 5. Everything else in GROUP_SIZE chunks (preserves CODES insertion order = Indian→foreign).
         codes.filterTo(LinkedHashSet()) { it !in groups.flatten().toSet() }
             .chunked(GROUP_SIZE)
             .forEach { groups.add(it.toCollection(LinkedHashSet())) }
@@ -231,7 +235,7 @@ object SubtilesProvider {
 
         val deadline = System.currentTimeMillis() + FETCH_BUDGET_MS
         val groups = groupRequests(codes, originalCode)
-        // First group = priority batch (English + original + all Indian langs).
+        // First group = Hindi batch (retried alone when everything else dies).
         val priority = groups.firstOrNull() ?: emptySet()
         val tracks = coroutineScope {
             val jobs = groups.map { launchFetch(imdb, season, episode, it, deadline) }

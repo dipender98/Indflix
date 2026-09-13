@@ -70,12 +70,13 @@ class SubtitleProvidersMmTest {
     }
 
     @Test
-    fun groupRequests_englishFirst_thenOriginal_thenIndianChunked() {
+    fun groupRequests_hindiFirst_thenEnglishOriginal_thenIndianChunked() {
         val groups = SubtilesProvider.groupRequests(setOf("hi", "en", "ta", "te", "ja"), "ja")
-        assertEquals(linkedSetOf("en"), groups[0])
-        assertEquals(linkedSetOf("ja"), groups[1])
-        assertEquals(linkedSetOf("hi", "ta", "te"), groups[2])
-        assertEquals(3, groups.size)
+        assertEquals(linkedSetOf("hi"), groups[0])
+        assertEquals(linkedSetOf("en"), groups[1])
+        assertEquals(linkedSetOf("ja"), groups[2])
+        assertEquals(linkedSetOf("ta", "te"), groups[3])
+        assertEquals(4, groups.size)
     }
 
     @Test
