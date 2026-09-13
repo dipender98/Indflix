@@ -320,6 +320,7 @@ class MultimoviesProvider : MainAPI() {
         mmDocCache[url]?.let { return it }
         val doc = runCatching { solveDocument(url) }.getOrNull() ?: return null
         if (mmDocCache.size >= MM_DOC_CACHE_MAX_SIZE) {
+            // ConcurrentHashMap has no order; eviction is arbitrary, not oldest-first.
             mmDocCache.keys.firstOrNull()?.let { mmDocCache.remove(it) }
         }
         mmDocCache[url] = doc
@@ -458,7 +459,9 @@ class MultimoviesProvider : MainAPI() {
             if (searchDoc != null && searchDoc.select(SEARCH_ITEMS_SELECTOR).isNotEmpty()) break
         }
         val candidate = searchDoc?.select(SEARCH_ITEMS_SELECTOR)?.mapNotNull { it.candidateHref() }
-            ?.minByOrNull { titleDistance(it.second, title) } ?: return null
+            ?.minByOrNull { titleDistance(it.second, title) }
+            // Same bar as the slug-guess path: a non-match must stay "not found", never a wrong title.
+            ?.takeIf { titleDistance(it.second, title) <= 1 } ?: return null
         val detailDoc = mmDocCache[candidate.first]
             ?: fetchDoc(candidate.first, timeoutSeconds = 8, required = false)
         if (detailDoc != null) {
@@ -493,10 +496,9 @@ class MultimoviesProvider : MainAPI() {
                     async {
                         semaphore.acquire()
                         try {
-                            withTimeoutOrNull(3000L) {
-                                val type = if (item.tvType == TvType.Movie) "movie" else "series"
-                                TmdbService.search(item.title).firstOrNull { it.type == type }?.poster
-                            }?.takeIf { it.isNotBlank() }
+                            val type = if (item.tvType == TvType.Movie) "movie" else "series"
+                            TmdbService.search(item.title).firstOrNull { it.type == type }?.poster
+                                ?.takeIf { it.isNotBlank() }
                         } finally {
                             semaphore.release()
                         }
@@ -685,14 +687,19 @@ class MultimoviesProvider : MainAPI() {
                 }
 
                 val seasonNums = mutableSetOf<Int>()
-                seasonDocs.forEach { sDoc ->
-                    if (sDoc == null) return@forEach
+                seasonDocs.forEachIndexed { pageIdx, sDoc ->
+                    if (sDoc == null) return@forEachIndexed
+                    // Season pages arrive in DOM order; the page index beats a forced guess.
+                    val pageSeason = pageIdx + 1
                     sDoc.select("ul.episodios li, div.eps div.ep, .episodios li").forEachIndexed { i, ep ->
                         val epLink = ep.selectFirst("a[href]")?.attr("href")?.takeIf { isMultimoviesUrl(it) }
                             ?: return@forEachIndexed
-                        val epNum = Regex("(?i)(\\d+)x(\\d+)").find(epLink)?.groupValues?.getOrNull(2)?.toIntOrNull()
-                            ?: Regex("(\\d+)").find(epLink)?.value?.toIntOrNull() ?: (i + 1)
-                        val seasonNum = Regex("(?i)(\\d+)x(\\d+)").find(epLink)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 1
+                        val nxm = Regex("(?i)(\\d+)x(\\d+)").find(epLink)
+                        // Bare digit runs are years/post-ids as often as episodes; implausible ones fall back to list position.
+                        val epNum = nxm?.groupValues?.getOrNull(2)?.toIntOrNull()
+                            ?: Regex("(\\d+)").find(epLink)?.value?.toIntOrNull()?.takeIf { it in 1..150 }
+                            ?: (i + 1)
+                        val seasonNum = nxm?.groupValues?.getOrNull(1)?.toIntOrNull() ?: pageSeason
                         val epTitle = ep.selectFirst(".episodiotitle a, .title, a")?.text()?.trim()
                         val ep = newEpisode(epLink) {
                             this.name = epTitle
@@ -803,6 +810,7 @@ class MultimoviesProvider : MainAPI() {
                 runCatching {
                     pullSource(
                         g, ConcurrentHashMap(), pageUrl,
+                        Collections.synchronizedSet(HashSet()),
                         Collections.synchronizedSet(HashSet()),
                         Collections.synchronizedList(mutableListOf()),
                         { _ -> }, { },
@@ -929,6 +937,7 @@ class MultimoviesProvider : MainAPI() {
 
         // LIVE-FILL pipeline (): every source (global id-keyed + each dooplayer embed) is.
         val emitted = Collections.synchronizedSet(HashSet<String>())
+        val emittedUrls = Collections.synchronizedSet(HashSet<String>())
         val found = Collections.synchronizedList(mutableListOf<ExtractorLink>())
         val firstLink = CompletableDeferred<Unit>()
         val labelCounter = ConcurrentHashMap<String, Int>()
@@ -949,7 +958,7 @@ class MultimoviesProvider : MainAPI() {
         globalSources.forEach { g ->
             searchScope.launch {
                 try {
-                    pullSource(g, labelCounter, data, emitted, found, noopSubtitle, callback,
+                    pullSource(g, labelCounter, data, emitted, emittedUrls, found, noopSubtitle, callback,
                         firstLink = firstLink, cacheKey = data)
                 } finally {
                     if (remainingPulls.decrementAndGet() <= 0) allPullsDone.complete(Unit)
@@ -976,7 +985,7 @@ class MultimoviesProvider : MainAPI() {
                         imdbId = meta?.imdbId,
                         latencyMs = e.latencyMs,
                     )
-                    pullSource(src, labelCounter, data, emitted, found, noopSubtitle, callback,
+                    pullSource(src, labelCounter, data, emitted, emittedUrls, found, noopSubtitle, callback,
                         firstLink = firstLink, cacheKey = data)
                 } finally {
                     if (remainingPulls.decrementAndGet() <= 0) allPullsDone.complete(Unit)
@@ -1055,6 +1064,7 @@ class MultimoviesProvider : MainAPI() {
         labelCounter: ConcurrentHashMap<String, Int>,
         data: String,
         emitted: MutableSet<String>,
+        emittedUrls: MutableSet<String>,
         found: MutableList<ExtractorLink>,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
@@ -1089,9 +1099,12 @@ class MultimoviesProvider : MainAPI() {
         /** Emit one disambiguated link: quality-floor it (sub-720 fixed files never reach the player OR the caches), then. */
         suspend fun emitOne(l: ExtractorLink) {
             if (!passesFloor(l)) return
-            val key = "${hostOf(l.url ?: "")}|${l.quality}"
-            if (!emitted.add(key)) return
+            // Exact-URL dupes drop cheaply; host+quality+language decides the rest
+            // AFTER enrichment, so a Hindi master is never dropped as an English dupe.
+            if (!emittedUrls.add(l.url ?: return)) return
             val dis = disambiguate(MultiSourcePuller.enrichLabel(l))
+            val key = "${hostOf(dis.url ?: "")}|${dis.quality}|${MultiSourcePuller.bracketTag(dis)}"
+            if (!emitted.add(key)) return
             found.add(dis)
             if (cacheKey != null) FastStartCache.put(cacheKey, listOf(dis))
             firstLink?.complete(Unit)
@@ -1178,10 +1191,11 @@ class MultimoviesProvider : MainAPI() {
     private fun buildGlobalSources(meta: SourceMeta?): List<MultiSourcePuller.Source> {
         if (meta == null) return emptyList()
         return GlobalSources.list.mapNotNull { g ->
+            // tmdb-only titles store "" (never null): skip instead of requesting "?imdb=".
             val id = when (g.idType) {
                 SourceId.IMDB -> meta.imdbId
                 SourceId.TMDB -> meta.tmdbId
-            } ?: return@mapNotNull null
+            }?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
             val url = g.buildUrl(id, meta.season, meta.episode) ?: return@mapNotNull null
             MultiSourcePuller.Source(
                 name = g.name,
@@ -1213,10 +1227,10 @@ class MultimoviesProvider : MainAPI() {
     private fun hostOf(url: String): String =
         url.substringAfter("://").substringBefore("/").lowercase()
 
-    /** Light dedupe (): keep the FIRST arrival per (host, quality) so the same final host reached through. */
+    /** Light dedupe (): keep the FIRST arrival per (host, quality, language) so the same final host reached through. */
     private fun dedupeByHostQuality(links: List<ExtractorLink>): List<ExtractorLink> {
         val seen = HashSet<String>()
-        return links.filter { l -> seen.add("${hostOf(l.url ?: "")}|${l.quality}") }
+        return links.filter { l -> seen.add("${hostOf(l.url ?: "")}|${l.quality}|${MultiSourcePuller.bracketTag(l)}") }
     }
 }
 
@@ -1470,6 +1484,10 @@ object MultiSourcePuller {
         }
     }
 
+    /** Trailing "(Language)" tag of an enriched label, else "". */
+    internal fun bracketTag(l: ExtractorLink): String =
+        Regex("""\(([A-Za-z]+)\)\s*$""").find(l.source ?: l.name ?: "")?.groupValues?.get(1).orEmpty()
+
     /** Language the HOST ITSELF declares (server brand "VidHindi", URL "lan=hindi", CDN path token) - a declaration, not a. guess. */
     internal fun declaredHindi(sourceName: String?, url: String?): Boolean {
         val hay = buildString {
@@ -1524,7 +1542,9 @@ object MultiSourcePuller {
                 parseMasterFacts(text)
             }.getOrNull()
         }
-        labelProbeCache[url] = facts
+        // Cache hits only: ConcurrentHashMap rejects null values, so a miss
+        // simply probes again (bounded by the 2.5s budget) instead of NPE-ing.
+        if (facts != null) labelProbeCache[url] = facts
         return facts
     }
 
@@ -2003,7 +2023,9 @@ object LinkCache {
     private val map = ConcurrentHashMap<String, Entry>()
 
     fun get(imdbId: String?, season: Int?, episode: Int?): Pair<List<ExtractorLink>, List<SubtitleFile>>? {
-        if (imdbId == null) return null
+        // Blank ids (tmdb-only titles store "") must never hit the cache:
+        // every such title would otherwise share one key and replay another title.
+        if (imdbId.isNullOrBlank()) return null
         val key = "$imdbId|$season|$episode"
         val e = map[key] ?: return null
         if (System.currentTimeMillis() > e.expiresAt) {
@@ -2014,7 +2036,7 @@ object LinkCache {
     }
 
     fun put(imdbId: String?, season: Int?, episode: Int?, links: List<ExtractorLink>, subs: List<SubtitleFile> = emptyList()) {
-        if (imdbId == null || links.isEmpty()) return
+        if (imdbId.isNullOrBlank() || links.isEmpty()) return
         map["$imdbId|$season|$episode"] = Entry(links, subs, System.currentTimeMillis() + TTL_MS)
     }
 }

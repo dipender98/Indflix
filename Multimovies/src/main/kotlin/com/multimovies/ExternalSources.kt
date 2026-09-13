@@ -101,6 +101,11 @@ object NxshaExtractor {
             result
         } catch (t: Throwable) {
             memo.remove(key)
+            // Cancellation must propagate (structured concurrency); joiners get it via the cancelled job.
+            if (t is kotlinx.coroutines.CancellationException) {
+                job.cancel()
+                throw t
+            }
             // Complete normally with an empty result so concurrent/duplicate callers awaiting this job get emptyList() instead of.
 // an exception propagating.
             job.complete(emptyList())
@@ -157,10 +162,12 @@ object NxshaExtractor {
         }
         if (servers.isEmpty()) return emptyList()
 
-        // 2) per-provider sources, bounded-parallel, nitro-first order.
+        // 2) per-provider sources, bounded-parallel, nitro-first order. The subtitle
+        // lookup rides alongside and never gates the streams (outer kill is 15s).
         val collected = coroutineScope {
+            val subsJob = async { runCatching { fetchSubtitles(apiBase, tmdb, type, season, episode, onSubtitle) } }
             val sem = Semaphore(MAX_PARALLEL_PROVIDERS)
-            servers.map { server ->
+            val sources = servers.map { server ->
                 async {
                     sem.acquire()
                     try {
@@ -172,9 +179,9 @@ object NxshaExtractor {
                     }
                 }
             }.awaitAll().flatten()
+            if (subsJob.isCompleted) runCatching { subsJob.await() } else subsJob.cancel()
+            sources
         }
-
-        fetchSubtitles(apiBase, tmdb, type, season, episode, onSubtitle)
         return collected
     }
 
@@ -491,7 +498,8 @@ object ShowsExtractor {
         val tmdbId = src.tmdbId?.takeIf { it.matches(Regex("""\d{2,10}""")) }
         val imdbId = src.imdbId?.takeIf { it.startsWith("tt") }
         val id = tmdbId ?: imdbId ?: return@withContext emptyList()
-        val isTv = src.season != null
+        // An unknown episode is a movie-shaped request, never a literal "episode=null".
+        val isTv = src.season != null && src.episode != null
         val type = if (isTv) "tv" else "movie"
         val url = if (type == "tv") {
             "$API_BASE/tv?id=$id&season=${src.season}&episode=${src.episode}&mode=json"

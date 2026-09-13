@@ -152,6 +152,11 @@ class ServerAdditionsTest {
             "https://a.111477.xyz/movies/Inception%20(2010)/Inception.2010.1080p.mkv",
             StreamEngine.dahmerEncodeUri("https://a.111477.xyz/movies/Inception (2010)/Inception.2010.1080p.mkv"),
         )
+        // Existing escapes survive (JS encodeURI parity); raw % never doubles.
+        assertEquals(
+            "https://a.111477.xyz/movies/Film%20X%2FY.mkv",
+            StreamEngine.dahmerEncodeUri("https://a.111477.xyz/movies/Film%20X%2FY.mkv"),
+        )
     }
 
     @Test

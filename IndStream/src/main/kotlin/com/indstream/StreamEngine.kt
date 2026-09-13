@@ -80,13 +80,13 @@ object StreamEngine {
     /** Dual-ID race helper (, ): run several id shapes for one host in parallel; the FIRST non-empty result wins and the. losing attempts are cancelled. */
     private suspend fun raceFirst(vararg blocks: suspend () -> List<RawStream>): List<RawStream> {
         if (blocks.isEmpty()) return emptyList()
-        if (blocks.size == 1) return runCatching { blocks[0]() }.getOrDefault(emptyList())
+        if (blocks.size == 1) return runCatching { blocks[0]() }.onFailure { if (it is kotlinx.coroutines.CancellationException) throw it }.getOrDefault(emptyList())
         return coroutineScope {
             val winner = CompletableDeferred<List<RawStream>>()
             val pending = java.util.concurrent.atomic.AtomicInteger(blocks.size)
             val jobs = blocks.map { block ->
                 launch {
-                    val r = runCatching { block() }.getOrDefault(emptyList())
+                    val r = runCatching { block() }.onFailure { if (it is kotlinx.coroutines.CancellationException) throw it }.getOrDefault(emptyList())
                     if (r.isNotEmpty()) winner.complete(r)
                     else if (pending.decrementAndGet() == 0 && !winner.isCompleted) {
                         winner.complete(emptyList())
@@ -1756,8 +1756,9 @@ object StreamEngine {
             Log.w("VixSrc", "token expired, skipping")
             return emptyList()
         }
-        val sep = if (playlist.contains("?")) "&" else "?"
-        val masterUrl = "$playlist${sep}token=$token&expires=$expires&h=1"
+        val absPlaylist = HttpKit.resolveUrl(embedUrl, playlist)
+        val sep = if (absPlaylist.contains("?")) "&" else "?"
+        val masterUrl = "$absPlaylist${sep}token=$token&expires=$expires&h=1"
         val masterText = withTimeoutOrNull(8_000L) {
             runCatching { app.get(masterUrl, timeout = 8, headers = okHeaders(apiUrl)).text }.getOrNull()
         } ?: run { Log.w("VixSrc", "master fetch failed"); return emptyList() }
@@ -1974,13 +1975,13 @@ object StreamEngine {
     /** First succeeding candidate wins, rest cancelled. */
     private suspend fun firstSuccess(urls: List<String>, block: suspend (String) -> String?): String? {
         if (urls.isEmpty()) return null
-        if (urls.size == 1) return runCatching { block(urls[0]) }.getOrNull()
+        if (urls.size == 1) return runCatching { block(urls[0]) }.onFailure { if (it is kotlinx.coroutines.CancellationException) throw it }.getOrNull()
         return coroutineScope {
             val winner = CompletableDeferred<String?>()
             val pending = java.util.concurrent.atomic.AtomicInteger(urls.size)
             val jobs = urls.map { u ->
                 launch {
-                    val r = runCatching { block(u) }.getOrNull()
+                    val r = runCatching { block(u) }.onFailure { if (it is kotlinx.coroutines.CancellationException) throw it }.getOrNull()
                     if (r != null) winner.complete(r)
                     else if (pending.decrementAndGet() == 0 && !winner.isCompleted) winner.complete(null)
                 }
@@ -2102,9 +2103,9 @@ object StreamEngine {
         return Regex("""EPISODE[\s._-]*0*$episode\b""", RegexOption.IGNORE_CASE).containsMatchIn(fileName)
     }
 
-    /** encodeURI equivalent: unreserved marks pass through. Pure. */
+    /** encodeURI equivalent: marks + existing escapes pass through. Pure. */
     internal fun dahmerEncodeUri(s: String): String {
-        val marks = ";,/?:@&=+$-_.!~*()#"
+        val marks = ";,/?:@&=+$-_.!~*()#%"
         return buildString {
             for (ch in s) {
                 if (ch.isLetterOrDigit() || ch in marks || ch == 39.toChar()) append(ch)
