@@ -169,7 +169,7 @@ object HttpKit {
         return null
     }
 
-    /** First non-zero video track height. 16 fixed point). */
+    /** First non-zero video track size, ladder-normalized. */
     private fun heightFromMoov(moov: ByteArray): Int {
         fun walk(start: Int, end: Int): Int {
             var i = start
@@ -178,8 +178,8 @@ object HttpKit {
                 if (size < 8 || i + size > end) return 0
                 val type = String(moov, i + 4, 4, Charsets.ISO_8859_1)
                 if (type == "tkhd") {
-                    val h = parseTkhdHeight(moov, i, size)
-                    if (h > 0) return h
+                    val (w, h) = parseTkhdSize(moov, i, size)
+                    if (h > 0) return ManifestKit.normalizeHeight(w, h)
                 } else if (type == "trak" || type == "mdia" || type == "minf" || type == "stbl") {
                     val h = walk(i + 8, i + size)
                     if (h > 0) return h
@@ -191,14 +191,17 @@ object HttpKit {
         return walk(0, moov.size)
     }
 
-    /** Height (px), version 1 → +96; top 16 bits of a 16. 16 value. */
-    private fun parseTkhdHeight(b: ByteArray, off: Int, size: Int): Int {
-        if (size < 12) return 0
+    /** Width + height (px), version 1 → +96; top 16 bits of 16.16. */
+    private fun parseTkhdSize(b: ByteArray, off: Int, size: Int): Pair<Int, Int> {
+        if (size < 12) return 0 to 0
         val version = b[off + 8].toInt() and 0xFF
         val base = if (version == 1) 96 else 84
-        if (off + base + 4 > b.size) return 0
-        val raw = read32(b, off + base + 4).toLong() and 0xFFFFFFFFL
-        return (raw ushr 16).toInt().coerceAtLeast(0)
+        if (off + base + 8 > b.size) return 0 to 0
+        fun fixed(at: Int): Int {
+            val raw = read32(b, at).toLong() and 0xFFFFFFFFL
+            return (raw ushr 16).toInt().coerceAtLeast(0)
+        }
+        return fixed(off + base) to fixed(off + base + 4)
     }
 
     /** Big-endian uint32. */
@@ -624,6 +627,7 @@ object ManifestKit {
         val codecs: String? = null,
         val audioGroup: String? = null,
         val subtitlesGroup: String? = null,
+        val width: Int = 0,
     )
 
     /** One EXT-X-MEDIA rendition (audio or subtitles). */
@@ -666,17 +670,17 @@ object ManifestKit {
                     val attrs = parseAttrs(line.removePrefix("#EXT-X-STREAM-INF:"))
                     val uri = lines.getOrNull(i + 1)?.trim()?.takeIf { it.isNotEmpty() && !it.startsWith("#") }
                     if (uri != null) {
-                        val height = attrs["RESOLUTION"]?.let { r ->
-                            Regex("\\d+").findAll(r).toList().getOrNull(1)?.value?.toIntOrNull()
-                        } ?: 0
+                        // Scope crops (1920x800/920) are still 1080p-class.
+                        val (w, h) = parseResolution(attrs["RESOLUTION"])
                         variants.add(
                             Variant(
                                 url = resolveUrl(baseUrl, uri),
-                                height = height,
+                                height = h,
                                 bandwidth = attrs["BANDWIDTH"]?.toLongOrNull() ?: 0L,
                                 codecs = attrs["CODECS"],
                                 audioGroup = attrs["AUDIO"],
                                 subtitlesGroup = attrs["SUBTITLES"],
+                                width = w,
                             )
                         )
                     }
@@ -732,6 +736,7 @@ object ManifestKit {
         val height: Int,
         val bandwidth: Long,
         val codecs: String? = null,
+        val width: Int = 0,
     )
 
     /** Parse a DASH MPD text into video representations. */
@@ -755,6 +760,7 @@ object ManifestKit {
                         height = height,
                         bandwidth = attrs["bandwidth"]?.toLongOrNull() ?: 0L,
                         codecs = attrs["codecs"],
+                        width = attrs["width"]?.toIntOrNull() ?: 0,
                     )
                 )
             }
@@ -779,13 +785,29 @@ object ManifestKit {
     }
 
     /** Rank variants by quality (height desc), used to label links. */
-    fun bestHeight(variants: List<Variant>): Int = variants.maxOfOrNull { it.height } ?: 0
+    fun bestHeight(variants: List<Variant>): Int =
+        variants.maxOfOrNull { normalizeHeight(it.width, it.height) } ?: 0
+
+    /** "1920x800" -> (1920, 800); missing/garbled -> (0, 0). */
+    fun parseResolution(raw: String?): Pair<Int, Int> {
+        if (raw.isNullOrBlank()) return 0 to 0
+        val nums = Regex("""\d+""").findAll(raw).mapNotNull { it.value.toIntOrNull() }.toList()
+        if (nums.size < 2) return 0 to 0
+        return nums[0] to nums[1]
+    }
+
+    /** Scope crops carry full width but cut height, so ladder by width. */
+    fun normalizeHeight(width: Int, height: Int): Int {
+        if (width <= 0) return height.coerceAtLeast(0)
+        val wide = ((width * 9 + 8) / 16).coerceAtLeast(0)
+        return max(height, wide)
+    }
 
     /** Peak video height of a manifest text, HLS master or DASH MPD alike. Dispatches on content (`<MPD` →, else) so. adaptive links (HLS m3u8 AND DASH. */
     fun bestHeightOf(text: String?, url: String): Int {
         if (text.isNullOrBlank()) return 0
         return if (text.contains("<MPD", ignoreCase = true)) {
-            parseMpd(text).maxOfOrNull { it.height } ?: 0
+            parseMpd(text).maxOfOrNull { normalizeHeight(it.width, it.height) } ?: 0
         } else {
             parseMaster(text, url)?.let { bestHeight(it.variants) } ?: 0
         }

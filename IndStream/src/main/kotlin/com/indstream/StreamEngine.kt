@@ -244,12 +244,11 @@ object StreamEngine {
                                 ResolvedEmit(raw, h, tag)
                             }
                         }
-                        // Direct file: measure the REAL height (moov parse? URL token?
+                        // Direct file: moov height is width-normalized; keep server hint.
                         !raw.isM3u8 && probeManifests -> {
                             val measured = HttpKit.resolveHeight(raw.url, raw.referer, raw.extraHeaders)
-                            val h = if (measured > 0) measured
-                            else if (raw.qualityHint > 0) raw.qualityHint
-                            else {
+                            val h = maxOf(measured, raw.qualityHint).takeIf { it > 0 }
+                                ?: run {
                                 val fromUrl = ManifestKit.resolutionFromUrl(raw.url)
                                 if (fromUrl > 0) fromUrl else -1   // 1 = Auto (unknown direct file).
                             }
@@ -1727,8 +1726,9 @@ object StreamEngine {
             }
             val lang = sd.optString("language").ifBlank { "" }
             val isHindi = lang.contains("hindi", ignoreCase = true)
+            // Keep the host sub-server in the name (Nova/Atlas/Luna/...).
             out += RawStream(
-                serverId = spec.id, serverName = spec.name,
+                serverId = spec.id, serverName = "${spec.name} $serverName".trim(),
                 url = decrypted,
                 isM3u8 = decrypted.contains(".m3u8", true) || sd.optString("type") == "hls",
                 referer = "https://vidrock.ru/",
@@ -1894,6 +1894,8 @@ object StreamEngine {
      *  return empty and are logged with their keys for future additions. */
     private fun parseVidnestSub(sub: String, root: org.json.JSONObject, spec: ServerSpec): List<RawStream> {
         val out = mutableListOf<RawStream>()
+        // Sub-server stays in the name so rows read VidNest Moviebox, ....
+        val subName = "${spec.name} ${sub.replaceFirstChar { it.uppercase() }}".trim()
         fun add(url: String, lang: String, qualityLabel: String, isFile: Boolean) {
             if (!url.startsWith("http")) return
             val pri = when {
@@ -1902,7 +1904,7 @@ object StreamEngine {
                 else -> 2 // labelled non-Hindi audio (Tamil/Telugu/Japanese/...) — "Original" tier
             }
             out += RawStream(
-                serverId = spec.id, serverName = spec.name,
+                serverId = spec.id, serverName = subName,
                 url = url, isM3u8 = !isFile || url.contains(".m3u8", true),
                 referer = "https://vidnest.fun/",
                 qualityHint = Regex("(\\d{3,4})").find(qualityLabel)?.groupValues?.get(1)?.toIntOrNull() ?: 0,
