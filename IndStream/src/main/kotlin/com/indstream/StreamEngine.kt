@@ -273,7 +273,9 @@ object StreamEngine {
                 }
             }.awaitAll()
         }
-        val resolvedForKey = preResolved.map { it.raw.copy(qualityHint = it.fullHeight) }
+        // India-first: Hindi/Indian-dub/Multi rows surface first. Stable.
+        val ordered = preResolved.sortedByDescending { indiaBoostRank(it.tagLabel) }
+        val resolvedForKey = ordered.map { it.raw.copy(qualityHint = it.fullHeight) }
         val numbers = LinkNaming.dedupeNames(resolvedForKey, originalLang)
 
         // 720p-floor observability (): the floor is, so a MovieBox-only-480p title would surface as "server absent" with zero.
@@ -281,7 +283,7 @@ object StreamEngine {
         val floorDroppedByServer = HashMap<String, Int>()
         val emittedByServer = HashMap<String, Int>()
 
-        preResolved.forEachIndexed { index, r ->
+        ordered.forEachIndexed { index, r ->
             val raw = r.raw
             val dupIdx = numbers.getOrElse(index) { 0 }
             if (!emitted.add(raw.url)) return@forEachIndexed
@@ -337,6 +339,16 @@ object StreamEngine {
     }
 
     /** Quality floor (): a FIXED (non-HLS) stream whose resolved height is a KNOWN value below 720p is dropped. Adaptive. HLS masters always pass (they. */
+    /** India-first boost: Hindi 4, Indian dubs + Multi 3, rest 0. Pure. */
+    internal fun indiaBoostRank(tagLabel: String): Int {
+        return when (LinkNaming.languageTag(tagLabel)) {
+            "Hindi" -> 4
+            "Multi" -> 3
+            in ManifestKit.INDIAN_DUB_LANGUAGES.map { it.canonical } -> 3
+            else -> 0
+        }
+    }
+
     fun passesQualityFloor(isAdaptive: Boolean, height: Int): Boolean {
         if (isAdaptive) return true
         if (height <= 0) return true
@@ -489,6 +501,24 @@ object StreamEngine {
             val result = resolveNetmirror(spec, tmdbId, type, season, episode)
             if (result.isNotEmpty()) { okServer(spec, start, "netmirror api", result.size); return result }
             failServer(spec, "netmirror returned no streams")
+            return emptyList()
+        }
+        if (spec.id == "vixsrc") {
+            val result = resolveVixsrc(spec, tmdbId, type, season, episode)
+            if (result.isNotEmpty()) { okServer(spec, start, "vixsrc signed hls", result.size); return result }
+            failServer(spec, "vixsrc returned no streams")
+            return emptyList()
+        }
+        if (spec.id == "zxcstreams") {
+            val result = resolveZxcstreams(spec, tmdbId, imdbId, type, season, episode, imdbIdProvider)
+            if (result.isNotEmpty()) { okServer(spec, start, "zxcstreams fan-out", result.size); return result }
+            failServer(spec, "zxcstreams returned no streams")
+            return emptyList()
+        }
+        if (spec.id == "dahmermovies") {
+            val result = resolveDahmer(spec, tmdbId, type, season, episode)
+            if (result.isNotEmpty()) { okServer(spec, start, "dahmermovies index", result.size); return result }
+            failServer(spec, "dahmermovies returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
             return emptyList()
         }
 
@@ -1690,6 +1720,399 @@ object StreamEngine {
      * 12-byte nonce prefix + ciphertext+tag, AES/GCM/NoPadding.
      * `language` field marks "Hindi" when the server carries a Hindi dub.
      */
+    /**
+     * VixSrc resolver (verified Sept 2026): TMDB-keyed JSON hands an embed
+     * path; the embed page carries token/expires/playlist, master is HLS.
+     */
+    private suspend fun resolveVixsrc(
+        spec: ServerSpec,
+        tmdbId: Int?,
+        type: String,
+        season: Int,
+        episode: Int,
+    ): List<RawStream> {
+        val id = tmdbId ?: return emptyList()
+        if (type != "movie" && (season <= 0 || episode <= 0)) return emptyList()
+        val base = "https://vixsrc.to"
+        val apiUrl = if (type == "movie") "$base/api/movie/$id"
+        else "$base/api/tv/$id/$season/$episode"
+        val apiHeaders = okHeaders("$base/") + mapOf(
+            "Accept" to "application/json, text/javascript, */*; q=0.01",
+            "Origin" to base,
+        )
+        val apiText = withTimeoutOrNull(8_000L) {
+            runCatching { app.get(apiUrl, timeout = 8, headers = apiHeaders).text }.getOrNull()
+        } ?: run { Log.w("VixSrc", "api no response"); return emptyList() }
+        val src = runCatching { org.json.JSONObject(apiText).optString("src") }
+            .getOrNull()?.takeIf { it.isNotBlank() }
+            ?: run { Log.w("VixSrc", "no src in api response"); return emptyList() }
+        val embedUrl = if (src.startsWith("http")) src else base + src
+        val html = withTimeoutOrNull(8_000L) {
+            runCatching { app.get(embedUrl, timeout = 8, headers = okHeaders(apiUrl)).text }.getOrNull()
+        } ?: run { Log.w("VixSrc", "embed page no response"); return emptyList() }
+        val (token, expires, playlist) = vixsrcTokenData(html)
+            ?: run { Log.w("VixSrc", "no token/expires/playlist in embed"); return emptyList() }
+        if (!vixsrcTokenFresh(expires, System.currentTimeMillis())) {
+            Log.w("VixSrc", "token expired, skipping")
+            return emptyList()
+        }
+        val sep = if (playlist.contains("?")) "&" else "?"
+        val masterUrl = "$playlist${sep}token=$token&expires=$expires&h=1"
+        val masterText = withTimeoutOrNull(8_000L) {
+            runCatching { app.get(masterUrl, timeout = 8, headers = okHeaders(apiUrl)).text }.getOrNull()
+        } ?: run { Log.w("VixSrc", "master fetch failed"); return emptyList() }
+        val (label, h) = probeAudioInlineHeight(masterText)
+        return listOf(
+            RawStream(
+                serverId = spec.id, serverName = spec.name,
+                url = masterUrl, isM3u8 = true, referer = apiUrl,
+                qualityHint = h, audioLabel = label,
+                inlineManifest = masterText.takeIf { it.contains("#EXT-X-STREAM-INF") },
+                extraHeaders = mapOf("User-Agent" to HttpKit.userAgent),
+            )
+        )
+    }
+
+    /** Token triple out of a VixSrc embed page, or null. Pure scans. */
+    internal fun vixsrcTokenData(html: String): Triple<String, String, String>? {
+        fun field(key: String, from: Int = 0): Pair<String, Int>? {
+            val ki = html.indexOf(34.toChar() + key + 34.toChar(), from).takeIf { it >= 0 } ?: return null
+            val ci = html.indexOf(58.toChar(), ki).takeIf { it >= 0 } ?: return null
+            var si = ci + 1
+            while (si < html.length && (html[si] == 32.toChar() || html[si] == 34.toChar() || html[si] == 39.toChar())) si++
+            var ei = si
+            while (ei < html.length && html[ei] != 34.toChar() && html[ei] != 39.toChar()) ei++
+            if (ei <= si) return null
+            return html.substring(si, ei) to ei
+        }
+        val (token, p1) = field("token") ?: return null
+        val (expires, p2) = field("expires", p1) ?: return null
+        val (playlist, _) = field("url", p2) ?: return null
+        return Triple(token, expires, playlist)
+    }
+
+    /** VixSrc token liveness (60s grace). Pure. */
+    internal fun vixsrcTokenFresh(expires: String, nowMs: Long): Boolean {
+        val exp = expires.toLongOrNull() ?: return false
+        return exp * 1000 - 60_000 >= nowMs
+    }
+
+    /**
+     * ZXCStreams resolver (verified Sept 2026): portal discovery finds the
+     * backend base, a sha512 token unlocks 4 sub-servers queried in parallel.
+     */
+    private suspend fun resolveZxcstreams(
+        spec: ServerSpec,
+        tmdbId: Int?,
+        imdbId: String?,
+        type: String,
+        season: Int,
+        episode: Int,
+        imdbIdProvider: (suspend () -> String?)? = null,
+    ): List<RawStream> {
+        val id = tmdbId?.takeIf { it > 0 } ?: return emptyList()
+        if (type != "movie" && (season <= 0 || episode <= 0)) return emptyList()
+        val meta = runCatching { TmdbService.fetchMeta(id, type) }.getOrNull()
+        val title = meta?.name ?: throw CleanMissException("no title for tmdb=$id (title-sent backend)")
+        val imdb = imdbId ?: imdbIdProvider?.invoke()
+        if (imdb.isNullOrBlank()) throw CleanMissException("zxcstreams: IMDB id unavailable (TMDB lookup miss)")
+        val year = meta?.year?.take(4).orEmpty()
+        val base = zxcBase()
+        val zType = if (type == "movie") "movie" else "tv"
+        return coroutineScope {
+            ZXC_SERVERS.map { server ->
+                async {
+                    runCatching {
+                        zxcFetchServer(base, server, id.toString(), title, year, imdb, zType, season, episode, spec)
+                    }.getOrDefault(emptyList())
+                }
+            }.awaitAll()
+        }.flatten().distinctBy { it.url }
+    }
+
+    private const val ZXC_SALT = "3435443433"
+    private const val ZXC_BASE_TTL_MS = 10 * 60 * 1000L
+    private val ZXC_PORTALS = listOf("https://zxcstream.xyz", "https://zxcprime.xyz")
+    private val ZXC_SUBDOMAINS = listOf("r1", "r2", "r3", "r4", "r5", "r6", "v4", "cdn", "api", "stream")
+    private val ZXC_SERVERS = listOf("icarus", "berkas", "orion", "athena")
+    private const val ZX_ID = "rgrwsdsdfgwrwrwwr"
+    private const val ZX_FTOKEN = "xfgdfgdsffgrwgrwyjhkjt"
+    private const val ZX_TS = "rdghhdghhfssft"
+    private const val ZX_TOKEN = "ZDDVHJFGHYRHG"
+    private const val ZX_TITLE = "TUKTHFSSFGDGHJS"
+    private const val ZX_YEAR = "53653TRFG647GF"
+    private const val ZX_SEASON = "adkljfhdahfladhfjahfjlahfhfljkadfdf"
+    private const val ZX_EPISODE = "546745ygy46ytfgty"
+    private const val ZX_IMDB = "564745ygtuy5yi75yuy"
+    @Volatile private var zxcBaseUrl = "https://r1.zxcstream.xyz"
+    @Volatile private var zxcBaseAt = 0L
+
+    /** sha512 hex of a string. Pure JVM. */
+    internal fun zxcSha512Hex(s: String): String {
+        val md = java.security.MessageDigest.getInstance("SHA-512")
+        return md.digest(s.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+    }
+
+    /** Cached backend base; rediscovers across portals + subdomains. */
+    private suspend fun zxcBase(): String {
+        if (System.currentTimeMillis() - zxcBaseAt < ZXC_BASE_TTL_MS) return zxcBaseUrl
+        val found = firstSuccess(ZXC_PORTALS + ZXC_SUBDOMAINS.map { "https://$it.zxcstream.xyz" }) { zxcVerifyBase(it) }
+        if (found != null) { zxcBaseUrl = found; zxcBaseAt = System.currentTimeMillis() }
+        return zxcBaseUrl
+    }
+
+    /** POST the probe token; base if the backend answers one. */
+    private suspend fun zxcVerifyBase(base: String): String? {
+        val rt = System.currentTimeMillis()
+        val xt = zxcSha512Hex("$rt:$ZXC_SALT:550").take(64)
+        val text = withTimeoutOrNull(6_000L) {
+            runCatching {
+                app.post("$base/backend/token", timeout = 6, headers = mapOf(
+                    "User-Agent" to HttpKit.userAgent,
+                    "Accept" to "application/json, text/plain, */*",
+                    "Content-Type" to "application/json",
+                    "Origin" to base,
+                    "Referer" to "$base/player/movie/550",
+                ), json = mapOf(ZX_ID to "550", ZX_FTOKEN to xt, ZX_TS to rt.toString())).text
+            }.getOrNull()
+        } ?: return null
+        return runCatching { org.json.JSONObject(text) }
+            .getOrNull()?.takeIf { it.has(ZX_TOKEN) }?.let { base }
+    }
+
+    /** One ZXC sub-server fan-out arm. */
+    private suspend fun zxcFetchServer(
+        base: String,
+        server: String,
+        tmdbId: String,
+        title: String,
+        year: String,
+        imdbId: String,
+        type: String,
+        season: Int,
+        episode: Int,
+        spec: ServerSpec,
+    ): List<RawStream> {
+        val referer = "$base/player/$type/$tmdbId" + if (type != "movie") "/$season/$episode" else ""
+        val rt = System.currentTimeMillis()
+        val xt = zxcSha512Hex("$rt:$ZXC_SALT:$tmdbId").take(64)
+        val tokenText = withTimeoutOrNull(8_000L) {
+            runCatching {
+                app.post("$base/backend/token", timeout = 8, headers = mapOf(
+                    "User-Agent" to HttpKit.userAgent,
+                    "Accept" to "application/json, text/plain, */*",
+                    "Content-Type" to "application/json",
+                    "Origin" to base,
+                    "Referer" to referer,
+                ), json = mapOf(ZX_ID to tmdbId, ZX_FTOKEN to xt, ZX_TS to rt.toString())).text
+            }.getOrNull()
+        } ?: return emptyList()
+        val tokenJson = runCatching { org.json.JSONObject(tokenText) }.getOrNull() ?: return emptyList()
+        val serverToken = tokenJson.optString(ZX_TOKEN).takeIf { it.isNotBlank() } ?: return emptyList()
+        val serverTs = tokenJson.optString(ZX_TS).takeIf { it.isNotBlank() } ?: return emptyList()
+        val params = LinkedHashMap<String, String>().apply {
+            put(ZX_ID, tmdbId); put("b", type); put(ZX_TS, serverTs); put(ZX_TOKEN, serverToken)
+            put(ZX_FTOKEN, xt); put(ZX_TITLE, title); put(ZX_YEAR, year)
+            put("date", year); put(ZX_IMDB, imdbId)
+            if (type != "movie") { put(ZX_SEASON, season.toString()); put(ZX_EPISODE, episode.toString()) }
+        }
+        val qs = params.entries.joinToString("&") { (k, v) -> "$k=${java.net.URLEncoder.encode(v, "UTF-8")}" }
+        val text = withTimeoutOrNull(10_000L) {
+            runCatching {
+                app.get("$base/backend_/servers/$server?$qs", timeout = 10, headers = mapOf(
+                    "User-Agent" to HttpKit.userAgent,
+                    "Accept" to "application/json, text/plain, */*",
+                    "Origin" to base,
+                    "Referer" to referer,
+                )).text
+            }.getOrNull()
+        } ?: return emptyList()
+        val links = runCatching {
+            val root = org.json.JSONObject(text)
+            if (!root.optBoolean("success", false)) return emptyList()
+            root.optJSONArray("links")
+        }.getOrNull() ?: return emptyList()
+        val out = mutableListOf<RawStream>()
+        for (i in 0 until links.length()) {
+            val o = links.optJSONObject(i) ?: continue
+            val link = o.optString("link").takeIf { it.startsWith("http") } ?: continue
+            val kind = o.optString("type").takeIf { it.isNotBlank() }
+                ?: if (link.contains(".m3u8", true)) "hls" else "mp4"
+            out += RawStream(
+                serverId = spec.id,
+                serverName = "${spec.name} ${server.replaceFirstChar { it.uppercase() }}".trim(),
+                url = link, isM3u8 = kind == "hls" || link.contains(".m3u8", true),
+                referer = referer, qualityHint = zxcHeightOf(zxcRawRes(o)),
+                extraHeaders = mapOf("Origin" to base),
+            )
+        }
+        return out
+    }
+
+    /** Raw resolution/source token out of a ZXC link object. */
+    internal fun zxcRawRes(o: org.json.JSONObject): Any? {
+        val r = o.opt("resolution")
+        if (r != null && r != org.json.JSONObject.NULL) return r
+        val s = o.opt("source")
+        return if (s != null && s != org.json.JSONObject.NULL) s else null
+    }
+
+    /** ZXC resolution token to ladder height (0-4 are ladder indexes). Pure. */
+    internal fun zxcHeightOf(res: Any?): Int {
+        if (res == null) return 0
+        if (res is Number) {
+            val n = res.toInt()
+            return if (n in 0..4) intArrayOf(360, 480, 720, 1080, 2160)[n] else n
+        }
+        val s = res.toString().trim()
+        if (s.equals("4k", ignoreCase = true)) return 2160
+        val digit = s.toIntOrNull()
+        if (s.length == 1 && digit != null && digit in 0..4) return intArrayOf(360, 480, 720, 1080, 2160)[digit]
+        return Regex("""(\d{3,4})""").find(s)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+    }
+
+    /** First succeeding candidate wins, rest cancelled. */
+    private suspend fun firstSuccess(urls: List<String>, block: suspend (String) -> String?): String? {
+        if (urls.isEmpty()) return null
+        if (urls.size == 1) return runCatching { block(urls[0]) }.getOrNull()
+        return coroutineScope {
+            val winner = CompletableDeferred<String?>()
+            val pending = java.util.concurrent.atomic.AtomicInteger(urls.size)
+            val jobs = urls.map { u ->
+                launch {
+                    val r = runCatching { block(u) }.getOrNull()
+                    if (r != null) winner.complete(r)
+                    else if (pending.decrementAndGet() == 0 && !winner.isCompleted) winner.complete(null)
+                }
+            }
+            val out = winner.await()
+            jobs.forEach { it.cancel() }
+            out
+        }
+    }
+
+    /**
+     * DahmerMovies resolver (verified Sept 2026): title-keyed file index,
+     * direct files through the worker proxy. 4K first, dubs labelled.
+     */
+    private suspend fun resolveDahmer(
+        spec: ServerSpec,
+        tmdbId: Int?,
+        type: String,
+        season: Int,
+        episode: Int,
+    ): List<RawStream> {
+        val meta = runCatching { TmdbService.fetchMeta(tmdbId ?: 0, type) }.getOrNull()
+        val title = meta?.name?.replace(":", "")?.takeIf { it.isNotBlank() }
+            ?: throw CleanMissException("no title for tmdb=$tmdbId (title-keyed index)")
+        val year = meta?.year?.take(4)
+        val api = "https://a.111477.xyz"
+        fun enc(s: String) = java.net.URLEncoder.encode(s, "UTF-8").replace("+", "%20")
+        val dirs = if (type == "movie") {
+            listOfNotNull(year?.let { "$api/movies/${enc("$title ($it)")}/" }, "$api/movies/${enc(title)}/")
+        } else {
+            if (season <= 0 || episode <= 0) throw CleanMissException("tv request without season/episode")
+            val ss = "%02d".format(season)
+            listOf("$api/tvs/${enc(title)}/Season%20$ss/", "$api/tvs/${enc(title)}/Season%20$season/")
+        }
+        var rows: List<Triple<String, String, String>> = emptyList()
+        var dirUrl = ""
+        for (d in dirs) {
+            val html = withTimeoutOrNull(8_000L) {
+                runCatching { app.get(d, timeout = 8, headers = okHeaders("$api/")).text }.getOrNull()
+            } ?: continue
+            val parsed = dahmerParseRows(html)
+            if (parsed.isNotEmpty()) { rows = parsed; dirUrl = d; break }
+        }
+        if (rows.isEmpty()) throw CleanMissException("no index entries")
+        if (type != "movie") {
+            val ep = rows.filter { dahmerEpisodeMatch(it.second, season, episode) }
+            if (ep.isNotEmpty()) rows = ep
+        }
+        return rows.sortedByDescending { dahmerResolutionOf(it.second) }.take(6).mapNotNull { (href, file, _) ->
+            val direct = when {
+                href.startsWith("http") -> href
+                href.startsWith("/") -> api + href
+                else -> dirUrl + href
+            }
+            if (file.isBlank()) return@mapNotNull null
+            RawStream(
+                serverId = spec.id, serverName = spec.name,
+                url = "https://p.111477.xyz/bulk?u=" + dahmerEncodeUri(direct),
+                isM3u8 = file.endsWith(".m3u8", true) || direct.contains(".m3u8", true),
+                referer = "$api/", qualityHint = dahmerResolutionOf(file),
+                audioLabel = dahmerLanguageOf(file),
+                extraHeaders = mapOf("Range" to "bytes=0-"),
+            )
+        }
+    }
+
+    /** Directory rows as (href, text, size). Pure. */
+    internal fun dahmerParseRows(html: String): List<Triple<String, String, String>> {
+        val rowRe = Regex("""<tr[^>]*>(.*?)</tr>""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+        val linkRe = Regex("""<a[^>]*href=["']([^"']*)["'][^>]*>([^<]*)</a>""", RegexOption.IGNORE_CASE)
+        val extRe = Regex("""\.(mkv|mp4|avi|webm|m3u8)$""", RegexOption.IGNORE_CASE)
+        val sizeRe = Regex("""<td[^>]*>(\d+(?:\.\d+)?\s?[KMGT]B)</td>""", RegexOption.IGNORE_CASE)
+        val out = mutableListOf<Triple<String, String, String>>()
+        for (m in rowRe.findAll(html)) {
+            val row = m.groupValues[1]
+            val link = linkRe.find(row) ?: continue
+            val href = link.groupValues[1]
+            val file = link.groupValues[2].trim()
+            if (file.isBlank() || href == "../") continue
+            if (!extRe.containsMatchIn(file)) continue
+            val size = sizeRe.find(row)?.groupValues?.get(1)?.trim().orEmpty()
+            out += Triple(href, file, size)
+        }
+        return out
+    }
+
+    /** Release-tag language to canonical label. Pure. */
+    internal fun dahmerLanguageOf(fileName: String): String {
+        val u = fileName.uppercase()
+        return when {
+            Regex("""\bHINDI\b""").containsMatchIn(u) -> "Hindi"
+            Regex("""\bTAMIL\b""").containsMatchIn(u) -> "Tamil"
+            Regex("""\bTELUGU\b""").containsMatchIn(u) -> "Telugu"
+            Regex("""\b(MULTI|DUAL|DUBBED|MULTI-AUDIO)\b""").containsMatchIn(u) -> "Multi"
+            Regex("""\b(ENGLISH|ENG)\b""").containsMatchIn(u) -> "English"
+            else -> ""
+        }
+    }
+
+    /** Release-tag resolution to ladder height. Pure. */
+    internal fun dahmerResolutionOf(fileName: String): Int {
+        val u = fileName.uppercase()
+        return when {
+            u.contains("2160P") || Regex("""\b4K\b""").containsMatchIn(u) -> 2160
+            u.contains("1080P") -> 1080
+            u.contains("720P") -> 720
+            u.contains("480P") -> 480
+            else -> 0
+        }
+    }
+
+    /** S01E02 / E02 / Episode 2 matcher. Pure. */
+    internal fun dahmerEpisodeMatch(fileName: String, season: Int, episode: Int): Boolean {
+        val ss = "%02d".format(season)
+        val ee = "%02d".format(episode)
+        val u = fileName.uppercase()
+        if (u.contains("S${ss}E$ee") || u.contains("S${season}E${episode}")) return true
+        if (Regex("""\bE$ee\b""").containsMatchIn(u)) return true
+        return Regex("""EPISODE[\s._-]*0*$episode\b""", RegexOption.IGNORE_CASE).containsMatchIn(fileName)
+    }
+
+    /** encodeURI equivalent: unreserved marks pass through. Pure. */
+    internal fun dahmerEncodeUri(s: String): String {
+        val marks = ";,/?:@&=+$-_.!~*()#"
+        return buildString {
+            for (ch in s) {
+                if (ch.isLetterOrDigit() || ch in marks || ch == 39.toChar()) append(ch)
+                else append(ch.toString().toByteArray(Charsets.UTF_8).joinToString("") { "%%%02X".format(it.toInt() and 0xFF) })
+            }
+        }
+    }
+
     private suspend fun resolveVidrock(
         spec: ServerSpec,
         tmdbId: Int?,

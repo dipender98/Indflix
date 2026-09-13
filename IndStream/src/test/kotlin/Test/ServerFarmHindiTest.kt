@@ -246,15 +246,16 @@ class ServerFarmHindiTest {
         // The fast direct-API servers (, no embed chain). mp4hydra, vidzee, vixsrc, streamprovider and 8stream are disabled ().
 // kept out of the farm so.
         val ids = setOf("vidlink", "vaplayer", "vidrock", "videasy-hindi", "moviebox", "vidnest",
-            "vidup", "vidcore", "allmovieland", "nhd", "netmirror")
+            "vidup", "vidcore", "allmovieland", "nhd", "netmirror",
+            "vixsrc", "zxcstreams", "dahmermovies", "vidapi", "twoembed")
         for (id in ids) {
             assertNotNull(
                 ServerFarm.allServers.firstOrNull { it.id == id },
                 "$id must be in the farm",
             )
         }
-        // Disabled/dead servers must NOT be in the live farm.
-        val disabled = setOf("mp4hydra", "vidzee", "vixsrc", "streamprovider", "primesrc",
+        // Disabled/dead servers must NOT be in the live farm (vixsrc re-enabled Sept 2026).
+        val disabled = setOf("mp4hydra", "vidzee", "streamprovider", "primesrc",
             "myflixer-hindi", "videm", "8stream")
         for (id in disabled) {
             assertNull(
@@ -266,7 +267,7 @@ class ServerFarmHindiTest {
 
     @Test
     fun farm_withinExpandedCap() {
-        // multi-language expansion: 11 live servers (added), cap 16.
-        assertTrue(ServerFarm.allServers.size <= 16, "farm must stay within MAX_SERVERS cap")
+        // Sept 2026 expansion: 16 live servers, exactly at the cap.
+        assertEquals(16, ServerFarm.allServers.size, "farm must stay within MAX_SERVERS cap")
     }
 }

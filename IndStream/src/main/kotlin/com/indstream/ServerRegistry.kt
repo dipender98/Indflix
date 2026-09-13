@@ -142,6 +142,58 @@ object ServerFarm {
             hasSubtitles = true, maxQuality = 1080, timeoutSec = 50,
             declaredLanguages = emptySet(),
         ),
+        // VixSrc (vixsrc.to, verified live Sept 2026): TMDB-keyed JSON API.
+        // GET /api/movie/{tmdb} (or /api/tv/{tmdb}/{s}/{e}) -> {src: "/embed/.."}.
+        // Embed page carries token/expires/playlist; master is signed HLS.
+        ServerSpec(
+            id = "vixsrc", name = "VixSrc",
+            idType = ServerIdType.TMDB,
+            movieUrl = "https://vixsrc.to/api/movie/{id}",
+            tvUrl = "https://vixsrc.to/api/tv/{id}/{season}/{episode}",
+            isJsonApi = true, referer = "https://vixsrc.to/",
+            hasSubtitles = true, maxQuality = 1080, timeoutSec = 30,
+        ),
+        // ZXCStreams (portal-discovered backend, verified live Sept 2026): TMDB-keyed.
+        // Portal (zxcstream.xyz/zxcprime.xyz) redirect -> base; sha512 token POST.
+        // 4 sub-servers (Icarus/Berkas/Orion/Athena) queried in parallel.
+        ServerSpec(
+            id = "zxcstreams", name = "ZXCStreams",
+            idType = ServerIdType.TMDB,
+            movieUrl = "https://zxcstream.xyz/player/movie/{id}",
+            tvUrl = "https://zxcstream.xyz/player/tv/{id}/{season}/{episode}",
+            referer = "https://zxcstream.xyz/",
+            hasSubtitles = false, maxQuality = 2160, timeoutSec = 25,
+        ),
+        // DahmerMovies (title-keyed file index + worker proxy, verified live Sept 2026).
+        // Directory listing per title carries 4K REMUX + Hindi/Tamil/Telugu dubs.
+        ServerSpec(
+            id = "dahmermovies", name = "DahmerMovies",
+            idType = ServerIdType.TMDB,
+            movieUrl = "https://a.111477.xyz/movies/",
+            tvUrl = "https://a.111477.xyz/tvs/",
+            referer = "https://a.111477.xyz/",
+            hasSubtitles = false, maxQuality = 2160, timeoutSec = 25,
+        ),
+        // VidAPI (vaplayer.ru embed, page live Sept 2026): TMDB-keyed embed page.
+        // Generic pipeline (unwrap/harvest/extractor registry), no custom crypto.
+        ServerSpec(
+            id = "vidapi", name = "VidAPI",
+            idType = ServerIdType.TMDB,
+            movieUrl = "https://vaplayer.ru/embed/movie/{id}",
+            tvUrl = "https://vaplayer.ru/embed/tv/{id}/{season}/{episode}",
+            referer = "https://vaplayer.ru/",
+            hasSubtitles = true, maxQuality = 1080, timeoutSec = 15,
+        ),
+        // 2Embed (embed page, servers Vsrc/Videm/Vcr live Sept 2026): IMDB-keyed.
+        // Generic pipeline handles the iframe chain.
+        ServerSpec(
+            id = "twoembed", name = "2Embed",
+            idType = ServerIdType.IMDB,
+            movieUrl = "https://2embed.cc/embed/{id}",
+            tvUrl = "https://2embed.cc/embedtv/{id}&s={season}&e={episode}",
+            referer = "https://2embed.cc/",
+            hasSubtitles = true, maxQuality = 1080, timeoutSec = 15,
+        ),
     )
 
     fun buildMovieUrl(spec: ServerSpec, id: String): String =
