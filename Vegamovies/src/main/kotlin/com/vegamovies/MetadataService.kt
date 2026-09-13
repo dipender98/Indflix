@@ -39,6 +39,10 @@ object MetadataService {
         val year: String?,
         val poster: String?,
         val rating: Double?,
+        /** TMDB vote_count - popularity signal for ranking. */
+        val votes: Int = 0,
+        /** TMDB popularity metric (informational; ranking uses votes). */
+        val popularity: Double = 0.0,
     )
 
     data class TmdbDetail(
@@ -179,6 +183,8 @@ object MetadataService {
                     year = (str(m, "release_date") ?: str(m, "first_air_date"))?.take(4),
                     poster = str(m, "poster_path")?.let { "$IMG_BASE$it" },
                     rating = m.optDouble("vote_average", -1.0).takeIf { it > 0 },
+                    votes = m.optInt("vote_count", 0),
+                    popularity = m.optDouble("popularity", 0.0),
                 )
             }.dedupedByTitle()
         } catch (e: Exception) {

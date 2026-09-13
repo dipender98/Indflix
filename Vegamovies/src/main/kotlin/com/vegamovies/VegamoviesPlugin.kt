@@ -193,33 +193,106 @@ class VegamoviesProvider : MainAPI() {
                 ?.key
     }
 
-    // Search - Meilisearch JSON proxy on both sites.
+    // Search - Meilisearch JSON proxy with typo respellings, TMDB popularity ranking, oracle fill.
 
     override suspend fun search(query: String): List<SearchResponse>? = coroutineScope {
         if (query.isBlank()) return@coroutineScope null
-        val vega = async { siteSearch(mainUrl, query) }
-        val rog = async { siteSearch(bollywoodUrl, query) }
-        var merged = (vega.await() + rog.await()).distinctBy { it.url }.take(SEARCH_MAX_RESULTS)
-        if (merged.isEmpty()) {
+        val vega = async { siteSearchFuzzy(mainUrl, query) }
+        val rog = async { siteSearchFuzzy(bollywoodUrl, query) }
+        val tmdb = async { MetadataService.search(query, 8) }
+
+        var hits = (vega.await() + rog.await()).distinctBy { it.url }
+        val tmdbItems = tmdb.await()
+        if (hits.isEmpty()) {
             refreshDomains()
-            merged = listOf(mainUrl, bollywoodUrl)
-                .map { siteSearch(it, query) }.flatten()
-                .distinctBy { it.url }.take(SEARCH_MAX_RESULTS)
+            hits = listOf(mainUrl, bollywoodUrl)
+                .flatMap { siteSearchFuzzy(it, query) }.distinctBy { it.url }
         }
-        if (merged.isEmpty()) return@coroutineScope null
-        backfillPosters(merged)
-        merged
+        if (hits.isEmpty()) return@coroutineScope null
+
+        // TMDB-driven fill: popular titles that the site's exact-match index skipped.
+        val extra = withTimeoutOrNull(6000L) { expansionHits(tmdbItems, hits) }.orEmpty()
+        if (extra.isNotEmpty()) hits = (hits + extra).distinctBy { it.url }
+
+        val ranked = rankSearchResults(query, hits, tmdbItems).dedupeByName().take(SEARCH_MAX_RESULTS)
+        backfillPosters(ranked, tmdbItems)
+        ranked
     }
 
+    /** Search-as-you-type runs the same ranked pipeline so typing previews match submit results. */
     override suspend fun quickSearch(query: String): List<SearchResponse>? = search(query)
 
-    /** Calls {site}/ts-search. php; pure JSON mapping in. */
+    /** Search ts-search.php for [query] and its typo respelling, merged by URL. */
+    internal suspend fun siteSearchFuzzy(baseUrl: String, query: String): List<SearchResponse> {
+        val queries = buildList {
+            add(query)
+            addAll(queryVariants(query, max = 1))
+        }.distinct()
+        if (queries.size == 1) return siteSearch(baseUrl, query)
+        return coroutineScope {
+            queries.map { q -> async { siteSearch(baseUrl, q) } }
+                .awaitAll().flatten().distinctBy { it.url }
+        }
+    }
+
+    /** Calls {site}/ts-search.php; pure JSON mapping in parseSearchHits. */
     internal suspend fun siteSearch(baseUrl: String, query: String): List<SearchResponse> {
         val url = "$baseUrl/ts-search.php?q=${URLEncoder.encode(query.trim(), "UTF-8")}&page=1"
         val text = runCatching {
             app.get(url, timeout = 7, headers = commonHeaders + mapOf("Referer" to "$baseUrl/")).text
         }.getOrNull() ?: return emptyList()
         return parseSearchHits(text, baseUrl)
+    }
+
+    /** Probe the site for TMDB titles the index missed (bounded, best-effort). */
+    private suspend fun expansionHits(
+        tmdb: List<MetadataService.TmdbItem>,
+        existing: List<SearchResponse>,
+    ): List<SearchResponse> {
+        if (tmdb.isEmpty()) return emptyList()
+        val uncovered = tmdb.take(4).filter { item ->
+            existing.none { bestTmdbMatch(listOf(item), it.name, yearOf(it)) != null }
+        }
+        if (uncovered.isEmpty()) return emptyList()
+        val probes = uncovered.mapNotNull { item ->
+            probeTokens(item.name).take(3).joinToString(" ").trim().ifBlank { null }
+        }.distinct().take(3)
+        if (probes.isEmpty()) return emptyList()
+        val sem = Semaphore(2)
+        return coroutineScope {
+            probes.map { probe ->
+                async {
+                    sem.acquire()
+                    try {
+                        withTimeoutOrNull(4500L) {
+                            siteSearchFuzzy(mainUrl, probe) + siteSearchFuzzy(bollywoodUrl, probe)
+                        }.orEmpty()
+                    } finally {
+                        sem.release()
+                    }
+                }
+            }.awaitAll().flatten()
+        }
+    }
+
+    /** Year on a search card (both concrete SearchResponse types carry one). */
+    internal fun yearOf(r: SearchResponse): Int? = when (r) {
+        is MovieSearchResponse -> r.year
+        is TvSeriesSearchResponse -> r.year
+        else -> null
+    }
+
+    /** Relevance + TMDB-popularity re-rank of site hits against the typed query. */
+    internal fun rankSearchResults(
+        query: String,
+        results: List<SearchResponse>,
+        tmdb: List<MetadataService.TmdbItem>,
+    ): List<SearchResponse> {
+        val scored = results.map { r -> r to combinedScore(query, r.name, yearOf(r), tmdb) }
+        return scored.sortedWith(
+            compareByDescending<Pair<SearchResponse, Double>> { it.second }
+                .thenByDescending { yearOf(it.first) ?: 0 },
+        ).map { it.first }
     }
 
     /** Pure: map a ts-search. php JSON response into SearchResponses. */
@@ -275,7 +348,10 @@ class VegamoviesProvider : MainAPI() {
     }
 
     /** TMDB poster backfill for results without one (bounded, best-effort). */
-    private suspend fun backfillPosters(results: List<SearchResponse>) {
+    private suspend fun backfillPosters(
+        results: List<SearchResponse>,
+        tmdb: List<MetadataService.TmdbItem> = emptyList(),
+    ) {
         val need = results.filter { it.posterUrl.isNullOrBlank() }.take(6)
         if (need.isEmpty()) return
         val sem = Semaphore(3)
@@ -285,7 +361,9 @@ class VegamoviesProvider : MainAPI() {
                     sem.acquire()
                     try {
                         withTimeoutOrNull(2500L) {
-                            MetadataService.search(r.name).firstOrNull()?.poster?.let { r.posterUrl = it }
+                            val known = bestTmdbMatch(tmdb, r.name, yearOf(r))?.poster
+                                ?: MetadataService.search(r.name).firstOrNull()?.poster
+                            if (!known.isNullOrBlank()) r.posterUrl = known
                         }
                     } finally { sem.release() }
                 }

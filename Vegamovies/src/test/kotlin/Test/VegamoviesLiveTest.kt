@@ -20,6 +20,19 @@ class VegamoviesLiveTest {
     }
 
     @Test
+    fun live_search_bahubali_topResults() = runBlocking {
+        try {
+            // Exact complaint: site's exact-token search hides the popular "Baahubali" films.
+            val res = p.search("bahubali") ?: return@runBlocking println("LIVE SEARCH returned null")
+            res.take(8).forEachIndexed { i, r ->
+                println("  [$i] ${r.name}  ${r.url.take(80)}")
+            }
+        } catch (e: Throwable) {
+            println("LIVE SEARCH ISSUE (non-fatal): ${e.message?.take(160)}")
+        }
+    }
+
+    @Test
     fun live_movie_metadata_check() = runBlocking {
         try {
             // IMDb-less movie post: metadata must come from the TMDB title search.
