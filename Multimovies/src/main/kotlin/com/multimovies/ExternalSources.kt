@@ -24,7 +24,6 @@ data class NxshaSource(
     val url: String,
     val quality: String = "",
     val isM3u8: Boolean = false,
-    val headers: Map<String, String> = emptyMap(),
 )
 
 data class NxshaSubtitle(val lang: String, val url: String)
@@ -389,6 +388,15 @@ internal object NxshaProtocol {
         var season: Int? = pathMatch?.groupValues?.getOrNull(3)?.toIntOrNull()?.takeIf { type == "tv" }
         var episode: Int? = pathMatch?.groupValues?.getOrNull(4)?.toIntOrNull()?.takeIf { type == "tv" }
 
+        // IMDB id in the path (`/embed/movie/tt1375666`): the site now serves Nxsha movie embeds this way.
+        val pathImdb = Regex("""/embed/(?:movie|tv)/(tt\d{6,10})(?:[/?&#]|$)""").find(url)
+            ?.groupValues?.getOrNull(1)
+        if (type == null) {
+            Regex("""/embed/(movie|tv)/""").find(url)?.groupValues?.getOrNull(1)?.let {
+                type = if (it == "movie") "movie" else "tv"
+            }
+        }
+
         fun queryValue(vararg names: String): String? {
             val parts = url.split('?', '&')
             for (part in parts.drop(1)) {
@@ -409,7 +417,8 @@ internal object NxshaProtocol {
         }
         queryValue("s", "season")?.toIntOrNull()?.let { season = it }
         queryValue("e", "episode", "ep")?.toIntOrNull()?.let { episode = it }
-        val imdb = queryValue("imdb", "imdb_id", "imdbid")?.takeIf { it.matches(Regex("""tt\d{6,10}""")) }
+        val imdb = pathImdb
+            ?: queryValue("imdb", "imdb_id", "imdbid")?.takeIf { it.matches(Regex("""tt\d{6,10}""")) }
         // season/episode are NOT filtered on type here: query-form embeds such as?imdb=tt. . . &s=1&e=1 (no type=) must keep.
 // them so extract() can infer tv.
         return ParsedIds(tmdb, imdb, type, season, episode)

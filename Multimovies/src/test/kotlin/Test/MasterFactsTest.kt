@@ -41,15 +41,6 @@ class MasterFactsTest {
     }
 
     @Test
-    fun qualityLabel_tokens() {
-        assertEquals("4K", MultiSourcePuller.qualityLabel(2160))
-        assertEquals("1080p", MultiSourcePuller.qualityLabel(1080))
-        assertEquals("720p", MultiSourcePuller.qualityLabel(720))
-        assertEquals("360p", MultiSourcePuller.qualityLabel(360))
-        assertEquals("", MultiSourcePuller.qualityLabel(0))
-    }
-
-    @Test
     fun declaredHindi_onlyFromDeclaration_neverGuessed() {
         assertTrue(MultiSourcePuller.declaredHindi("VidHindi", null))
         assertTrue(MultiSourcePuller.declaredHindi(null, "https://cdn/x/hindi/file.mp4"))

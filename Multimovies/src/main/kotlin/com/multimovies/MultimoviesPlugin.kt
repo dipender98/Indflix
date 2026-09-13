@@ -97,6 +97,11 @@ internal val SOURCE_PRIORITY: List<String> = listOf(
     "Cineverse",
     "nxsha",
     "nhdapi",
+    "GDMIRROR",
+    "screenscape",
+    "Peachify",
+    "Vidout",
+    "Server 01",
     "2embed",
     "VidSrc",
     "111Movies",
@@ -861,8 +866,8 @@ class MultimoviesProvider : MainAPI() {
 // instantly, in stored (arrival) order.
         if (meta != null) {
             LinkCache.get(meta.imdbId, meta.season, meta.episode)?.let { cached ->
-                if (cached.first.isNotEmpty()) {
-                    cached.first.forEach { runCatching { callback(it) } }
+                if (cached.isNotEmpty()) {
+                    cached.forEach { runCatching { callback(it) } }
                     // SubtilesProvider is the ONLY subtitle source - replayed titles must get their tracks too (the 15-min per-title cache.
                     deliverFallbackSubs(meta, subtitleCallback)
                     return@withDomainRetry true
@@ -905,16 +910,16 @@ class MultimoviesProvider : MainAPI() {
         // Fast path 2: embeds prefetched in the background while the detail page was open - skips the page fetch AND.
         val awaited = EmbedPrefetchCache.awaitInFlight(data, timeoutMs = 1200L)
         var embeds: List<ResolvedEmbed> =
-            (awaited.orEmpty() + EmbedPrefetchCache.arrived(data)).distinctBy { it.name }
+            (awaited.orEmpty() + EmbedPrefetchCache.arrived(data)).distinctBy { it.embedIdentity() }
 
         if (awaited == null) {
             // No complete prefetch (cold tap or warm-up still running): resolve the servers not already in hand.
             val doc = cachedDocOrFetch(data)
             if (doc != null) {
-                val have = embeds.mapTo(HashSet()) { it.name }
+                val have = embeds.mapTo(HashSet()) { it.key }
                 val missing = parsePlayerOptions(doc, data)
-                    .distinctBy { it.first }
-                    .filterNot { have.contains(it.first) }
+                    .distinctBy { dooplayOptionKey(it.second.first, it.second.second, it.second.third) }
+                    .filterNot { have.contains(dooplayOptionKey(it.second.first, it.second.second, it.second.third)) }
                 if (missing.isNotEmpty()) {
                     embeds += coroutineScope {
                         missing.map { (name, triple) ->
@@ -983,7 +988,6 @@ class MultimoviesProvider : MainAPI() {
                         // Cached ids let the Nxsha extractor resolve even when the embed URL itself carries no tmdb/imdb marker.
                         tmdbId = meta?.tmdbId,
                         imdbId = meta?.imdbId,
-                        latencyMs = e.latencyMs,
                     )
                     pullSource(src, labelCounter, data, emitted, emittedUrls, found, noopSubtitle, callback,
                         firstLink = firstLink, cacheKey = data)
@@ -1097,12 +1101,17 @@ class MultimoviesProvider : MainAPI() {
             )
 
         /** Emit one disambiguated link: quality-floor it (sub-720 fixed files never reach the player OR the caches), then. */
-        suspend fun emitOne(l: ExtractorLink) {
+        suspend fun emitOne(l: ExtractorLink, fast: Boolean = false) {
             if (!passesFloor(l)) return
             // Exact-URL dupes drop cheaply; host+quality+language decides the rest
             // AFTER enrichment, so a Hindi master is never dropped as an English dupe.
             if (!emittedUrls.add(l.url ?: return)) return
-            val dis = disambiguate(MultiSourcePuller.enrichLabel(l))
+            val dis = disambiguate(MultiSourcePuller.enrichLabel(
+                l,
+                // Fast path skips the slow master probe: URL facts only, instant emit.
+                probeBudgetMs = if (fast) MultiSourcePuller.FAST_PROBE_BUDGET_MS
+                else MultiSourcePuller.LABEL_PROBE_BUDGET_MS,
+            ))
             val key = "${hostOf(dis.url ?: "")}|${dis.quality}|${MultiSourcePuller.bracketTag(dis)}"
             if (!emitted.add(key)) return
             found.add(dis)
@@ -1118,7 +1127,7 @@ class MultimoviesProvider : MainAPI() {
                 src.url.contains(".mp4", ignoreCase = true))
         ) buildDirectLink(src) else null
         if (cineverseFastLink != null) {
-            emitOne(cineverseFastLink)
+            emitOne(cineverseFastLink, fast = true)
             return listOf(cineverseFastLink)
         }
         return MultiSourcePuller.pull(
@@ -1151,9 +1160,8 @@ class MultimoviesProvider : MainAPI() {
         )
     }
 
-    /** Resolve a single dooplayer server's embed URL via the site's admin-ajax endpoint, measuring the round-trip latency. as a speed hint. */
+    /** Resolve a single dooplayer server's embed URL via the site's admin-ajax endpoint. */
     private suspend fun resolveEmbed(data: String, name: String, post: String, nume: String, type: String): ResolvedEmbed? {
-        val startMs = System.currentTimeMillis()
         val resp = runCatching {
             app.post(
                 "$mainUrl/wp-admin/admin-ajax.php",
@@ -1172,13 +1180,12 @@ class MultimoviesProvider : MainAPI() {
                 interceptor = getCfKiller(),
             ).text
         }.getOrNull() ?: return null
-        val latencyMs = System.currentTimeMillis() - startMs
 
         val rawEmbed = Regex("\"embed_url\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\"")
             .find(resp)?.groupValues?.get(1)
             ?: return null
         val embed = cleanEmbedUrl(rawEmbed).takeIf { it.isNotBlank() } ?: return null
-        return ResolvedEmbed(name, embed, latencyMs, embedUrl = embed)
+        return ResolvedEmbed(name, embed, embedUrl = embed, key = dooplayOptionKey(post, nume, type))
     }
 
     private fun parseSeason(url: String): Int? =
@@ -1322,7 +1329,6 @@ object MultiSourcePuller {
         val imdbId: String? = null,
         val season: Int? = null,
         val episode: Int? = null,
-        val latencyMs: Long = Long.MAX_VALUE,
     )
 
     /** Max iframe levels to unwrap before treating a page as the player. */
@@ -1411,6 +1417,8 @@ object MultiSourcePuller {
         "www.vibuxer.com",
         "modiplay.com",
         "www.modiplay.com",
+        "modiplay.xyz",
+        "hanerix.com",
         "cinemodiy.com",
         "cinehive.com",
         "play.cineverse.com",
@@ -1497,18 +1505,6 @@ object MultiSourcePuller {
         return hay.contains("hindi") || hay.contains("हिन्दी") || hay.contains("हिंदी")
     }
 
-    /** Height→display token (. . LinkNaming. qualityLabel). */
-    internal fun qualityLabel(height: Int): String = when {
-        height >= 2160 -> "4K"
-        height >= 1440 -> "1440p"
-        height >= 1080 -> "1080p"
-        height >= 720 -> "720p"
-        height >= 480 -> "480p"
-        height >= 360 -> "360p"
-        height > 0 -> "${height}p"
-        else -> ""
-    }
-
     /** Cheap height token. . . 1080p. mp4") - a host declaration, not a guess (0 = nothing declared). */
     internal fun resolutionFromUrl(url: String?): Int {
         if (url.isNullOrBlank()) return 0
@@ -1517,13 +1513,15 @@ object MultiSourcePuller {
     }
 
     /** Budget for one master fetch inside emission (runs in the live fill window, parallel per link - must never gate. playback). */
-    private const val LABEL_PROBE_BUDGET_MS = 2500L
+    internal const val LABEL_PROBE_BUDGET_MS = 2500L
+    /** Fast-path probe budget (Cineverse direct links): fast CDNs answer in ms; slow ones fall back to URL facts. */
+    internal const val FAST_PROBE_BUDGET_MS = 1000L
 
     /** Cache of label probes per stream url (per process) so a re-pull of the same source never re-fetches the same master. */
     private val labelProbeCache = java.util.concurrent.ConcurrentHashMap<String, MasterFacts?>()
 
     /** PROBE the stream for its real (language, height) facts: HLS masters are fetched (2. 5s budget) and parsed (variants +. */
-    internal suspend fun probeLabelFacts(l: ExtractorLink): MasterFacts? {
+    internal suspend fun probeLabelFacts(l: ExtractorLink, budgetMs: Long = LABEL_PROBE_BUDGET_MS): MasterFacts? {
         val url = l.url ?: return null
         if (url.isBlank()) return null
         if (l.type != ExtractorLinkType.M3U8) {
@@ -1531,7 +1529,7 @@ object MultiSourcePuller {
             return MasterFacts(declared, emptyList())
         }
         labelProbeCache[url]?.let { return it }
-        val facts = withTimeoutOrNull(LABEL_PROBE_BUDGET_MS) {
+        val facts = withTimeoutOrNull(budgetMs) {
             runCatching {
                 val headers = LinkedHashMap<String, String>()
                 headers.putAll(l.headers)
@@ -1549,8 +1547,8 @@ object MultiSourcePuller {
     }
 
     /** Enrich a link's label with. */
-    internal suspend fun enrichLabel(l: ExtractorLink): ExtractorLink {
-        val facts = probeLabelFacts(l)
+    internal suspend fun enrichLabel(l: ExtractorLink, probeBudgetMs: Long = LABEL_PROBE_BUDGET_MS): ExtractorLink {
+        val facts = probeLabelFacts(l, probeBudgetMs)
         val height = facts?.bestHeight?.takeIf { it > 0 }
             ?: l.quality.takeIf { it > 0 }
             ?: resolutionFromUrl(l.url).takeIf { it > 0 }
@@ -1731,12 +1729,8 @@ object MultiSourcePuller {
                     ExtractorLinkType.M3U8
                 } else ExtractorLinkType.VIDEO
                 // Streams come back without headers.
-                val refererHeader = s.headers["Referer"] ?: src.referer ?: src.url
-                val headers = buildMap {
-                    putAll(src.headers)
-                    putAll(s.headers)
-                    if (!s.headers.containsKey("Referer")) put("Referer", refererHeader)
-                }
+                val refererHeader = src.referer ?: src.url
+                val headers = src.headers + ("Referer" to refererHeader)
                 ExtractorLink(
                     source = source,
                     name = source,
@@ -1911,10 +1905,19 @@ object SourceMetaCache {
 data class ResolvedEmbed(
     val name: String,
     val url: String,
-    val latencyMs: Long,
     val embedUrl: String? = null,
     val unwrapped: Boolean = false,
+    /** Admin-ajax option identity (post|nume|type); same display name may list twice (live: 2x Nxsha). */
+    val key: String = "",
 )
+
+/** Stable identity of one dooplayer option; duplicate display names stay distinct. */
+internal fun dooplayOptionKey(post: String, nume: String, type: String): String =
+    "$post|$nume|$type"
+
+/** Dedupe identity of a resolved embed: option key when known, else the embed URL. */
+internal fun ResolvedEmbed.embedIdentity(): String =
+    key.ifEmpty { embedUrl ?: url }
 
 /** Session-level cache of player sources prefetched in the background while a movie's detail page is open, keyed by the. */
 object EmbedPrefetchCache {
@@ -1947,7 +1950,7 @@ object EmbedPrefetchCache {
         val e = map[key] ?: return
         if (System.currentTimeMillis() > e.expiresAt || e.embeds != null) return
         synchronized(e.partial) {
-            if (e.partial.none { it.name == embed.name }) e.partial.add(embed)
+            if (e.partial.none { it.embedIdentity() == embed.embedIdentity() }) e.partial.add(embed)
         }
     }
 
@@ -2016,13 +2019,12 @@ object EmbedPrefetchCache {
 object LinkCache {
     private data class Entry(
         val links: List<ExtractorLink>,
-        val subs: List<SubtitleFile>,
         val expiresAt: Long,
     )
     private const val TTL_MS = 5 * 60 * 1000L
     private val map = ConcurrentHashMap<String, Entry>()
 
-    fun get(imdbId: String?, season: Int?, episode: Int?): Pair<List<ExtractorLink>, List<SubtitleFile>>? {
+    fun get(imdbId: String?, season: Int?, episode: Int?): List<ExtractorLink>? {
         // Blank ids (tmdb-only titles store "") must never hit the cache:
         // every such title would otherwise share one key and replay another title.
         if (imdbId.isNullOrBlank()) return null
@@ -2032,12 +2034,12 @@ object LinkCache {
             map.remove(key)
             return null
         }
-        return e.links to e.subs
+        return e.links
     }
 
-    fun put(imdbId: String?, season: Int?, episode: Int?, links: List<ExtractorLink>, subs: List<SubtitleFile> = emptyList()) {
+    fun put(imdbId: String?, season: Int?, episode: Int?, links: List<ExtractorLink>) {
         if (imdbId.isNullOrBlank() || links.isEmpty()) return
-        map["$imdbId|$season|$episode"] = Entry(links, subs, System.currentTimeMillis() + TTL_MS)
+        map["$imdbId|$season|$episode"] = Entry(links, System.currentTimeMillis() + TTL_MS)
     }
 }
 
@@ -2060,8 +2062,6 @@ object FastStartCache {
         val merged = (existing + links).distinctBy { it.url }
         map[key] = Entry(merged, System.currentTimeMillis() + TTL_MS)
     }
-
-    fun clear() = map.clear()
 }
 
 /** A curated, id-based public streaming source. */

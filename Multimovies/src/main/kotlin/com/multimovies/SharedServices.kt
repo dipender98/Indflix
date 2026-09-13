@@ -27,7 +27,6 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import org.jsoup.nodes.Document
@@ -45,7 +44,7 @@ internal object HttpKit {
         }
     }
 
-    val client: OkHttpClient = OkHttpClient.Builder()
+    private val client: OkHttpClient = OkHttpClient.Builder()
         .cookieJar(cookieJar)
         .connectTimeout(12, TimeUnit.SECONDS)
         .readTimeout(12, TimeUnit.SECONDS)
@@ -73,28 +72,6 @@ internal object HttpKit {
         get(url, headers, budgetMs)?.let { raw ->
             runCatching { JSONObject(raw) }.getOrNull()
         }
-
-    /** POST with an empty body and the given + optional /. Returns the response body text, or null on failure / timeout after. */
-    suspend fun post(
-        url: String,
-        headers: Map<String, String> = emptyMap(),
-        referer: String? = null,
-        origin: String? = null,
-        budgetMs: Long = 8_000L,
-    ): String? = withContext(Dispatchers.IO) {
-        withTimeoutOrNull(budgetMs) {
-            runCatching {
-                val req = Request.Builder().url(url).post("".toRequestBody(null))
-                headers.forEach { (k, v) -> req.header(k, v) }
-                if (!referer.isNullOrBlank()) req.header("Referer", referer)
-                if (!origin.isNullOrBlank()) req.header("Origin", origin)
-                client.newCall(req.build()).execute().use { resp ->
-                    if (!resp.isSuccessful) return@use null
-                    resp.body.string()
-                }
-            }.getOrNull()
-        }
-    }
 }
 
 /** Shared CryptoJS-compatible AES helpers for the OpenSSL "Salted__" envelope format (`CryptoJS. AES. encrypt(data. passphrase)` / `. decrypt(. */

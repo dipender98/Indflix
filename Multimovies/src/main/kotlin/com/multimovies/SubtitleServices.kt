@@ -101,9 +101,9 @@ object SubtilesProvider {
     const val FETCH_BUDGET_MS = 13_000L
     /** Timeout for the best-effort SubSense top-up. */
     private const val SENSE_CALL_MS = 5_000L
-    /** Maximum tracks retained per language. */
+    /** Maximum OpenSubtitles tracks retained per language. */
     internal const val MAX_PER_LANG = 3
-    /** Maximum tracks retained per language. */
+    /** Maximum SubSense tracks retained per language. */
     internal const val SENSE_MAX_PER_LANG = 5
     /** Re-watching the same episode within the TTL reuses the parsed list. */
     private const val CACHE_TTL_MS = 15 * 60 * 1000L
@@ -148,10 +148,6 @@ object SubtilesProvider {
         originalLang?.let { SubtitleServices.canonicalName(it) }?.let { wanted.add(it) }
         return wanted
     }
-
-    /** Returns requested languages not covered by stream-owned subtitles. */
-    fun missingLanguages(covered: Set<String>, desired: Set<String>): Set<String> =
-        desired - covered
 
     /** Maps canonical names to ordered addon codes, dropping unsupported names. */
     internal fun codesFromLangs(langs: Set<String>): Set<String> =
@@ -203,8 +199,11 @@ object SubtilesProvider {
     }
 
     /** Builds an addon URL for a movie or series. */
-    internal fun buildUrl(imdbId: String, season: Int?, episode: Int?, langs: Set<String>): String {
-        val codes = codesFromLangs(langs)
+    internal fun buildUrl(imdbId: String, season: Int?, episode: Int?, langs: Set<String>): String =
+        buildUrlFromCodes(imdbId, season, episode, codesFromLangs(langs))
+
+    /** Builds an addon URL from ISO-1 codes for a movie or series. */
+    private fun buildUrlFromCodes(imdbId: String, season: Int?, episode: Int?, codes: Set<String>): String {
         val langPath = if (codes.isEmpty()) "en|hi" else codes.joinToString("|")
         val idPart = if (season != null && season > 0 && episode != null && episode > 0)
             "series/$imdbId:$season:$episode" else "movie/$imdbId"
@@ -347,7 +346,7 @@ object SubtilesProvider {
     private fun CoroutineScope.launchFetch(
         imdb: String, season: Int?, episode: Int?, codes: Set<String>, deadline: Long,
     ): Deferred<List<SubTrack>> = async {
-        val url = buildUrlOf(imdb, season, episode, codes)
+        val url = buildUrlFromCodes(imdb, season, episode, codes)
         val budget = deadline - System.currentTimeMillis()
         if (budget <= 0) return@async emptyList()
         val tracks = fetchGroup(url, codes, budget)
@@ -368,15 +367,6 @@ object SubtilesProvider {
             return emptyList()
         }
         return runCatching { parseOpenSubtitles(text, codes) }.getOrDefault(emptyList())
-    }
-
-    /** Builds an addon URL. */
-    private fun buildUrlOf(imdbId: String, season: Int?, episode: Int?, codes: Set<String>): String {
-        val langPath = if (codes.isEmpty()) "en|hi" else codes.joinToString("|")
-        val idPart = if (season != null && season > 0 && episode != null && episode > 0)
-            "series/$imdbId:$season:$episode" else "movie/$imdbId"
-        val pipe: (String) -> String = { it.replace("|", "%7C") }
-        return "$BASE/" + pipe(langPath) + "/" + pipe(CONFIG) + "/subtitles/$idPart.json"
     }
 
     /** Best-effort SubSense top-up bounded by the remaining fetch window. */
