@@ -9,7 +9,7 @@
             "Indflix"
         ],
         "description": "Federated embed-server resolver keyed by TMDB/IMDB id. Races dozens of independent HLS/DASH servers, picks the fastest CDN per title, and exposes multi-language audio + per-quality links.",
-        "fileSize": 133358,
+        "fileSize": 133328,
         "repositoryUrl": "https://github.com/dipender98/Indflix",
         "language": "hi",
         "tvTypes": [
@@ -18,7 +18,7 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/dipender98/Indflix/main/IndStream/icon.png",
         "apiVersion": 1,
-        "fileHash": "sha256-5335f2bf68cfbbc1c01c73655c67fd335c1a5fc5a28958dd257fb76d400f205d"
+        "fileHash": "sha256-ecf659b9c65228793cba846d657f1a77c73c62df03c157a1c3a88e264d9edfcb"
     },
     {
         "url": "https://raw.githubusercontent.com/dipender98/Indflix/builds/Multimovies.cs3",
@@ -30,7 +30,7 @@
             "Indflix"
         ],
         "description": "CloudStream provider that scrapes Multimovies and pulls sources in parallel with a per-source timeout.",
-        "fileSize": 91386,
+        "fileSize": 91378,
         "repositoryUrl": "https://github.com/dipender98/Indflix",
         "language": "hi",
         "tvTypes": [
@@ -42,19 +42,19 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/dipender98/Indflix/main/Multimovies/icon.png",
         "apiVersion": 1,
-        "fileHash": "sha256-178b6277c4bd4684c71bfba68a363c9cc27f1411fe942c50d5ee22d150970503"
+        "fileHash": "sha256-bdf288cb987a98d4e1ab406cc0388b916c06cfc5285ced2a249a8718eaa73218"
     },
     {
         "url": "https://raw.githubusercontent.com/dipender98/Indflix/builds/Vegamovies.cs3",
         "status": 1,
-        "version": 5,
+        "version": 6,
         "name": "Vegamovies",
         "internalName": "Vegamovies",
         "authors": [
             "Indflix"
         ],
         "description": "CloudStream provider that scrapes Vegamovies (Hollywood + Bollywood) with TMDB metadata and live-fill download servers.",
-        "fileSize": 41022,
+        "fileSize": 41018,
         "repositoryUrl": "https://github.com/dipender98/Indflix",
         "language": "hi",
         "tvTypes": [
@@ -63,6 +63,6 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/dipender98/Indflix/main/Vegamovies/icon.png",
         "apiVersion": 1,
-        "fileHash": "sha256-fecee537d1b92b344c8d72ef23ba9ad32bbfe086737708324cefcc9e5f92a597"
+        "fileHash": "sha256-e46fab5d5b5c0694cbd6e87134afbba86d619fb326be2fa7ba4b6fa0b5b4a57f"
     }
 ]
