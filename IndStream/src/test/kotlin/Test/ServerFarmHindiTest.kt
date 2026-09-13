@@ -29,7 +29,6 @@ class ServerFarmHindiTest {
         // VidLink is multi-audio (Hindi + English dubs), NOT a Hindi-only host. A single declared language would blanket-bias.
 // every stream's label even when.
         assertTrue(vidlink.declaredLanguages.isEmpty(), "VidLink is multi-audio, not Hindi-only — a declared language mislabels English playback")
-        assertEquals(1080, vidlink.maxQuality)
         assertTrue(vidlink.hasSubtitles)
     }
 
@@ -94,8 +93,7 @@ class ServerFarmHindiTest {
         // TMDB-keyed: the resolver is title-keyed and never reads the IMDB id, so IMDB keying only delayed its start behind.
 // the id lookup.
         assertEquals(ServerIdType.TMDB, s.idType)
-        // DASH ladders reach 2160p; nothing downstream may clamp quality.
-        assertEquals(2160, s.maxQuality)
+        // DASH ladders reach 2160p; nothing downstream may clamp quality (no per-server cap).
         assertEquals("https://fmoviesunblocked.net/", s.referer)
         assertTrue(s.hasSubtitles)
     }
@@ -114,7 +112,6 @@ class ServerFarmHindiTest {
         val s = ServerFarm.allServers.first { it.id == "nhd" }
         assertEquals("NHD", s.name)
         assertEquals(ServerIdType.TMDB, s.idType)
-        assertEquals(1080, s.maxQuality)
         // F8 budget invariant: page 8s + extraction 10s = 18s must fit the kill.
         assertEquals(20, s.timeoutSec, "nhd farm kill must fit the resolver chain (8+10)")
         assertEquals("https://nhdapi.com/", s.referer)
@@ -133,7 +130,6 @@ class ServerFarmHindiTest {
         assertEquals(ServerIdType.TMDB, s.idType)
         assertTrue(s.declaredLanguages.isEmpty(), "default-ladder audio undeclared — never guessed")
         assertTrue(s.isJsonApi, "embed-tmdb JSON API")
-        assertEquals(1080, s.maxQuality)
         assertTrue(s.hasSubtitles, "API captions carry language (incl. Bengali/Punjabi)")
         assertEquals("https://net27.cc/", s.referer)
         // Round-3: the resolve chain is default-embed ‖ variants (12s/6s) then a dub fan-out (dub embeds in parallel, 12s) →.
@@ -187,7 +183,6 @@ class ServerFarmHindiTest {
         assertEquals("VidUp", s.name)
         assertEquals(ServerIdType.TMDB, s.idType)
         assertEquals("https://vidup.to/", s.referer)
-        assertEquals(2160, s.maxQuality, "VidUp supports 4K via Premier sub-server")
         assertTrue(s.hasSubtitles)
         val m = ServerFarm.buildMovieUrl(s, "27205")
         assertTrue(m.contains("vidup.to/movie/27205"))
@@ -201,7 +196,6 @@ class ServerFarmHindiTest {
         assertEquals("VidCore", s.name)
         assertEquals(ServerIdType.TMDB, s.idType)
         assertEquals("https://vidcore.io/", s.referer)
-        assertEquals(2160, s.maxQuality)
         assertTrue(s.hasSubtitles)
         val m = ServerFarm.buildMovieUrl(s, "27205")
         assertTrue(m.contains("vidcore.io/movie/27205"))
@@ -215,7 +209,6 @@ class ServerFarmHindiTest {
         // Multi-language host () - the declared set documents the coverage but must NOT be a single language (no blanket bias.
 // per-entry resolver labels win).
         assertEquals(setOf("Hindi", "Tamil", "Telugu", "Bengali"), s.declaredLanguages)
-        assertEquals(1080, s.maxQuality)
         // timeoutSec 30→60 (F8 budget-invariant): the documented chain ceilings - search 8s×2 hosts (IMDB pass) + 8s title.
 // fallback + card 6 + 2×(play 5 +.
         assertEquals(60, s.timeoutSec, "allmovieland farm kill must fit the resolver chain")

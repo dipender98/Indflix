@@ -30,7 +30,6 @@ class ServerAdditionsTest {
         val s = ServerFarm.allServers.first { it.id == "zxcstreams" }
         assertEquals("ZXCStreams", s.name)
         assertEquals(ServerIdType.TMDB, s.idType)
-        assertEquals(2160, s.maxQuality)
         assertEquals("https://zxcstream.xyz/player/movie/27205", ServerFarm.buildMovieUrl(s, "27205"))
         assertEquals("https://zxcstream.xyz/player/tv/1399/1/1", ServerFarm.buildTvUrl(s, "1399", 1, 1))
     }
@@ -40,7 +39,6 @@ class ServerAdditionsTest {
         val s = ServerFarm.allServers.first { it.id == "dahmermovies" }
         assertEquals("DahmerMovies", s.name)
         assertEquals(ServerIdType.TMDB, s.idType)
-        assertEquals(2160, s.maxQuality)
         assertEquals("https://a.111477.xyz/", s.referer)
     }
 

@@ -16,7 +16,7 @@ data class ServerSpec(
     /** Referer this server requires for its embed/API/stream requests. */
     val referer: String? = null,
     val hasSubtitles: Boolean = false,
-    val maxQuality: Int = 0,
+    // No quality cap: servers emit whatever ladder the upstream carries (up to 4K+).
     val timeoutSec: Int = 10,
     /** Languages this host itself declares (canonical names. INDIAN_DUB_LANGUAGES]: "Hindi", "Tamil", "Telugu", …). */
     val declaredLanguages: Set<String> = emptySet(),
@@ -34,7 +34,7 @@ object ServerFarm {
             movieUrl = "https://vidlink.pro/api/b/movie/{id}?multiLang=1",
             tvUrl = "https://vidlink.pro/api/b/tv/{id}/{season}/{episode}?multiLang=1",
             isJsonApi = true, referer = "https://vidlink.pro/",
-            hasSubtitles = true, maxQuality = 1080, timeoutSec = 15,
+            hasSubtitles = true, timeoutSec = 15,
             declaredLanguages = emptySet(),
         ),
         // VaPlayer ('s top live server, ): IMDB-keyed JSON API returning 3 direct HLS master playlists (up to 1920x800 ≈.
@@ -45,7 +45,7 @@ object ServerFarm {
             movieUrl = "https://streamdata.vaplayer.ru/api.php?imdb={id}&type=movie",
             tvUrl = "https://streamdata.vaplayer.ru/api.php?imdb={id}&type=tv&season={season}&episode={episode}",
             isJsonApi = true, referer = "https://nextgencloudfabric.com/",
-            hasSubtitles = true, maxQuality = 1080, timeoutSec = 12,
+            hasSubtitles = true, timeoutSec = 12,
         ),
         // VidRock (registry, ): TMDB-keyed JSON API with per-server map (Nova/Atlas/Luna/Orion/Astra). URLs are AES-GCM.
 // encrypted - decrypted locally in.
@@ -55,7 +55,7 @@ object ServerFarm {
             movieUrl = "https://vidrock.ru/api/movie/{id}/",
             tvUrl = "https://vidrock.ru/api/tv/{id}/{season}/{episode}/",
             isJsonApi = true, referer = "https://vidrock.ru/",
-            hasSubtitles = false, maxQuality = 1080, timeoutSec = 12,
+            hasSubtitles = false, timeoutSec = 12,
         ),
         // VidEm (2embed. cc's real player, reversed): IMDB-keyed. Embed page carries a signed `Q` object with per-server refs.
 // each ref exchanges at api.
@@ -66,7 +66,7 @@ object ServerFarm {
             tvUrl = "https://api.speedracelight.com/hdmovie/sources-with-title?tmdbId={id}",
             isJsonApi = true, referer = "https://player.videasy.net/",
             // 4 parallel routes (hdmovie/cdn/lamovie/meine): seed 6s + slowest route 10s.
-            hasSubtitles = false, maxQuality = 1080, timeoutSec = 20,
+            hasSubtitles = false, timeoutSec = 20,
             declaredLanguages = setOf("Hindi"),
         ),
         // MyFlixer Hindi (hindi. myflixerapi. com): IMDB-keyed with the id in the path (/embed/tt. . . ). Whole host is Hindi.
@@ -79,7 +79,7 @@ object ServerFarm {
             isJsonApi = true, referer = "https://fmoviesunblocked.net/",
             // timeoutSec 30→40 (user report: MovieBox absent while the reference plugin works on the SAME device/network - sends.
 // no per-request timeout, so.
-            hasSubtitles = true, maxQuality = 2160, timeoutSec = 55,
+            hasSubtitles = true, timeoutSec = 55,
         ),
         // PrimeSrc (primesrc. me, ): IMDB-keyed JSON API. GET /api/v1/s?imdb={id}&type=movie|tv returns servers ({name, key.
 // file_name, audio_language.
@@ -89,7 +89,7 @@ object ServerFarm {
             movieUrl = "https://new.vidnest.fun/{server}/movie/{id}",
             tvUrl = "https://new.vidnest.fun/{server}/tv/{id}/{season}/{episode}",
             isJsonApi = true, referer = "https://vidnest.fun/",
-            hasSubtitles = false, maxQuality = 1080, timeoutSec = 20,
+            hasSubtitles = false, timeoutSec = 20,
         ),
         // Vidup (vidup. to, ): TMDB-keyed (accepts IMDB too via the URL path). 4-step enc-dec. app pipeline: 1) page → "en".
 // "token" → enc-dec.
@@ -99,7 +99,7 @@ object ServerFarm {
             movieUrl = "https://vidup.to/movie/{id}",
             tvUrl = "https://vidup.to/tv/{id}/{season}/{episode}",
             referer = "https://vidup.to/",
-            hasSubtitles = true, maxQuality = 2160, timeoutSec = 20,
+            hasSubtitles = true, timeoutSec = 20,
         ),
         // Vidcore (vidcore. io, ): twin of Vidup - same enc-dec. app pipeline (enc-vidcore/dec-vidcore), same moon. peakstorm.
 // top HLS backend, same.
@@ -109,7 +109,7 @@ object ServerFarm {
             movieUrl = "https://vidcore.io/movie/{id}",
             tvUrl = "https://vidcore.io/tv/{id}/{season}/{episode}",
             referer = "https://vidcore.io/",
-            hasSubtitles = true, maxQuality = 2160, timeoutSec = 20,
+            hasSubtitles = true, timeoutSec = 20,
         ),
         // Allmovieland (allmovieland. art, ): DLE CMS with per-language HLS playlists - Hindi, Bengali, Tamil, Telugu.
 // Pipeline: IMDB-keyed search → find.
@@ -119,7 +119,7 @@ object ServerFarm {
             movieUrl = "https://allmovieland.art/?do=search&subaction=search&story={id}",
             tvUrl = "https://allmovieland.art/?do=search&subaction=search&story={id}",
             referer = "https://allmovieland.art/",
-            hasSubtitles = false, maxQuality = 1080, timeoutSec = 60,
+            hasSubtitles = false, timeoutSec = 60,
             declaredLanguages = setOf("Hindi", "Tamil", "Telugu", "Bengali"),
         ),
         // MP4Hydra (mp4hydra. org): title-slug keyed multipart POST to /info2 returns per-quality HLS sources across Beta.
@@ -130,7 +130,7 @@ object ServerFarm {
             movieUrl = "https://nhdapi.com/movie/{id}",
             tvUrl = "https://nhdapi.com/tv/{id}/{season}/{episode}",
             referer = "https://nhdapi.com/",
-            hasSubtitles = true, maxQuality = 1080, timeoutSec = 20,
+            hasSubtitles = true, timeoutSec = 20,
         ),
         // (net27. cc - Netflix-grade OTT, ): TMDB-keyed JSON API. Default GET /api/embed-tmdb/{tmdb} → {ok, streams: } =.
 // Netflix-ladder MP4 360→1080p.
@@ -140,7 +140,7 @@ object ServerFarm {
             movieUrl = "https://net27.cc/api/embed-tmdb/{id}",
             tvUrl = "https://net27.cc/api/embed-tmdb/{id}?type=tv&se={season}&ep={episode}",
             isJsonApi = true, referer = "https://net27.cc/",
-            hasSubtitles = true, maxQuality = 1080, timeoutSec = 50,
+            hasSubtitles = true, timeoutSec = 50,
             declaredLanguages = emptySet(),
         ),
         // VixSrc (vixsrc.to, verified live Sept 2026): TMDB-keyed JSON API.
@@ -152,7 +152,7 @@ object ServerFarm {
             movieUrl = "https://vixsrc.to/api/movie/{id}",
             tvUrl = "https://vixsrc.to/api/tv/{id}/{season}/{episode}",
             isJsonApi = true, referer = "https://vixsrc.to/",
-            hasSubtitles = true, maxQuality = 1080, timeoutSec = 30,
+            hasSubtitles = true, timeoutSec = 30,
         ),
         // ZXCStreams (portal-discovered backend, verified live Sept 2026): TMDB-keyed.
         // Portal (zxcstream.xyz/zxcprime.xyz) redirect -> base; sha512 token POST.
@@ -164,7 +164,7 @@ object ServerFarm {
             tvUrl = "https://zxcstream.xyz/player/tv/{id}/{season}/{episode}",
             referer = "https://zxcstream.xyz/",
             // Discovery + token + 4 servers + master-measure pass.
-            hasSubtitles = false, maxQuality = 2160, timeoutSec = 30,
+            hasSubtitles = false, timeoutSec = 30,
         ),
         // DahmerMovies (title-keyed file index + worker proxy, verified live Sept 2026).
         // Directory listing per title carries 4K REMUX + Hindi/Tamil/Telugu dubs.
@@ -174,7 +174,7 @@ object ServerFarm {
             movieUrl = "https://a.111477.xyz/movies/",
             tvUrl = "https://a.111477.xyz/tvs/",
             referer = "https://a.111477.xyz/",
-            hasSubtitles = false, maxQuality = 2160, timeoutSec = 25,
+            hasSubtitles = false, timeoutSec = 25,
         ),
         // VidAPI (vaplayer.ru embed, page live Sept 2026): TMDB-keyed embed page.
         // Generic pipeline (unwrap/harvest/extractor registry), no custom crypto.
@@ -184,7 +184,7 @@ object ServerFarm {
             movieUrl = "https://vaplayer.ru/embed/movie/{id}",
             tvUrl = "https://vaplayer.ru/embed/tv/{id}/{season}/{episode}",
             referer = "https://vaplayer.ru/",
-            hasSubtitles = true, maxQuality = 1080, timeoutSec = 15,
+            hasSubtitles = true, timeoutSec = 15,
         ),
         // 2Embed (embed page, servers Vsrc/Videm/Vcr live Sept 2026): IMDB-keyed.
         // Generic pipeline handles the iframe chain.
@@ -194,7 +194,7 @@ object ServerFarm {
             movieUrl = "https://2embed.cc/embed/{id}",
             tvUrl = "https://2embed.cc/embedtv/{id}&s={season}&e={episode}",
             referer = "https://2embed.cc/",
-            hasSubtitles = true, maxQuality = 1080, timeoutSec = 15,
+            hasSubtitles = true, timeoutSec = 15,
         ),
     )
 
