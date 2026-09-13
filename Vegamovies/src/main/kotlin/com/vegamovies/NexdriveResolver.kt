@@ -4,11 +4,7 @@ import com.lagradost.cloudstream3.app
 import java.net.URLDecoder
 import java.util.concurrent.ConcurrentHashMap
 
-/** Expands nexdrive gateways and resolves fastdl embeds. */
-
-
-
-/** Concrete link, server family, and family-relative index. */
+/** Expands nexdrive gateways and resolves fastdl embeds. Concrete link, server family, and family-relative index. */
 internal data class Concrete(val kind: String, val url: String, val idx: Int)
 
 /** Parsed gateway content. */
@@ -72,9 +68,8 @@ internal object NexdriveResolver {
         val title = Regex("""<h1[^>]*>([^<]{1,260})""", RegexOption.IGNORE_CASE)
             .find(html)?.groupValues?.get(1)?.trim()
 
-        // Classify by host, not by the title tag: a movie gate carries BOTH a
-        // fastdl embed and a vcloud page (users want every server of the page).
-        // idx = position WITHIN THE FAMILY — episode ordinal for per-episode gates.
+        // Classify by host, not by the title tag: a movie gate carries BOTH a fastdl embed and a vcloud page (users want every.
+// server of the page). idx =.
         val links = ArrayList<Concrete>(16)
         FASTDL_REGEX.findAll(html).forEachIndexed { i, m -> links += Concrete(Servers.GDRIVE, m.value, i) }
         VCLOUD_REGEX.findAll(html).forEachIndexed { i, m -> links += Concrete(Servers.VCLOUD, m.value, i) }
@@ -106,9 +101,9 @@ internal object NexdriveResolver {
         return direct
     }
 
-    /** Extracts a direct media URL from gateway HTML. */
+    /** Extracts a direct media URL. */
     internal fun extractDirect(body: String): String? {
-        // 1. Plain reurl: "https://fastdl.tld/dl.php?link=https://video-downloads.googleusercontent.com/..."
+        // 1. Plain reurl: ".
         REURL_REGEX.find(body)?.groupValues?.get(1)?.let { cand ->
             DIRECT_REGEX.find(cand)?.value?.let { return it }
         }

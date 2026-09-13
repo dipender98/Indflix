@@ -5,10 +5,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
-/**
- * Guards the TMDB multi-search parser: movie/tv filtering, junk duplicate
- * collapsing by (title, year), and highest-rated-entry retention.
- */
+/** Guards the TMDB multi-search parser: movie/tv filtering, junk duplicate collapsing by (title, year), and. highest-rated-entry retention. */
 class TmdbSearchDedupTest {
 
     private fun resultJson(
@@ -21,9 +18,7 @@ class TmdbSearchDedupTest {
 
     @Test
     fun multiSearch_collapsesSameTitleAndYear() {
-        // Mirrors TMDB's real response for "breaking bad": the genuine series
-        // (tv/1396) plus a junk movie duplicate (movie/1762067) of the same
-        // title and year.
+        // ) plus a junk movie duplicate (movie/1762067) of the same title and year.
         val json = """
             {"results":[
               ${resultJson(1396, "tv", "Breaking Bad", "2008-01-20", 8.951)},

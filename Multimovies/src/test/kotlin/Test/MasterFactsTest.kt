@@ -7,19 +7,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-/**
- * FILE: MasterFactsTest.kt — guards the probed server-name labeling
- * (user spec: language + resolution ON the server name, derived from
- * probing/parsing the stream — NEVER guessed):
- *
- *  - [MultiSourcePuller.parseMasterFacts] reads REAL master playlists:
- *    tallest variant height (RESOLUTION=WxH) + #EXT-X-MEDIA audio languages
- *    (LANGUAGE/NAME/DEFAULT), pure JVM.
- *  - [MultiSourcePuller.qualityLabel] maps heights to display tokens.
- *  - [MultiSourcePuller.declaredHindi] accepts only host declarations
- *    (brand/URL tokens); a stream with no declaration is NOT Hindi.
- *  - [MultiSourcePuller.resolutionFromUrl] reads declared heights only.
- */
+/** FILE: MasterFactsTest. kt - guards the, derived): - reads REAL master playlists: tallest variant height. (RESOLUTION=WxH) + #EXT-X-MEDIA audio. */
 class MasterFactsTest {
 
     private val master = """

@@ -8,30 +8,13 @@ import com.indstream.ServerIdType
 import com.indstream.ServerSpec
 import com.indstream.VidlinkSource
 import com.indstream.VideasySource
-/**
-
- * FILE: VidLinkTest.kt â€” guards VidLinkSource.kt (delete-safe rename-proof
- * tests named after what they test).
- *
- *  - NaCl secretbox correctness against the official libsodium test vector.
- *  - XSalsa20/Poly1305 round-trip integrity.
- *  - VidLink token encoding: base64url without padding, deterministic per
- *    (id, timestamp), timestamp-sensitive.
- */
+/** FILE: VidLinkTest. kt â€” guards VidLinkSource. kt (delete-safe rename-proof tests named after what they test). NaCl secretbox correctness. */
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
-/**
- * Cryptographic correctness tests for [NaCl] (XSalsa20-Poly1305 secretbox)
- * and [VidlinkSource] token encoding.
- *
- * Vectors:
- *  - Secretbox Test Vector #1 from the official NaCl documentation
- *    (https://nacl.cr.yp.to/secretbox.html) — key/nonce/message -> boxed bytes.
- *  - HSalsa20 test vector from the NaCl / XSalsa20 paper.
- */
+/** Cryptographic correctness tests for (XSalsa20-Poly1305 secretbox) and token encoding. Vectors: - Secretbox Test. Vector #1. - HSalsa20 test vector. */
 class VidlinkTest {
 
     private fun hex(b: ByteArray): String = b.joinToString("") { "%02x".format(it) }
@@ -40,8 +23,7 @@ class VidlinkTest {
 
     @Test
     fun secretbox_naclTestVector1() {
-        // Secretbox Test Vector #1 from libsodium's test/default/secretbox.c:
-        // 131-byte message -> 147-byte boxed output (16 MAC + 131 ciphertext).
+        // Secretbox Test Vector #1. c: 131-byte message -> 147-byte boxed output (16 MAC + 131 ciphertext).
         val key = unhex(
             "1b27556473e985d462cd51197a9a46c76009549eac6474f206c4ee0844f68389"
         )
@@ -93,8 +75,7 @@ class VidlinkTest {
     @Test
     fun vidlinkToken_isBase64UrlNoPadding() {
         val token = VidlinkSource.token("603", 1_700_000_000L)
-        // payload = 24 nonce + (16 MAC + 11-byte message) = 51 bytes
-        // -> base64url = ceil(51/3)*4 = 68 chars, no '=' padding.
+        // payload = 24 nonce + (16 MAC + 11-byte message) = 51 bytes -> base64url = ceil(51/3)*4 = 68 chars, no '=' padding.
         assertEquals(68, token.length, "unexpected token length: $token")
         assertTrue(token.none { it == '+' || it == '/' || it == '=' }, "token not base64url: $token")
     }
@@ -110,18 +91,15 @@ class VidlinkTest {
 
     @Test
     fun vidlinkPlayerHeaders_useNativePlayerAgent() {
-        // The bcdn.hakunaymatata.com CDN User-Agent-fingerprints requests:
-        // browser UAs get 428, a native player UA gets 206. Playback
-        // headers therefore must override the UA with a non-browser value.
+        // The bcdn. hakunaymatata. com CDN User-Agent-fingerprints requests: browser UAs get 428, a native player UA gets 206.
+// Playback headers therefore.
         val ua = VidlinkSource.PLAYER_HEADERS["User-Agent"]
         assertEquals("ExoPlayer", ua, "vidlink playback must use a native player UA")
     }
 
     @Test
     fun vidlinkPlayerHeaders_baseHasNoReferer() {
-        // Live-probed Sept 2026: the mwVault CDN 429s ANY request that
-        // carries a Referer header (even an empty one). The base playback
-        // headers must therefore never include Referer/Origin.
+        // Live-). The base playback headers must therefore never include Referer/Origin.
         assertTrue(!VidlinkSource.PLAYER_HEADERS.containsKey("Referer"),
             "mwVault CDN 429s on Referer; base headers must not carry one")
         assertTrue(!VidlinkSource.PLAYER_HEADERS.containsKey("Origin"),
@@ -130,8 +108,7 @@ class VidlinkTest {
 
     @Test
     fun vidlinkQualityHeaders_emptyApiHeaders_yieldsUaOnly() {
-        // mwVault shape: headers:{} — the CDN serves the MP4 to a bare
-        // ExoPlayer UA (verified 206) and rejects anything with a Referer.
+        // mwVault shape: headers: {} - the CDN serves the MP4 to a bare ExoPlayer UA () and rejects anything with a Referer.
         val q = org.json.JSONObject("""{"type":"mp4","url":"https://bcdn.hakunaymatata.com/x.mp4","headers":{},"requiresProxy":true}""")
         val h = VidlinkSource.qualityPlaybackHeaders(q)
         assertEquals(mapOf("User-Agent" to "ExoPlayer"), h,
@@ -140,8 +117,7 @@ class VidlinkTest {
 
     @Test
     fun vidlinkQualityHeaders_mergeApiProvided() {
-        // mbVault shape: per-quality headers carry the exact referer/origin
-        // the CDN requires (verified 206 with these values).
+        // mbVault shape: per-quality headers carry the exact referer/origin the CDN requires ().
         val q = org.json.JSONObject(
             """{"type":"mp4","url":"https://bcdnxw.hakunaymatata.com/x.mp4",
                "headers":{"referer":"https://filmboom.top/","origin":"https://filmboom.top"},

@@ -1,5 +1,5 @@
 package com.vegamovies
-/** Vegamovies CloudStream provider and link resolver. */
+/** CloudStream provider and link resolver. */
 
 import android.content.Context
 import com.lagradost.cloudstream3.*
@@ -18,7 +18,7 @@ import org.json.JSONObject
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
-/** Registers the Vegamovies provider with CloudStream. */
+/** Registers the provider with CloudStream. */
 @CloudstreamPlugin
 class Vegamovies : Plugin() {
     override fun load(context: Context) {
@@ -32,12 +32,12 @@ internal data class DlLink(val gatewayUrl: String, val chip: String, val heading
 /** One payload entry handed to loadLinks(): concrete file URL or (gateway, idx). */
 internal data class PayloadLink(
     val url: String,
-    /** Server family when known at scrape time (from chip), else "". */
+    /** Server family when known at scrape time (), else "". */
     val kind: String = "",
     val heading: String = "",
     /** Index into the gateway's ordered concrete links (series episodes). */
     val idx: Int = 0,
-    /** True = [url] is a genxfm gateway that must be expanded. */
+    /** True = is a genxfm gateway that must be expanded. */
     val isGateway: Boolean = true,
     val season: Int? = null,
     val episode: Int? = null,
@@ -78,19 +78,18 @@ internal data class LinkPayload(val pageUrl: String, val links: List<PayloadLink
     }
 }
 
-/** Vegamovies provider with live link resolution. */
+/** provider with live link resolution. */
 class VegamoviesProvider : MainAPI() {
 
     companion object {
         const val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
             "(KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
 
-        /** Seed domains — self-healed at runtime by [DomainResolver]. */
+        /** Seed domains - self-healed at runtime by. */
         const val SEED_VEGA = "https://new2.vegamovies.futbol"
         const val SEED_ROG = "https://new2.rogmovies.click"
 
-        /** Live change-server window (user: server list must keep growing in
-         *  the background while the video plays). */
+        /** Maximum time for background link resolution. */
         const val LIVE_FILL_MS = 90_000L
 
         const val SEARCH_MAX_RESULTS = 10
@@ -142,15 +141,13 @@ class VegamoviesProvider : MainAPI() {
             Pair("$mainUrl/korean-series/", "K-Drama"),
         )
 
-    // ------------------------------------------------------------------ HTTP helpers.
-
-    /** True when [doc] is a Cloudflare interstitial. */
+    // HTTP helpers. True when is a Cloudflare interstitial.
     internal fun isChallenge(doc: Document): Boolean {
         val t = doc.title()
         return t.contains("just a moment", true) || t.contains("checking your browser", true)
     }
 
-    /** Fetch [url]: plain fast path, CloudflareKiller solve on challenge. */
+    /** Fetch: plain fast path, CloudflareKiller solve on challenge. */
     suspend fun fetchDoc(
         url: String,
         timeoutSeconds: Long = 12,
@@ -160,7 +157,7 @@ class VegamoviesProvider : MainAPI() {
             val doc = app.get(url, timeout = timeoutSeconds, headers = headers).document
             if (!isChallenge(doc)) return doc
         } catch (e: Exception) {
-            // fall through to the challenge-solve path
+            // fall through to the challenge-solve path.
         }
         return try {
             val killer = cfKiller ?: CloudflareKiller().also { cfKiller = it }
@@ -171,9 +168,7 @@ class VegamoviesProvider : MainAPI() {
         }
     }
 
-    // ------------------------------------------------------------------ Domain self-healing.
-
-    /** Live Hollywood + Bollywood domains via the posts' own cross-links. */
+    // Domain self-healing. Live Hollywood + Bollywood domains via the posts' own cross-links.
     suspend fun refreshDomains() = coroutineScope {
         val a = async { fetchDoc(SEED_VEGA, timeoutSeconds = 8) }
         val b = async { fetchDoc(SEED_ROG, timeoutSeconds = 8) }
@@ -184,8 +179,7 @@ class VegamoviesProvider : MainAPI() {
     }
 
     internal object DomainResolver {
-        /** The most common vegamovies / rogmovies family href on the page
-         *  (the live mirror; each site always announces the other). */
+        /** The most common / rogmovies family href on the page (the live; each site always announces the other). */
         fun pick(doc: Document, family: String): String? =
             doc.select("a[href]")
                 .mapNotNull {
@@ -199,7 +193,7 @@ class VegamoviesProvider : MainAPI() {
                 ?.key
     }
 
-    // ------------------------------------------------------------------ Search — Meilisearch JSON proxy on both sites.
+    // Search - Meilisearch JSON proxy on both sites.
 
     override suspend fun search(query: String): List<SearchResponse>? = coroutineScope {
         if (query.isBlank()) return@coroutineScope null
@@ -219,7 +213,7 @@ class VegamoviesProvider : MainAPI() {
 
     override suspend fun quickSearch(query: String): List<SearchResponse>? = search(query)
 
-    /** Calls {site}/ts-search.php; pure JSON mapping in [parseSearchHits]. */
+    /** Calls {site}/ts-search. php; pure JSON mapping in. */
     internal suspend fun siteSearch(baseUrl: String, query: String): List<SearchResponse> {
         val url = "$baseUrl/ts-search.php?q=${URLEncoder.encode(query.trim(), "UTF-8")}&page=1"
         val text = runCatching {
@@ -228,7 +222,7 @@ class VegamoviesProvider : MainAPI() {
         return parseSearchHits(text, baseUrl)
     }
 
-    /** Pure: map a ts-search.php JSON response into SearchResponses. */
+    /** Pure: map a ts-search. php JSON response into SearchResponses. */
     internal fun parseSearchHits(json: String, baseUrl: String): List<SearchResponse> {
         val root = runCatching { JSONObject(json) }.getOrNull() ?: return emptyList()
         val hits = root.optJSONArray("hits") ?: return emptyList()
@@ -256,10 +250,10 @@ class VegamoviesProvider : MainAPI() {
         }
     }
 
-    /** Clean "Download X (2019) Dual Audio … 480p [500MB] | 720p …" to "X (2019)". */
+    /** Clean "Download X (2019) Dual Audio … 480p | 720p …" to "X (2019)". */
     internal fun cleanSearchTitle(raw: String): String {
         var t = raw.trim().removePrefix("Download").trim()
-        // Keep through the year parenthesis when present — anything after it is quality/source noise and gets dropped wholesale.
+        // Keep through the year parenthesis when present - anything after it is quality/source noise and gets dropped wholesale.
         val until = Regex("""(.*?\(\d{4}[^)]*\))""").find(t)
         if (until != null) {
             return until.groupValues[1].trim().trimEnd(' ', '-', '|', ':', ',')
@@ -299,7 +293,7 @@ class VegamoviesProvider : MainAPI() {
         }
     }
 
-    // ------------------------------------------------------------------ Main page — server-rendered poster-card grids.
+    // Main page - server-rendered poster-card grids.
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         val base = request.data
@@ -315,7 +309,7 @@ class VegamoviesProvider : MainAPI() {
         return newHomePageResponse(request.name, items)
     }
 
-    /** Pure: scrape poster-cards from a listing page. */
+    /** Pure: scrape poster-cards. */
     internal fun parseListing(doc: Document): List<SearchResponse> {
         return doc.select("div.poster-card").mapNotNull { card ->
             cardToSearch(card)
@@ -350,7 +344,7 @@ class VegamoviesProvider : MainAPI() {
         }
     }
 
-    // ------------------------------------------------------------------ Load — detail page, sections, gateway expansion.
+    // Load - detail page, sections, gateway expansion.
 
     override suspend fun load(url: String): LoadResponse? {
         val doc = fetchDoc(url) ?: run {
@@ -420,7 +414,7 @@ class VegamoviesProvider : MainAPI() {
                     val t = el.text().trim()
                     if (t.isNotBlank() && t.length < 220) {
                         if (anchors.isNotEmpty()) closeGroup()
-                        // Download-group-shaped headings take links; everything else (Info:, Screenshots:, comments, sidebar) turns labelling.
+                        // Download-group-shaped headings take links; everything else (Info: , Screenshots: , comments, sidebar) turns labelling.
                         heading = if (DOWNLOAD_HEADING.containsMatchIn(t)) t else ""
                     }
                 }
@@ -456,16 +450,8 @@ class VegamoviesProvider : MainAPI() {
                                 exp.links.isEmpty() -> listOf(
                                     PayloadLink(dl.gatewayUrl, chipKind.ifBlank { Servers.GATE }, g.heading, 0, true),
                                 )
-                                // Concrete links are classified by HOST, never
-                                // by chip: the G-Direct and V-Cloud chips of
-                                // one quality group often open the SAME
-                                // gateway whose body interleaves both
-                                // families; chip-based labels then marked
-                                // vcloud URLs "G-Drive" (and vice versa),
-                                // breaking per-server resolution. Only a
-                                // Batch/Zip chip forces ZIP — its files ARE
-                                // the season archive. idx = ordinal within
-                                // the link's own host family (== episode).
+                                // Concrete links are classified by HOST, never by chip: the G-Direct and V-Cloud chips of one quality group often open.
+// the SAME gateway whose body.
                                 else -> exp.links.map { c ->
                                     PayloadLink(
                                         c.url,
@@ -474,7 +460,7 @@ class VegamoviesProvider : MainAPI() {
                                     )
                                 }
                             }
-                        }.distinctBy { it.url } // two chips may share one gateway
+                        }.distinctBy { it.url } // two chips may share one gateway.
                         g to concrete
                     } finally { sem.release() }
                 }
@@ -591,7 +577,7 @@ class VegamoviesProvider : MainAPI() {
         }
     }
 
-    // ------------------------------------------------------------------ loadLinks — resolve embeds, live-fill, honest.
+    // loadLinks - resolve embeds, live-fill, honest.
 
     override suspend fun loadLinks(
         data: String,
@@ -604,14 +590,7 @@ class VegamoviesProvider : MainAPI() {
         val referer = payload.pageUrl.ifBlank { mainUrl }
         var emitted = false
 
-        // Two-wave emit so the PROVEN-seekable source always registers before
-        // the range-hostile one. CloudStream auto-plays the first
-        // highest-quality link; G-Drive's googleusercontent file IGNORES Range
-        // (probe: 200, no content-range) → ExoPlayer can't buffer/seek →
-        // "not streaming", while V-Cloud's FSL/R2 file answers 206. Because
-        // both resolve in parallel, arrival order was a coin-flip; running the
-        // V-Cloud tier first (and highest quality within it) makes R2 win the
-        // tie, with G-Drive kept as a listed fallback.
+        // Wave order: seekable V-Cloud first, G-Drive/ZIP (download-only) last.
         val waves = payload.links
             .groupBy {
                 when (it.kind) {
@@ -621,16 +600,13 @@ class VegamoviesProvider : MainAPI() {
                     else -> 2
                 }
             }.toSortedMap().values
-            // Within a wave: the best picture registers first — CloudStream
-            // auto-plays the highest quality it saw so far (ties = first in).
             .map { wave -> wave.sortedByDescending { LinkNaming.qualityInt(it.heading) } }
 
         withTimeoutOrNull(LIVE_FILL_MS) {
             coroutineScope {
                 val sem = Semaphore(6)
                 waves.forEach { wave ->
-                    // awaitAll inside each wave — the previous wave's callbacks
-                    // are ALL registered before the next one launches.
+                    // Each wave fully registers before the next launches.
                     wave.map { pl ->
                         async {
                             sem.acquire()
@@ -649,11 +625,10 @@ class VegamoviesProvider : MainAPI() {
         return emitted
     }
 
-    /** Resolve one payload link into 0..n ExtractorLinks. */
+    /** Resolve one payload link into 0. . n ExtractorLinks. */
     private suspend fun buildLinks(pl: PayloadLink, referer: String): List<ExtractorLink> {
         val kind = pl.kind.ifBlank { Servers.kindOf(pl.url) }
-        // Gateway stored unexpanded (rare — only when expansion failed at load
-        // time): re-expand now and pick the episode index.
+        // Gateway stored unexpanded (rare - only when expansion failed at load time): re-expand now and pick the episode index.
         val concrete: String
         val concreteKind: String
         if (pl.isGateway || GENXFM_REGEX.containsMatchIn(pl.url)) {
@@ -674,15 +649,12 @@ class VegamoviesProvider : MainAPI() {
 
         return when (concreteKind) {
             Servers.GDRIVE -> {
-                // embed page -> googleusercontent direct (1 fast hop), or self as browser link.
+                // G-Drive ignores Range -> not streamable: Downloadable-only rows (user spec).
                 val direct = NexdriveResolver.resolveEmbed(concrete, referer, commonHeaders)
-                if (direct != null) return listOf(extractor(direct, Servers.GDRIVE, pl, browserOnly = false))
-                listOf(extractor(concrete, Servers.GDRIVE, pl, browserOnly = true))
+                listOf(extractor(direct ?: concrete, Servers.GDRIVE, pl, browserOnly = true))
             }
             Servers.VCLOUD -> {
-                // CSX-grade chain: vcloud.fit -> atob(atob) token page ->
-                // FSLv2/FSL R2 files (206-seekable in-app streams). Browser
-                // page only when the chain yields nothing.
+                // V-Cloud R2 files answer 206: the in-app stream source. Browser page as fallback.
                 val fs = runCatching { VcloudResolver.resolve(concrete, referer, commonHeaders) }
                     .getOrDefault(emptyList())
                 if (fs.isEmpty()) listOf(extractor(concrete, Servers.VCLOUD, pl, browserOnly = true))
@@ -690,17 +662,16 @@ class VegamoviesProvider : MainAPI() {
             }
             Servers.ZIP -> listOf(extractor(concrete, concreteKind, pl, browserOnly = true))
             else -> {
-                val direct = runCatching {
-                    if (concrete.contains("fastdl")) NexdriveResolver.resolveEmbed(concrete, referer, commonHeaders) else null
-                }.getOrNull()
-                if (direct != null) return listOf(extractor(direct, Servers.GDRIVE, pl, browserOnly = false))
                 val v = runCatching {
                     if (concrete.contains("vcloud")) VcloudResolver.resolve(concrete, referer, commonHeaders) else emptyList()
                 }.getOrDefault(emptyList())
                 if (v.isNotEmpty()) {
                     return v.map { extractor(it.url, Servers.VCLOUD, pl, browserOnly = false, serverTag = it.tag) }
                 }
-                listOf(extractor(concrete, concreteKind, pl, browserOnly = true))
+                val direct = runCatching {
+                    if (concrete.contains("fastdl")) NexdriveResolver.resolveEmbed(concrete, referer, commonHeaders) else null
+                }.getOrNull()
+                listOf(extractor(direct ?: concrete, concreteKind, pl, browserOnly = true))
             }
         }
     }
@@ -714,10 +685,7 @@ class VegamoviesProvider : MainAPI() {
             name = LinkNaming.displayName(raw),
             url = url,
             referer = if (kind == Servers.GDRIVE && !browserOnly) "https://fastdl.zip/" else pl.pageReferer(),
-            // Real resolution from the heading (stock getQualityFromName is
-            // blind to these WordPress headings and returns Unknown=400 —
-            // tying every row). Download-only rows stay 0 so auto-play
-            // never picks them.
+            // Real resolution). Download-only rows stay 0 so auto-play never picks them.
             quality = if (browserOnly) 0 else LinkNaming.qualityInt(pl.heading),
             headers = commonHeaders + mapOf("Referer" to (if (kind == Servers.GDRIVE && !browserOnly) "https://fastdl.zip/" else "https://new2.vegamovies.futbol/")),
             extractorData = null,

@@ -1,18 +1,5 @@
 ﻿package com.indstream
-/**
-
- * FILE: CoreServices.kt â€” shared IndStream primitives.
- *
- *  - [HttpKit]       shared HTTP helpers (speed probing, common headers).
- *  - [TmdbService]   TMDB search / metadata / season data.
- *  - [ManifestKit]   HLS master-playlist parsing: variants, audio
- *                    renditions, Hindi / dual-audio priority.
- *  - [TitleMatch]    fuzzy title matching (normalize, levenshtein, year
- *                    tolerance) used to verify search results.
- *
- * The resolution orchestration lives in StreamEngine.kt; the VidLink
- * source lives in VidLinkSource.kt.
- */
+/** FILE: CoreServices. kt â€” shared primitives. - shared HTTP helpers (speed probing, common headers). - TMDB search /. metadata / season data. - HLS. */
 
 import com.lagradost.cloudstream3.Actor
 import com.lagradost.cloudstream3.ActorData
@@ -37,11 +24,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.jsoup.nodes.Document
 
-/**
- * Lean HTTP helpers for the IndStream module.
- * Shares the CloudStream app client (with its cookie jar) but keeps
- * IndStream-specific timeouts and header logic in one place.
- */
+/** Lean HTTP helpers for the module. Shares the CloudStream app client (with its cookie jar) but keeps -specific. timeouts and header logic in one place. */
 object HttpKit {
 
     const val DEFAULT_TIMEOUT = 12L
@@ -105,19 +88,13 @@ object HttpKit {
                 val elapsed = System.currentTimeMillis() - start
                 if (elapsed < 1) return@runCatching null
                 val bytes = resp.text.length.coerceAtLeast(1)
-                // throughput in KB/s
+                // throughput in KB/s.
                 (bytes * 1000L) / (elapsed * 1024L)
             }.getOrNull()
         }
     }
 
-    /**
-     * Cheap liveness check for REPLAYED (possibly stale/expired) stream URLs:
-     * one tiny ranged request. Returns TRUE (alive — 2xx/3xx/416), FALSE (dead —
-     * explicit 4xx/5xx, e.g. an expired `?sign=` URL rejecting with 403) and
-     * null (UNKNOWN — any timeout/exception): callers must only drop links on
-     * an explicit FALSE so a slow-but-live CDN is never mistaken for a dead one.
-     */
+    /** Cheap liveness check for REPLAYED (possibly stale/expired) stream URLs: one tiny ranged request. Returns TRUE (alive. 2xx/3xx/416), FALSE (dead. */
     suspend fun aliveCheck(
         url: String,
         referer: String? = null,
@@ -136,14 +113,7 @@ object HttpKit {
         }.getOrNull()
     }
 
-    /**
-     * Measure the REAL pixel height of a direct (non-HLS) media file by parsing its
-     * ISO-BMFF (MP4/MOV) container. Fetches the `moov` box — front for faststart,
-     * tail otherwise — and reads the first video `tkhd` width/height. Returns 0 when
-     * the height can't be determined, so callers fall back to a server token or "Auto"
-     * rather than claiming a guessed resolution (the old 1080p-hardcode bug).
-     * HLS masters are measured elsewhere via the master playlist; they return 0 here.
-     */
+    /** Measure the REAL pixel height of a direct (non-HLS) media file by parsing its ISO-BMFF (MP4/MOV) container. Fetches. the `moov` box - front for. */
     suspend fun resolveHeight(
         url: String,
         referer: String? = null,
@@ -199,7 +169,7 @@ object HttpKit {
         return null
     }
 
-    /** First non-zero video track height from a moov box (16.16 fixed point). */
+    /** First non-zero video track height. 16 fixed point). */
     private fun heightFromMoov(moov: ByteArray): Int {
         fun walk(start: Int, end: Int): Int {
             var i = start
@@ -221,7 +191,7 @@ object HttpKit {
         return walk(0, moov.size)
     }
 
-    /** Height (px) from a tkhd box: version 0 → +84, version 1 → +96; top 16 bits of a 16.16 value. */
+    /** Height (px), version 1 → +96; top 16 bits of a 16. 16 value. */
     private fun parseTkhdHeight(b: ByteArray, off: Int, size: Int): Int {
         if (size < 12) return 0
         val version = b[off + 8].toInt() and 0xFF
@@ -237,10 +207,7 @@ object HttpKit {
             ((b[off + 2].toInt() and 0xFF) shl 8) or (b[off + 3].toInt() and 0xFF)
 }
 
-/**
- * TMDB metadata engine for IndStream. Search, detail, episodes, IMDB→TMDB lookup.
- * Embedded public API key (same approach as Multimovies — no settings hook in pinned lib).
- */
+/** TMDB metadata engine for. Search, detail, episodes, IMDB→TMDB lookup. */
 object TmdbService {
 
     private const val API_KEY = "e6333b32409e02a4a6eba6fb7ff866bb"
@@ -248,8 +215,7 @@ object TmdbService {
     private const val IMG_BASE = "https://image.tmdb.org/t/p/w500"
     private const val IMG_BACKDROP = "https://image.tmdb.org/t/p/w1280"
 
-    /** Search-result cache TTL / bounds. Results don't change minute-to-minute;
-     *  a hit makes history re-clicks instant and immune to upstream blips. */
+    /** Search-result cache TTL / bounds. Results don't change minute-to-minute; a hit makes history re-clicks instant and. immune to upstream blips. */
     private const val SEARCH_CACHE_TTL_MS = 15 * 60 * 1000L
     private const val SEARCH_CACHE_MAX = 64
     /** Cap on riding someone else's in-flight search before giving up. */
@@ -263,7 +229,7 @@ object TmdbService {
     data class TmdbItem(
         val tmdbId: Int?,
         val imdbId: String?,
-        val type: String,      // "movie" or "series"
+        val type: String,      // "movie" or "series".
         val name: String,
         val year: String?,
         val poster: String?,
@@ -275,9 +241,7 @@ object TmdbService {
         val tmdbId: Int? = null,
         val imdbId: String? = null,
         val name: String? = null,
-        /** TMDB "original_language" code ("hi", "ja", "en", …). Powers the
-         *  (original) tag on emitted server names — a stream whose audio label is
-         *  "Original" and whose title's origin is Japanese is Japanese audio. */
+        /** TMDB "original_language" code ("hi", "ja", "en", …). Powers the (original) tag on emitted server names - a stream. whose audio label is "Original". */
         val originalLanguage: String? = null,
         val poster: String? = null,
         val backdrop: String? = null,
@@ -299,17 +263,7 @@ object TmdbService {
         val rating: Double? = null,
     )
 
-    /** Search movies + series via TMDB /search/multi — cached + deduplicated.
-     *
-     *  Both plugins key every search on ONE shared TMDB api key against one
-     *  endpoint, so transient 429/latency blips blank BOTH providers at the
-     *  same moment (the "search-history click shows nothing" bug). Two
-     *  defenses live here:
-     *  - 15-min positive result cache: re-clicking a previously-successful
-     *    history query answers from memory — never touches upstream again.
-     *  - In-flight dedup: quickSearch and search firing concurrently for the
-     *    SAME query (the app runs both paths on a history click) share ONE
-     *    request instead of stacking identical hits onto a rate-limited key. */
+    /** Search movies + series via TMDB /search/multi - cached + deduplicated. Both plugins key every search on ONE shared. TMDB api key against one. */
     suspend fun search(query: String): List<TmdbItem> {
         if (query.isBlank()) return emptyList()
         val key = query.trim().lowercase()
@@ -317,9 +271,8 @@ object TmdbService {
             if (System.currentTimeMillis() <= it.expiresAt) return it.items
             searchCache.remove(key)
         }
-        // putIfAbsent: first caller LEADS, everyone else rides its request.
-        // The leader runs on [searchScope], so it still completes (and fills
-        // the cache) even if the app cancels the caller's own budget.
+        // putIfAbsent: first caller LEADS, everyone else rides its request. The leader runs on, so it still completes (and.
+// fills the cache) even if the app.
         val mine = searchScope.async {
             val found = searchRemote(query)
             if (found.isNotEmpty()) {
@@ -342,8 +295,7 @@ object TmdbService {
             ?: emptyList()
     }
 
-    /** The actual single /search/multi round-trip (never throw — errors/429s
-     *  arrive as an empty list, with a log line to make them visible). */
+    /** The actual single /search/multi round-trip (never throw - errors/429s arrive as an empty list, with a log line to. make them visible). */
     private suspend fun searchRemote(query: String): List<TmdbItem> {
         val encoded = URLEncoder.encode(query.trim(), "UTF-8")
         val json = runCatching {
@@ -352,14 +304,14 @@ object TmdbService {
                 timeout = 5,
             ).text
         }.getOrElse { t ->
-            // DIAG(search-blank): timeouts / connection resets / thrown HTTP errors land
-            // here invisibly today — proves or kills that theory in logcat.
+            // DIAG(search-blank): timeouts / connection resets / thrown HTTP errors land here invisibly today - proves or kills.
+// that theory in logcat.
             android.util.Log.w("IndStream", "tmdb search NET-FAIL q='$query': ${t.javaClass.simpleName}: ${t.message?.take(200)}")
             return emptyList()
         }
         val items = parseTmdbMultiSearch(json)
-        // TMDB error bodies (e.g. 429 "rate-limit exceeded" on a shared key) carry a
-        // status_code and parse to ZERO results — identical to a genuine no-hit.
+        // TMDB error bodies (e. g. 429 "rate-limit exceeded" on a shared key) carry a status_code and parse to ZERO results.
+// identical to a genuine no-hit.
         if (items.isEmpty() && json.contains("status_code"))
             android.util.Log.w("IndStream", "tmdb search UPSTREAM-ERR q='$query': ${json.take(200)}")
         return items
@@ -371,14 +323,14 @@ object TmdbService {
     private val searchInFlight = ConcurrentHashMap<String, kotlinx.coroutines.Deferred<List<TmdbItem>>>()
     private val searchScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    /** Trending this week — powers the home page. [type] is "movie" or "tv". */
+    /** Trending this week - powers the home page. is "movie" or "tv". */
     suspend fun trending(type: String, page: Int = 1): List<TmdbItem> {
         val url = "$API/trending/$type/week?api_key=$API_KEY&language=en-US&page=$page"
         val json = runCatching { app.get(url, timeout = 5).text }.getOrNull() ?: return emptyList()
         return parseResults(json, type)
     }
 
-    /** Popular titles — extra home page row. [type] is "movie" or "tv". */
+    /** Popular titles - extra home page row. is "movie" or "tv". */
     suspend fun popular(type: String, page: Int = 1): List<TmdbItem> {
         val url = "$API/$type/popular?api_key=$API_KEY&language=en-US&page=$page"
         val json = runCatching { app.get(url, timeout = 5).text }.getOrNull() ?: return emptyList()
@@ -402,7 +354,7 @@ object TmdbService {
         } catch (e: Exception) { emptyList() }
     }
 
-    /** Fetch full TMDB metadata for [tmdbId] of [type] ("movie"|"series"). */
+    /** Fetch full TMDB metadata for of ("movie"|"series"). */
     suspend fun fetchMeta(tmdbId: Int, type: String): TmdbDetail? {
         if (tmdbId <= 0) return null
         val cacheKey = "$tmdbId|$type"
@@ -433,8 +385,7 @@ object TmdbService {
         return result
     }
 
-    /** Fetch TMDB episode metadata for the given [seasons] of [tmdbId], in parallel.
-     *  Returns keyed (season, episode) -> metadata. */
+    /** Fetch TMDB episode metadata for the given of, in parallel. Returns keyed (season, episode) -> metadata. */
     suspend fun fetchEpisodes(tmdbId: Int, seasons: Set<Int>): Map<Pair<Int, Int>, TmdbEpisode> {
         if (tmdbId <= 0 || seasons.isEmpty()) return emptyMap()
         val semaphore = Semaphore(3)
@@ -457,14 +408,8 @@ object TmdbService {
         return fetchSeason(tmdbId, season).orEmpty()
     }
 
-    // ------------------------------------------------------------------
-    // Internal helpers
-    // ------------------------------------------------------------------
-
-    /** Collapse search hits sharing a normalized (title, year). TMDB multi-search
-     *  sometimes lists the same title twice — the real entry plus a junk duplicate
-     *  of the other media type (e.g. "Breaking Bad" as tv/1396 and movie/1762067).
-     *  The highest-rated entry of each group wins. */
+    // Internal helpers ------------------------------------------------------------------ Collapse search hits sharing a.
+// normalized (title, year). TMDB.
     internal fun List<TmdbItem>.dedupedByTitle(): List<TmdbItem> {
         val best = LinkedHashMap<String, TmdbItem>()
         for (item in this) {
@@ -490,7 +435,7 @@ object TmdbService {
                 val name = str(r, "title") ?: str(r, "name") ?: return@mapNotNull null
                 TmdbItem(
                     tmdbId = r.optInt("id", -1).takeIf { it > 0 },
-                    imdbId = null, // IMDB id not in search results; fetch detail if needed
+                    imdbId = null, // IMDB id not in search results; fetch detail if needed.
                     type = type,
                     name = name,
                     year = (str(r, "release_date") ?: str(r, "first_air_date"))?.take(4),
@@ -573,7 +518,7 @@ object TmdbService {
         return if (v.isBlank()) null else v
     }
 
-    /** Parse a TMDB results array into TmdbItems. [type] is "movie" or "tv". */
+    /** Parse a TMDB results array into TmdbItems. is "movie" or "tv". */
     private fun parseResults(json: String, type: String): List<TmdbItem> {
         return try {
             val root = JSONObject(json)
@@ -596,10 +541,7 @@ object TmdbService {
     }
 }
 
-/**
- * Pure parsers for HLS master playlists and DASH MPDs.
- * No network, no Android, no CloudStream dependency — safe for JVM unit tests.
- */
+/** Pure parsers for HLS master playlists and DASH MPDs. No network, no Android, no CloudStream dependency - safe for. JVM unit tests. */
 object ManifestKit {
 
     /** Resolve a possibly-relative URL against a base. Pure (no network). */
@@ -622,7 +564,7 @@ object ManifestKit {
 
     /** One EXT-X-MEDIA rendition (audio or subtitles). */
     data class MediaRendition(
-        val type: String,       // "AUDIO" | "SUBTITLES"
+        val type: String,       // "AUDIO" | "SUBTITLES".
         val groupId: String,
         val name: String,
         val language: String?,
@@ -674,7 +616,7 @@ object ManifestKit {
                             )
                         )
                     }
-                    i++ // consume the URI line
+                    i++ // consume the URI line.
                 }
             }
             i++
@@ -704,7 +646,7 @@ object ManifestKit {
         )
     }
 
-    /** Parse `KEY=VALUE,KEY2="VALUE2"` attr lists (values may be quoted). */
+    /** Parse `KEY=VALUE, KEY2="VALUE2"` attr lists (values may be quoted). */
     fun parseAttrs(raw: String?): Map<String, String> {
         if (raw.isNullOrBlank()) return emptyMap()
         val out = LinkedHashMap<String, String>()
@@ -775,13 +717,7 @@ object ManifestKit {
     /** Rank variants by quality (height desc), used to label links. */
     fun bestHeight(variants: List<Variant>): Int = variants.maxOfOrNull { it.height } ?: 0
 
-    /**
-     * Peak video height of a manifest text, HLS master or DASH MPD alike.
-     * Dispatches on content (`<MPD` → [parseMpd], else [parseMaster]) so
-     * adaptive links (HLS m3u8 AND DASH mpd) resolve their real best
-     * rendition — "4K"/"1080p" labels, never a guessed value. Returns 0
-     * when nothing usable parses (honest unknown, callers fall back).
-     */
+    /** Peak video height of a manifest text, HLS master or DASH MPD alike. Dispatches on content (`<MPD` →, else) so. adaptive links (HLS m3u8 AND DASH. */
     fun bestHeightOf(text: String?, url: String): Int {
         if (text.isNullOrBlank()) return 0
         return if (text.contains("<MPD", ignoreCase = true)) {
@@ -806,8 +742,7 @@ object ManifestKit {
     /** Max of two, but treats 0 (unknown) as -inf so known quality wins. */
     fun maxQuality(a: Int, b: Int): Int = if (a <= 0) b else if (b <= 0) a else max(a, b)
 
-    /** Best resolution token (height) embedded in a URL/filename like ".../1080p/..."
-     *  → 1080, else 0. Used as the server-provided fallback when a real probe fails. */
+    /** Best resolution token (height) embedded in a URL/filename like ". . . /1080p/. . . " → 1080, else 0. */
     fun resolutionFromUrl(url: String?): Int {
         if (url.isNullOrBlank()) return 0
         return Regex("""(?<!\d)(\d{3,4})p(?!\d)""", RegexOption.IGNORE_CASE).findAll(url).maxOfOrNull {
@@ -815,9 +750,7 @@ object ManifestKit {
         } ?: 0
     }
 
-    // ── Language detection ──────────────────────────────────
-
-    /** Language codes we know. */
+    // ── Language detection ────────────────────────────────── Language codes we know.
     private val LANG_HINDI = setOf("hi", "hin")
     private val LANG_ENGLISH = setOf("en", "eng")
 
@@ -863,23 +796,16 @@ object ManifestKit {
         return hay.contains("english") || hay.contains("eng") || hay.contains("english")
     }
 
-    /** True if rendition is likely the original/default track (default=YES or name
-     *  "original"). A rendition with NO language attribute is NOT "original" — it is
-     *  an unknown (user spec Sept 2026: don't guess a language we were never given). */
+    /** True if rendition is likely the original/default track (default=YES or name "original"). A rendition with NO. language attribute is NOT "original". */
     fun isOriginal(rendition: MediaRendition): Boolean =
         rendition.default ||
             rendition.name.contains("original", ignoreCase = true)
 
-    // ── Indian dub languages (user spec 2026-09-11: label every OFFICIALLY
-    //    dubbed Indian audio, not just Hindi — Tamil/Telugu dubs previously
-    //    fell out of audioPriority's Hindi/English buckets as "Unknown") ──
-
-    /** One Indian dub language: canonical display name + ISO codes + name tokens. */
+    // ── Indian dub languages (, not just Hindi - Tamil/Telugu dubs previously fell out of audioPriority's Hindi/English.
+// buckets as "Unknown") ── One.
     data class DubLanguage(val canonical: String, val codes: Set<String>, val names: Set<String>)
 
-    /** The official Indian dubbing languages, Hindi first (Hindi is the most
-     *  common host-wide dub). Detection is containment-based over codes and
-     *  names, native scripts included. */
+    /** The official Indian dubbing languages, Hindi first (Hindi is the most common host-wide dub). Detection is. containment-based over codes and names. */
     val INDIAN_DUB_LANGUAGES = listOf(
         DubLanguage("Hindi", setOf("hi", "hin"), setOf("hindi", "हिन्दी", "हिंदी")),
         DubLanguage("Tamil", setOf("ta", "tam"), setOf("tamil", "தமிழ்")),
@@ -892,9 +818,7 @@ object ManifestKit {
         DubLanguage("Gujarati", setOf("gu", "guj"), setOf("gujarati", "ગુજરાતી")),
     )
 
-    /** Canonical Indian-dub language of a rendition ("ta", "ta-IN", "Tamil",
-     *  "தமிழ்" …), or null. Hindi included — for renditions the generic
-     *  isHindi() already covers, this returns "Hindi" too. */
+    /** Canonical Indian-dub language of a rendition ("ta", "ta-IN", "Tamil", "தமிழ்" …), or null. Hindi included - for. renditions the generic isHindi(). */
     fun indianLanguageOf(rendition: MediaRendition): String? {
         val lang = rendition.language?.lowercase()
         if (!lang.isNullOrBlank()) {
@@ -906,10 +830,7 @@ object ManifestKit {
         return INDIAN_DUB_LANGUAGES.firstOrNull { spec -> spec.names.any { name.contains(it) } }?.canonical
     }
 
-    /** Canonical Indian-dub language token declared in a server name and/or
-     *  URL ("…tamil…", "…/te/…", "MyFlixer Hindi"), or null. The host-declared
-     *  generalization of the old isHindiFromName hint — never guesses a
-     *  language the host itself doesn't name. */
+    /** Canonical Indian-dub language token declared in a server name and/or URL ("…tamil…", "…/te/…", "MyFlixer Hindi"), or. null. The host-declared. */
     fun languageFromName(name: String?, url: String?): String? {
         val hay = buildString {
             name?.let { append(it.lowercase()); append(' ') }
@@ -919,21 +840,11 @@ object ManifestKit {
         return INDIAN_DUB_LANGUAGES.firstOrNull { spec -> spec.names.any { hay.contains(it) } }?.canonical
     }
 
-    /**
-     * Audio-language LABEL of the track the player auto-selects — the display
-     * counterpart of [audioPriority]. Same precedence (DEFAULT=YES rendition,
-     * else the single rendition, else the aggregate), but every known Indian
-     * dub language is reported by name instead of collapsing into 0/"other":
-     * a master whose default track is Telugu now labels "Telugu", and a
-     * no-default Tamil+English master labels "Tamil" (was 1/"English").
-     * Returns null when nothing usable parses — honest unknown.
-     */
+    /** Audio-language LABEL of the track the player auto-selects - the display counterpart of. Same precedence (DEFAULT=YES. rendition, else the single. */
     fun audioLanguageLabel(master: MasterPlaylist): String? {
         if (master.audio.isEmpty()) return null
-        // Hindi/English keep their legacy buckets; an Indian dub beats the
-        // "Original" fallback (a DEFAULT=YES `te` track on an English title is
-        // a Telugu DUB, not the original) — while a non-Indian default
-        // (Japanese "Original" renditions) still reports "Original".
+        // Hindi/English keep their legacy buckets; an Indian dub beats the "Original" fallback (a DEFAULT=YES `te` track on an.
+// English title is a Telugu.
         fun trackLabel(t: MediaRendition): String? = when {
             isHindi(t) -> "Hindi"
             isEnglish(t) -> "English"
@@ -943,8 +854,8 @@ object ManifestKit {
         }
         val defaultTrack = master.audio.firstOrNull { it.default }
         if (defaultTrack != null) return trackLabel(defaultTrack)
-        // No explicit DEFAULT: a single audio rendition IS what plays — label it
-        // precisely. Several renditions with no default = true dual/multi audio.
+        // No explicit DEFAULT: a single audio rendition IS what plays - label it precisely. Several renditions with no default.
+// = true dual/multi audio.
         if (master.audio.size == 1) return trackLabel(master.audio.first())
         val hasHindi = master.audio.any { isHindi(it) }
         val hasEnglish = master.audio.any { isEnglish(it) }
@@ -958,12 +869,7 @@ object ManifestKit {
         }
     }
 
-    /** Returns priority 4(Hindi) > 3(Hindi+English) > 2(Original) > 1(English) > 0(Other).
-     *  Prefers the track the player actually auto-selects — the EXT-X-MEDIA with
-     *  DEFAULT=YES, or the single track when a master carries exactly one audio
-     *  rendition/group — so a Hindi-dub master whose primary track is defaulted is
-     *  labelled "Hindi", not "English". Genuine multi-audio (several tracks, no
-     *  default) aggregates to dual "Hindi+English" rather than mislabeling. */
+    /** Returns priority 4(Hindi) > 3(Hindi+English) > 2(Original) > 1(English) > 0(Other). Prefers the track the player. actually auto-selects - the. */
     fun audioPriority(master: MasterPlaylist): Int {
         if (master.audio.isEmpty()) return 0
         val defaultTrack = master.audio.firstOrNull { it.default }
@@ -975,8 +881,8 @@ object ManifestKit {
                 else -> 0
             }
         }
-        // No explicit DEFAULT: a single audio rendition IS what plays — label it
-        // precisely. Several renditions with no default = true dual/multi audio.
+        // No explicit DEFAULT: a single audio rendition IS what plays - label it precisely. Several renditions with no default.
+// = true dual/multi audio.
         if (master.audio.size == 1) {
             val t = master.audio.first()
             return when {
@@ -999,10 +905,7 @@ object ManifestKit {
     }
 }
 
-/**
- * Pure, JVM-testable helpers for title normalization and fuzzy matching.
- * No network, no Android — safe for unit tests.
- */
+/** Pure, JVM-testable helpers for title normalization and fuzzy matching. No network, no Android - safe for unit tests. */
 object TitleMatch {
 
     /** Strip punctuation, collapse whitespace, lowercase. Keeps unicode letters/digits. */
@@ -1021,16 +924,15 @@ object TitleMatch {
         val n = normalizeTitle(title)
         if (n.isBlank()) return emptyList()
         val variants = linkedSetOf(n)
-        // "a & b" ↔ "a and b" — must be derived from the RAW title before the
-        // ampersand is normalized away into a space.
+        // "a & b" ↔ "a and b" - must be derived.
         if (title != null) {
             variants += normalizeTitle(title.replace("&", " and "))
             variants += normalizeTitle(title.replace(Regex("\\band\\b", RegexOption.IGNORE_CASE), "&"))
         }
-        // apostrophes dropped / kept
+        // apostrophes dropped / kept.
         variants += n.replace("'", "")
         variants += n.replace("’", "")
-        // roman numeral ↔ number (basic)
+        // roman numeral ↔ number (basic).
         variants += n.replace(Regex("\\biv\\b"), "4")
         variants += n.replace(Regex("\\biii\\b"), "3")
         variants += n.replace(Regex("\\bii\\b"), "2")
@@ -1057,20 +959,20 @@ object TitleMatch {
         return dp[a.length][b.length]
     }
 
-    /** Relevance 0..1 — exact normalized match = 1.0. */
+    /** Relevance 0. . 1 - exact normalized match = 1. 0. */
     fun titleDistance(query: String, title: String): Double {
         val q = normalizeTitle(query)
         val t = normalizeTitle(title)
         if (q.isBlank() || t.isBlank()) return 0.0
         if (q == t) return 1.0
-        // token-prefix bonus: every query token starts one of the title tokens
+        // token-prefix bonus: every query token starts one of the title tokens.
         val qTokens = q.split(" ")
         val tTokens = t.split(" ")
         if (qTokens.all { qt -> tTokens.any { tt -> tt.startsWith(qt) } }) {
             val lenScore = q.length.toDouble() / t.length.toDouble()
             return 0.7 + 0.3 * min(1.0, lenScore)
         }
-        // levenshtein similarity on the full strings
+        // levenshtein similarity on the full strings.
         val maxLen = maxOf(q.length, t.length)
         if (maxLen == 0) return 0.0
         return 1.0 - levenshtein(q, t).toDouble() / maxLen
@@ -1085,13 +987,13 @@ object TitleMatch {
     /** Combined gate used by search: strict token match + score threshold. */
     fun isRelevant(query: String, title: String, queryYear: Int?, candidateYear: Int?): Boolean {
         if (!yearMatches(queryYear, candidateYear)) return false
-        // Strip any embedded years (e.g. "Joker (2019)") before comparing titles.
+        // Strip any embedded years (e. g. "Joker (2019)") before comparing titles.
         val q = stripYearTokens(normalizeTitle(query))
         val t = stripYearTokens(normalizeTitle(title))
         return titleDistance(q, t) >= 0.7
     }
 
-    /** Remove standalone 4-digit year tokens ("2019", "2001") from a normalized title. */
+    /** Remove standalone 4-digit year tokens ("2019", "2001"). */
     private fun stripYearTokens(normalized: String): String {
         if (normalized.isBlank()) return normalized
         return normalized.split(" ")
@@ -1100,7 +1002,7 @@ object TitleMatch {
             .trim()
     }
 
-    /** Extract 4-digit year from a string, or null. */
+    /** Extract 4-digit year, or null. */
     fun parseYear(raw: String?): Int? {
         if (raw.isNullOrBlank()) return null
         return Regex("(19|20)\\d{2}").find(raw)?.value?.toIntOrNull()

@@ -1,21 +1,5 @@
 ﻿package com.multimovies
-/**
-
- * FILE: SharedServices.kt â€” Multimovies shared services (reusable, site-agnostic).
- *
- *  - [HttpKit]        shared HTTP client (get / getJson / post + retry).
- *  - [CryptoJs]       CryptoJS-AES envelope helpers (OpenSSL "Salted__"
- *                     format) used by the encrypted APIs in
- *                     sources/ExternalSources.kt.
- *  - [TmdbService]    TMDB metadata: search, meta, season data, the
- *                     IMDB -> TMDB id fallback.
- *  - Search ranking  pure TMDB search relevance ranking + poster upgrades
- *                     (top-level functions: relevanceOf, titleDistance,
- *                     upgradePosterUrl, ...).
- *
- * Site-specific code lives in plugin/MultimoviesPlugin.kt; third-party stream
- * APIs live in sources/ExternalSources.kt.
- */
+/** Shared HTTP, crypto, metadata, search, and retry helpers. */
 
 import com.lagradost.cloudstream3.Actor
 import com.lagradost.cloudstream3.ActorData
@@ -48,16 +32,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.jsoup.nodes.Document
 
-/**
- * One shared OkHttp stack for the id-based extractors (Nxsha, Shows, VidEm).
- * Each previously built its own client and re-implemented
- * httpGet/httpGetJson/httpPost — this object kills the duplication.
- *
- * The client carries a per-host cookie jar. Callers pass their full header set
- * (including UA) as [headers]; the client's own connect/read timeouts are a
- * high hard cap (12 s), while [budgetMs] wraps each call in
- * `withTimeoutOrNull`.
- */
+/** Shared HTTP client with per-host cookies and bounded request timeouts. */
 internal object HttpKit {
 
     private val cookieJar = object : okhttp3.CookieJar {
@@ -78,8 +53,7 @@ internal object HttpKit {
         .followSslRedirects(true)
         .build()
 
-    /** GET [url] with the given [headers], returning the response body text,
-     *  or null on failure / timeout after [budgetMs]. */
+    /** GET with the given, returning the response body text, or null on failure / timeout after. */
     suspend fun get(url: String, headers: Map<String, String> = emptyMap(), budgetMs: Long = 8_000L): String? =
         withContext(Dispatchers.IO) {
             withTimeoutOrNull(budgetMs) {
@@ -94,15 +68,13 @@ internal object HttpKit {
             }
         }
 
-    /** GET [url] and parse the response as JSON, or null. */
+    /** GET and parse the response as JSON, or null. */
     suspend fun getJson(url: String, headers: Map<String, String> = emptyMap(), budgetMs: Long = 8_000L): JSONObject? =
         get(url, headers, budgetMs)?.let { raw ->
             runCatching { JSONObject(raw) }.getOrNull()
         }
 
-    /** POST [url] with an empty body and the given [headers] + optional
-     *  [referer] / [origin]. Returns the response body text, or null on
-     *  failure / timeout after [budgetMs]. */
+    /** POST with an empty body and the given + optional /. Returns the response body text, or null on failure / timeout after. */
     suspend fun post(
         url: String,
         headers: Map<String, String> = emptyMap(),
@@ -125,16 +97,7 @@ internal object HttpKit {
     }
 }
 
-/**
- * Shared CryptoJS-compatible AES helpers for the OpenSSL "Salted__" envelope
- * format (`CryptoJS.AES.encrypt(data, passphrase)` / `.decrypt(...)` with a
- * string passphrase). Used by extractors whose web players ship that exact
- * client-side crypto.
- *
- * The encrypt side mirrors what CryptoJS does internally: random 8-byte salt,
- * EVP_BytesToKey(MD5) key+iv derivation, AES-256-CBC/PKCS5, output =
- * base64("Salted__" + salt + ciphertext).
- */
+/** Shared CryptoJS-compatible AES helpers for the OpenSSL "Salted__" envelope format (`CryptoJS. AES. encrypt(data. passphrase)` / `. decrypt(. */
 internal object CryptoJs {
 
     /** OpenSSL EVP_BytesToKey (MD5 variant), matching CryptoJS's default KDF. */
@@ -155,9 +118,7 @@ internal object CryptoJs {
         return keyIv.copyOfRange(0, keyLen) to keyIv.copyOfRange(keyLen, total)
     }
 
-    /** Lenient base64 decode matching Node's Buffer.from(s, "base64"): silently
-     *  drops non-base64 characters and pads partial trailing groups (no padding
-     *  required). Used by the OpenSSL envelope decoder. */
+    /** Lenient base64 decode matching Node's Buffer. , "base64"): silently drops non-base64 characters and pads partial. trailing groups (no padding. */
     fun base64DecodeLenient(s: String): ByteArray {
         val b64Chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
         val valid = s.filter { it in b64Chars }
@@ -165,8 +126,7 @@ internal object CryptoJs {
         return Base64.getDecoder().decode(valid + "=".repeat(padding))
     }
 
-    /** Decrypt a base64 OpenSSL-Salted AES ciphertext; returns UTF-8 plaintext
-     *  or null when the payload is malformed / undecryptable. */
+    /** Decrypt a base64 OpenSSL-Salted AES ciphertext; returns UTF-8 plaintext or null when the payload is malformed /. undecryptable. */
     fun aesDecryptCryptoJs(cipherBase64: String, passphrase: String): String? {
         val all = runCatching { base64DecodeLenient(cipherBase64) }.getOrNull() ?: return null
         val (salt, cipher) = if (all.size >= 16 && String(all.copyOfRange(0, 8), StandardCharsets.ISO_8859_1) == "Salted__") {
@@ -180,8 +140,7 @@ internal object CryptoJs {
         }.getOrNull()
     }
 
-    /** Encrypt [plaintext] the way CryptoJS.AES.encrypt(plaintext, passphrase)
-     *  does and return its standard-base64 string form ("Salted__" envelope). */
+    /** Encrypt the way CryptoJS. AES. encrypt(plaintext, passphrase) does and return its standard-base64 string form. ("Salted__" envelope). */
     fun aesEncryptCryptoJs(plaintext: String, passphrase: String): String {
         val salt = ByteArray(8).also { SecureRandom().nextBytes(it) }
         val (key, iv) = evpKdf(passphrase.toByteArray(StandardCharsets.UTF_8), salt, 32, 16)
@@ -202,18 +161,7 @@ private fun str(obj: JSONObject, key: String): String? {
     return if (v.isBlank()) null else v
 }
 
-/**
- * TMDB/SIMKL metadata engine for the Multimovies provider.
- *
- * Search is the only SIMKL-backed path: when [SIMKL_CLIENT_ID] is non-blank,
- * `search()` queries the SIMKL search API (which returns posters, ratings, years
- * and TMDB/IMDB ids); otherwise it uses the TMDB `/search/multi` endpoint. Detail
- * and episode metadata ALWAYS come from TMDB (using the tmdb id SIMKL returned),
- * so no SIMKL metadata endpoints are required.
- *
- * The API keys are embedded because the pinned CloudStream library exposes no
- * runtime access to user-entered TMDB/SIMKL keys (MainAPI has no settings hook).
- */
+/** TMDB/SIMKL metadata engine for the provider. Search is the only SIMKL-backed path: when is non-blank, `search()`. queries the SIMKL search API. */
 object TmdbService {
 
     private const val TMDB_API_KEY = "e6333b32409e02a4a6eba6fb7ff866bb"
@@ -230,8 +178,7 @@ object TmdbService {
     /** Cache of imdb-id -> (tmdbId, type) lookups. */
     private val imdbFindCache = ConcurrentHashMap<String, Pair<Int, String>>()
 
-    /** One search hit (movie or series) with everything CloudStream needs to render
-     *  a result row — rating and poster are inline in the search payload. */
+    /** One search hit (movie or series) with everything CloudStream needs to render a result row - rating and poster are. inline in the search payload. */
     data class TmdbItem(
         val tmdbId: Int?,
         val imdbId: String?,
@@ -242,7 +189,7 @@ object TmdbService {
         val rating: Double?,
     )
 
-    /** Full metadata for a detail page, sourced from TMDB. */
+    /** Full metadata for a detail page, sourced. */
     data class TmdbDetail(
         val tmdbId: Int? = null,
         val imdbId: String? = null,
@@ -265,14 +212,7 @@ object TmdbService {
         val rating: Double? = null,
     )
 
-    /** Search movies + series. SIMKL takes priority when its client_id is set.
-     *
-     *  The TMDB branch is deduplicated IN-FLIGHT: quickSearch and search can
-     *  fire concurrently for the SAME query (a history click drives both paths),
-     *  and the provider's 2.5s budget cancel-and-retry re-enters here — every
-     *  caller rides ONE upstream request instead of stacking identical hits on
-     *  the shared rate-limited key (transient 429/latency there blanks both
-     *  providers at once; see IndStream TmdbService/search). */
+    /** Search movies + series. SIMKL takes priority when its client_id is set. */
     suspend fun search(query: String): List<TmdbItem> {
         if (query.isBlank()) return emptyList()
         return when {
@@ -284,10 +224,7 @@ object TmdbService {
     private val searchScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val searchInFlight = ConcurrentHashMap<String, Deferred<List<TmdbItem>>>()
 
-    /** One /search/multi per in-flight query; the leader runs on [searchScope]
-     *  so it still completes (serving late riders and the retryer) after any
-     *  individual caller's budget is cancelled. Never throws: upstream errors
-     *  arrive as an empty list, logged on the GET itself. */
+    /** One /search/multi per in-flight query; the leader runs on so it still completes (serving late riders and the. retryer) after any individual. */
     private suspend fun searchTmdbShared(key: String, query: String): List<TmdbItem> {
         val mine = searchScope.async { searchTmdb(query) }
         val existing = searchInFlight.putIfAbsent(key, mine)
@@ -301,7 +238,7 @@ object TmdbService {
             ?: emptyList()
     }
 
-    /** Fetch full TMDB metadata for [tmdbId] of [type] ("movie"|"series"). */
+    /** Fetch full TMDB metadata for of ("movie"|"series"). */
     suspend fun fetchMeta(tmdbId: Int, type: String): TmdbDetail? {
         if (tmdbId <= 0) return null
         val cacheKey = "$tmdbId|$type"
@@ -332,8 +269,7 @@ object TmdbService {
         return result
     }
 
-    /** Fetch TMDB episode metadata for the given [seasons] of [tmdbId], in
-     *  parallel with bounded concurrency and a short per-call cap. */
+    /** Fetch TMDB episode metadata for the given of, in parallel with bounded concurrency and a short per-call cap. */
     suspend fun fetchEpisodes(tmdbId: Int, seasons: Set<Int>): Map<Pair<Int, Int>, TmdbEpisode> {
         if (tmdbId <= 0 || seasons.isEmpty()) return emptyMap()
         val semaphore = Semaphore(3)
@@ -351,14 +287,8 @@ object TmdbService {
         }
     }
 
-    // ------------------------------------------------------------------
-    // Search backends
-    // ------------------------------------------------------------------
-
-    /** Collapse search hits sharing a normalized (title, year). TMDB multi-search
-     *  sometimes lists the same title twice — the real entry plus a junk duplicate
-     *  of the other media type (e.g. "Breaking Bad" as tv/1396 and movie/1762067).
-     *  The highest-rated entry of each group wins. */
+    // Search backends ------------------------------------------------------------------ Collapse search hits sharing a.
+// normalized (title, year). TMDB.
     internal fun List<TmdbItem>.dedupedByTitle(): List<TmdbItem> {
         val best = LinkedHashMap<String, TmdbItem>()
         for (item in this) {
@@ -384,8 +314,8 @@ object TmdbService {
             return emptyList()
         }
         val items = parseTmdbMultiSearch(json)
-        // A TMDB error body (429 rate-limit on the shared key, invalid key, …) parses
-        // to zero results — log it so logcat can tell it apart from a real no-hit.
+        // A TMDB error body (429 rate-limit on the shared key, invalid key, …) parses to zero results - log it so logcat can.
+// tell it apart.
         if (items.isEmpty() && json.contains("status_code"))
             android.util.Log.w("Multimovies", "tmdb search UPSTREAM-ERR q='$query': ${json.take(200)}")
         return items
@@ -398,8 +328,7 @@ object TmdbService {
         }.getOrNull() ?: return emptyList()
         val items = parseSimklSearch(json)
         if (items.isEmpty()) return emptyList()
-        // Hits without a tmdb id are resolved via TMDB /find (parallel, capped);
-        // still-unresolved hits are dropped (rare).
+        // Hits without a tmdb id are resolved via TMDB /find (parallel, capped); still-unresolved hits are dropped (rare).
         return coroutineScope {
             items.map { item ->
                 async {
@@ -412,8 +341,7 @@ object TmdbService {
         }.dedupedByTitle()
     }
 
-    /** Parse a TMDB `/search/multi` response into [TmdbItem]s (movies + series
-     *  only), deduplicated by (title, year). */
+    /** Parse a TMDB `/search/multi` response into s (movies + series only), deduplicated by (title, year). */
     fun parseTmdbMultiSearch(raw: String?): List<TmdbItem> {
         if (raw.isNullOrBlank()) return emptyList()
         return try {
@@ -441,7 +369,7 @@ object TmdbService {
         }
     }
 
-    /** Parse a SIMKL `/search/simkl` response (JSON array) into [TmdbItem]s. */
+    /** Parse a SIMKL `/search/simkl` response (JSON array) into s. */
     fun parseSimklSearch(raw: String?): List<TmdbItem> {
         if (raw.isNullOrBlank()) return emptyList()
         return try {
@@ -533,22 +461,22 @@ object TmdbService {
         }.getOrNull() ?: emptyList()
     }
 
-    /** Extract the IMDB "tt…" id from a Multimovies/Dooplay detail page. */
+    /** Extract the IMDB "tt…" id. */
     fun extractImdbId(doc: Document): String? {
-        // 1. Open Graph meta tag: <meta property="og:imdb_id" content="tt...">
+        // 1. Open Graph meta tag: <meta property="og: imdb_id" content="tt. . .
         doc.selectFirst("meta[property=\"og:imdb_id\"]")
             ?.attr("content")
             ?.takeIf { it.isNotBlank() }
             ?.let { return normalizeImdb(it) }
 
-        // 2. IMDB links anywhere on the page
+        // 2. IMDB links anywhere on the page.
         doc.select("a[href*='imdb.com/title/'], a[href*='/title/tt']").firstOrNull()
             ?.attr("href")
             ?.let { normalizeImdb(it) }
             ?.takeIf { it.isNotEmpty() }
             ?.let { return it }
 
-        // 3. Dooplay-specific containers (common patterns)
+        // 3. Dooplay-specific containers (common patterns).
         doc.select("div.imdb a, span.imdb a, li.imdb a, .imdb-link a, .imdbRating a, [class*='imdb'] a")
             .firstOrNull()
             ?.attr("href")
@@ -556,14 +484,14 @@ object TmdbService {
             ?.takeIf { it.isNotEmpty() }
             ?.let { return it }
 
-        // 4. Data attributes (some themes use data-imdb / data-imdb-id / data-imdbid)
+        // 4. Data attributes (some themes use data-imdb / data-imdb-id / data-imdbid).
         doc.select("[data-imdb], [data-imdb-id], [data-imdbid], [data-imdb_id]").firstOrNull()?.let { el ->
             listOf("data-imdb", "data-imdb-id", "data-imdbid", "data-imdb_id").forEach { attr ->
                 el.attr(attr).takeIf { it.isNotBlank() }?.let { return normalizeImdb(it) }
             }
         }
 
-        // 5. Script tags with JSON-LD or embedded data
+        // 5. Script tags with JSON-LD or embedded data.
         doc.select("script[type=\"application/ld+json\"]").forEach { script ->
             val text = script.html()
             val m = Regex("""\"@id\"\s*:\s*\"https?://(?:www\.)?imdb\.com/title/(tt\d+)\"""").find(text)
@@ -587,19 +515,16 @@ object TmdbService {
         return m?.value ?: value
     }
 
-    /** Extract a TMDB numeric id from the page (used when a main-page card tap
-     *  doesn't carry a TMDB search URL, so the id must be scraped from the
-     *  Multimovies detail page itself). Checks data-* attributes, JSON-LD
-     *  sameAs/@id links and inline JS vars. Returns null when absent. */
+    /** Extract a TMDB numeric id, so the id must be scraped). Checks data-* attributes, JSON-LD sameAs/@id links and inline. JS vars. */
     fun extractTmdbId(doc: Document): String? {
-        // 1. Data attributes
+        // 1. Data attributes.
         doc.select("[data-tmdb], [data-tmdb-id], [data-tmdbid], [data-tmdb_id]").firstOrNull()?.let { el ->
             listOf("data-tmdb", "data-tmdb-id", "data-tmdbid", "data-tmdb_id").forEach { attr ->
                 el.attr(attr).takeIf { it.isNotBlank() }?.let { return it.trim() }
             }
         }
 
-        // 2. JSON-LD / scripts referencing themoviedb.org or inline tmdb vars
+        // 2. JSON-LD / scripts referencing themoviedb. org or inline tmdb vars.
         doc.select("script").forEach { script ->
             val text = script.html()
             Regex("""https?://(?:www\.)?themoviedb\.org/(?:movie|tv)/(\d+)""")
@@ -611,29 +536,14 @@ object TmdbService {
     }
 }
 
-/**
- * Pure, JVM-testable helpers shared by the provider's search pipeline, poster
- * handling and fetch retry logic. No CloudStream/Android runtime dependency, so
- * the unit tests exercise them on the plain JVM.
- *
- * Kept out of [MultimoviesProvider] so the provider file stays focused on the
- * MainAPI wiring (search / mainPage / load / loadLinks) instead of carrying
- * ~250 lines of string/regex utilities.
- */
-
-/** Unicode-aware normalization (lowercase; letters, marks, digits only) so
- *  Hindi/Devanagari queries survive: vowel signs like ि/ी are combining marks
- *  (Unicode \p{M}), not letters, so they must be kept or scripts get mangled. */
+/** Pure, JVM-testable helpers shared by the provider's search pipeline, poster handling and fetch retry logic. No. CloudStream/Android runtime. */
 private val NON_ALNUM_UNICODE = Regex("""[^\p{L}\p{M}\p{N}]+""")
 
 internal fun normalizeTitle(t: String): String =
     t.lowercase().replace("'", "").replace("’", "").trim()
         .replace(NON_ALNUM_UNICODE, " ").trim()
 
-/** Alternative spellings of a title that a Dooplay site may store, so slug
- *  guessing and the site-search fallback survive "&" vs "and", dropped
- *  apostrophes ("King's Man" -> "Kings Man") and stray punctuation such as
- *  "(", ")", ":", ";", "," that a WordPress search treats literally. */
+/** Alternative spellings of a title that a Dooplay site may store, so slug guessing and the site-search fallback. survive "&" vs "and", dropped. */
 internal fun titleVariants(title: String): List<String> {
     val andWord = Regex("\\band\\b", RegexOption.IGNORE_CASE)
     return buildList {
@@ -666,17 +576,14 @@ internal fun levenshtein(a: String, b: String): Int {
     return prev[b.length]
 }
 
-/** Coarse title match distance for validating a fetched page / search hit
- *  against the queried title: 0 identical (also when they differ only by the
- *  "&"/"and" join or a dropped apostrophe), 1 when one is a prefix of the
- *  other, else 2. */
+/** Coarse title match distance for validating a fetched page / search hit against the queried title: 0 identical (also. when they differ only by the. */
 internal fun titleDistance(itemTitle: String, target: String): Int {
     val a = normalizeTitle(itemTitle)
     val b = normalizeTitle(target)
     return when {
         a == b -> 0
-        // TMDB spells "Locke & Key" where the site says "Locke and Key";
-        // dropping the "and" join on either side makes them identical.
+        // TMDB spells "Locke & Key" where the site says "Locke and Key"; dropping the "and" join on either side makes them.
+// identical.
         a.replace(" and ", " ") == b && a.contains(" and ") -> 0
         b.replace(" and ", " ") == a && b.contains(" and ") -> 0
         a.startsWith(b) || b.startsWith(a) -> 1
@@ -684,15 +591,11 @@ internal fun titleDistance(itemTitle: String, target: String): Int {
     }
 }
 
-/** Query words that carry meaning (>=2 chars); digit tokens such as years are
- *  kept so "iron man 2010" can match a release year too. */
+/** Query words that carry meaning (>=2 chars); digit tokens such as years are kept so "iron man 2010" can match a. release year too. */
 internal fun significantQueryTokens(query: String): List<String> =
     normalizeTitle(query).split(' ').filter { it.length >= 2 }.distinct()
 
-/** Best fuzzy match score for one query [token] against the title's tokens:
- *  1.0 exact or substring in either direction (long words only for the
- *  query-contains-title direction to avoid false hits like "spiderman" vs
- *  "Man"), 0.7 within a small Levenshtein tolerance (typos), else 0.0. */
+/** Best fuzzy match score for one query against the title's tokens: 1. 0 exact or substring in either direction (long. words only for the. */
 internal fun tokenMatchScore(token: String, titleTokens: List<String>): Double {
     if (titleTokens.any { it == token || it.contains(token) }) return 1.0
     if (titleTokens.any { token.contains(it) && it.length >= 4 }) return 1.0
@@ -701,13 +604,10 @@ internal fun tokenMatchScore(token: String, titleTokens: List<String>): Double {
     return 0.0
 }
 
-/** Relevance verdict for one search candidate. [score] is in [0,1];
- *  [allTokensMatched] drives the hard "remove every other" gate. */
+/** Relevance verdict for one search candidate. is in; drives the hard "remove every other" gate. */
 internal data class Relevance(val score: Double, val allTokensMatched: Boolean)
 
-/** Fuzzy relevance of [query] against a candidate [title] (+ optional release
- *  [year], which pure-digit tokens may match). Score = weighted mean of
- *  per-token matches with a small penalty for bloated titles, clamped [0,1]. */
+/** Fuzzy relevance of against a candidate (+ optional release, which pure-digit tokens may match). Score = weighted. mean of per-token matches with a. */
 internal fun relevanceOf(query: String, title: String, year: String?): Relevance {
     val qNorm = normalizeTitle(query)
     if (qNorm.isEmpty()) return Relevance(0.0, false)
@@ -735,20 +635,13 @@ internal fun relevanceOf(query: String, title: String, year: String?): Relevance
     return Relevance(score, matchedAll)
 }
 
-/** TMDB image CDN size prefixes that are too small for a poster. Anything from
- *  w92 to w500 is upgraded to `original`; w780/w1280 are kept (already good). */
+/** TMDB image CDN size prefixes that are too small for a poster. Anything; w780/w1280 are kept (already good). */
 private val TMDB_SIZE_REGEX = Regex("""/(w92|w154|w185|w342|w500|w780|w1280)/""")
 
-/** Amazon (IMDB) CDN thumbnail suffix, e.g. `_SX250` / `_SY450`. Upgraded to a
- *  larger variant so posters aren't pixelated. */
+/** Amazon (IMDB) CDN thumbnail suffix, e. g. `_SX250` / `_SY450`. Upgraded to a larger variant so posters aren't pixelated. */
 private val AMAZON_SIZE_REGEX = Regex("""_SX\d{2,4}(?=\.|_|$)""", RegexOption.IGNORE_CASE)
 
-/** Upgrades a thumbnail URL to the full-resolution image by stripping only
- *  genuine thumbnail resize markers (-WxH where W,H are small, TMDB CDN size
- *  prefixes, Amazon _SX* suffixes) and query-size params. Conservative: never
- *  strips -scaled (a real WordPress file variant) and only drops -WxH when both
- *  dims <= 500; otherwise returns the original so a poster is always shown.
- *  Pure function, used for both search and detail posters. */
+/** Upgrades a thumbnail URL to the full-resolution image by stripping only genuine thumbnail resize markers (-WxH where. W, H are small, TMDB CDN size. */
 internal fun upgradePosterUrl(url: String?): String? {
     if (url.isNullOrBlank()) return null
     var fixed = if (url.startsWith("//")) "https:$url" else url
@@ -780,11 +673,7 @@ internal fun upgradePosterUrl(url: String?): String? {
     return fixed
 }
 
-/** True when [url] still carries a resize/thumbnail marker that [upgradePosterUrl]
- *  could not remove (e.g. a large -WxH variant that is still smaller than the
- *  original, a TMDB CDN small-size prefix, or an Amazon _SX* suffix). Used to
- *  decide when a search result should be overridden with a known-good
- *  full-resolution poster from TMDB. */
+/** True when still carries a resize/thumbnail marker that could not remove (e. g. a large -WxH variant that is still. smaller than the original, a. */
 internal fun isThumbnailish(url: String?): Boolean {
     if (url.isNullOrBlank()) return false
     return Regex("""-\d{2,4}x\d{2,4}""", RegexOption.IGNORE_CASE).containsMatchIn(url)
@@ -793,10 +682,7 @@ internal fun isThumbnailish(url: String?): Boolean {
         || Regex("""[?&](resize|w|h|width|height|fit|im|q|quality)=""", RegexOption.IGNORE_CASE).containsMatchIn(url)
 }
 
-/** Strips a "-WxH" size marker (e.g. -300x450) only when it represents a
- *  small thumbnail: both dims <= 500. Left intact: -scaled (a real WP file
- *  variant), large dims (the image is already full-res). Returns [url] unchanged
- *  when the marker dims exceed the thumbnail threshold or there is none. */
+/** Strips a "-WxH" size marker (e. g. -300x450) only when it represents a small thumbnail: both dims <= 500. Left. intact: -scaled (a real WP file. */
 private fun stripSmallSizeSuffix(url: String): String {
     val m = Regex("""-(\d{2,4})x(\d{2,4})""", RegexOption.IGNORE_CASE).find(url) ?: return url
     val w = m.groupValues[1].toInt()
@@ -805,23 +691,11 @@ private fun stripSmallSizeSuffix(url: String): String {
     return url.removeRange(m.range)
 }
 
-/** Pull the first `tt\d{7,8}` IMDB id from any text (URL, JSON, HTML). Used
- *  to extract the IMDB id from dooplayer admin-ajax embed URLs, which always
- *  carry the id (e.g. tt1979320) inside the embed_url field. */
+/** Pull the first `tt\d{7, 8}` IMDB id, JSON, HTML). Used to extract the IMDB id, which always carry the id (e. g. tt1979320) inside the embed_url field. */
 internal fun extractImdbIdFromUrl(text: String?): String? =
     text?.let { Regex("""tt\d{7,8}""").find(it)?.value }
 
-/**
- * Retry [fetch] up to [attempts] times. If a result is "blocked" (e.g. a Cloudflare
- * challenge page rather than the real document), [onBlocked] is invoked and the next
- * attempt is tried. If every attempt fails or is blocked, throws an exception built by
- * [failureMessage].
- *
- * This is the core of the detail-page fix: it tries a fixed, finite number of solvers
- * and then surfaces a single error instead of CloudStream's LoadFragment retrying
- * load() forever (the "keep refreshing" loop). Kept CloudStream-free so it is
- * unit-testable on the JVM without an Android/WebView runtime.
- */
+/** Retry up to times. If a result is "blocked" (e. g. a Cloudflare challenge page rather than the real document), is. invoked and the next attempt is. */
 internal suspend fun <T> retryUntilSolved(
     attempts: Int,
     fetch: suspend (attempt: Int) -> T,
@@ -846,7 +720,7 @@ internal suspend fun <T> retryUntilSolved(
     throw IllegalStateException(failureMessage(lastErr))
 }
 
-/** True when [doc] is the site's Cloudflare interstitial rather than real content. */
+/** True when is the site's Cloudflare interstitial rather than real content. */
 internal fun isChallenge(doc: Document): Boolean =
     doc.body()?.text().orEmpty().let { bodyText ->
         val titleText = doc.selectFirst("title")?.text()?.lowercase() ?: ""

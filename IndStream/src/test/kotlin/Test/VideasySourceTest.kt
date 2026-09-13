@@ -12,11 +12,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
-/**
- * Guards VideasySource's cipher port against the verified Python reference
- * (cracked Sept 2026 against live api.speedracelight.com payloads, header
- * "mvm1"). Round-trip + anchor tests so refactors can't silently break it.
- */
+/** Guards VideasySource's cipher. speedracelight. com payloads, header "mvm1"). Round-trip + anchor tests so refactors. can't silently break it. */
 class VideasySourceTest {
 
     @Test
@@ -34,9 +30,8 @@ class VideasySourceTest {
 
     @Test
     fun decrypt_roundTrip() {
-        // encrypt == decrypt for a stream XOR cipher: build a ciphertext by
-        // running the keystream over a known plaintext, then decrypt it back
-        // through the public entry point.
+        // encrypt == decrypt for a stream XOR cipher: build a ciphertext by running the keystream over a known plaintext, then.
+// decrypt it back through the.
         val seed = "59622076.V3iLVcZwtMl1EabSU9UqBf"
         val mediaId = 385687
         val plaintext = "mvm1{\"ok\":true,\"sources\":[]}"

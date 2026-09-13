@@ -12,12 +12,12 @@ internal object VcloudResolver {
     private val cacheSize
         get() = 64
 
-    /** Parses the double-encoded token URL from a V-Cloud page. */
+    /** Parses the double-encoded token URL. */
     val ATOB_ATOB = Regex(
         """var\s+url\s*=\s*atob\s*\(\s*atob\s*\(\s*['"]([A-Za-z0-9+/=]{16,})['"]\s*\)\s*\)""",
     )
 
-    /** Parses download buttons from the token page. */
+    /** Parses download buttons. */
     val BTN = Regex(
         """<a\b[^>]*href="([^"]+)"[^>]*>\s*(?:<[^>]+>\s*)*([^<]*(?:Download|Server|File)[^<]*)(?:<[^>]+>\s*)*</a>""",
         RegexOption.IGNORE_CASE,

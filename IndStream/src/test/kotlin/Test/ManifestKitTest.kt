@@ -7,13 +7,7 @@ import com.indstream.ServerIdType
 import com.indstream.ServerSpec
 import com.indstream.VidlinkSource
 import com.indstream.VideasySource
-/**
-
- * FILE: ManifestKitTest.kt â€” guards the [ManifestKit] service.
- *
- *  - HLS master-playlist parsing (variants, audio renditions).
- *  - Audio-priority classification (Hindi / dual-audio / original).
- */
+/** FILE: ManifestKitTest. kt â€” guards the service. - HLS master-playlist parsing (variants, audio renditions). Audio-priority classification. */
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -83,7 +77,7 @@ class ManifestKitTest {
         assertEquals(3, result.audio.size)
         assertEquals(2, result.subtitles.size)
         assertEquals("Hindi", result.audio[0].name)
-        // Hindi + English dual audio must be detected
+        // Hindi + English dual audio must be detected.
         assertTrue(ManifestKit.hasHindiEnglishAudio(result), "expected Hi+En dual audio")
     }
 
@@ -98,7 +92,7 @@ class ManifestKitTest {
         """.trimIndent()
         val result = ManifestKit.parseMaster(master, "https://cdn.example.com/")
         assertNotNull(result)
-        // English+Tamil, no Hindi → NOT Hindi+English dual
+        // English+Tamil, no Hindi → NOT Hindi+English dual.
         assertFalse(ManifestKit.hasHindiEnglishAudio(result), "expected false (no Hindi)")
     }
 
@@ -184,8 +178,8 @@ class ManifestKitTest {
 
     @Test
     fun audioPriority_defaultHindiWinsWhenEnglishAlsoPresent() {
-        // RRR-on-VaPlayer style: Hindi is the DEFAULT track, an English track also
-        // exists. The label must be "Hindi" (4), never "English" (1) or dual (3).
+        // RRR-on-VaPlayer style: Hindi is the DEFAULT track, an English track also exists. The label must be "Hindi" (4).
+// never "English" (1) or dual (3).
         val master = """
         #EXTM3U
         #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="Hindi",LANGUAGE="hi",URI="hi.m3u8",DEFAULT=YES
@@ -200,7 +194,7 @@ class ManifestKitTest {
 
     @Test
     fun audioPriority_defaultEnglishWinsWhenHindiAlsoPresent() {
-        // The DEFAULT track is English even though Hindi exists — trust the played track.
+        // The DEFAULT track is English even though Hindi exists - trust the played track.
         val master = """
         #EXTM3U
         #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="English",LANGUAGE="en",URI="en.m3u8",DEFAULT=YES
@@ -213,7 +207,7 @@ class ManifestKitTest {
         assertEquals(1, ManifestKit.audioPriority(result))
     }
 
-    // ── Indian dub-language labeling (user spec 2026-09-11) ────────────────
+    // ── Indian dub-language labeling () ────────────────.
 
     private fun masterWithAudio(vararg mediaLines: String): ManifestKit.MasterPlaylist? {
         val master = buildString {
@@ -227,8 +221,8 @@ class ManifestKitTest {
 
     @Test
     fun audioLanguageLabel_defaultTeluguWins() {
-        // Telugu dub is the DEFAULT track — the label must be "Telugu", which
-        // the old Hindi/English priority model collapsed to 0/"Unknown".
+        // Telugu dub is the DEFAULT track - the label must be "Telugu", which the old Hindi/English priority model collapsed.
+// to 0/"Unknown".
         val master = masterWithAudio(
             """#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="Telugu",LANGUAGE="te",URI="te.m3u8",DEFAULT=YES""",
             """#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="Hindi",LANGUAGE="hi",URI="hi.m3u8"""",

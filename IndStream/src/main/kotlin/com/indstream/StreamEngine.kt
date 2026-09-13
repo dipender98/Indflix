@@ -1,21 +1,6 @@
 package com.indstream
 
-/**
-
- * FILE: StreamEngine.kt â€” the IndStream resolution engine (HOW a TMDB id
- * becomes playable links).
- *
- *  - [StreamEngine]   fans out to healthy servers in parallel and emits
- *                     EVERY stream that answers in arrival order (user spec:
- *                     neutral — the player's quality-profile decides).
- *  - [ServerFarm]     server registry + [HealthMonitor] ï¿½ defined in
- *                     ServerRegistry.kt (data + health state, no orchestration).
- *
- * Distinct from CoreServices.kt (stateless primitives: HTTP, TMDB, manifest
- * parsing, title matching) and ServerRegistry.kt (server registry + health
- * data): this file holds the orchestration. Third-party stream sources
- * live in VidLinkSource.kt.
- */
+/** FILE: StreamEngine. kt - the resolution engine (HOW a TMDB id becomes playable links). - fans out to healthy servers. in parallel and emits EVERY. */
 
 import android.util.Log
 import com.lagradost.cloudstream3.app
@@ -29,30 +14,16 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.withTimeoutOrNull
 import org.jsoup.Jsoup
 
-/**
- * Federated resolution engine.
- *
- * 1. Fans out to healthy embed servers in parallel.
- * 2. Uses the same multi-strategy pipeline as Multimovies:
- *    fetch ? unwrap iframes ? bare-URL regex harvest ? loadExtractor registry
- *    ? JS config ? <video> source.
- * 3. NEUTRAL emission (user spec Sept 2026 rewrite): every resolved stream
- *    is pushed in arrival order; audio labels are display-only, and the
- *    user's CloudStream quality/source profile decides what auto-plays.
- */
+/** Federated resolution engine. 1. Fans out to healthy embed servers in parallel. 2. */
 object StreamEngine {
 
-    // One slot per host: the live farm is =16 servers, so a smaller cap only
-    // made fast resolvers QUEUE behind slow multi-chain hosts (MovieBox /
-    // Allmovieland hold their slot 10-20s) and pushed the first frame out.
-    // Full-parallel launch = every host starts the instant the tap lands
-    // (user spec: instant play + all servers pulled).
+    // One slot per host: the live farm is =16 servers, so a smaller cap only made fast resolvers QUEUE behind slow.
+// multi-chain hosts (MovieBox /.
     private const val MAX_CONCURRENT = 16
     private const val MAX_SERVERS = 16
     private const val MAX_UNWRAP = 4
 
-    /** MovieBox bearer token cache (CSX parity): the x-user token lives for
-     *  hours; caching it removes one serial round-trip from every resolve. */
+    /** MovieBox bearer token cache (): the x-user token lives for hours; caching it removes one serial round-trip. */
     @Volatile private var movieBoxToken: String? = null
     @Volatile private var movieBoxTokenAt: Long = 0L
     private const val MOVIEBOX_TOKEN_TTL_MS = 6 * 60 * 60 * 1000L
@@ -72,39 +43,20 @@ object StreamEngine {
         val measuredKbps: Long? = null,
         val audioPriority: Int = 0,
         val audioLabel: String = "",
-        val inlineManifest: String? = null, // HLS master playlist text delivered inline (JSON API)
-        /** Extra HTTP headers the player must send when fetching [url] (e.g.
-         *  "User-Agent: ExoPlayer" for CDNs that reject browser UAs). Merged
-         *  into the ExtractorLink headers at emission time. */
+        val inlineManifest: String? = null, // HLS master playlist text delivered inline (JSON API) Extra HTTP headers the player must send when fetching (e. g.
+// "User-Agent: ExoPlayer" for CDNs.
         val extraHeaders: Map<String, String> = emptyMap(),
     )
 
-    /**
-     * A resolver throws this when the host legitimately carries no source for
-     * this title/episode: library miss, unsupported media type, no Hindi dub,
-     * season range not covered. Unlike a network failure or a timeout it must
-     * NOT feed the circuit breaker — otherwise three unlucky taps (an
-     * English-only title hitting Videasy Hindi, a MovieBox title-match miss,
-     * a series episode on 8Stream) trip the breaker and a working server
-     * silently vanishes from the farm for 5 minutes. This is exactly what
-     * made MovieBox "appear in some episodes but not others".
-     */
+    /** A resolver throws this when the host legitimately carries no source for this title/episode: library miss. unsupported media type, no Hindi dub. */
     class CleanMissException(message: String) : Exception(message)
 
-    /**
-     * Pick the servers to query for this title. NEUTRAL (user spec Sept 2026:
-     * "do not prioritize based on anything") — healthy servers in registry
-     * order, no Hindi-first placement, no speed-score sorting. Every server
-     * launches in parallel anyway, so order only matters for tie-breaks.
-     */
+    /** Pick the servers to query for this title. NEUTRAL () — healthy servers in registry order, no Hindi-first placement. no speed-score sorting. */
     private fun selectServers(tmdbId: Int, type: String, season: Int, episode: Int): List<ServerSpec> {
         val healthy = ServerFarm.allServers.filter { HealthMonitor.isHealthy(it.id) }
         Log.d("IndStream", "healthy: ${healthy.size}/${ServerFarm.allServers.size}")
-        // A fully-tripped farm used to return emptyList() instantly, so every tap
-        // showed "no link found" for a full trip window with zero network traffic.
-        // Once per cooldown window, clear the trips and re-probe the whole farm --
-        // one bad session must never lock the plugin out, but a dead uplink should
-        // not trigger a full-farm hammer on every tap either.
+        // A fully-tripped farm used to return emptyList() instantly, so every tap showed "no link found" for a full trip.
+// window with zero network traffic.
         val candidates = if (healthy.isEmpty()) {
             val now = System.currentTimeMillis()
             if (now - lastFarmProbeAt < FARM_REPROBE_COOLDOWN_MS) {
@@ -113,8 +65,8 @@ object StreamEngine {
                 emptyList()
             } else {
                 lastFarmProbeAt = now
-                // Clear only the trip state, keeping latency/throughput history so the
-                // health data survives the re-probe (display/debug only — no ranking).
+                // Clear only the trip state, keeping latency/throughput history so the health data survives the re-probe.
+// (display/debug only — no ranking).
                 Log.w("IndStream", "all ${ServerFarm.allServers.size} servers tripped -- clearing trips, re-probing all")
                 HealthMonitor.resetTrips()
                 ServerFarm.allServers
@@ -125,14 +77,7 @@ object StreamEngine {
         return servers
     }
 
-    /**
-     * Dual-ID race helper (user spec Sept 2026, Phase 1): run several id
-     * shapes for one host in parallel; the FIRST non-empty result wins and
-     * the losing attempts are cancelled. All-empty ? emptyList. Used by the
-     * vidup/vidcore dispatch (both hosts accept TMDB and IMDB ids in their
-     * URL path) — TMDB-keyed arm starts at t=0, the IMDB-keyed arm starts as
-     * soon as the id resolves, so neither blocks the other.
-     */
+    /** Dual-ID race helper (, ): run several id shapes for one host in parallel; the FIRST non-empty result wins and the. losing attempts are cancelled. */
     private suspend fun raceFirst(vararg blocks: suspend () -> List<RawStream>): List<RawStream> {
         if (blocks.isEmpty()) return emptyList()
         if (blocks.size == 1) return runCatching { blocks[0]() }.getOrDefault(emptyList())
@@ -154,19 +99,10 @@ object StreamEngine {
         }
     }
 
-    /**
-     * Resolve every server, invoking [onBatch] with a server's results the instant
-     * that server finishes. The whole farm launches in parallel, so completion
-     * order is fastest-first — the caller pushes each batch straight to the
-     * player (live source list) while loadLinks is still running, and keeps
-     * landing later arrivals in [FastStartCache] for the full-list replay.
-     */
+    /** Resolve every server, invoking with a server's results the instant that server finishes. The whole farm launches in. parallel, so completion order. */
     suspend fun resolveRealtime(
         tmdbId: Int, type: String, season: Int = -1, episode: Int = -1,
-        /** Lazily resolves the IMDB id for IMDB-keyed servers. Called INSIDE each
-         *  server's coroutine so the (up to 3s) TMDB lookup runs concurrently with
-         *  the farm instead of blocking every server's start (fast-start: zero
-         *  serial head before the first launch). */
+        /** Lazily resolves the IMDB id for IMDB-keyed servers. Called INSIDE each server's coroutine so the (up to 3s) TMDB. lookup runs concurrently with the. */
         imdbIdProvider: (suspend () -> String?)? = null,
         onBatch: suspend (serverId: String, streams: List<RawStream>) -> Unit,
     ) {
@@ -182,19 +118,15 @@ object StreamEngine {
                 async {
                     sem.acquire()
                     try {
-                        // IMDB id only for the servers that need it — TMDB-keyed
-                        // servers never wait for (or trigger) the lookup.
+                        // IMDB id only for the servers that need it — TMDB-keyed servers never wait for (or trigger) the lookup.
                         val serverStart = System.currentTimeMillis()
                         val imdbId = if (spec.idType == ServerIdType.IMDB) imdbIdProvider?.invoke() else null
                         if (spec.idType == ServerIdType.IMDB) {
                             Log.i("IndStream", "${spec.id}: imdb=${imdbId ?: "MISSING"} after " +
                                 "${System.currentTimeMillis() - serverStart}ms wait")
                         }
-                        // Distinguish a CRASH (resolver throw that is not a clean
-                        // miss — parse bug / changed upstream shape) from a TIMEOUT
-                        // (server slow / black-holing). Only timeouts strike the
-                        // breaker: a shape change must not vanish the server 5 min
-                        // every tap while its log line says why (RC-J, Sept 2026).
+                        // Distinguish a CRASH (resolver throw that is not a clean miss — parse bug / changed upstream shape)). Only timeouts.
+// strike the breaker: a shape.
                         var crashed: Throwable? = null
                         val outcome = withTimeoutOrNull(spec.timeoutSec * 1000L) {
                             runCatching { resolveOne(spec, tmdbId, imdbId, type, season, episode, imdbIdProvider) }
@@ -217,12 +149,8 @@ object StreamEngine {
                                 HealthMonitor.recordFailure(spec.id)
                             }
                         }
-                        // Single-language hosts often declare no labelled audio
-                        // track; bias their streams' LABEL to the declared
-                        // language (display only — the Sept 2026 rewrite
-                        // removed all priority sorting). A host declaring
-                        // SEVERAL languages never biases: per-entry resolver
-                        // labels win, blanks stay "Unknown" (never guessed).
+                        // Single-language hosts often declare no labelled audio track; bias their streams' LABEL to the declared language.
+// (display only — the). A host.
                         val streams = outcome?.map { s ->
                             if (s.audioLabel.isBlank() && spec.declaredLanguages.size == 1)
                                 s.copy(audioLabel = spec.declaredLanguages.first())
@@ -239,55 +167,20 @@ object StreamEngine {
         }
     }
 
-    /**
-     * Emit links (Sept 2026 rewrite, user spec). Changes from the old model:
-     *
-     *  - NO PRIORITIZATION of our own: streams are emitted in ARRIVAL order.
-     *    The player's own quality-profile settings (the user's priority, like
-     *    CloudStream's source-priority dialog) decide what auto-plays. No
-     *    Hindi-first, no speed scores, no quality pools.
-     *  - REAL QUALITY HEIGHT: ExtractorLink.quality carries the resolved
-     *    height so the user's quality profile actually ranks it (quality=0
-     *    stays only for adaptive/unknown heights). The display name no longer
-     *    repeats the resolution — the player's badge shows it once (the old
-     *    "1080p [1080p]" double print is gone); an unmeasured direct file
-     *    keeps its "Auto" marker in the name.
-     *  - QUALITY FLOOR: fixed/progressive (non-HLS) links with a KNOWN height
-     *    below 720p are dropped ([passesQualityFloor]). Adaptive HLS masters
-     *    always pass — they ramp to their best rendition regardless of what
-     *    the master header reads — and unknown heights (0 / "Auto") can't be
-     *    proven low, so they stay.
-     *  - NO SERVER SUBTITLES: the OpenSubtitles fallback is THE subtitle
-     *    provider (fetched when the stream starts, title-keyed, sync-safe
-     *    after any in-player server switch). Caption lists from the servers
-     *    are ignored.
-     *
-     * One link per stream — HLS masters go out as the adaptive source (the
-     * player selects the rung), never as master + per-variant duplicates.
-     *
-     * Returns the set of emitted urls (empty strings are filtered upstream).
-     */
+    /** Emit links (, ). Changes. */
     suspend fun emit(
         streams: List<RawStream>,
         onLink: (ExtractorLink) -> Unit,
-        /** TMDB original_language ("ja", "hi", ...): a stream whose audio label is
-         *  "Original" carries this language, so "VidLink (Japanese)" is shown
-         *  instead of "VidLink (Original)". */
+        /** TMDB original_language ("ja", "hi", . . . ): a stream whose audio label is "Original" carries this language, so. "VidLink (Japanese)" is shown. */
         originalLang: String? = null,
-        /** Background-arrival mode (user spec: while the video plays the
-         *  bandwidth belongs to it): true = skip the master-manifest re-fetch
-         *  for labels; the RawStream's own qualityHint is used as-is. */
+        /** Background-arrival mode (): true = skip the master-manifest re-fetch for labels; the RawStream's own qualityHint is. used as-is. */
         probeManifests: Boolean = true,
     ): Set<String> {
         val emitted = java.util.Collections.synchronizedSet(HashSet<String>())
         if (streams.isEmpty()) return emitted
 
-        // Replay liveness sweep (F9, Sept 2026): background/replay mode feeds
-        // FastStartCache links that may have gone stale — aoneroom `?sign=` and
-        // vidnest tokens expire well inside the 5-min TTL, and replaying them is
-        // exactly the field symptom "server shown, buffers, then dies". ONE
-        // cheap ranged request per url, in parallel, hard-capped: an UNCONFIRMED
-        // (timed-out) url is kept — only an explicit 4xx/5xx/exception drops it.
+        // Replay liveness sweep (F9, ): background/replay mode feeds FastStartCache links that may have gone stale — aoneroom.
+// `?sign=` and vidnest tokens.
         var liveSet = streams
         if (!probeManifests) {
             val dead = withTimeoutOrNull(3000L) {
@@ -308,32 +201,24 @@ object StreamEngine {
             }
         }
 
-        // NEUTRAL order (user spec Sept 2026: no prioritizing): arrival order.
+        // NEUTRAL order (): arrival order.
         val ranked = liveSet.filter { it.url.isNotBlank() }
 
-        // Pre-resolve M3U8 masters before dedupe so the numbering key uses
-        // the ACTUAL height (from variant parse) rather than qualityHint
-        // (which is 0 for adaptive masters). Without this, a master with
-        // qualityHint=0 and a direct MP4 qualityHint=1080 from the same
-        // server form separate dedupe groups and both print "1080p".
+        // Pre-resolve M3U8 masters before dedupe so the numbering key uses the ACTUAL height () rather than qualityHint (which.
+// is 0 for adaptive masters).
         data class ResolvedEmit(
             val raw: RawStream,
             val fullHeight: Int,
             val tagLabel: String,
         )
-        // Pre-resolve CONCURRENTLY: serial map added up to 4s PER unprobed HLS
-        // master (VaPlayer/VidUp/VidCore arrive without height) BEFORE the first
-        // link reached the player. Parallel fetches cap that head at one master
-        // timeout (~4s worst case, usually <1s).
+        // Pre-resolve CONCURRENTLY: serial map added up to 4s PER unprobed HLS master (VaPlayer/VidUp/VidCore arrive without.
+// height) BEFORE the first link.
         val preResolved = coroutineScope {
             ranked.map { raw ->
                 async {
                     when {
-                        // Adaptive master (HLS or DASH): re-parse for real height + audio
-                        // (skip when background/off, or when the height is ALREADY known —
-                        // probeAudioHeight stored it at harvest time). The gate is the
-                        // HEIGHT, not the audio probe: a probed-audio stream with no
-                        // height would previously skip this branch and label blank/0.
+                        // Adaptive master (HLS or DASH): re-parse for real height + audio (skip when background/off, or when the height is.
+// ALREADY known — probeAudioHeight.
                         raw.isM3u8 && probeManifests -> {
                             val alreadyKnown = raw.qualityHint > 0
                             if (alreadyKnown) {
@@ -345,17 +230,12 @@ object StreamEngine {
                                 val masterText = raw.inlineManifest ?: withTimeoutOrNull(3000L) {
                                     runCatching { app.get(raw.url, timeout = 3, headers = lh).text }.getOrNull()
                                 }
-                                // Dispatch HLS/MPD: bestHeightOf parses the DASH MPD too, so
-                                // a MovieBox DASH ladder gets its real peak (e.g. 2160), not 0.
-                                // Adaptive guard (Sept 2026): an HLS master never carries the
-                                // -1 "Auto" direct-file sentinel — clamp the fallback height
-                                // to =0 in THIS branch too, not only the probeManifests=false one.
+                                // Dispatch HLS/MPD: bestHeightOf parses the DASH MPD too, so a MovieBox DASH ladder gets its real peak (e. g. 2160).
+// not 0. Adaptive guard (): an.
                                 val h = (ManifestKit.bestHeightOf(masterText, raw.url).takeIf { it > 0 } ?: raw.qualityHint).coerceAtLeast(0)
                                 val master = ManifestKit.parseMaster(masterText, raw.url)
-                                // Audio label: explicit server label wins; else the REAL track the
-                                // player auto-selects (multi-audio ? "Multi", single track ? its language);
-                                // else a language the HOST ITSELF declares in its URL/server name.
-                                // Anything still blank stays "Unknown" — never guessed.
+                                // Audio label: explicit server label wins; else the REAL track the player auto-selects (multi-audio? "Multi", single.
+// track? its language); else a.
                                 val tag = (if (raw.audioLabel.isNotBlank()) raw.audioLabel
                                 else if (master != null && master.isMultiAudio) "Multi"
                                 else if (master != null) ManifestKit.audioLanguageLabel(master).orEmpty()
@@ -364,36 +244,24 @@ object StreamEngine {
                                 ResolvedEmit(raw, h, tag)
                             }
                         }
-                        // Direct file: measure the REAL height (moov parse ? URL token ? "Auto");
-                        // language from the host's own declaration only (URL/server name) —
-                        // a file with no declared language stays "Unknown", never guessed.
+                        // Direct file: measure the REAL height (moov parse? URL token?
                         !raw.isM3u8 && probeManifests -> {
                             val measured = HttpKit.resolveHeight(raw.url, raw.referer, raw.extraHeaders)
                             val h = if (measured > 0) measured
                             else if (raw.qualityHint > 0) raw.qualityHint
                             else {
                                 val fromUrl = ManifestKit.resolutionFromUrl(raw.url)
-                                if (fromUrl > 0) fromUrl else -1   // -1 = Auto (unknown direct file)
+                                if (fromUrl > 0) fromUrl else -1   // 1 = Auto (unknown direct file).
                             }
                             val tag = raw.audioLabel.ifBlank { declaredLanguageHint(raw) ?: "" }
                             ResolvedEmit(raw, h, tag)
                         }
-                        // Background/off path: trust the RawStream's own qualityHint (no
-                        // new probes). For direct files (non-adaptive) with no known
-                        // height, use -1 so they stay distinguishable from adaptive
-                        // masters (height 0) in dedupe grouping; the display name no
-                        // longer prints resolution at all (CloudStream's quality badge
-                        // does). Language still comes from host declarations only
-                        // (URL/server name) — never guessed.
+                        // Background/off path: trust the RawStream's own qualityHint (no new probes). For direct files (non-adaptive) with no.
+// known height, use -1 so they.
                         else -> {
                             var fullHeight = if (!raw.isM3u8 && raw.qualityHint <= 0) -1 else raw.qualityHint
-                            // Adaptive guard (Sept 2026): an HLS master can
-                            // NEVER carry the -1 "Auto" direct-file sentinel —
-                            // clamp negatives to 0 (unknown-adaptive), and if
-                            // the server shipped the master inline (the API's
-                            // `manifest` field) read its peak height directly,
-                            // so adaptive links get their real badge without
-                            // a probe even when probeManifests=false.
+                            // Adaptive guard (): an HLS master can NEVER carry the -1 "Auto" direct-file sentinel — clamp negatives to 0.
+// (unknown-adaptive), and if the server.
                             if (raw.isM3u8 && fullHeight < 0) fullHeight = 0
                             if (raw.isM3u8 && fullHeight <= 0 && !raw.inlineManifest.isNullOrBlank()) {
                                 val h = ManifestKit.bestHeightOf(raw.inlineManifest, raw.url).takeIf { it > 0 } ?: 0
@@ -409,10 +277,8 @@ object StreamEngine {
         val resolvedForKey = preResolved.map { it.raw.copy(qualityHint = it.fullHeight) }
         val numbers = LinkNaming.dedupeNames(resolvedForKey, originalLang)
 
-        // 720p-floor observability (Sept 2026): the floor is user spec and MovieBox
-        // has no CSX equivalent, so a MovieBox-only-480p title would surface as
-        // "server absent" with zero logs. Count drops vs survives per server and
-        // log once when a server lost EVERYTHING to the floor. Behavior unchanged.
+        // 720p-floor observability (): the floor is, so a MovieBox-only-480p title would surface as "server absent" with zero.
+// logs. Count drops vs survives.
         val floorDroppedByServer = HashMap<String, Int>()
         val emittedByServer = HashMap<String, Int>()
 
@@ -421,10 +287,8 @@ object StreamEngine {
             val dupIdx = numbers.getOrElse(index) { 0 }
             if (!emitted.add(raw.url)) return@forEachIndexed
 
-            // Quality floor (user spec Sept 2026): fixed (non-HLS) links with a
-            // KNOWN height below 720p never surface. Adaptive masters always
-            // pass — their height reading is the master header, not their best
-            // rendition — and unknown heights (0) can't be proven low.
+            // Quality floor (): fixed (non-HLS) links with a KNOWN height below 720p never surface. Adaptive masters always pass —.
+// their height reading is the.
             if (!passesQualityFloor(raw.isM3u8, r.fullHeight)) {
                 floorDroppedByServer.merge(raw.serverId, 1, Int::plus)
                 return@forEachIndexed
@@ -438,15 +302,8 @@ object StreamEngine {
             }
 
             val isAdaptive = raw.isM3u8
-            // ExtractorLink.quality = the REAL resolved height (user spec Sept
-            // 2026) so the user's quality-profile ranks every stream by its
-            // height AND CloudStream's own badge is the ONLY resolution print
-            // (user spec revision: the server name never repeats it). The name
-            // carries the (language) tag — derived from probing/parsing, never
-            // guessed. [LinkNaming.displayName] enforces the canonical
-            // `{Server} ({Language})` shape and strips any guessed resolution
-            // token inside the server/sub name; it prints nothing for an
-            // unmeasurable direct file (-1) or height-less master (0).
+            // ExtractorLink. quality = the REAL resolved height () so the user's quality-profile ranks every stream by its height.
+// AND CloudStream's own badge is.
             val quality = r.fullHeight.coerceAtLeast(0)
             val label = LinkNaming.displayName(
                 serverName = raw.serverName,
@@ -480,22 +337,14 @@ object StreamEngine {
         return emitted
     }
 
-    /**
-     * Quality floor (user spec Sept 2026): a FIXED (non-HLS) stream whose
-     * resolved height is a KNOWN value below 720p is dropped. Adaptive HLS
-     * masters always pass (they ABR-ramp to their best rendition even when
-     * the master header reads low/0) and unknown heights (0) can't be proven
-     * sub-720, so they stay. Pure function — unit-tested in NeutralOrderTest.
-     */
+    /** Quality floor (): a FIXED (non-HLS) stream whose resolved height is a KNOWN value below 720p is dropped. Adaptive. HLS masters always pass (they. */
     fun passesQualityFloor(isAdaptive: Boolean, height: Int): Boolean {
         if (isAdaptive) return true
         if (height <= 0) return true
         return height >= 720
     }
 
-    // ------------------------------------------------------------------
-    // Internals ï¿½ multi-strategy pipeline (proven from Multimovies)
-    // ------------------------------------------------------------------
+    // Internals ï¿½ multi-strategy pipeline (proven).
 
     private suspend fun resolveOne(
         spec: ServerSpec,
@@ -504,28 +353,22 @@ object StreamEngine {
         type: String,
         season: Int,
         episode: Int,
-        /** Lazy IMDB lookup for the dual-ID race (vidup/vidcore accept both id
-         *  shapes). Null = no provider (prewarm path passes a direct id). */
+        /** Lazy IMDB lookup for the dual-ID race (vidup/vidcore accept both id shapes). Null = no provider (prewarm path passes. a direct id). */
         imdbIdProvider: (suspend () -> String?)? = null,
     ): List<RawStream> {
         val start = System.currentTimeMillis()
-        // RC-H (Sept 2026 audit): a MISSING IMDB id is a TMDB-lookup problem
-        // (cold cache + 3s cap, or the transient 429s the last commit fought),
-        // NOT this host failing. The plain emptyList return let the branch
-        // below record a HARD failure — 5 lookup blips tripped the breaker and
-        // the server "randomly" vanished for 5 min. Clean miss keeps it visible.
+        // RC-H (): a MISSING IMDB id is a TMDB-lookup problem (cold cache + 3s cap, or the transient 429s the last commit.
+// fought), NOT this host failing.
         val id = if (spec.idType == ServerIdType.IMDB)
             (imdbId ?: throw CleanMissException("${spec.id}: IMDB id unavailable (TMDB lookup miss) — host stays in farm"))
         else tmdbId.toString()
         val embedUrl = if (type == "movie") ServerFarm.buildMovieUrl(spec, id)
         else ServerFarm.buildTvUrl(spec, id, season, episode)
-        // Per-server referer (some APIs 403 without it, e.g. api.shows.st).
+        // Per-server referer (some APIs 403 without it, e. g. api. shows. st).
         val referer = spec.referer ?: embedUrl.substringBefore("?")
 
-        // VidLink: encrypted-token API. Token embeds the TMDB id + a +480s
-        // timestamp (VidlinkSource); the response carries stream.playlist (an
-        // adaptive multi-audio master up to 1080p) + captions. Key rotation
-        // (rare) is fixed by updating VidlinkSource.KEY_HEX only.
+        // VidLink: encrypted-token API. Token embeds the TMDB id + a +480s timestamp (VidlinkSource); the response carries.
+// stream. playlist (an adaptive.
         if (spec.id == "vidlink") {
             if (type != "movie" && (season <= 0 || episode <= 0)) {
                 Log.w("IndStream", "${spec.id}: tv request without season/episode (s=$season e=$episode), skipping")
@@ -589,10 +432,8 @@ object StreamEngine {
             if (answered == 0) {
                 failServer(spec, "vidnest: no sub-server answered (host down)")
             } else {
-                // Soft-fail (user spec Sept 2026, MovieBox parity): sub-servers
-                // answered but none carry this title — a title-level miss, not
-                // a host failure. VidNest flaps 502s per sub-server, and hard-
-                // failing the aggregate for one bad tap would trip the breaker.
+                // Soft-fail (, MovieBox): sub-servers answered but none carry this title — a title-level miss, not a host failure.
+// VidNest flaps 502s per.
                 failServer(spec, "vidnest returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
             }
             return emptyList()
@@ -617,11 +458,8 @@ object StreamEngine {
         }
         if (spec.id == "vidup" || spec.id == "vidcore") {
             val variant = spec.id
-            // Dual-ID race (user spec Sept 2026): both hosts accept TMDB AND
-            // IMDB ids in the URL path. The TMDB arm starts at t=0; the IMDB
-            // arm joins the race as soon as the id resolves (instant cache
-            // hit after load()). First non-empty result wins; on a joint miss
-            // one failure is recorded, not two.
+            // Dual-ID race (): both hosts accept TMDB AND IMDB ids in the URL path. The TMDB arm starts at t=0; the IMDB arm joins.
+// the race as soon as the id.
             val arms = mutableListOf<suspend () -> List<RawStream>>()
             arms.add { resolveEncDecPlayer(spec, tmdbId.toString(), type, season, episode, variant) }
             if (!imdbId.isNullOrBlank()) {
@@ -643,10 +481,8 @@ object StreamEngine {
         if (spec.id == "allmovieland") {
             val result = resolveAllmovieland(spec, tmdbId, imdbId, type, season, episode)
             if (result.isNotEmpty()) { okServer(spec, start, "allmovieland multi-lang", result.size); return result }
-            // Soft-fail (user spec Sept 2026): multi-step chain finishing with
-            // no language streams is a title-level miss — network failures
-            // inside the resolver already log/return distinctly and the
-            // timeout path records hard failures.
+            // Soft-fail (): multi-step chain finishing with no language streams is a title-level miss — network failures inside.
+// the resolver already log/return.
             failServer(spec, "allmovieland returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
             return emptyList()
         }
@@ -657,9 +493,7 @@ object StreamEngine {
             return emptyList()
         }
 
-        // 0. JSON API branch (api.shows.st style): parse JSON, take source.url +
-        //    source.qualities[] + subtitles[]. The signed stream URLs carry no
-        //    file extension, so regex harvest would never find them.
+        // 0. JSON API branch (api. shows. st style): parse JSON, take source. url + source. qualities + subtitles.
         if (spec.isJsonApi) {
             val result = resolveJsonApi(spec, embedUrl, referer)
             if (result.isNotEmpty()) { okServer(spec, start, "json api", result.size); return result }
@@ -667,7 +501,7 @@ object StreamEngine {
             return emptyList()
         }
 
-        // 1. Fetch embed page
+        // 1. Fetch embed page.
         val rawText = withTimeoutOrNull((spec.timeoutSec - 2).coerceAtLeast(3) * 1000L) {
             runCatching {
                 app.get(embedUrl, timeout = (spec.timeoutSec - 2).coerceAtLeast(3).toLong(), headers = okHeaders(referer)).text
@@ -676,11 +510,11 @@ object StreamEngine {
         if (rawText.isNullOrBlank()) { failServer(spec, "embed fetch blank/timeout: $embedUrl"); return emptyList() }
         Log.d("IndStream", "${spec.id}: embed fetched, ${rawText.length}B")
 
-        // 2. Unwrap iframes
+        // 2. Unwrap iframes.
         val (unwrapped, unwrappedUrl) = unwrapPages(rawText, embedUrl, spec.timeoutSec)
         if (unwrapped !== rawText) Log.d("IndStream", "${spec.id}: unwrapped to $unwrappedUrl, ${unwrapped.length}B")
 
-        // 3. Direct stream URL regex harvest
+        // 3. Direct stream URL regex harvest.
         val direct = harvestUrls(unwrapped)
         if (direct.isNotEmpty()) {
             Log.d("IndStream", "${spec.id}: direct harvest found ${direct.size} urls")
@@ -696,15 +530,13 @@ object StreamEngine {
             Log.d("IndStream", "${spec.id}: no direct urls in page")
         }
 
-        // 4. CloudStream extractor registry (VidSrc, 2embed, embed.su, MyFlixer, etc.)
+        // 4. CloudStream extractor registry (VidSrc, 2embed, embed. su, MyFlixer, etc. ).
         val regLinks = mutableListOf<ExtractorLink>()
         val regOk = runCatching {
             loadExtractor(url = embedUrl, referer = referer, subtitleCallback = { }, callback = { regLinks.add(it) })
         }.getOrDefault(false)
-        // Also try the deepest unwrapped URL ï¿½ most embed chains register a
-        // CloudStream extractor on the INNER host (the actual player), not the
-        // outer wrapper. The outer page is the correct referer for the inner
-        // player's CORS / origin check.
+        // Also try the deepest unwrapped URL ï¿½ most embed chains register a CloudStream extractor on the INNER host (the.
+// actual player), not the outer.
         if (unwrappedUrl != embedUrl) {
             runCatching {
                 loadExtractor(url = unwrappedUrl, referer = embedUrl, subtitleCallback = { }, callback = { regLinks.add(it) })
@@ -725,7 +557,7 @@ object StreamEngine {
             Log.d("IndStream", "${spec.id}: extractor registry returned no links (outerOk=$regOk unwrapped=$unwrappedUrl)")
         }
 
-        // 5. JS config: file:"...", sources:[{file:"..."}]
+        // 5. JS config: file: ". . .
         val jsUrls = harvestJsUrls(unwrapped)
         if (jsUrls.isNotEmpty()) {
             Log.d("IndStream", "${spec.id}: js harvest found ${jsUrls.size} urls")
@@ -741,7 +573,7 @@ object StreamEngine {
             Log.d("IndStream", "${spec.id}: no js harvest")
         }
 
-        // 6. <video src> / <source src> HTML elements
+        // 6. <video src> / <source src> HTML elements.
         val videoSrc = harvestVideoSource(unwrapped, embedUrl)
         if (videoSrc != null) {
             Log.d("IndStream", "${spec.id}: video tag found: $videoSrc")
@@ -754,17 +586,13 @@ object StreamEngine {
             Log.d("IndStream", "${spec.id}: no video tag")
         }
 
-        // (No subtitle-only fallback carrier: server captions are not emitted —
-        //  the SubtilesProvider provider is the only subtitle source, user spec
-        //  Sept 2026. A page with no stream is a failure like any other.)
+        // (No subtitle-only fallback carrier: server captions are not emitted — the SubtilesProvider provider is the only.
+// subtitle source, . A page with no.
         failServer(spec, "no harvestable stream across full pipeline")
         return emptyList()
     }
 
-    /** Log + trip a server. Single choke point so every failure names its reason.
-     *  A [CleanMissException] (library miss / unsupported media / no Hindi dub)
-     *  is logged as a clean miss WITHOUT tripping the breaker — the host is up,
-     *  this title just isn't in it. */
+    /** Log + trip a server. Single choke point so every failure names its reason. */
     private fun failServer(spec: ServerSpec, reason: String, isCleanMiss: Boolean = false) {
         if (isCleanMiss) {
             Log.i("IndStream", "${spec.id}: clean miss — $reason (no breaker trip)")
@@ -781,27 +609,11 @@ object StreamEngine {
         HealthMonitor.recordSuccess(spec.id)
     }
 
-    /** DECLARED-language hint (user spec: probe/parsing wins, NEVER guess):
-     *  a language counts only when the host itself declares it — a server
-     *  brand that names it ("MyFlixer Hindi", "VidHindi") or a CDN path/URL
-     *  carrying the token ("...tamil...", ".../te/..."). Any of the official
-     *  Indian dub languages count, not just Hindi. A stream with no such
-     *  declaration returns null and stays "Unknown" in the name. */
+    /** DECLARED-language hint (, NEVER guess): a language counts only when the host itself declares it — a server brand. that names it ("MyFlixer Hindi". */
     private fun declaredLanguageHint(raw: RawStream): String? =
         ManifestKit.languageFromName(raw.serverName, raw.url)
 
-    /**
-     * Probe an adaptive manifest (HLS master or DASH MPD) for the audio
-     * language label AND the peak video height in ONE fetch — the master
-     * text serves both, so the height rides along for free and feeds
-     * [RawStream.qualityHint] (emit() then never needs a second refetch to
-     * label the adaptive link with its real best rendition: 4K/1080p/…).
-     * Returns (audioLabel, bestHeight); ("", 0) when the url is not adaptive,
-     * unreachable, or nothing usable parses (honest unknown — no guesses).
-     * Every officially dubbed Indian language reports by name ("Tamil",
-     * "Telugu", …) via [ManifestKit.audioLanguageLabel] — no more
-     * priority-int indirection.
-     */
+    /** Probe an adaptive manifest (HLS master or DASH MPD) for the audio language label AND the peak video height in ONE. fetch — the master text serves. */
     private suspend fun probeAudioHeight(url: String, referer: String?): Pair<String, Int> {
         val isAdaptive = url.contains(".m3u8", ignoreCase = true) || url.contains(".mpd", ignoreCase = true)
         if (!isAdaptive) return "" to 0
@@ -824,7 +636,7 @@ object StreamEngine {
         return ManifestKit.audioLanguageLabel(master).orEmpty() to ManifestKit.bestHeight(master.variants)
     }
 
-    /** Headers for vidlink.pro API + playlist requests (site Referer/Origin required). */
+    /** Headers for vidlink. pro API + playlist requests (site Referer/Origin required). */
     private fun vidlinkHeaders(mediaPageUrl: String): Map<String, String> = mapOf(
         "User-Agent" to HttpKit.userAgent,
         "Accept" to "*/*",
@@ -833,11 +645,7 @@ object StreamEngine {
         "Referer" to mediaPageUrl,
     )
 
-    /**
-     * VidLink resolver: token API -> stream.playlist (multi-audio HLS master) ->
-     * one inline-manifest RawStream. The master is fetched once here so the
-     * audio probe and quality height come free (no second fetch in emit()).
-     */
+    /** VidLink resolver: token API -> stream. playlist (multi-audio HLS master) -> one inline-manifest RawStream. The. master is fetched once here so the. */
     private suspend fun resolveVidlink(
         spec: ServerSpec,
         tmdbId: Int,
@@ -860,9 +668,8 @@ object StreamEngine {
             Log.w("VidLink", "no API response (timeout/HTTP error) for $mediaPage")
             return emptyList()
         }
-        // 200 + literal `null` body (RRR, 2026-09-11 probe): the site knows
-        // this title but has no multiLang source for it — a library miss, not
-        // a host failure. Clean-miss so 5 such taps never trip the breaker.
+        // 200 + literal `null` body (RRR, probe): the site knows this title but has no multiLang source for it — a library.
+// miss, not a host failure.
         if (jsonText.trim() == "null") {
             throw CleanMissException("vidlink: api returned null body (no multiLang source) for $mediaPage")
         }
@@ -872,10 +679,8 @@ object StreamEngine {
             return emptyList()
         }
 
-        // VidLink API error response: {"error":"Invalid token","code":2004}
-        // code 2004 here is the API's token error ï¿½ NOT ExoPlayer's
-        // ERROR_CODE_IO_BAD_HTTP_STATUS. It appears when the site rotates its
-        // secretbox key; fix by updating VidlinkSource.KEY_HEX.
+        // VidLink API error response: {"error": "Invalid token", "code": 2004} code 2004 here is the API's token error ï¿½ NOT.
+// ExoPlayer's.
         if (root.has("error") || root.has("code")) {
             val err = root.optJSONObject("error") ?: root
             val code = err.optInt("code", -1)
@@ -889,29 +694,16 @@ object StreamEngine {
             return emptyList()
         }
 
-        // (Server captions are NOT collected — the SubtilesProvider provider is
-        //  the only subtitle source, user spec Sept 2026.)
-
-        // New shape (Sept 2026, sourceId mwVault/mbVault): stream.qualities maps
-        // "360"/"480"/"720"/"1080" -> {type:"mp4", url (signed, TTL 3600),
-        // headers:{referer,origin} (mbVault only, else {}), requiresProxy}.
-        // Direct MP4s ï¿½ no playlist fetch, no speed probe (the CDN rate-limits
-        // hard). Playback headers are per-source (see
-        // VidlinkSource.PLAYER_HEADERS): mwVault CDN 429s on any Referer so
-        // only the native UA is sent; mbVault requires the API-provided
-        // headers. referer stays null so emit() injects nothing extra ï¿½ a
-        // blanket vidlink.pro Referer is exactly what breaks playback with
-        // ExoPlayer ERROR_CODE_IO_BAD_HTTP_STATUS (2004).
+        // (Server captions are NOT collected — the SubtilesProvider provider is the only subtitle source, . ) New shape (.
+// sourceId mwVault/mbVault).
         val qualities = stream.optJSONObject("qualities")
         if (qualities != null && qualities.length() > 0) {
             val entries = qualities.names()?.let { n ->
                 (0 until n.length()).mapNotNull { i ->
                     val key = n.optString(i)
                     val height = key.toIntOrNull() ?: 0
-                    // Quality floor note (user spec Sept 2026 rewrite #2): the
-                    // emit() quality floor now drops KNOWN sub-720 progressive
-                    // entries (360/480 mp4) at emission; adaptive masters are
-                    // always kept.
+                    // Quality floor note (): the emit() quality floor now drops KNOWN sub-720 progressive entries (360/480 mp4) at.
+// emission; adaptive masters are always.
                     val q = qualities.optJSONObject(key) ?: return@mapNotNull null
                     val url = q.optString("url").takeIf { it.isNotBlank() } ?: return@mapNotNull null
                     Triple(height, url, q)
@@ -934,8 +726,7 @@ object StreamEngine {
             Log.w("VidLink", "qualities present but no usable urls (keys=${namesOf(qualities)})")
         }
 
-        // Legacy shape: stream.playlist (HLS master) ï¿½ kept for when VidLink
-        // serves an adaptive playlist again.
+        // Legacy shape: stream. playlist (HLS master) ï¿½ kept for when VidLink serves an adaptive playlist again.
         val masterUrl = stream.optString("playlist").takeIf { it.isNotBlank() }
             ?: root.optString("url").takeIf { it.isNotBlank() }
             ?: run {
@@ -969,29 +760,7 @@ object StreamEngine {
     }
 
 
-    /**
-     * MyFlixer Hindi resolver (hindi.myflixerapi.com). Sept 2026 state: the
-     * HTML embed pages sit behind an anti-bot wall and the old
-     * /ajax/get_stream_link endpoint is gone (404), but /api/status is a
-     * clean JSON hit/miss API with no captcha:
-     *   movie:  /api/status?imdb={id}&type=movie
-     *   series: /api/status?imdb={id}&type=tv&sea=&epi= (episode-level checks
-     *           are flaky, so show-level + type=movie fallbacks are tried and
-     *           the embed chain itself validates the episode)
-     * Flow:
-     *   1. Status check — "failed" = not in library ? CLEAN miss (no breaker
-     *      trip; the library is small so most titles legitimately miss —
-     *      counting those as failures tripped the breaker and hid the server).
-     *   2. On a hit, warm the app cookie jar with a homepage GET (the wall is
-     *      cookie-gated for plain clients), then fetch the embed page with a
-     *      mobile UA (series use /embed/series?imdb=&sea=&epi=).
-     *   3. If the page renders (wall passed): parse data-movie-id + the server
-     *      list (data-id + "Server-{Name}" label) and run the AJAX chain;
-     *      each link resolves through the standard pipeline labelled
-     *      "MyFlixer Hindi {SubServer}".
-     *   4. If the wall still blocks: record a failure (host-side blockage)
-     *      and return empty — logged clearly so the cause is one grep away.
-     */
+    /** MyFlixer Hindi resolver (hindi. myflixerapi. com). state: the HTML embed pages sit behind an anti-bot wall and the. old /ajax/get_stream_link. */
     private suspend fun resolveMyFlixerHindi(
         spec: ServerSpec,
         tmdbId: Int?,
@@ -1008,10 +777,7 @@ object StreamEngine {
         val referer = "https://hindi.myflixerapi.com/"
         val isMovie = type == "movie"
 
-        // -- 1. Status API hit/miss (no captcha) -----------------------------
-        // Movies: one call. Series: episode-level first, then show-level tv,
-        // then show-level movie (their own docs use type=movie for series —
-        // the API accepts both; first "success" wins).
+        // 1. Status API hit/miss (no captcha) ----------------------------- Movies: one call.
         val statusUrls = if (isMovie) {
             listOf("https://hindi.myflixerapi.com/api/status?imdb=$id&type=movie")
         } else {
@@ -1034,7 +800,7 @@ object StreamEngine {
             val status = runCatching { org.json.JSONObject(statusText).optString("status", "") }.getOrNull()
             when (status) {
                 "success" -> { inLibrary = true; break }
-                "failed" -> { /* try next fallback (series) or clean miss */ }
+                "failed" -> { /* try next fallback (series) or clean miss. */ }
                 else -> failServer(spec, "status api unexpected body: ${statusText.take(120)}")
             }
         }
@@ -1044,14 +810,8 @@ object StreamEngine {
         }
         Log.d("MyFlixerHindi", "$id in library — attempting embed chain")
 
-        // -- 2. Embed page, both domains ------------------------------------
-        // The hindi. subdomain is robot-walled for plain clients (verified
-        // Sept 2026) but the MAIN myflixerapi.com renders the same embed
-        // chain without a wall — same library, same data-movie-id/AJAX
-        // shapes. Try hindi. first (canonical Hindi host), fall back to the
-        // main domain on a wall. Series episodes use /embed/series?imdb=….
-        // Warm-up: the anti-bot wall is cookie-gated; a homepage GET seeds
-        // the app's shared cookie jar before the embed request.
+        // 2. Embed page, both domains ------------------------------------ The hindi. subdomain is robot-walled for plain.
+// clients () but the MAIN.
         val mobileHeaders = mapOf(
             "User-Agent" to "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
             "Referer" to "https://myflixerapi.com/",
@@ -1073,8 +833,7 @@ object StreamEngine {
                 val text = withTimeoutOrNull(8_000L) {
                     runCatching { app.get(url, timeout = 8, headers = mobileHeaders).text }.getOrNull()
                 } ?: continue
-                // Genuine library miss page (checked BEFORE the wall — the
-                // miss page also carries the robot banner in its footer).
+                // Genuine library miss page (checked BEFORE the wall — the miss page also carries the robot banner in its footer).
                 if (text.contains("movie-not-found") || text.contains("Movie or Episode Not Found", ignoreCase = true)) {
                     Log.d("MyFlixerHindi", "$id not in library (embed page miss)")
                     return emptyList()
@@ -1210,22 +969,20 @@ object StreamEngine {
                 RawStream(
                     serverId = spec.id, serverName = spec.name,
                     url = s.url, isM3u8 = isHls,
-                    referer = null, qualityHint = 0, // adaptive master; heights come from variants
+                    referer = null, qualityHint = 0, // adaptive master; heights come.
                     audioPriority = 4, audioLabel = "Hindi",
                     extraHeaders = VideasySource.apiHeaders(),
                 )
             }
-        // The host exists only for Hindi: an English-only title is a CLEAN miss
-        // (no breaker trip), otherwise three straight taps on English-only
-        // content tripped the breaker and Videasy Hindi vanished from the farm.
+        // The host exists only for Hindi: an English-only title is a CLEAN miss (no breaker trip), otherwise three straight.
+// taps on English-only content.
         if (out.isEmpty()) {
             throw CleanMissException("sources present but no Hindi label: ${fetched.sources.map { it.quality }}")
         }
         return out
     }
 
-    /** Fetch (and cache) the MovieBox bearer token from the app-pkgs response's
-     *  `x-user` header. The token lives for hours (MOVIEBOX_TOKEN_TTL_MS). */
+    /** Fetch (and cache) the MovieBox bearer token. The token lives for hours (MOVIEBOX_TOKEN_TTL_MS). */
     private suspend fun fetchMovieBoxBearer(forceRefresh: Boolean): String? {
         if (!forceRefresh) {
             movieBoxToken?.takeIf {
@@ -1233,16 +990,8 @@ object StreamEngine {
             }?.let { return it }
         }
         val base = "https://h5-api.aoneroom.com"
-        // INTERNAL BUDGETS (Sept 2026 latency parity rework, user report:
-        // MovieBox absent in IndStream while CSX works on the same device/
-        // network — CSX sends NO per-request timeout (nicehttp default = 0 =
-        // callTimeout off) so legit 8-12s responses survive there and were
-        // canned by our 6/7s budgets here): bearer 8s (prewarm covers the
-        // cold path), search 15s single attempt (+12s auth-retry only on a
-        // rejected token answer, never on a plain timeout), detail 8s,
-        // download/play 8s (these two run in parallel).
-        // CSX parity: the pkgs GET goes out with NO header overrides at all
-        // (the CloudStream default UA the reference plugin effectively uses).
+        // INTERNAL BUDGETS (latency, user report: MovieBox absent in while works on the same device/ network — sends NO.
+// per-request timeout (nicehttp.
         val xUser = withTimeoutOrNull(8_000L) {
             runCatching {
                 app.get("$base/wefeed-h5api-bff/app/get-latest-app-pkgs?app_name=moviebox",
@@ -1257,31 +1006,10 @@ object StreamEngine {
         return t
     }
 
-    /** Public pre-warm, called once at plugin load: the token lives for hours,
-     *  so one background GET at app start removes a serial round-trip
-     *  (~0.5-1s) from the first MovieBox resolve of the session. */
+    /** Public pre-warm, called once at plugin load: the token lives for hours, so one background GET at app start removes a. serial round-trip (~0. 5-1s). */
     suspend fun prewarmMovieBoxToken(): String? = fetchMovieBoxBearer(forceRefresh = false)
 
-    /**
-     * MovieBox resolver (h5-api.aoneroom.com app API, ported from CSX
-     * CineStream's invokeMoviebox, Sept 2026). Title-keyed, 4-step chain:
-     *   1. GET /wefeed-h5api-bff/app/get-latest-app-pkgs?app_name=moviebox —
-     *      the response HEADER `x-user` carries JSON with a bearer `token`.
-     *   2. POST /wefeed-h5api-bff/subject/search {keyword, page, perPage,
-     *      subjectType:1|2} ? items[] with subjectId + title; title brackets
-     *      mark the audio ("Title [Hindi]") and a trailing " S1-S3" is the
-     *      season coverage (stripped before matching).
-     *   3. GET h5.aoneroom.com/wefeed-h5-bff/web/post/list/subject?id=
-     *      {subjectId} ? items[0].subject.detailPath (needed by step 4).
-     *   4. GET /wefeed-h5api-bff/subject/download? and /subject/play?
-     *      subjectId=&se=&ep=&detailPath= (Referer/Origin
-     *      fmoviesunblocked.net) ? downloads[]/streams[]/dash[] with
-     *      {url, resolution, vipLocked} + captions[].
-     * Direct MP4/HLS up to 2160p; vipLocked entries are skipped.
-     */
-    /** Parse a MovieBox title's trailing season-coverage suffix ("Reacher
-     *  [Hindi] S1-S4" ? 4, "Show S3" ? 3, no suffix ? null). Captured
-     *  separately (not digit-filtered): " S1-S16" must end at 16, not 116. */
+    /** MovieBox resolver (h5-api. aoneroom. com app API, , ). Title-keyed, 4-step chain: 1. */
     internal fun movieboxSeasonEnd(rawTitle: String): Int? {
         val m = Regex("""\s+S(\d+)(?:\s*-\s*S?(\d+))?$""", RegexOption.IGNORE_CASE)
             .find(rawTitle) ?: return null
@@ -1298,8 +1026,8 @@ object StreamEngine {
     ): List<RawStream> {
         val meta = runCatching { TmdbService.fetchMeta(tmdbId ?: 0, type) }.getOrNull()
         val title = meta?.name ?: run {
-            // Title-keyed API without a title = nothing to search; the host is
-            // fine, so a clean miss (no breaker trip) keeps MovieBox visible.
+            // Title-keyed API without a title = nothing to search; the host is fine, so a clean miss (no breaker trip) keeps.
+// MovieBox visible.
             throw CleanMissException("no title for tmdb=$tmdbId (title-keyed API)")
         }
         val seasonKey = if (season > 0) season else 1
@@ -1308,14 +1036,8 @@ object StreamEngine {
         val host = "h5-api.aoneroom.com"
         val base = "https://$host"
 
-        // 1+2. Bearer token + title search (Sept 2026 latency-parity rework,
-        // user report: MovieBox absent while CSX works on the same device/
-        // network). CSX search is ONE uncapped request; we give it a single
-        // 15s attempt first. The retry (12s, fresh bearer) fires ONLY when
-        // the API REJECTS the answer (HTTP 401/403 or a non-zero `code`) —
-        // i.e. a genuinely stale token (user report: "works, then vanishes,
-        // then works"). A plain timeout with an accepted token must NOT
-        // double-wait: the slow-but-alive case is already the 15s budget.
+        // 1+2. Bearer token + title search (latency-, user report: MovieBox absent while works on the same device/ network).
+// search is ONE uncapped request.
         suspend fun movieBoxBearer(forceRefresh: Boolean): String? =
             fetchMovieBoxBearer(forceRefresh)
 
@@ -1329,19 +1051,15 @@ object StreamEngine {
         val mbStart = System.currentTimeMillis()
         for (attempt in 0 until 2) {
             val budgetSec = if (attempt == 0) 15L else 12L
-            // F8 budget guard: the second (auth-retry) pass only pays off when
-            // the first answer was a FAST rejection. If =25s is already spent,
-            // the remaining bearer+search+detail+play chain would run past the
-            // 55s farm kill and every canned chain is a breaker strike.
+            // F8 budget guard: the second (auth-retry) pass only pays off when the first answer was a FAST rejection. If =25s is.
+// already spent, the remaining.
             if (attempt == 1 && System.currentTimeMillis() - mbStart > 25_000) {
                 Log.w("MovieBox", "skipping auth-retry (>25s already spent) — keeps the chain inside the 55s kill")
                 break
             }
             val token = movieBoxBearer(forceRefresh = attempt > 0) ?: return emptyList()
-            // CSX's EXACT baseHeaders (invokeMoviebox): Asia/Kolkata and the
-            // okHeaders() Chrome UA were IndStream inventions; aoneroom is
-            // known to answer differently per profile, so copy the reference
-            // plugin byte-for-byte (incl. Host and Linux Chrome 138 UA).
+            // 's EXACT baseHeaders (invokeMoviebox): Asia/Kolkata and the okHeaders() Chrome UA were inventions; aoneroom is known.
+// to answer differently per.
             baseHeaders = mapOf(
                 "X-Client-Info" to "{\"timezone\":\"Africa/Nairobi\"}",
                 "Accept-Language" to "en-US,en;q=0.5",
@@ -1362,10 +1080,8 @@ object StreamEngine {
                 }.getOrNull()
             }
             if (resp == null) {
-                // Timeout / connection failure: a second wait is pointless —
-                // the token was never rejected (CSX survives this the same
-                // way only because it never cuts the first request; our 15s
-                // is the parity compromise inside the farm kill).
+                // Timeout / connection failure: a second wait is pointless — the token was never rejected (survives this the same way.
+// only because it never cuts the.
                 Log.w("MovieBox", "search no answer in ${budgetSec}s (attempt ${attempt + 1})")
                 break
             }
@@ -1378,8 +1094,7 @@ object StreamEngine {
             val jsonCode = root?.optString("code", "")?.takeIf { it.isNotBlank() } ?: "0"
             val authRejected = resp.code == 401 || resp.code == 403 || jsonCode != "0"
             if (!authRejected) {
-                // Answered, accepted, just no rows for this title — a real
-                // miss, not a token problem; retrying would only burn 12s.
+                // Answered, accepted, just no rows for this title — a real miss, not a token problem; retrying would only burn 12s.
                 Log.w("MovieBox", "search answered with no items")
                 break
             }
@@ -1390,48 +1105,35 @@ object StreamEngine {
         }
         val items = searchItems ?: run { Log.w("MovieBox", "no search items"); return emptyList() }
 
-        // "Title [Hindi]" / "Title (Hindi Dubbed)" ? audio; "Title S1-S3"
-        // trailing suffix is season coverage, stripped before matching. The
-        // MovieBox title often also carries a year / extra bracket group
-        // ("The Batman (2024)"), so match on a NORMALIZED form (lowercase,
-        // alnum only) and accept an exact match OR the MovieBox title starting
-        // with the TMDB title — otherwise legit titles silently miss and
-        // MovieBox (the fastest source) vanishes from the farm.
+        // "Title " / "Title (Hindi Dubbed)"? audio; "Title S1-S3" trailing suffix is season coverage, stripped before.
+// matching. The MovieBox title often.
         val seasonSuffix = Regex("""\s+S\d+(?:\s*-\s*S?\d+)?$""", RegexOption.IGNORE_CASE)
         val bracketGroups = Regex("""[\[(]([^\])]+)[\])]""", RegexOption.IGNORE_CASE)
         val norm: (String) -> String = { t -> t.lowercase().replace(Regex("""[^a-z0-9]"""), "") }
         val titleNorm = norm(title)
-        val subjects = mutableListOf<Triple<String, Int, String?>>() // id, seasonEnd, language
+        val subjects = mutableListOf<Triple<String, Int, String?>>() // id, seasonEnd, language.
         for (i in 0 until items.length()) {
             val item = items.optJSONObject(i) ?: continue
             val id = item.optString("subjectId").takeIf { it.isNotBlank() } ?: continue
             val rawTitle = item.optString("title", "")
-            // " S1-S4" / " S3" coverage suffix -> LAST number (season end).
-            // F4 (Sept 2026 wrong-episode audit): this used to be
-            // `value.filter { isDigit() }.toInt()` — "S1-S4" parsed as 14 and
-            // "S1-S16" as 116 — so the coverage skip (below) and the
-            // all-subjects-too-old clean-miss guard both misfired and the
-            // resolver asked aoneroom for episodes outside a subject's
-            // stated range, surfacing whatever fallback the API returned.
+            // " S1-S4" / " S3" coverage suffix -> LAST number (season end). F4 (wrong-episode): this used to be `value. filter.
+// {isDigit() }. toInt()` — "S1-S4".
             val seasonEnd = movieboxSeasonEnd(rawTitle)
-            // Pull the audio tag from any bracket group that carries a language
-            // name (letters, not a bare year) — "Title [Hindi]", "Title (2024)".
+            // Pull the audio tag, not a bare year) — "Title ", "Title (2024)".
             val audioTag = bracketGroups.findAll(rawTitle)
                 .map { it.groupValues[1] }
                 .firstOrNull { it.any { c -> c.isLetter() } && !it.any { c -> c.isDigit() } }
             val clean = rawTitle
                 .let { seasonSuffix.replace(it, "") }
-                .replace(Regex("""\s*[\(\[][^)\]]*[\)\]]"""), "") // drop all bracket groups
-                .replace(Regex("""\s*\d{4}"""), "")               // drop a stray year
+                .replace(Regex("""\s*[\(\[][^)\]]*[\)\]]"""), "") // drop all bracket groups.
+                .replace(Regex("""\s*\d{4}"""), "")               // drop a stray year.
                 .trim()
             val cleanNorm = norm(clean)
             val matched = cleanNorm == titleNorm ||
                 (titleNorm.length >= 4 && cleanNorm.startsWith(titleNorm))
             if (!matched) continue
-            // 0 = no explicit "S1-S3" coverage marker: the subject is presumed
-            // to cover every season (the play/download APIs take se/ep
-            // directly). Treating a marker-less subject as S1-only is what
-            // silently hid MovieBox on later-season episodes.
+            // 0 = no explicit "S1-S3" coverage marker: the subject is presumed to cover every season (the play/download APIs take.
+// se/ep directly). Treating a.
             subjects += Triple(id, seasonEnd ?: 0, audioTag)
         }
         if (subjects.isEmpty()) {
@@ -1443,18 +1145,15 @@ object StreamEngine {
         val out = mutableListOf<RawStream>()
         val seenUrls = java.util.Collections.synchronizedSet(mutableSetOf<String>())
 
-        // Subjects resolve concurrently (CSX parity — the serial loop was the
-        // main speed gap: token+search+detail+download+play per subject).
+        // Subjects resolve concurrently ().
         val subjectResults = kotlinx.coroutines.coroutineScope {
             subjects.map { (subjectId, seasonEnd, language) ->
                 async {
-                    // Series entry EXPLICITLY covering fewer seasons than
-                    // requested can't serve this episode (library splits shows
-                    // into S1-S3 / S4-…). seasonEnd==0 (no marker) never skips.
+                    // Series entry EXPLICITLY covering fewer seasons than requested can't serve this episode (library splits shows into.
+// S1-S3 / S4-…). seasonEnd==0 (no.
                     if (type != "movie" && seasonEnd in 1 until season) return@async emptyList<RawStream>()
 
-                    // 3. detailPath lookup — CSX parity: NO header overrides
-                    // (bare app.get on the h5.aoneroom.com web host).
+                    // 3. detailPath lookup —. get on the h5. aoneroom. com web host).
                     val detailText = withTimeoutOrNull(8_000L) {
                         runCatching {
                             app.get("https://h5.aoneroom.com/wefeed-h5-bff/web/post/list/subject?id=$subjectId",
@@ -1478,9 +1177,8 @@ object StreamEngine {
                         append("&detailPath=$detailPath")
                     }
 
-                    // 4. download + play endpoints in parallel (CSX runs them
-                    // back-to-back; parallel keeps the combined wall time at
-                    // this ONE 8s budget shared by both).
+                    // 4. download + play endpoints in parallel (runs them back-to-back; parallel keeps the combined wall time at this ONE.
+// 8s budget shared by both).
                     val (downloadObj, playObj) = kotlinx.coroutines.coroutineScope {
                         val d = async {
                             withTimeoutOrNull(8_000L) {
@@ -1501,8 +1199,7 @@ object StreamEngine {
                         (d.await() ?: org.json.JSONObject()) to (p.await() ?: org.json.JSONObject())
                     }
 
-                    // (Server subtitle tracks in the play response are ignored:
-                    //  SubtilesProvider is the only subtitle provider.)
+                    // (Server subtitle tracks in the play response are ignored: SubtilesProvider is the only subtitle provider. ).
 
                     fun addStreams(arr: org.json.JSONArray?, dash: Boolean): List<RawStream> {
                         if (arr == null) return emptyList()
@@ -1514,13 +1211,9 @@ object StreamEngine {
                             if (!seenUrls.add(url)) continue
                             val resolution = s.optString("resolutions", "").toIntOrNull()
                                 ?: s.optInt("resolution", 0)
-                            // Audio tag may be "Hindi", "Hindi Dubbed",
-                            // "Dual Audio [Hindi-English]" etc — any mention
-                            // of Hindi ranks as Hindi (priority 4).
+                            // Audio tag may be "Hindi", "Hindi Dubbed", "Dual Audio " etc — any mention of Hindi ranks as Hindi (priority 4).
                             val isHindi = language?.contains("hindi", ignoreCase = true) == true
-                            // No " Auto" name suffix (user spec: the peak-resolution
-                            // label comes from the manifest probe — "MovieBox (Hindi) 4K";
-                            // a literal "MovieBox Auto" hid the real rendition).
+                            // No " Auto" name suffix () 4K"; a literal "MovieBox Auto" hid the real rendition).
                             added += RawStream(
                                 serverId = spec.id,
                                 serverName = spec.name,
@@ -1530,9 +1223,7 @@ object StreamEngine {
                                 qualityHint = resolution,
                                 audioPriority = if (isHindi) 4 else 2,
                                 audioLabel = language ?: "",
-                                // CSX parity: playback link carries Referer AND
-                                // Origin (aoneroom CDNs reject bare-Referer
-                                // fetches on some hosts).
+                                // ).
                                 extraHeaders = mapOf(
                                     "Referer" to refererBase,
                                     "Origin" to refererBase.trimEnd('/'),
@@ -1548,9 +1239,8 @@ object StreamEngine {
             }.awaitAll()
         }
         subjectResults.forEach { out += it }
-        // Every matched subject explicitly covers fewer seasons than requested
-        // ("S1-S3" markers only) — the episode is a library miss, not a host
-        // failure: clean miss keeps MovieBox in the farm for other episodes.
+        // Every matched subject explicitly covers fewer seasons than requested ("S1-S3" markers only) — the episode is a.
+// library miss, not a host failure.
         if (out.isEmpty() && type != "movie" && subjects.isNotEmpty() &&
             subjects.all { it.second in 1 until season }
         ) {
@@ -1561,14 +1251,7 @@ object StreamEngine {
         return out
     }
 
-    /**
-     * PrimeSrc resolver (primesrc.me, verified live Sept 2026). IMDB-keyed,
-     * 2-step: /api/v1/s?imdb={id}&type=movie|tv[&season=&episode=] returns
-     * info + servers[] ({name, key, file_name, audio_language}); each key
-     * exchanges at /api/v1/l?key={key} ? {"link": "<player url>"} which is
-     * resolved through the standard embed pipeline. audio_language "hi" marks
-     * Hindi dubs (priority 4); everything else is original audio (2).
-     */
+    /** PrimeSrc resolver (primesrc. me, ). IMDB-keyed, 2-step: /api/v1/s?imdb={id}&type=movie|tv returns info + servers. ({name, key, file_name. */
     private suspend fun resolvePrimeSrc(
         spec: ServerSpec,
         tmdbId: Int?,
@@ -1613,9 +1296,8 @@ object StreamEngine {
                 audioPriority = if (isHindi) 4 else 2,
                 audioLabel = if (isHindi) "Hindi" else "Original",
             ) ?: continue
-            // Sub-server name distinguishes same-host duplicates; the file
-            // name carries the real resolution ("… 1080p …") when the player
-            // link itself reports none.
+            // Sub-server name distinguishes same-host duplicates; the file name carries the real resolution ("… 1080p …") when the.
+// player link itself reports none.
             val height = Regex("""(\d{3,4})p""", RegexOption.IGNORE_CASE).find(fileName)
                 ?.groupValues?.get(1)?.toIntOrNull() ?: 0
             out += streams.map {
@@ -1629,10 +1311,7 @@ object StreamEngine {
         return out
     }
 
-    /** Resolve one player/stream link through the multi-strategy pipeline
-     *  (unwrap ? harvest ? extractor registry). Returns null on failure.
-     *  Audio ranking is parameterized: MyFlixer Hindi defaults to Hindi (4);
-     *  PrimeSrc passes per-server values from audio_language. */
+    /** Resolve one player/stream link through the multi-strategy pipeline (unwrap? harvest? extractor registry). Returns. null on failure. */
     private suspend fun resolveEmbedLink(
         spec: ServerSpec, link: String, referer: String,
         audioPriority: Int = 4, audioLabel: String = "Hindi",
@@ -1673,16 +1352,7 @@ object StreamEngine {
         return null
     }
 
-    /**
-     * NHD resolver (reversed Sept 2026): the extraction API key is embedded
-     * PER-PAGE-LOAD (stale keys 401), so:
-     *   1. GET nhdapi.com/movie/{id} (or /tv/{id}/{s}/{e}) and extract
-     *      `var API_KEY = "..."` and `/api/movie/{id}` from the page JS.
-     *   2. GET nhdapi.com/api/movie/{id}?key=... with the page as Referer.
-     *   3. Response carries playUrl (their /api/hls?t= proxy, needs the
-     *      page's exact UA) â€” emit with page UA + no Referer.
-     *audioTracks field (per-dub sibling URLs) marks Hindi dubs.
-     */
+    /** NHD resolver (reversed): the extraction API key is embedded PER-PAGE-LOAD (stale keys 401), so: 1. GET nhdapi. com/movie/{id} (or. */
     private suspend fun resolveNhd(
         spec: ServerSpec,
         tmdbId: Int?,
@@ -1692,13 +1362,8 @@ object StreamEngine {
         episode: Int,
     ): List<RawStream> {
         val id = tmdbId?.toString() ?: return emptyList()
-        // MOVIE GUARD (2026-09-11 probe): the host's TV pipeline is live
-        // (GoT/Family Man resolved playable HLS) but the movie pipeline is
-        // dead upstream — extraction answers success=true, then every playUrl
-        // 404s regardless of headers. A hard failure here would strike the
-        // breaker on 5 movie taps and vanish the WORKING TV path for 5 min;
-        // a clean miss keeps NHD in the farm for TV while logging loudly for
-        // recovery watch. Remove this guard when movie playback recovers.
+        // MOVIE GUARD (probe): the host's TV pipeline is live (GoT/Family Man resolved playable HLS) but the movie pipeline is.
+// dead upstream — extraction.
         if (type == "movie") {
             throw CleanMissException("nhd: movie pipeline dead upstream (playUrl 404) — clean miss, TV path stays live")
         }
@@ -1706,7 +1371,7 @@ object StreamEngine {
         val referer = "https://nhdapi.com/"
         Log.d("NHD", "page=$pageUrl")
 
-        // 1. Page first â€” carries the per-load API key.
+        // 1. Page first - carries the per-load API key.
         val pageText = withTimeoutOrNull(8_000L) {
             runCatching { app.get(pageUrl, timeout = 8, headers = okHeaders(referer)).text }.getOrNull()
         } ?: run { Log.w("NHD", "page fetch failed"); return emptyList() }
@@ -2865,9 +2530,8 @@ object StreamEngine {
         val file = playFile!!
         val key = playKey!!
 
-        // file may be: an absolute URL (movies) OR a path that already starts
-        // with "/playlist/" (series) — the naive "$playerDomain/playlist/$file"
-        // doubled the prefix on series and 404'd the fetch.
+        // file may be: an absolute URL (movies) OR a path that already starts with "/playlist/" (series) — the naive.
+// "$playerDomain/playlist/$file" doubled.
         val fileUrl = when {
             file.startsWith("http") -> file
             file.startsWith("/playlist/") -> "$playerDomain$file"
@@ -2875,8 +2539,7 @@ object StreamEngine {
         }
         val cdnBase = fileUrl.substringBefore("/playlist/")
 
-        // 4. Language playlist (file = encrypted path like "B64hash.txt").
-        // 6s ceiling (budget spec Sept 2026 — see search step above).
+        // 4. Language playlist (file = encrypted path like "B64hash. txt"). 6s ceiling (budget spec — see search step above).
         val playlistHeaders = okHeaders(playUrl).toMutableMap()
         playlistHeaders["X-Csrf-Token"] = key
         val playlistText = withTimeoutOrNull(6_000L) {
@@ -2885,15 +2548,8 @@ object StreamEngine {
         val playlist = runCatching { org.json.JSONArray(playlistText) }.getOrElse {
             Log.w("Allmovieland", "playlist not JSON array"); throw IllegalStateException("allmovieland playlist parse error") }
 
-        // Series shape (re-verified + F3, Sept 2026): top entries are SEASON
-        // containers ("Season 1") whose folder holds EPISODE rows whose folder
-        // holds per-language leaves {file, title:"Hindi"}; single-season shows
-        // also appear FLAT (top level = episode rows). Movies are a flat
-        // {title:"Hindi", file} list. The picker is STRICT: no exact
-        // season+episode node means no streams (clean miss + tree-shape
-        // dump). The old `?: first()` fallbacks are exactly what played a
-        // DIFFERENT episode whenever the tree fields drifted (user report +
-        // live audit).
+        // Series shape (re-, ): top entries are SEASON containers ("Season 1") whose folder holds EPISODE rows whose folder.
+// holds per-language leaves {file.
         val nodes = amParseNodes(playlist)
         data class LangLeaf(val lang: String, val file: String)
         fun leavesOf(node: AmNode): List<LangLeaf> = node.children.flatMap {
@@ -2920,12 +2576,7 @@ object StreamEngine {
             leaves
         }
 
-        // 5. Per-language: fetch each language's playlist ? m3u8 URL.
-        // CONCURRENT, 5s each (budget spec Sept 2026, re-landed — the rebuild
-        // restored a serial 8s×N loop): a multi-language title must not pay
-        // 8s PER entry on the farm's critical path. async over langEntries,
-        // one 5s ceiling per fetch, results collected IN ORDER via awaitAll;
-        // a failed/slow fetch is skipped (null), never retried.
+        // 5. Per-language: fetch each language's playlist? m3u8 URL.
         val out = mutableListOf<RawStream>()
         val fetched = coroutineScope {
             langEntries.map { leaf ->
@@ -2954,9 +2605,8 @@ object StreamEngine {
             )
         }
         if (out.isEmpty()) {
-            // Every language playlist timed out / answered no URL: the node
-            // matched, the content just did not answer this tap. Clean miss
-            // (kept retryable) rather than a silent soft-empty.
+            // Every language playlist timed out / answered no URL: the node matched, the content just did not answer this tap.
+// Clean miss (kept retryable).
             throw CleanMissException("${langEntries.size} language playlists, none yielded an m3u8")
         }
         Log.d("Allmovieland", "got ${out.size} language streams from ${langEntries.size} entries " +
@@ -2964,11 +2614,7 @@ object StreamEngine {
         return out
     }
 
-    /**
-     * JSON API resolver (api.shows.st / 111Movies shape):
-     * `{ "source": { "url": ..., "qualities": [{"quality","url"}] }, "subtitles": [...] }`
-     * The signed stream URLs carry no file extension — JSON parsing is mandatory.
-     */
+    /** JSON API resolver (api. shows. st / 111Movies shape): `{"source": {"url": . . . , "qualities": }, "subtitles": }`. The signed stream URLs carry no. */
     private suspend fun resolveJsonApi(
         spec: ServerSpec,
         apiUrl: String,
@@ -2996,14 +2642,12 @@ object StreamEngine {
             Log.w("IndStream", "${spec.id}: missing \"source\" (${if (nullSource) "null -- id not known to this server" else "absent"}); root keys=${namesOf(root)}")
             return emptyList()
         }
-        // (root.subtitles is not collected — SubtilesProvider is the only
-        //  subtitle provider, user spec Sept 2026.)
+        // (root. subtitles is not collected — SubtilesProvider is the only subtitle provider, . ).
 
         val out = mutableListOf<RawStream>()
 
-        // Adaptive master (source.url). source.manifest carries the FULL HLS master
-        // playlist inline (variant URIs are absolute https URLs) ï¿½ the signed url has
-        // no file extension, so manifest presence is the HLS signal.
+        // Adaptive master (source. url). source. manifest carries the FULL HLS master playlist inline (variant URIs are.
+// absolute https URLs) ï¿½ the signed.
         val masterUrl = source.optString("url").takeIf { it.isNotBlank() }
         val inlineManifest = source.optString("manifest").takeIf { it.isNotBlank() && it.contains("#EXT-X-STREAM-INF") }
         if (masterUrl != null || inlineManifest != null) {
@@ -3023,7 +2667,7 @@ object StreamEngine {
             ))
         }
 
-        // Per-quality MP4s (source.qualities[]) ï¿½ direct VIDEO links.
+        // Per-quality MP4s (source. qualities) ï¿½ direct VIDEO links.
         source.optJSONArray("qualities")?.let { arr ->
             (0 until arr.length()).mapNotNull { i ->
                 val q = arr.optJSONObject(i) ?: return@mapNotNull null
@@ -3046,10 +2690,7 @@ object StreamEngine {
         return out
     }
 
-    /** Follow iframes to the deepest player page. Returns the deepest HTML and
-     *  its final URL so [resolveOne] can also pass the inner URL to
-     *  [loadExtractor] ï¿½ many embed chains (2embed -> vidsrc, superembed -> cloud-hosted
-     *  player) only have a CloudStream extractor registered for the INNER host. */
+    /** Follow iframes to the deepest player page. Returns the deepest HTML and its final URL so can also pass the inner URL. to ï¿½ many embed chains. */
     private suspend fun unwrapPages(html: String, baseUrl: String, timeoutSec: Int): Pair<String, String> {
         var curHtml = html; var curUrl = baseUrl
         repeat(MAX_UNWRAP) {
@@ -3067,16 +2708,14 @@ object StreamEngine {
         return curHtml to curUrl
     }
 
-    /** Harvest bare m3u8/mp4/webm URLs from raw page text. */
+    /** Harvest bare m3u8/mp4/webm URLs. */
     private fun harvestUrls(text: String?): List<String> {
         if (text.isNullOrBlank()) return emptyList()
         val n = text.replace("\\/", "/").replace("\\\"", "\"")
         return STREAM_REGEX.flatMap { r -> r.findAll(n).map { it.groupValues[0].trim('"', '\'') }.filter { it.startsWith("http") } }.distinct()
     }
 
-    /** Extract from JS config: file:"..." / sources:[{file:"..."}] / url:"..."
-     *  Also catches JWPlayer `setup({file:...})` and the broader set of stream
-     *  key names used by VidSrc / MyFlixer / SuperEmbed / NHD players. */
+    /** Extract. . . " / sources: / url: ". . . */
     private fun harvestJsUrls(text: String?): List<String> {
         if (text.isNullOrBlank()) return emptyList()
         val n = text.replace("\\/", "/")
@@ -3090,7 +2729,7 @@ object StreamEngine {
         return patterns.flatMap { p -> p.findAll(n).map { it.groupValues[1].trim() }.filter { it.startsWith("http") } }.distinct()
     }
 
-    /** Pull stream URL from <video src> / <source src>. */
+    /** Pull stream URL. */
     private fun harvestVideoSource(text: String, baseUrl: String): String? {
         val src = Jsoup.parse(text).selectFirst("video[src], video source[src], source[src]")?.attr("src")?.trim() ?: return null
         return relUrl(baseUrl, src).takeIf { it.startsWith("http") }
@@ -3110,38 +2749,26 @@ object StreamEngine {
         return h
     }
 
-    /** UA nhdapi's HLS proxy expects at playback (the extraction API echoes it
-     *  back; using the browser UA gets 502 from the upstream). */
+    /** UA nhdapi's HLS proxy expects at playback (the extraction API echoes it back; using the browser UA gets 502). */
     private const val NHD_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 
-    /** JSON key listing for failure logs (shape changes are one log line away).
-     *  Keys are server-controlled: strip control chars (log-forgery) and cap length. */
+    /** JSON key listing for failure logs (shape changes are one log line away). Keys are server-controlled: strip control. chars (log-forgery) and cap length. */
     private fun namesOf(obj: org.json.JSONObject): String =
         obj.names()?.let { n ->
             (0 until n.length()).joinToString(",") { key -> sanitizeToken(n.optString(key)) }
         } ?: "none"
 
-    /** Short, control-char-free prefix of a remote body for parse-failure hints --
-     *  long enough to recognise the shape, too short to carry a signed URL. */
+    /** Short, control-char-free prefix of a remote body for parse-failure hints -- long enough to recognise the shape, too. short to carry a signed URL. */
     private fun safeSnippet(text: String): String = sanitizeToken(text).take(40)
 
     private fun sanitizeToken(s: String): String = s.filterNot { it.isISOControl() }.take(64)
 
-    /** Last farm-wide re-probe; cooldown keeps a dead uplink from hammering all
-     *  embeds (~30s of network) on every single playback tap. */
+    /** Last farm-wide re-probe; cooldown keeps a dead uplink) on every single playback tap. */
     @Volatile
     private var lastFarmProbeAt = 0L
     private const val FARM_REPROBE_COOLDOWN_MS = 15_000L
 
-    /**
-     * Per-title cache of resolved streams. Two jobs:
-     *   1. Instant replay — a re-tap (or switching back) emits the FULL server
-     *      list immediately with zero head.
-     *   2. Background landing zone — servers that resolve while the video plays
-     *      keep landing here, so the next open already has the full farm.
-     * Short TTL: stream URLs are signed/expiring, so stale links are never served
-     * for long.
-     */
+    /** Per-title cache of resolved streams. Two jobs: 1. */
     object FastStartCache {
         private const val TTL_MS = 5 * 60 * 1000L
         private data class Entry(val streams: List<RawStream>, val expiresAt: Long)
@@ -3155,15 +2782,13 @@ object StreamEngine {
             return e.streams
         }
 
-        /** Age of the current entry in ms (-1 = nothing cached). Replay audit:
-         *  signed stream URLs expire, and the age is what tells "instant
-         *  replay of fresh links" apart from "replay of a stale list". */
+        /** Age of the current entry in ms (-1 = nothing cached). Replay, and the age is what tells "instant replay of fresh. links" apart. */
         fun ageMs(key: String): Long {
             val e = map[key] ?: return -1L
             return (System.currentTimeMillis() - (e.expiresAt - TTL_MS)).coerceAtLeast(0)
         }
 
-        /** Merge [streams] for [key] into the existing set (dedup by url) and extend TTL. */
+        /** Merge for into the existing set (dedup by url) and extend TTL. */
         fun put(key: String, streams: List<RawStream>) {
             if (streams.isEmpty()) return
             val existing = get(key).orEmpty()
@@ -3174,26 +2799,10 @@ object StreamEngine {
         fun clear() = map.clear()
     }
 
-    /** Hard cap on how long [IndStreamProvider.loadLinks] waits for the FIRST
-     *  server batch before giving up. Safety net so a totally dead farm still
-     *  surfaces "no link found" instead of hanging. */
+    /** Hard cap on how long waits for the FIRST server batch before giving up. Safety net so a totally dead farm still. surfaces "no link found" instead. */
     const val FAST_START_MAX_MS: Long = 45_000L
 
-    /** Live fill window (user spec Sept 2026 rewrite #2): loadLinks STAYS
-     *  ALIVE for at most this long, pushing every server that answers into
-     *  the live change-server list — the list keeps growing while the player
-     *  is open (the app only records callback pushes while loadLinks runs, so
-     *  the old settle-and-return model froze it at the first arrivals).
-     *  Single tuning knob: longer captures more slow servers live
-     *  (MovieBox/Allmovieland finish ~10-20s) but keeps the loading spinner
-     *  up; shorter plays sooner and leaves the slowest servers to the
-     *  FastStartCache replay on re-open. [FAST_START_MAX_MS] remains the
-     *  hard ceiling for a totally dead farm.
-     *  15s?90s (user spec Sept 2026 rewrite #3, "90s LIVE_FILL"): the
-     *  player starts as soon as the first batch lands regardless, while the
-     *  change-server list keeps growing; the old 15s window frozen the list
-     *  before the 90s tail (slow hosts + the 13s subtitle budget + the 30s
-     *  farm kills) had landed, showing "no more servers" prematurely. */
+    /** Live fill window (): loadLinks STAYS ALIVE for at most this long, pushing every server that answers into the live. change-server list — the list. */
     const val LIVE_FILL_MS: Long = 90_000L
 }
 

@@ -20,11 +20,7 @@ internal fun str(obj: JSONObject, key: String): String? {
     return if (v.isBlank()) null else v
 }
 
-/**
- * TMDB search / detail / find-by-IMDb client. All calls are best-effort:
- * failures arrive as null / empty, never exceptions. Results are cached in
- * memory (TMDB metadata doesn't change minute-to-minute).
- */
+/** TMDB search, detail, and IMDb lookup client with caching. */
 object MetadataService {
 
     private const val TMDB_API_KEY = "e6333b32409e02a4a6eba6fb7ff866bb"
@@ -58,7 +54,7 @@ object MetadataService {
         val cast: List<ActorData>? = null,
     )
 
-    /** Search movies + series; returns up to [limit] ranked hits. */
+    /** Search movies + series; returns up to ranked hits. */
     suspend fun search(query: String, limit: Int = 8): List<TmdbItem> {
         if (query.isBlank()) return emptyList()
         val encoded = URLEncoder.encode(query.trim(), "UTF-8")
@@ -71,7 +67,7 @@ object MetadataService {
         return parseMultiSearch(json).take(limit)
     }
 
-    /** Fetch full TMDB metadata for [tmdbId] of [type] ("movie"|"series"). */
+    /** Fetch full TMDB metadata for of ("movie"|"series"). */
     suspend fun fetchMeta(tmdbId: Int, type: String): TmdbDetail? {
         if (tmdbId <= 0) return null
         val cacheKey = "$tmdbId|$type"
@@ -109,17 +105,13 @@ object MetadataService {
         val thumbnail: String? = null,
         /** Runtime in minutes, when TMDB knows it. */
         val runTime: Int? = null,
-        /** ISO air date ("2025-11-28"), when present. */
+        /** ISO air date (" "), when present. */
         val aired: String? = null,
     )
 
     private val episodeCache = ConcurrentHashMap<String, Map<Int, TmdbEpisode>>()
 
-    /**
-     * TMDB episode names/overviews/thumbnails for [season], keyed by episode
-     * number. [tmdbIdHint] wins when the detail fetch already resolved it;
-     * otherwise the IMDB id is mapped via /find. Best-effort: empty on miss.
-     */
+    /** TMDB episode names/overviews/thumbnails for, keyed by episode number. wins when the detail fetch already resolved. it; otherwise the IMDB id is. */
     suspend fun episodesForSeason(imdbId: String?, tmdbIdHint: Int?, season: Int): Map<Int, TmdbEpisode> {
         if (season <= 0) return emptyMap()
         val tvId = tmdbIdHint
@@ -128,10 +120,8 @@ object MetadataService {
         val ck = "$tvId|$season"
         episodeCache[ck]?.let { return it }
         val url = "$TMDB_API/tv/$tvId/season/$season?api_key=$TMDB_API_KEY&language=en-US"
-        // Mobile networks routinely need >6s for the first api.themoviedb.org
-        // handshake; a cold season fetch must not silently mean "no episode
-        // names". 8s + one retry, and carry runtime + air date so episode
-        // rows are fully labelled like CSX's cinemeta path.
+        // Mobile networks routinely need >6s for the first api. themoviedb. org handshake; a cold season fetch must not.
+// silently mean "no episode names". 8s.
         var map: Map<Int, TmdbEpisode> = emptyMap()
         for (attempt in 1..2) {
             val root = runCatching { JSONObject(app.get(url, timeout = 8).text) }.getOrNull() ?: continue
@@ -155,11 +145,7 @@ object MetadataService {
         return map
     }
 
-    /**
-     * One-shot title/year → (detail) resolution used by [VegamoviesProvider.load]:
-     * prefers the IMDb id scraped from the page (exact), falls back to a TMDB
-     * title search. Wrapped in a caller-supplied budget; returns null on miss.
-     */
+    /** One-shot title/year → (detail) resolution used by: prefers the IMDb id scraped), falls back to a TMDB title search. Wrapped in a caller-supplied. */
     suspend fun enrich(title: String, year: String?, imdbId: String?): TmdbDetail? {
         imdbId?.takeIf { it.startsWith("tt") }?.let { id ->
             findByImdb(id)?.let { (tmdbId, type) ->
