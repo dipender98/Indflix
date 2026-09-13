@@ -954,7 +954,7 @@ object StreamEngine {
      * Videasy "Fade" (Hindi) resolver: the decrypted API returns per-audio
      * muxed streams — the "Hindi" quality entry IS a Hindi-dubbed HLS master
      * (verified Sept 2026: GOT S1E1/AOT S1E1 return distinct Hindi + English
-     * URLs). Only sources labelled Hindi are emitted (this server exists for
+     * URLs). Hindi + Multi/Dual sources are emitted (this server exists for
      * Hindi; English comes from the rest of the farm). HLS masters are
      * quality-labelled 360→1080p; a master URL without a known height gets
      * qualityHint 0 (adaptive).
@@ -974,7 +974,7 @@ object StreamEngine {
         val title = meta?.name
         val year = meta?.year?.take(4)?.toIntOrNull()
 
-        val fetched = VideasySource.fetchSources(
+        val fetched = VideasySource.fetchAllSources(
             tmdbId = tmdbId, imdbId = imdbId, title = title, year = year,
             mediaType = type, season = season, episode = episode,
         )
@@ -992,21 +992,23 @@ object StreamEngine {
         }
 
         val out = fetched.sources
-            .filter { it.quality.equals("Hindi", ignoreCase = true) }
+            .filter { VideasySource.hindiRank(it.quality) > 0 }
             .map { s ->
                 val isHls = s.url.contains(".m3u8", ignoreCase = true)
                 RawStream(
-                    serverId = spec.id, serverName = spec.name,
+                    serverId = spec.id,
+                    serverName = if (s.route == "hdmovie") spec.name
+                        else "${spec.name} ${s.route.replaceFirstChar { it.uppercase() }}".trim(),
                     url = s.url, isM3u8 = isHls,
                     referer = null, qualityHint = 0, // adaptive master; heights come.
-                    audioPriority = 4, audioLabel = "Hindi",
+                    audioPriority = 4, audioLabel = if (VideasySource.hindiRank(s.quality) == 2) "Hindi" else "Multi",
                     extraHeaders = VideasySource.apiHeaders(),
                 )
             }
         // The host exists only for Hindi: an English-only title is a CLEAN miss (no breaker trip), otherwise three straight.
 // taps on English-only content.
         if (out.isEmpty()) {
-            throw CleanMissException("sources present but no Hindi label: ${fetched.sources.map { it.quality }}")
+            throw CleanMissException("sources present but no Hindi/Multi label: ${fetched.sources.map { it.quality }}")
         }
         return out
     }
@@ -1947,7 +1949,34 @@ object StreamEngine {
                 extraHeaders = mapOf("Origin" to base),
             )
         }
-        return out
+        // HLS masters carry their real peak: measure once so a low ladder tag
+        // never sticks on an adaptive master (badge + rank follow the master).
+        val measured = coroutineScope {
+            out.filter { it.isM3u8 }.map { s ->
+                async {
+                    val t = withTimeoutOrNull(6_000L) {
+                        runCatching {
+                            app.get(s.url, timeout = 6, headers = mapOf(
+                                "User-Agent" to HttpKit.userAgent,
+                                "Referer" to (s.referer ?: ""),
+                            )).text
+                        }.getOrNull()
+                    }
+                    s to t
+                }
+            }.awaitAll()
+        }
+        return out.map { s ->
+            val t = measured.firstOrNull { it.first.url == s.url }?.second
+            if (t != null && t.contains("#EXT-X-STREAM-INF")) {
+                val (label, h) = probeAudioInlineHeight(t)
+                s.copy(
+                    qualityHint = if (h > 0) h else s.qualityHint,
+                    audioLabel = label.ifBlank { s.audioLabel },
+                    inlineManifest = t,
+                )
+            } else s
+        }
     }
 
     /** Raw resolution/source token out of a ZXC link object. */
@@ -2030,7 +2059,9 @@ object StreamEngine {
             val ep = rows.filter { dahmerEpisodeMatch(it.second, season, episode) }
             if (ep.isNotEmpty()) rows = ep
         }
-        return rows.sortedByDescending { dahmerResolutionOf(it.second) }.take(6).mapNotNull { (href, file, _) ->
+        // Streamable first: giant REMUXes stall the worker proxy, so they only
+        // serve when nothing 12GB-or-under exists (then the 2 smallest).
+        return dahmerPool(rows).sortedByDescending { dahmerResolutionOf(it.second) }.take(6).mapNotNull { (href, file, _) ->
             val direct = when {
                 href.startsWith("http") -> href
                 href.startsWith("/") -> api + href
@@ -2046,6 +2077,26 @@ object StreamEngine {
                 extraHeaders = mapOf("Range" to "bytes=0-"),
             )
         }
+    }
+
+    /** Max pick size: bigger files stall the worker proxy past watchability. */
+    private const val DAHMER_SIZE_CAP_MB = 12 * 1024L
+
+    /** Rows that fit the size cap, else the 2 smallest. Pure. */
+    internal fun dahmerPool(rows: List<Triple<String, String, String>>): List<Triple<String, String, String>> {
+        val small = rows.filter { (dahmerSizeMb(it.third) ?: 0) <= DAHMER_SIZE_CAP_MB }
+        if (small.isNotEmpty()) return small
+        return rows.sortedBy { dahmerSizeMb(it.third) ?: Long.MAX_VALUE }.take(2)
+    }
+
+    /** "35.3 GB"/"970.6 MB"/"450MB" to MB, or null when absent. Pure. */
+    internal fun dahmerSizeMb(size: String): Long? {
+        val m = Regex("""(\d+(?:\.\d+)?)\s?([KMGT])B""", RegexOption.IGNORE_CASE).find(size.trim()) ?: return null
+        val n = m.groupValues[1].toDoubleOrNull() ?: return null
+        val mult = when (m.groupValues[2].uppercase()) {
+            "K" -> 1.0 / 1024; "M" -> 1.0; "G" -> 1024.0; "T" -> 1024.0 * 1024; else -> return null
+        }
+        return (n * mult).toLong()
     }
 
     /** Directory rows as (href, text, size). Pure. */

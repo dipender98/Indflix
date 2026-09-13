@@ -65,7 +65,8 @@ object ServerFarm {
             movieUrl = "https://api.speedracelight.com/hdmovie/sources-with-title?tmdbId={id}",
             tvUrl = "https://api.speedracelight.com/hdmovie/sources-with-title?tmdbId={id}",
             isJsonApi = true, referer = "https://player.videasy.net/",
-            hasSubtitles = false, maxQuality = 1080, timeoutSec = 15,
+            // 4 parallel routes (hdmovie/cdn/lamovie/meine): seed 6s + slowest route 10s.
+            hasSubtitles = false, maxQuality = 1080, timeoutSec = 20,
             declaredLanguages = setOf("Hindi"),
         ),
         // MyFlixer Hindi (hindi. myflixerapi. com): IMDB-keyed with the id in the path (/embed/tt. . . ). Whole host is Hindi.
@@ -162,7 +163,8 @@ object ServerFarm {
             movieUrl = "https://zxcstream.xyz/player/movie/{id}",
             tvUrl = "https://zxcstream.xyz/player/tv/{id}/{season}/{episode}",
             referer = "https://zxcstream.xyz/",
-            hasSubtitles = false, maxQuality = 2160, timeoutSec = 25,
+            // Discovery + token + 4 servers + master-measure pass.
+            hasSubtitles = false, maxQuality = 2160, timeoutSec = 30,
         ),
         // DahmerMovies (title-keyed file index + worker proxy, verified live Sept 2026).
         // Directory listing per title carries 4K REMUX + Hindi/Tamil/Telugu dubs.

@@ -3,6 +3,7 @@ package Test
 import com.indstream.ServerFarm
 import com.indstream.ServerIdType
 import com.indstream.StreamEngine
+import com.indstream.VideasySource
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -144,6 +145,52 @@ class ServerAdditionsTest {
         assertTrue(StreamEngine.dahmerEpisodeMatch("Show.E02.HDTV.mkv", 1, 2))
         assertTrue(StreamEngine.dahmerEpisodeMatch("Show.Episode.2.1080p.mkv", 1, 2))
         assertTrue(!StreamEngine.dahmerEpisodeMatch("Show.S01E03.1080p.WEB.mkv", 1, 2))
+    }
+
+    @Test
+    fun videasyRoutes_coverHindiMirrors() {
+        assertEquals(setOf("hdmovie", "cdn", "lamovie", "meine"), VideasySource.ROUTES.keys)
+        assertEquals(true, VideasySource.ROUTES["meine"])
+        assertEquals(false, VideasySource.ROUTES["hdmovie"])
+    }
+
+    @Test
+    fun videasyHindiRank_tiers() {
+        assertEquals(2, VideasySource.hindiRank("Hindi"))
+        assertEquals(2, VideasySource.hindiRank("hindi"))
+        assertEquals(1, VideasySource.hindiRank("Multi"))
+        assertEquals(1, VideasySource.hindiRank("Dual Audio"))
+        assertEquals(0, VideasySource.hindiRank("1080p"))
+        assertEquals(0, VideasySource.hindiRank("English"))
+    }
+
+    @Test
+    fun dahmerSizeMb_units() {
+        assertEquals(36147, StreamEngine.dahmerSizeMb("35.3 GB"))
+        assertEquals(970, StreamEngine.dahmerSizeMb("970.6 MB"))
+        assertEquals(450, StreamEngine.dahmerSizeMb("450MB"))
+        assertEquals(1638, StreamEngine.dahmerSizeMb("1.6 GB"))
+        assertNull(StreamEngine.dahmerSizeMb(""))
+        assertNull(StreamEngine.dahmerSizeMb("N/A"))
+    }
+
+    @Test
+    fun dahmerPool_prefersStreamableSizes() {
+        fun row(name: String, size: String) = Triple("https://a.111477.xyz/$name", name, size)
+        val rows = listOf(
+            row("Big.2010.2160p.REMUX.mkv", "35.3 GB"),
+            row("Mid.2010.1080p.WEB.mkv", "9.2 GB"),
+            row("Small.2010.720p.HINDI.mkv", "970.6 MB"),
+        )
+        val pool = StreamEngine.dahmerPool(rows)
+        assertEquals(2, pool.size)
+        assertTrue(pool.none { it.second.startsWith("Big.") })
+        // All giants: two smallest survive.
+        val giants = listOf(row("G1.mkv", "66.0 GB"), row("G2.mkv", "35.3 GB"), row("G3.mkv", "25.7 GB"))
+        val gp = StreamEngine.dahmerPool(giants)
+        assertEquals(2, gp.size)
+        assertEquals("G3.mkv", gp[0].second)
+        assertEquals("G2.mkv", gp[1].second)
     }
 
     @Test

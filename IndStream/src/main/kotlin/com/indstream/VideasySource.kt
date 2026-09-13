@@ -1,6 +1,9 @@
 ﻿package com.indstream
 
 import android.util.Log
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import org.json.JSONObject
 import org.json.JSONArray
 
@@ -116,7 +119,7 @@ object VideasySource {
     }
 
     /** Parsed source entry. */
-    data class Source(val quality: String, val url: String)
+    data class Source(val quality: String, val url: String, val route: String = ROUTE)
 
     /** Full decoded payload: stream sources + the server's own subtitle tracks ({url, language|lang|code} items - usually. empty, but they must be taken. */
     data class Result(val sources: List<Source>, val subtitles: List<Pair<String, String>>, val httpOk: Boolean)
@@ -129,7 +132,20 @@ object VideasySource {
     internal fun keystreamForTest(state: State, counter: Int): Int = keystreamU32(state, counter)
     internal fun decryptForTest(b64: String, seed: String, mediaId: Int): String = decrypt(b64, seed, mediaId)
 
-    /** Fetch + decrypt sources for one title. Returns parsed sources (may be empty when the upstream has no entry or 500s). / / all help the upstream. */
+    /** Player routes (verified Sept 2026): hdmovie is the Hindi upstream; the rest add mirrors. Boolean = movies-only. */
+    internal val ROUTES: Map<String, Boolean> = linkedMapOf(
+        "hdmovie" to false, "cdn" to false, "lamovie" to false, "meine" to true,
+    )
+
+    /** Hindi-relevance of a source quality label: Hindi 2, Multi/Dual 1, else 0. Pure. */
+    internal fun hindiRank(quality: String): Int = when {
+        quality.equals("Hindi", ignoreCase = true) -> 2
+        quality.contains("multi", ignoreCase = true) ||
+            quality.contains("dual", ignoreCase = true) -> 1
+        else -> 0
+    }
+
+    /** Fetch + decrypt sources for one title (hdmovie route only; historical entry point). */
     suspend fun fetchSources(
         tmdbId: Int,
         imdbId: String?,
@@ -139,16 +155,63 @@ object VideasySource {
         season: Int,
         episode: Int,
     ): Result {
+        val seed = fetchSeed(tmdbId) ?: return Result(emptyList(), emptyList(), httpOk = false)
+        return fetchRoute(ROUTE, seed, tmdbId, imdbId, title, year, mediaType, season, episode)
+    }
+
+    /** Fetch + decrypt across all player routes in parallel, deduped by url. */
+    suspend fun fetchAllSources(
+        tmdbId: Int,
+        imdbId: String?,
+        title: String?,
+        year: Int?,
+        mediaType: String,
+        season: Int,
+        episode: Int,
+    ): Result {
+        val seed = fetchSeed(tmdbId) ?: return Result(emptyList(), emptyList(), httpOk = false)
+        val routes = ROUTES.filter { !(it.value && mediaType == "tv") }.keys.toList()
+        val got = coroutineScope {
+            routes.map { route ->
+                async {
+                    runCatching {
+                        fetchRoute(route, seed, tmdbId, imdbId, title, year, mediaType, season, episode)
+                    }.getOrDefault(Result(emptyList(), emptyList(), httpOk = true))
+                }
+            }.awaitAll()
+        }
+        val seen = HashSet<String>()
+        val sources = got.flatMap { it.sources }.filter { seen.add(it.url) }
+        val subtitles = got.flatMap { it.subtitles }.distinct()
+        return Result(sources, subtitles, httpOk = got.any { it.httpOk })
+    }
+
+    /** One seed for all routes (server-cached per mediaId, short TTL). Null on failure. */
+    private suspend fun fetchSeed(tmdbId: Int): String? {
         return try {
             val seedJson = com.lagradost.cloudstream3.app.get(
                 "$API/seed?mediaId=$tmdbId", timeout = 6, headers = apiHeaders(),
             ).text
-            val seed = JSONObject(seedJson).optString("seed")
-            if (seed.isBlank()) {
-                Log.w("VideasyHindi", "no seed in response: ${seedJson.take(120)}")
-                return Result(emptyList(), emptyList(), httpOk = false)
-            }
+            JSONObject(seedJson).optString("seed").takeIf { it.isNotBlank() }
+        } catch (e: Exception) {
+            Log.w("VideasyHindi", "seed fetch failed: ${e.message}")
+            null
+        }
+    }
 
+    /** Query + decrypt one route. Never throws: failures are empty non-ok results. */
+    private suspend fun fetchRoute(
+        route: String,
+        seed: String,
+        tmdbId: Int,
+        imdbId: String?,
+        title: String?,
+        year: Int?,
+        mediaType: String,
+        season: Int,
+        episode: Int,
+    ): Result {
+        return try {
             val q = buildString {
                 append("mediaType=").append(if (mediaType == "tv") "tv" else "movie")
                 append("&tmdbId=").append(tmdbId)
@@ -162,10 +225,10 @@ object VideasySource {
                 }
             }
             val enc = com.lagradost.cloudstream3.app.get(
-                "$API/$ROUTE/sources-with-title?$q", timeout = 10, headers = apiHeaders(),
+                "$API/$route/sources-with-title?$q", timeout = 10, headers = apiHeaders(),
             ).text
             if (enc.isBlank() || enc.startsWith("<")) {
-                Log.w("VideasyHindi", "bad response (${enc.length}B): ${enc.take(80)}")
+                Log.w("VideasyHindi", "bad response ($route, ${enc.length}B): ${enc.take(80)}")
                 return Result(emptyList(), emptyList(), httpOk = false)
             }
 
@@ -175,7 +238,7 @@ object VideasySource {
                 (0 until arr.length()).mapNotNull { i ->
                     val s = arr.optJSONObject(i) ?: return@mapNotNull null
                     val url = s.optString("url").takeIf { it.isNotBlank() } ?: return@mapNotNull null
-                    Source(s.optString("quality"), url)
+                    Source(s.optString("quality"), url, route)
                 }
             } ?: emptyList()
             // The payload's own subtitle tracks ({url, language|lang|code}). Usually absent for hdmovie - emitted when present so.
@@ -192,7 +255,7 @@ object VideasySource {
             } ?: emptyList()
             Result(sources, subtitles, httpOk = true)
         } catch (e: Exception) {
-            Log.w("VideasyHindi", "fetchSources failed: ${e.message}")
+            Log.w("VideasyHindi", "fetchRoute $route failed: ${e.message}")
             Result(emptyList(), emptyList(), httpOk = false)
         }
     }
