@@ -80,10 +80,11 @@ object SubtitleServices {
     fun subtitleMenuName(canon: String, raw: String?): String {
         val lower = raw?.lowercase().orEmpty()
         if (canon == "Hindi") {
-            if (lower.contains("hinglish") || lower.contains("roman") || lower.contains("latin")) return "Hindi (Hinglish)"
+            if (lower.contains("hinglish") || lower.contains("roman") || lower.contains("latin") ||
+                lower.contains("latn") || lower.contains("english word")) return "Hindi (Hinglish)"
             if (lower.contains("\u0939\u093f\u0928\u094d\u0926") || lower.contains("\u0939\u093f\u0902\u0926") ||
                 lower.contains("\u0926\u0947\u0935\u0928\u093e\u0917\u0930\u0940")) return "Hindi (\u0939\u093f\u0928\u094d\u0926\u0940)"
-            return "Hindi"
+            return "Hindi (\u0939\u093f\u0928\u094d\u0926\u0940)"
         }
         val native = INDIAN_NATIVE[canon] ?: return canon
         return "$canon ($native)"

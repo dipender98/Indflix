@@ -251,8 +251,8 @@ class SubtitleProvidersTest {
 
     @Test
     fun subtitleMenuName_hindiVariants() {
-        assertEquals("Hindi", LinkNaming.subtitleMenuName("Hindi", "hi"))
         assertEquals("Hindi (Hinglish)", LinkNaming.subtitleMenuName("Hindi", "Hinglish subs"))
+        assertEquals("Hindi (\u0939\u093F\u0928\u094D\u0926\u0940)", LinkNaming.subtitleMenuName("Hindi", "hi"))
         assertEquals("Hindi (\u0939\u093F\u0928\u094D\u0926\u0940)", LinkNaming.subtitleMenuName("Hindi", "\u0939\u093F\u0928\u094D\u0926\u0940"))
     }
 

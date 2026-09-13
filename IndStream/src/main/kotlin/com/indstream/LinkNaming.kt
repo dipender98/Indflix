@@ -177,14 +177,14 @@ object LinkNaming {
         "Sinhala" to "\u0DC3\u0DD2\u0D82\u0DC4\u0DCD",
     )
 
-    /** Menu label for a parsed track: Indian languages show "English-name (native-script)" so Devanagari and the roman name read as one; raw labels already carrying the English name keep it plain, roman/script Hindi splits Hinglish vs native. */
+    /** Menu label for a parsed track: Indian languages show "English-name (native-script)" so Devanagari and the roman name read as one.
+     *  Hindi: the sources give no script code (probe: always hi/hin + English titles), so plain = Devanagari - OpenSubtitles' own convention; roman only when the release title/label says so or an AI-translated flag rides. */
     fun subtitleMenuName(canon: String, raw: String?): String {
         val lower = raw?.lowercase().orEmpty()
         if (canon == "Hindi") {
-            if (lower.contains("hinglish") || lower.contains("roman") || lower.contains("latin")) return "Hindi (Hinglish)"
-            if (lower.contains("\u0939\u093F\u0928\u094D\u0926") || lower.contains("\u0939\u093F\u0902\u0926\u0940") ||
-                lower.contains("\u0926\u0947\u0935\u0928\u093E\u0917\u0930\u0940")) return "Hindi (\u0939\u093F\u0928\u094D\u0926\u0940)"
-            return "Hindi"
+            if (lower.contains("hinglish") || lower.contains("roman") || lower.contains("latin") ||
+                lower.contains("latn") || lower.contains("english word")) return "Hindi (Hinglish)"
+            return "Hindi (\u0939\u093F\u0928\u094D\u0926\u0940)"
         }
         val native = INDIAN_NATIVE[canon] ?: return canon
         return "$canon ($native)"

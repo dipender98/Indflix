@@ -256,8 +256,8 @@ class SubtitleProvidersMmTest {
 
     @Test
     fun subtitleMenuName_hindiVariantsAndIndianSuffix() {
-        assertEquals("Hindi", SubtitleServices.subtitleMenuName("Hindi", "hi"))
         assertEquals("Hindi (Hinglish)", SubtitleServices.subtitleMenuName("Hindi", "Hinglish subs"))
+        assertEquals("Hindi (\u0939\u093F\u0928\u094D\u0926\u0940)", SubtitleServices.subtitleMenuName("Hindi", "hi"))
         assertEquals("Hindi (\u0939\u093F\u0928\u094D\u0926\u0940)", SubtitleServices.subtitleMenuName("Hindi", "\u0939\u093F\u0928\u094D\u0926"))
         assertEquals("Tamil (\u0BA4\u0BAE\u0BB4\u0BCD)", SubtitleServices.subtitleMenuName("Tamil", "tam"))
         assertEquals("Arabic", SubtitleServices.subtitleMenuName("Arabic", "ar"))
