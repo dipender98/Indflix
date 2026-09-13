@@ -18,7 +18,7 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/dipender98/Indflix/main/IndStream/icon.png",
         "apiVersion": 1,
-        "fileHash": "sha256-4cfc6e5be2fe8c358bf57e3b4f943db278a82cce7a685b9f3710cc1507b47d06"
+        "fileHash": "sha256-5335f2bf68cfbbc1c01c73655c67fd335c1a5fc5a28958dd257fb76d400f205d"
     },
     {
         "url": "https://raw.githubusercontent.com/dipender98/Indflix/builds/Multimovies.cs3",
@@ -42,19 +42,19 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/dipender98/Indflix/main/Multimovies/icon.png",
         "apiVersion": 1,
-        "fileHash": "sha256-9a826f06abdc6d1d401e102b2bddb6430cc362c6ddb667220bb3545a2ed568d0"
+        "fileHash": "sha256-178b6277c4bd4684c71bfba68a363c9cc27f1411fe942c50d5ee22d150970503"
     },
     {
         "url": "https://raw.githubusercontent.com/dipender98/Indflix/builds/Vegamovies.cs3",
         "status": 1,
-        "version": 4,
+        "version": 5,
         "name": "Vegamovies",
         "internalName": "Vegamovies",
         "authors": [
             "Indflix"
         ],
         "description": "CloudStream provider that scrapes Vegamovies (Hollywood + Bollywood) with TMDB metadata and live-fill download servers.",
-        "fileSize": 40116,
+        "fileSize": 41022,
         "repositoryUrl": "https://github.com/dipender98/Indflix",
         "language": "hi",
         "tvTypes": [
@@ -63,6 +63,6 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/dipender98/Indflix/main/Vegamovies/icon.png",
         "apiVersion": 1,
-        "fileHash": "sha256-4b7be2d0d42946b7c7afd05825eb794c6facc9dda013d4132e3a5f51aff2b6ac"
+        "fileHash": "sha256-fecee537d1b92b344c8d72ef23ba9ad32bbfe086737708324cefcc9e5f92a597"
     }
 ]
