@@ -1252,7 +1252,7 @@ internal object MultimoviesDomainResolver {
 
     /** Last-known-good domain; used only when the gateway itself is unreachable
      *  and no cached value exists. */
-    internal const val SEED_DOMAIN = "https://multimovies.beer"
+    internal const val SEED_DOMAIN = "https://multimovies.casa"
 
     private const val CACHE_TTL_MS = 6 * 60 * 60 * 1000L
     private const val GATEWAY_DEBOUNCE_MS = 60_000L
