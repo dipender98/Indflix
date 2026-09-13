@@ -9,7 +9,7 @@
             "Indflix"
         ],
         "description": "Federated embed-server resolver keyed by TMDB/IMDB id. Races dozens of independent HLS/DASH servers, picks the fastest CDN per title, and exposes multi-language audio + per-quality links.",
-        "fileSize": 134323,
+        "fileSize": 135804,
         "repositoryUrl": "https://github.com/dipender98/Indflix",
         "language": "hi",
         "tvTypes": [
@@ -18,7 +18,7 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/dipender98/Indflix/main/IndStream/icon.png",
         "apiVersion": 1,
-        "fileHash": "sha256-b725cf38324f6f40049ead954d976fea67d97a676ee8699f51a65576fec9adf9"
+        "fileHash": "sha256-59d5069c5410a71d2fb625e625757eb7ad9daf42f03879f108ba702309a51de7"
     },
     {
         "url": "https://raw.githubusercontent.com/dipender98/Indflix/builds/Multimovies.cs3",
@@ -30,7 +30,7 @@
             "Indflix"
         ],
         "description": "CloudStream provider that scrapes Multimovies and pulls sources in parallel with a per-source timeout.",
-        "fileSize": 91378,
+        "fileSize": 93552,
         "repositoryUrl": "https://github.com/dipender98/Indflix",
         "language": "hi",
         "tvTypes": [
@@ -42,7 +42,7 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/dipender98/Indflix/main/Multimovies/icon.png",
         "apiVersion": 1,
-        "fileHash": "sha256-df36e53195096c1710d8ca6b2f56304af4fe30ba0c3aeeb533cd69a29be611ec"
+        "fileHash": "sha256-b3eab6b81510fa445235e4b21002bca06928718f2a4576317a8579de808ae9ca"
     },
     {
         "url": "https://raw.githubusercontent.com/dipender98/Indflix/builds/Vegamovies.cs3",
@@ -63,6 +63,6 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/dipender98/Indflix/main/Vegamovies/icon.png",
         "apiVersion": 1,
-        "fileHash": "sha256-9890253d5f92b45de332cc1a83f68519b5e83b15fda887280395eb5aa0e8003f"
+        "fileHash": "sha256-1100bff17f38b994f0c49db6db903be8dbf0bbdadb14c0c3d4a0ad34853b9f1a"
     }
 ]
