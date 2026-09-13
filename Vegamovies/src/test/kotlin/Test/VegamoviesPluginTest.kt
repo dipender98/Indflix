@@ -131,6 +131,62 @@ class VegamoviesPluginTest {
         assertTrue(g480.links.all { it.heading.contains("480p") })
     }
 
+    /** Series post with explicit per-episode headings, each keeping its own quality/ZIP links. */
+    private val explicitEpisodeHtml = """
+    <html><body><div class="entry-content">
+      <h1>Download Show (2025) S01 Complete Series</h1>
+      <h3>Episode 01 {Hindi-English} 480p WEB-DL [400MB] ZIP</h3>
+      <p><a href="https://nexdrive.fit/genxfm100/">&#9889; V-Cloud [Resumable]</a></p>
+      <h3>Episode 02 {Hindi-English} 720p WEB-DL [800MB]</h3>
+      <p><a href="https://nexdrive.fit/genxfm101/">&#9889; G-Direct [Instant]</a>
+         <a href="https://nexdrive.fit/genxfm102/">&#9889; V-Cloud [Resumable]</a></p>
+      <h3>Episode 03 {Hindi-English} 1080p WEB-DL [1.6GB]</h3>
+      <p><a href="https://nexdrive.fit/genxfm103/">&#9889; V-Cloud [Resumable]</a></p>
+      <h3>Season 1 Batch Pack [9GB]</h3>
+      <p><a href="https://nexdrive.fit/genxfm199/">&#9889; Batch/Zip [9GB]</a></p>
+    </div></body></html>"""
+
+    @Test
+    fun parseDetail_explicitEpisodesKeptSeparateWithOwnQuality() {
+        val s = p.parseDetail(Jsoup.parse(explicitEpisodeHtml))
+        val eps = s.groups.filter { it.episode != null }
+        assertEquals(3, eps.size, "each Episode NN heading is its own group")
+        assertEquals(listOf(1, 2, 3), eps.map { it.episode })
+        assertTrue(eps.all { it.season == 1 || it.season == null })
+        assertTrue(eps[0].heading.contains("480p"))
+        assertTrue(eps[1].heading.contains("720p"))
+        assertTrue(eps[2].heading.contains("1080p"))
+        // Episode-level ZIP stays episode-specific, not a pack; the Batch Pack heading is the pack. 480p+ZIP heading means pack text. but episode wins.
+        assertTrue(eps[0].pack.not(), "explicit episode with ZIP token is still an episode")
+        val pack = s.groups.single { it.episode == null && it.pack }
+        assertEquals(1, pack.links.size)
+    }
+
+    @Test
+    fun parseDetail_imdbShortcodeExtracted() {
+        val html = """
+        <html><body><div class="entry-content">
+          <p>[imdb_wrap][imdbimdb]tt1234567[/imdb][/imdb_wrap]</p>
+          <h5>Movie (2020) 720p WEB-DL [1GB]</h5>
+          <p><a href="https://nexdrive.fit/genxfm555/">Download Now</a></p>
+        </div></body></html>"""
+        val s = p.parseDetail(Jsoup.parse(html))
+        assertEquals("tt1234567", s.imdbId, "shortcode IMDb id extracted")
+        val good = """
+        <html><body><div class="entry-content">
+          <p>[imdb size="large" img="2" hdr="3" color="Red"]tt7654321[/imdb]</p>
+          <h5>Movie (2020) 720p WEB-DL [1GB]</h5>
+          <p><a href="https://nexdrive.fit/genxfm555/">Download Now</a></p>
+        </div></body></html>"""
+        assertEquals("tt7654321", p.parseDetail(Jsoup.parse(good)).imdbId)
+    }
+
+    @Test
+    fun seasonEpisode_episodeWordHeadings() {
+        assertEquals(null to 2, LinkNaming.seasonEpisodeFrom("Episode 02 {Hindi} 720p WEB-DL"))
+        assertEquals(3 to 4, LinkNaming.seasonEpisodeFrom("Season 3 Episode 04 1080p"))
+    }
+
     @Test
     fun parseDetail_pageWithoutLinksIsEmpty() {
         val s = p.parseDetail(Jsoup.parse("<html><body><h1>Nothing</h1><a href='https://x/y'>z</a></body></html>"))

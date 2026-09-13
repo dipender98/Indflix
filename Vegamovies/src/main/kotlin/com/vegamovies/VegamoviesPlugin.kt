@@ -90,7 +90,7 @@ class VegamoviesProvider : MainAPI() {
         const val SEED_ROG = "https://new2.rogmovies.click"
 
         /** Maximum time for background link resolution. */
-        const val LIVE_FILL_MS = 90_000L
+        const val LIVE_FILL_MS = 180_000L
 
         const val SEARCH_MAX_RESULTS = 10
 
@@ -389,20 +389,29 @@ class VegamoviesProvider : MainAPI() {
     /** Parsed detail: download groups + any IMDb id found on the page. */
     internal data class Scraped(val imdbId: String?, val groups: List<Group>)
     /** One quality heading block and the server chips under it. */
-    internal data class Group(val heading: String, val season: Int?, val links: List<DlLink>, val pack: Boolean)
+    internal data class Group(
+        val heading: String,
+        val season: Int?,
+        val episode: Int?,
+        val links: List<DlLink>,
+        val pack: Boolean,
+    )
 
     /** Walk the post body in order: every h1-h6 sets the current heading; a genxfm anchor is a server chip belonging to. */
     internal fun parseDetail(doc: Document): Scraped {
         val imdbId = Regex("""imdb\.com/title/(tt\d+)""", RegexOption.IGNORE_CASE)
             .find(doc.body().html())?.groupValues?.get(1)
+            ?: Regex("""\[imdb[^]]*](tt\d+)\[/imdb]""", RegexOption.IGNORE_CASE)
+                .find(doc.body().html())?.groupValues?.get(1)
         val groups = ArrayList<Group>()
         var heading = ""
         var anchors = ArrayList<DlLink>()
 
         fun closeGroup() {
             if (anchors.isNotEmpty() && heading.isNotBlank()) {
-                val (season, _) = LinkNaming.seasonEpisodeFrom(heading)
-                groups += Group(heading, season, anchors.toList(), LinkNaming.isPack(heading))
+                val (season, episode) = LinkNaming.seasonEpisodeFrom(heading)
+                val pack = LinkNaming.isPack(heading) && episode == null
+                groups += Group(heading, season, episode, anchors.toList(), pack)
             }
             anchors = ArrayList()
         }
@@ -427,10 +436,12 @@ class VegamoviesProvider : MainAPI() {
             }
         }
         closeGroup()
-        // Merge groups sharing a heading but split by noise? Group by heading to dedupe.
-        val merged = groups.groupBy { it.heading }.map { (h, gs) ->
-            gs.first().copy(links = gs.flatMap { it.links }.distinctBy { it.gatewayUrl })
-        }.filter { it.links.isNotEmpty() }
+        // Keep identical headings from different episode blocks separate.
+        val merged = groups.groupBy { it.heading to (it.season ?: 1) to it.episode }
+            .map { (_, gs) ->
+                gs.first().copy(links = gs.flatMap { it.links }.distinctBy { it.gatewayUrl })
+            }
+            .filter { it.links.isNotEmpty() }
         return Scraped(imdbId, merged)
     }
 
@@ -438,7 +449,7 @@ class VegamoviesProvider : MainAPI() {
     private suspend fun expandAll(scraped: Scraped, referer: String): List<Pair<Group, List<PayloadLink>>> =
 
         coroutineScope {
-            val sem = Semaphore(6)
+            val sem = Semaphore(12)
             scraped.groups.map { g ->
                 async {
                     sem.acquire()
@@ -448,7 +459,15 @@ class VegamoviesProvider : MainAPI() {
                             val exp = NexdriveResolver.expand(dl.gatewayUrl, referer, commonHeaders)
                             when {
                                 exp.links.isEmpty() -> listOf(
-                                    PayloadLink(dl.gatewayUrl, chipKind.ifBlank { Servers.GATE }, g.heading, 0, true),
+                                    PayloadLink(
+                                        dl.gatewayUrl,
+                                        chipKind.ifBlank { Servers.GATE },
+                                        g.heading,
+                                        0,
+                                        true,
+                                        g.season,
+                                        g.episode,
+                                    ),
                                 )
                                 // Concrete links are classified by HOST, never by chip: the G-Direct and V-Cloud chips of one quality group often open.
 // the SAME gateway whose body.
@@ -456,7 +475,11 @@ class VegamoviesProvider : MainAPI() {
                                     PayloadLink(
                                         c.url,
                                         if (chipKind == Servers.ZIP) Servers.ZIP else c.kind,
-                                        g.heading, c.idx, false,
+                                        g.heading,
+                                        c.idx,
+                                        false,
+                                        g.season,
+                                        g.episode,
                                     )
                                 }
                             }
@@ -479,12 +502,24 @@ class VegamoviesProvider : MainAPI() {
             posterUrl = poster ?: meta?.poster
             backgroundPosterUrl = meta?.backdrop
             this.year = year ?: meta?.year?.toIntOrNull()
-            this.plot = meta?.overview ?: plot
-            this.tags = meta?.genres ?: language?.let { listOf(it) }
+            applyMetadata(this, meta, imdbRating, plot, language)
             this.actors = meta?.cast
             imdbId?.let { addImdbId(it) }
-            (meta?.rating ?: imdbRating)?.let { addScore(it.toString(), 10) }
         }
+    }
+
+    /** Page plot/rating win over TMDB when present; genres merge (page language first). */
+    private fun applyMetadata(
+        resp: LoadResponse, meta: MetadataService.TmdbDetail?, imdbRating: Double?,
+        plot: String?, language: String?,
+    ) {
+        val pagePlot = plot?.takeIf { it.length >= 40 }
+        resp.plot = pagePlot ?: meta?.overview
+        val genres = LinkedHashSet<String>()
+        language?.takeIf { it.isNotBlank() }?.let { genres.add(it.trim()) }
+        meta?.genres?.forEach { genres.add(it) }
+        if (genres.isNotEmpty()) resp.tags = genres.toList()
+        (imdbRating ?: meta?.rating)?.let { resp.addScore(it.toString(), 10) }
     }
 
     /** How many episodes this set of concrete links reveals: the largest number of ordered links sharing ONE server family. */
@@ -501,6 +536,8 @@ class VegamoviesProvider : MainAPI() {
         plot: String?, language: String?, scraped: Scraped,
     ): LoadResponse {
         val groups = expandAll(scraped, url)
+            // Per-episode links only: drop ZIP/batch archives from series.
+            .map { (g, concrete) -> g to concrete.filter { it.kind != Servers.ZIP } }
 
         // Season → ordered quality groups.
         val bySeason = LinkedHashMap<Int, MutableList<Pair<Group, List<PayloadLink>>>>()
@@ -511,16 +548,21 @@ class VegamoviesProvider : MainAPI() {
 
         val episodes = ArrayList<Episode>()
         for ((season, seasonGroups) in bySeason) {
-            // Per-episode structure: some server family exposes >1 ordered links (one per episode).
-            val maxEps = seasonGroups
-                .filter { (g, _) -> !g.pack }
+            // Explicit episodes: each anchor heading already names season/episode. They are authoritative.
+            val explicit = seasonGroups.filter { it.first.episode != null }
+            val explicitByEp = explicit.groupBy { it.first.episode!! }
+            // Inferred episodes: one server family exposes >1 ordered links (one per episode).
+            val hasExplicit = explicitByEp.isNotEmpty()
+            val maxEps = if (hasExplicit) explicitByEp.keys.max()
+            else seasonGroups.filter { (g, _) -> !g.pack }
                 .maxOfOrNull { (_, c) -> c.familyEpisodeCount() } ?: 0
 
-            if (maxEps > 1) {
-                // TMDB episode names/thumbs if available.
-                val epMeta = withTimeoutOrNull(9000L) {
-                    MetadataService.episodesForSeason(imdbId, meta?.tmdbId, season)
-                } ?: emptyMap()
+            // TMDB episode names/thumbs if available.
+            val epMeta = if (maxEps > 1) withTimeoutOrNull(9000L) {
+                MetadataService.episodesForSeason(imdbId, meta?.tmdbId, season)
+            } ?: emptyMap() else emptyMap()
+
+            if (!hasExplicit && maxEps > 1) {
                 for (i in 0 until maxEps) {
                     // A single-link ZIP family is the season pack, not episode 1.
                     val links = seasonGroups.flatMap { (g, concrete) ->
@@ -536,44 +578,55 @@ class VegamoviesProvider : MainAPI() {
                         this.episode = epNum
                         this.name = m?.name ?: "Episode $epNum"
                         this.description = m?.overview
-                        m?.runTime?.let { this.runTime = it }
+                        m?.runTime?.let { this.runTime = it * 60 }
+                        m?.thumbnail?.let { this.posterUrl = it }
+                        m?.aired?.let { this.addDate(it) }
+                    }
+                }
+            } else {
+                // Emit one row per explicit episode, preserving its own links and quality.
+                for (epNum in 1..maxEps) {
+                    val rows = explicitByEp[epNum]
+                    val links = rows?.flatMap { (g, concrete) ->
+                        concrete.map { it.copy(heading = g.heading, season = season, episode = epNum) }
+                    } ?: emptyList()
+                    if (links.isEmpty()) continue
+                    val m = epMeta[epNum]
+                    episodes += newEpisode(LinkPayload(url, links).toJson()) {
+                        this.season = season
+                        this.episode = epNum
+                        this.name = m?.name ?: "Episode $epNum"
+                        this.description = m?.overview
+                        m?.runTime?.let { this.runTime = it * 60 }
                         m?.thumbnail?.let { this.posterUrl = it }
                         m?.aired?.let { this.addDate(it) }
                     }
                 }
             }
-            // Season-level rows: whole-season pack chips, plus every group when the season has no per-episode structure at all.
-            seasonGroups.forEach { (g, concrete) ->
-                val packLinks = concrete.filter { it.kind == Servers.ZIP }
-                val noEpisodes = maxEps <= 1
-                val rows = when {
-                    noEpisodes -> listOf(concrete to g.heading.ifBlank { "Season $season" })
-                    packLinks.isNotEmpty() -> listOf(packLinks to "${g.heading.ifBlank { "Season $season" }} (Pack)")
-                    else -> emptyList()
-                }
-                for ((rowLinks, rowName) in rows) {
-                    if (rowLinks.isEmpty()) continue
+            // Season-level rows only when the season has no per-episode structure at all.
+            val seasonLevel = seasonGroups.filter { it.first.episode == null }
+            if (!hasExplicit && maxEps <= 1) {
+                seasonLevel.forEach { (g, concrete) ->
+                    if (concrete.isEmpty()) return@forEach
                     val payload = LinkPayload(
                         url,
-                        rowLinks.map { it.copy(heading = g.heading, season = season) },
+                        concrete.map { it.copy(heading = g.heading, season = season) },
                     ).toJson()
                     episodes += newEpisode(payload) {
                         this.season = season
-                        this.name = rowName
+                        this.name = g.heading.ifBlank { "Season $season" }
                     }
                 }
             }
         }
 
         return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
-            posterUrl = poster ?: meta?.poster
+            posterUrl = meta?.poster ?: poster
             backgroundPosterUrl = meta?.backdrop
             this.year = year ?: meta?.year?.toIntOrNull()
-            this.plot = meta?.overview ?: plot
-            this.tags = meta?.genres ?: language?.let { listOf(it) }
+            applyMetadata(this, meta, imdbRating, plot, language)
             this.actors = meta?.cast
             imdbId?.let { addImdbId(it) }
-            (meta?.rating ?: imdbRating)?.let { addScore(it.toString(), 10) }
         }
     }
 
@@ -604,14 +657,17 @@ class VegamoviesProvider : MainAPI() {
 
         withTimeoutOrNull(LIVE_FILL_MS) {
             coroutineScope {
-                val sem = Semaphore(6)
+                val sem = Semaphore(12)
                 waves.forEach { wave ->
                     // Each wave fully registers before the next launches.
                     wave.map { pl ->
                         async {
                             sem.acquire()
                             val links = try {
-                                buildLinks(pl, referer)
+                                runCatching { buildLinks(pl, referer) }.getOrElse {
+                                    delay(800) // one retry: transient gateway hiccups must not cost a link. 800ms
+                                    runCatching { buildLinks(pl, referer) }.getOrDefault(emptyList())
+                                }
                             } finally { sem.release() }
                             links.forEach {
                                 emitted = true
@@ -637,11 +693,18 @@ class VegamoviesProvider : MainAPI() {
                 // Dead gateway: list the gateway page itself as browser download.
                 return listOf(extractor(pl.url, Servers.GATE, pl, browserOnly = true))
             }
-            val sameKind = if (pl.kind.isNotBlank()) exp.links.filter { it.kind == pl.kind } else exp.links
-            val pool = sameKind.ifEmpty { exp.links }
-            val idx = pl.idx.coerceIn(0, pool.size - 1)
-            concrete = pool[idx].url
-            concreteKind = pool[idx].kind
+            // Strict family selection: never substitute another server family for the one the payload names.
+            if (pl.kind.isNotBlank() && pl.kind != Servers.GATE) {
+                val pool = exp.links.filter { it.kind == pl.kind }
+                if (pool.isEmpty()) return emptyList()
+                val idx = pl.idx.coerceIn(0, pool.size - 1)
+                concrete = pool[idx].url
+                concreteKind = pool[idx].kind
+            } else {
+                val idx = pl.idx.coerceIn(0, exp.links.size - 1)
+                concrete = exp.links[idx].url
+                concreteKind = exp.links[idx].kind
+            }
         } else {
             concrete = pl.url
             concreteKind = kind

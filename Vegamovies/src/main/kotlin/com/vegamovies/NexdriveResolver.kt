@@ -54,16 +54,22 @@ internal object NexdriveResolver {
         headers: Map<String, String>,
     ): GatewayExpansion {
         cache[gatewayUrl]?.let { return it }
-        val html = runCatching {
-            app.get(
-                gatewayUrl,
-                timeout = 12,
-                headers = headers + mapOf(
-                    "Referer" to pageReferer,
-                    "Accept" to "text/html,application/xhtml+xml",
-                ),
-            ).text
-        }.getOrNull() ?: return GatewayExpansion.EMPTY
+        // Two attempts, rising timeout: a slow gateway must still yield its links.
+        var html: String? = null
+        for (attempt in 1..2) {
+            html = runCatching {
+                app.get(
+                    gatewayUrl,
+                    timeout = if (attempt == 1) 15 else 25,
+                    headers = headers + mapOf(
+                        "Referer" to pageReferer,
+                        "Accept" to "text/html,application/xhtml+xml",
+                    ),
+                ).text
+            }.getOrNull()
+            if (!html.isNullOrBlank()) break
+        }
+        if (html.isNullOrBlank()) return GatewayExpansion.EMPTY
 
         val title = Regex("""<h1[^>]*>([^<]{1,260})""", RegexOption.IGNORE_CASE)
             .find(html)?.groupValues?.get(1)?.trim()
@@ -85,16 +91,21 @@ internal object NexdriveResolver {
         headers: Map<String, String>,
     ): String? {
         directCache[embedUrl]?.let { return it.ifEmpty { null } }
-        val body = runCatching {
-            app.get(
-                embedUrl,
-                timeout = 10,
-                headers = headers + mapOf(
-                    "Referer" to referer,
-                    "Accept" to "text/html,application/xhtml+xml",
-                ),
-            ).text
-        }.getOrNull()
+        // Two attempts, rising timeout: slow fastdl embeds should still resolve to a direct link.
+        var body: String? = null
+        for (attempt in 1..2) {
+            body = runCatching {
+                app.get(
+                    embedUrl,
+                    timeout = if (attempt == 1) 12 else 20,
+                    headers = headers + mapOf(
+                        "Referer" to referer,
+                        "Accept" to "text/html,application/xhtml+xml",
+                    ),
+                ).text
+            }.getOrNull()
+            if (body?.let { extractDirect(it) } != null) break
+        }
         val direct = body?.let { extractDirect(it) }
         // Memoize failures as "" so a dead embed isn't retried every playback.
         if (directCache.size < 96) directCache[embedUrl] = direct ?: ""
