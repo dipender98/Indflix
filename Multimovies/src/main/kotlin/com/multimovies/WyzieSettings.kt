@@ -1,6 +1,6 @@
 package com.multimovies
 
-import android.app.AlertDialog
+import android.app.Dialog
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
@@ -13,6 +13,7 @@ import android.text.method.LinkMovementMethod
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.ViewGroup
+import android.view.Window
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -85,9 +86,9 @@ object WyzieSettings {
 
     /** Dark (not pitch-black) settings dialog: key field, redeem link, save/clear. */
     fun openSettings(context: Context) {
-        val bgColor = Color.parseColor("#242428")
-        val cardColor = Color.parseColor("#2E2E34")
-        val fieldColor = Color.parseColor("#3C3C44")
+        val bgColor = Color.parseColor("#1D1D20")
+        val cardColor = Color.parseColor("#25252A")
+        val fieldColor = Color.parseColor("#303036")
         val textColor = Color.parseColor("#EDEDF2")
         val hintColor = Color.parseColor("#A3A3AD")
         val accentColor = Color.parseColor("#2F7CF6")
@@ -187,7 +188,12 @@ object WyzieSettings {
             setPadding(dp(4), dp(4), dp(4), dp(4))
             addView(body)
         }
-        val dialog = AlertDialog.Builder(context).setView(scroll).create()
+        // Plain Dialog (not AlertDialog): the alert container theme draws edge shading
+        // around the content, which we don't want - flat solid background instead.
+        val dialog = Dialog(context).apply {
+            requestWindowFeature(Window.FEATURE_NO_TITLE)
+            setContentView(scroll)
+        }
         clearBtn.setOnClickListener {
             clear(context)
             Toast.makeText(context, "Cleared - using built-in subtitles", Toast.LENGTH_SHORT).show()
@@ -202,11 +208,10 @@ object WyzieSettings {
             }
         }
         dialog.show()
-        dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-        // 20% narrower than the default dialog width; layout and content unchanged.
+        dialog.window?.setBackgroundDrawable(ColorDrawable(bgColor))
         dialog.window?.let { w ->
             val lp = w.attributes
-            lp.width = (context.resources.displayMetrics.widthPixels * 0.8).toInt()
+            lp.width = (context.resources.displayMetrics.widthPixels * 0.88).toInt()
             w.attributes = lp
         }
     }
