@@ -76,6 +76,25 @@ object Settings {
         save(context, "")
     }
 
+    @Volatile
+    private var wyzieFailureNotified = false
+
+    /** One-time notice that the saved key failed (callers fall back to built-in). */
+    fun notifyWyzieFailed(reason: String) {
+        val ctx = appContext ?: return
+        synchronized(this) {
+            if (wyzieFailureNotified) return
+            wyzieFailureNotified = true
+        }
+        runCatching {
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                runCatching {
+                    Toast.makeText(ctx, "Wyzie subtitles failed ($reason) - using built-in", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
     private fun load() {
         val ctx = appContext ?: return
         cached = runCatching {

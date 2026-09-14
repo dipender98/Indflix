@@ -90,6 +90,37 @@ class WyzieSubsTest {
     }
 
     @Test
+    fun parse_ignoresLive401ErrorBody() {
+        val err = """{"code":401,"message":"API key required","details":"Include a valid API key"}"""
+        assertEquals(emptyList(), WyzieSubs.parse(err, setOf("en", "hi")))
+    }
+
+    @Test
+    fun failureReason_live401Body_keyRejected() {
+        val err = """{"code":401,"message":"API key required","details":"Include a valid API key"}"""
+        assertEquals("key rejected", WyzieSubs.failureReason(err))
+    }
+
+    @Test
+    fun failureReason_rateAndPaymentBodies_limitReached() {
+        assertEquals("limit reached", WyzieSubs.failureReason("""{"code":429,"message":"Rate limit exceeded"}"""))
+        assertEquals("limit reached", WyzieSubs.failureReason("""{"code":402,"message":"Top up required"}"""))
+    }
+
+    @Test
+    fun failureReason_healthyBodies_null() {
+        assertEquals(null, WyzieSubs.failureReason(wyzieJson))
+        assertEquals(null, WyzieSubs.failureReason("""{"subtitles":[]}"""))
+        assertEquals(null, WyzieSubs.failureReason(null))
+        assertEquals(null, WyzieSubs.failureReason("  "))
+    }
+
+    @Test
+    fun failureReason_htmlGarbage_serverError() {
+        assertEquals("server error", WyzieSubs.failureReason("<html>denied</html>"))
+    }
+
+    @Test
     fun keyValidation_trimsAndLengthGates() {
         assertTrue(Settings.isValidKey("wyzie-abc123"))
         assertTrue(Settings.isValidKey("  wyzie-abc123  "))
