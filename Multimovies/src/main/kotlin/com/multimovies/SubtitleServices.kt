@@ -332,8 +332,6 @@ object SubtilesProvider {
         val deadline = System.currentTimeMillis() + FETCH_BUDGET_MS
         val groups = groupRequests(codes, originalCode)
         if (groups.isEmpty()) return 0
-        // Priority singles (hi, en, original) are tiny and most-wanted: land them before the slower chunks.
-        val priorityCount = minOf(3, groups.size)
         val seen = HashSet<String>()
         val perLang = HashMap<String, Int>()
         val collected = mutableListOf<SubTrack>()
@@ -349,23 +347,11 @@ object SubtilesProvider {
             }
         }
         coroutineScope {
-            // Phase 1 (top priority): English + Hindi + original - tiny singles, land at playback start.
-            groups.take(priorityCount).map { launchFetch(imdb, season, episode, it, deadline) }
-                .map { it.await() }.forEach { emit(it) }
-            // Phase 2 (priority batch): rest of the Indian block in native-written form.
-            if (System.currentTimeMillis() < deadline) {
-                groups.drop(priorityCount)
-                    .filter { g -> g.all { it in INDIAN_LANG_CODES } }
-                    .map { launchFetch(imdb, season, episode, it, deadline) }
-                    .map { it.await() }.forEach { emit(it) }
-            }
-            // Phase 3: foreign languages.
-            if (System.currentTimeMillis() < deadline) {
-                groups.drop(priorityCount)
-                    .filterNot { g -> g.all { it in INDIAN_LANG_CODES } }
-                    .map { launchFetch(imdb, season, episode, it, deadline) }
-                    .map { it.await() }.forEach { emit(it) }
-            }
+            // Single wave: every group launches at once and awaits in priority order, so hi/en
+            // still emit first while a slow group can no longer starve the rest of the budget
+            // (sequential phases meant one cold group ate it all and only English landed, late).
+            groups.map { launchFetch(imdb, season, episode, it, deadline) }
+                .forEach { emit(it.await()) }
             if (delivered == 0 && System.currentTimeMillis() < deadline) {
                 Log.d("SubtilesProvider", "all groups empty - one priority retry")
                 groups.firstOrNull()?.let { emit(launchFetch(imdb, season, episode, it, deadline).await()) }

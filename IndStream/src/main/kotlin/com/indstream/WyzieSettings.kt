@@ -85,13 +85,13 @@ object WyzieSettings {
 
     /** Dark (not pitch-black) settings dialog: key field, redeem link, save/clear. */
     fun openSettings(context: Context) {
-        val bgColor = Color.parseColor("#23232F")
-        val cardColor = Color.parseColor("#2D2D40")
-        val fieldColor = Color.parseColor("#3B3B54")
+        val bgColor = Color.parseColor("#242428")
+        val cardColor = Color.parseColor("#2E2E34")
+        val fieldColor = Color.parseColor("#3C3C44")
         val textColor = Color.parseColor("#EDEDF2")
-        val hintColor = Color.parseColor("#9A9AB0")
-        val accentColor = Color.parseColor("#7C6CF5")
-        val linkColor = Color.parseColor("#8FA8FF")
+        val hintColor = Color.parseColor("#A3A3AD")
+        val accentColor = Color.parseColor("#2F7CF6")
+        val linkColor = Color.parseColor("#7FA9F5")
 
         fun dp(v: Int): Int = (v * context.resources.displayMetrics.density).toInt()
         fun rounded(color: Int, radiusDp: Int): GradientDrawable =
@@ -203,5 +203,11 @@ object WyzieSettings {
         }
         dialog.show()
         dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        // 20% narrower than the default dialog width; layout and content unchanged.
+        dialog.window?.let { w ->
+            val lp = w.attributes
+            lp.width = (context.resources.displayMetrics.widthPixels * 0.8).toInt()
+            w.attributes = lp
+        }
     }
 }
