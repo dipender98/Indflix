@@ -27,7 +27,9 @@ import kotlinx.coroutines.withTimeoutOrNull
 @CloudstreamPlugin
 class IndStream : Plugin() {
     override fun load(context: Context) {
+        WyzieSettings.init(context)
         registerMainAPI(IndStreamProvider())
+        openSettings = { ctx -> WyzieSettings.openSettings(ctx) }
         // MovieBox bearer pre-warm: the x-user token lives for hours, so one background GET now removes a serial round-trip.
         CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
             runCatching { StreamEngine.prewarmMovieBoxToken() }
@@ -470,7 +472,7 @@ class IndStreamProvider : MainAPI() {
         job.invokeOnCompletion { warmFarms.remove(key, job) }
     }
 
-    /** Subtitle provider (): server captions are NOT used - the OpenSubtitles fallback IS the subtitle. */
+    /** Subtitle provider: user Wyzie key replaces the built-in stack, else OpenSubtitles fallback. */
     private suspend fun topUpSubtitles(
         imdbId: String?,
         season: Int,
@@ -479,6 +481,12 @@ class IndStreamProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
     ) {
         val wanted = SubtilesProvider.desiredLanguages(originalLang)
+        WyzieSettings.apiKey()?.let { key ->
+            val n = WyzieSubs.fetchAndDeliver(imdbId, season, episode, wanted, key) {
+                runCatching { subtitleCallback(it) }
+            }
+            if (n > 0) return
+        }
         // Progressive: hi/en emit first so tracks land at playback start, rest follow within budget.
         SubtilesProvider.fetchAndDeliver(imdbId, season, episode, wanted, originalLang) {
             runCatching { subtitleCallback(it) }

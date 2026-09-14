@@ -7,6 +7,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.loadExtractor
 import java.net.URLEncoder
 import java.security.SecureRandom
+import java.util.Base64
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -24,6 +25,7 @@ data class NxshaSource(
     val url: String,
     val quality: String = "",
     val isM3u8: Boolean = false,
+    val isDash: Boolean = false,
 )
 
 data class NxshaSubtitle(val lang: String, val url: String)
@@ -238,6 +240,9 @@ object NxshaExtractor {
                         quality = quality,
                         isM3u8 = streamType.equals("m3u8", true) || streamType.equals("hls", true) ||
                             url.contains(".m3u8", ignoreCase = true),
+                        // DASH manifests (.mpd) are adaptive too - mistyping them as VIDEO breaks playback.
+                        isDash = streamType.equals("mpd", true) || streamType.equals("dash", true) ||
+                            url.contains(".mpd", ignoreCase = true),
                     )
                 )
                 continue
@@ -261,6 +266,7 @@ object NxshaExtractor {
                             url = l.url,
                             quality = quality,
                             isM3u8 = l.type == ExtractorLinkType.M3U8 || l.url.contains(".m3u8", ignoreCase = true),
+                            isDash = l.type == ExtractorLinkType.DASH || l.url.contains(".mpd", ignoreCase = true),
                         )
                     )
                 }
@@ -278,6 +284,7 @@ object NxshaExtractor {
                         url = unwrapped,
                         quality = quality,
                         isM3u8 = unwrapped.contains(".m3u8", ignoreCase = true),
+                        isDash = unwrapped.contains(".mpd", ignoreCase = true),
                     )
                 )
             }
@@ -654,6 +661,258 @@ object VidemExtractor {
         // Normalise escaped slashes the JSON parser can't handle.
         val cleaned = raw.replace("\\/", "/")
         return runCatching { JSONObject(cleaned) }.getOrNull()
+    }
+}
+
+/** One resolved GDMirror HLS stream. */
+data class GdMirrorStream(
+    val name: String,
+    val url: String,
+    val fileName: String = "",
+    val referer: String? = null,
+)
+
+/** GDMirror (streams.iqsmartgames.com) extractor. The dooplayer embed is a JS shell, resolved statically:
+ *  embed vars -> mymovieapi/myseriesapi (fileslugs) -> embedhelper2 (mirror embeds) -> mirror player page
+ *  (packed JWPlayer `links` carrying HLS masters). */
+object GdMirrorExtractor {
+
+    private const val DEF_API = "https://streams.iqsmartgames.com"
+    private const val DEF_PLAYER = "https://pro.iqsmartgames.com"
+    private const val PAGE_BUDGET_MS = 5_000L
+    private const val API_BUDGET_MS = 5_000L
+    private const val HELPER_BUDGET_MS = 5_000L
+    private const val MIRROR_BUDGET_MS = 6_000L
+    private const val MAX_SLUGS = 2
+    private const val MAX_MIRRORS = 3
+    private const val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
+
+    suspend fun extract(pageUrl: String): List<GdMirrorStream> = coroutineScope {
+        val embed = GdMirrorProtocol.parseEmbed(pageUrl) ?: return@coroutineScope emptyList()
+        val html = HttpKit.get(
+            embed.pageUrl,
+            mapOf("User-Agent" to UA, "Accept" to "text/html,*/*", "Referer" to pageUrl),
+            PAGE_BUDGET_MS,
+        ) ?: return@coroutineScope emptyList()
+        val vars = GdMirrorProtocol.parseVars(html, embed)
+        val apiJson = HttpKit.getJson(
+            GdMirrorProtocol.apiUrl(vars),
+            mapOf("User-Agent" to UA, "Accept" to "*/*", "Referer" to embed.pageUrl),
+            API_BUDGET_MS,
+        ) ?: return@coroutineScope emptyList()
+        val files = GdMirrorProtocol.parseFiles(apiJson)
+            .sortedByDescending { GdMirrorProtocol.isHindiName(it.fileName) }
+            .take(MAX_SLUGS)
+        if (files.isEmpty()) return@coroutineScope emptyList()
+        val sem = Semaphore(2)
+        files.map { f ->
+            async {
+                sem.acquire()
+                try {
+                    resolveSlug(vars, f)
+                } finally {
+                    sem.release()
+                }
+            }
+        }.awaitAll().flatten()
+    }
+
+    private suspend fun resolveSlug(vars: GdMirrorProtocol.Vars, file: GdMirrorProtocol.GdFile): List<GdMirrorStream> {
+        val helperBody = HttpKit.postForm(
+            "${vars.player}/embedhelper2.php",
+            mapOf("sid" to file.slug, "UserFavSite" to "", "currentDomain" to vars.playerHost),
+            mapOf("User-Agent" to UA, "Accept" to "*/*", "Referer" to vars.player + "/"),
+            HELPER_BUDGET_MS,
+        ) ?: return emptyList()
+        val out = mutableListOf<GdMirrorStream>()
+        for (m in GdMirrorProtocol.parseMirrors(helperBody).take(MAX_MIRRORS)) {
+            val html = HttpKit.get(
+                m.url,
+                mapOf("User-Agent" to UA, "Accept" to "text/html,*/*", "Referer" to vars.player + "/"),
+                MIRROR_BUDGET_MS,
+            ) ?: continue
+            GdMirrorProtocol.extractHls(html, m.base).forEach { url ->
+                val hindi = GdMirrorProtocol.isHindiName(file.fileName)
+                out.add(
+                    GdMirrorStream(
+                        "GDMirror (${m.site}${if (hindi) " Hindi" else ""})",
+                        url, file.fileName, m.url,
+                    )
+                )
+            }
+            if (out.size >= 3) break
+        }
+        return out
+    }
+}
+
+/** Pure GDMirror wire logic: embed/vars/api parsing, mirror mapping, packed-player unpack. */
+internal object GdMirrorProtocol {
+
+    internal data class Embed(val pageUrl: String, val kind: String, val id: String, val season: String?, val episode: String?, val key: String?)
+    internal data class Vars(val api: String, val player: String, val playerHost: String, val idType: String, val id: String, val season: String?, val epname: String?, val key: String)
+    internal data class GdFile(val slug: String, val fileName: String)
+    internal data class Mirror(val site: String, val base: String, val url: String)
+
+    /** Parse an iqsmartgames embed URL: /embed/movie/{id} or /embed/tv/{id}/{s}/{e} plus ?key=. */
+    internal fun parseEmbed(url: String): Embed? {
+        val path = Regex("""/embed/(movie|tv)/([^/?#]+)(?:/(\d+)(?:/(\d+))?)?""").find(url) ?: return null
+        val key = Regex("""[?&]key=([^&#]+)""").find(url)?.groupValues?.get(1)
+        return Embed(url, path.groupValues[1], path.groupValues[2], path.groupValues[3].ifEmpty { null },
+            path.groupValues[4].ifEmpty { null }, key?.ifEmpty { null })
+    }
+
+    private fun jsVar(page: String, name: String): String? =
+        Regex("""(?:let|var|const)\s+$name\s*=\s*"([^"]*)"""").find(page)?.groupValues?.get(1)
+
+    /** Embed-page JS vars with URL-derived fallbacks so one missing var never kills the chain. */
+    internal fun parseVars(page: String, embed: Embed): Vars {
+        val id = jsVar(page, "FinalID")?.ifEmpty { null } ?: embed.id
+        val idType = jsVar(page, "idType")?.ifEmpty { null }
+            ?: if (id.startsWith("tt")) "imdbid" else "tmdbid"
+        val key = jsVar(page, "myKey")?.ifEmpty { null } ?: embed.key.orEmpty()
+        val api = jsVar(page, "api_url")?.trimEnd('/')?.ifEmpty { null } ?: DEF_API
+        val player = jsVar(page, "player_base")?.trimEnd('/')?.ifEmpty { null } ?: DEF_PLAYER
+        val season = jsVar(page, "season")?.ifEmpty { null } ?: embed.season
+        val epname = jsVar(page, "epname")?.ifEmpty { null } ?: embed.episode
+        val host = Regex("""^https?://[^/]+""").find(player)?.value?.substringAfter("://").orEmpty()
+        return Vars(api, player, host, idType, id, season, epname, key)
+    }
+
+    internal const val DEF_API = "https://streams.iqsmartgames.com"
+    internal const val DEF_PLAYER = "https://pro.iqsmartgames.com"
+
+    /** mymovieapi / myseriesapi URL for the resolved vars. */
+    internal fun apiUrl(v: Vars): String {
+        val enc: (String) -> String = { URLEncoder.encode(it, "UTF-8") }
+        return if (v.season != null || v.epname != null) {
+            "${v.api}/myseriesapi?${v.idType}=${enc(v.id)}&season=${enc(v.season.orEmpty())}" +
+                "&epname=${enc(v.epname.orEmpty())}&key=${enc(v.key)}"
+        } else {
+            "${v.api}/mymovieapi?${v.idType}=${enc(v.id)}&key=${enc(v.key)}"
+        }
+    }
+
+    /** `data` array -> (fileslug, filename), blanks dropped. */
+    internal fun parseFiles(json: JSONObject): List<GdFile> {
+        val arr = json.optJSONArray("data") ?: return emptyList()
+        val out = mutableListOf<GdFile>()
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val slug = o.optString("fileslug").trim().takeIf { it.isNotEmpty() } ?: continue
+            out.add(GdFile(slug, o.optString("filename")))
+        }
+        return out
+    }
+
+    internal fun isHindiName(name: String?): Boolean = name?.contains("hindi", ignoreCase = true) == true
+
+    /** embedhelper2 response -> mirror embeds in sources order: siteUrl + base64(mresult)[siteKey]. */
+    internal fun parseMirrors(body: String): List<Mirror> {
+        val root = runCatching { JSONObject(body) }.getOrNull() ?: return emptyList()
+        val sources = root.optJSONObject("sources") ?: return emptyList()
+        val mresult = runCatching {
+            JSONObject(String(Base64.getDecoder().decode(root.optString("mresult")), Charsets.UTF_8))
+        }.getOrNull() ?: return emptyList()
+        val out = mutableListOf<Mirror>()
+        val keys = sources.keys()
+        while (keys.hasNext()) {
+            val siteKey = keys.next()
+            val o = sources.optJSONObject(siteKey) ?: continue
+            val code = mresult.optString(siteKey).takeIf { it.isNotBlank() } ?: continue
+            val base = o.optString("siteUrl").takeIf { it.startsWith("http") } ?: continue
+            val site = o.optString("friendlyName").ifBlank { siteKey }
+            out.add(Mirror(site, base, base + code))
+        }
+        // JSONObject key order is not contractual: verified player families first, then stable key order.
+        return out.sortedWith(compareBy({ mirrorPriority(it.site) }, { it.site }))
+    }
+
+    private fun mirrorPriority(site: String): Int = when (site.lowercase()) {
+        "streamhg" -> 0
+        "earnvids" -> 1
+        else -> 2
+    }
+
+    /** Mirror player page -> HLS master urls (hls4, hls3, hls2 preference), relative resolved against the page. */
+    internal fun extractHls(html: String, mirrorBase: String): List<String> {
+        val start = html.indexOf("eval(function(p,a,c,k,e,d)").takeIf { it >= 0 } ?: return emptyList()
+        val end = html.indexOf(".split('|')))", start).takeIf { it > start } ?: return emptyList()
+        val unpacked = deanUnpack(html.substring(start, end + ".split('|')))".length)) ?: return emptyList()
+        val found = mutableListOf<String>()
+        for (tag in listOf("hls4", "hls3", "hls2")) {
+            Regex(""""$tag"\s*:\s*"([^"]+)"""").find(unpacked)?.groupValues?.get(1)
+                ?.takeIf { it.isNotBlank() }?.let { found.add(absolutize(mirrorBase, it)) }
+        }
+        return found.distinct()
+    }
+
+    private fun absolutize(base: String, ref: String): String {
+        if (ref.startsWith("http", ignoreCase = true)) return ref
+        if (ref.startsWith("//")) return "https:$ref"
+        val schemeHost = Regex("""^https?://[^/]+""").find(base)?.value ?: return ref
+        return if (ref.startsWith("/")) "$schemeHost$ref" else "$schemeHost/$ref"
+    }
+
+    /** Dean Edwards packer unpack: eval(function(p,a,c,k,e,d){...}('P',A,C,'K'.split('|'))). Null-safe. */
+    internal fun deanUnpack(block: String): String? = runCatching {
+        val m = Regex("""\}\('([\s\S]*?)',(\d+),(\d+),'([\s\S]*)'\.split\('\|'\)\)\)""")
+            .find(block) ?: return null
+        val p = unescapeJs(m.groupValues[1])
+        val a = m.groupValues[2].toInt()
+        val c = m.groupValues[3].toInt()
+        val k = m.groupValues[4].split('|')
+        fun eKey(n: Int): String {
+            var x = n
+            var s = ""
+            do {
+                val d = x % a
+                s = (if (d > 35) (d + 29).toChar().toString() else d.toString(a)) + s
+                x /= a
+            } while (x > 0)
+            return s
+        }
+        var s = p
+        for (i in c - 1 downTo 0) {
+            val rep = k.getOrNull(i).orEmpty()
+            if (rep.isEmpty()) continue
+            s = Regex("\\b${Regex.escape(eKey(i))}\\b").replace(s, java.util.regex.Matcher.quoteReplacement(rep))
+        }
+        s
+    }.getOrNull()
+
+    /** Unescape a JS string literal body (no surrounding quotes): \\ \' \" \/ \n \r \t \xNN \uNNNN. */
+    internal fun unescapeJs(s: String): String {
+        val out = StringBuilder(s.length)
+        var i = 0
+        while (i < s.length) {
+            val ch = s[i]
+            if (ch != '\\' || i + 1 >= s.length) {
+                out.append(ch)
+                i++
+                continue
+            }
+            when (val e = s[i + 1]) {
+                '\\' -> out.append('\\')
+                '\'' -> out.append('\'')
+                '"' -> out.append('"')
+                '/' -> out.append('/')
+                'n' -> out.append('\n')
+                'r' -> out.append('\r')
+                't' -> out.append('\t')
+                'x' -> {
+                    out.append(s.substring(i + 2, minOf(i + 4, s.length)).toIntOrNull(16)?.toChar() ?: e)
+                    i += 2
+                }
+                'u' -> {
+                    out.append(s.substring(i + 2, minOf(i + 6, s.length)).toIntOrNull(16)?.toChar() ?: e)
+                    i += 4
+                }
+                else -> out.append(e)
+            }
+            i += 2
+        }
+        return out.toString()
     }
 }
 

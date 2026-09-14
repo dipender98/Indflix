@@ -33,8 +33,10 @@ import org.jsoup.nodes.Element
 @CloudstreamPlugin
 class Multimovies : Plugin() {
     override fun load(context: Context) {
+        WyzieSettings.init(context)
         // All providers/extractors added here are registered in the app.
         registerMainAPI(MultimoviesProvider())
+        openSettings = { ctx -> WyzieSettings.openSettings(ctx) }
     }
 }
 
@@ -1047,7 +1049,7 @@ class MultimoviesProvider : MainAPI() {
         return@withDomainRetry true
     }
 
-    /** Subtitle provider (): the two-source OpenSubtitles + SubSense fallback (SubtilesProvider) is the SOLE. */
+    /** Subtitle provider: user Wyzie key first, else the OpenSubtitles + SubSense fallback. */
     private suspend fun deliverFallbackSubs(
         meta: SourceMeta,
         subtitleCallback: (SubtitleFile) -> Unit,
@@ -1062,6 +1064,14 @@ class MultimoviesProvider : MainAPI() {
                     imdb = withTimeoutOrNull(4000L) { TmdbService.fetchMeta(tmdb, type) }
                         ?.imdbId?.takeIf { it.startsWith("tt") }
                 }
+            }
+            // User key set: Wyzie replaces the built-in stack for this play (0 = fall through).
+            WyzieSettings.apiKey()?.let { key ->
+                val n = WyzieSubs.fetchAndDeliver(
+                    imdb, meta.tmdbId, meta.season, meta.episode,
+                    SubtilesProvider.desiredLanguages(), key,
+                ) { runCatching { subtitleCallback(it) } }
+                if (n > 0) return@runCatching
             }
             SubtilesProvider.fetchAndDeliver(
                 imdb, meta.season, meta.episode,
@@ -1108,7 +1118,7 @@ class MultimoviesProvider : MainAPI() {
         /** Quality floor (): drop KNOWN sub-720p fixed files. */
         fun passesFloor(l: ExtractorLink): Boolean =
             MultimoviesProvider.passesQualityFloor(
-                l.type == ExtractorLinkType.M3U8,
+                l.type == ExtractorLinkType.M3U8 || l.type == ExtractorLinkType.DASH,
                 l.quality,
             )
 
@@ -1736,6 +1746,30 @@ object MultiSourcePuller {
         // Trailers/YouTube embeds are not streams - never surface them as sources.
         if (isYouTubeHost(src.url)) return emptyList()
 
+        // GDMirror (streams.iqsmartgames.com): JS-shell embed resolved statically
+        // (embed vars -> mymovieapi/myseriesapi -> embedhelper2 mirrors -> packed HLS masters).
+        if (hostOf(src.url).contains("iqsmartgames")) {
+            val out = mutableListOf<ExtractorLink>()
+            for (g in GdMirrorExtractor.extract(src.url)) {
+                val label = g.name.ifBlank { "GDMirror" }
+                val refererHeader = g.referer ?: src.referer ?: src.url
+                val headers = src.headers + ("Referer" to refererHeader)
+                out += newExtractorLink(
+                    source = label,
+                    name = label,
+                    url = g.url,
+                    type = ExtractorLinkType.M3U8,
+                ) {
+                    referer = refererHeader
+                    quality = getQualityFromName(g.fileName.ifEmpty { g.url })
+                    this.headers = headers
+                    extractorData = null
+                    audioTracks = emptyList()
+                }
+            }
+            return out
+        }
+
         // Nxsha: the web player resolves servers/sources through same-origin CryptoJS-AES envelopes (no stream URL in any.
         if (hostOf(src.url).contains("nxsha")) {
             val subs = mutableListOf<SubtitleFile>()
@@ -1744,8 +1778,11 @@ object MultiSourcePuller {
             val out = mutableListOf<ExtractorLink>()
             for (s in nxLinks) {
                 val source = s.name
+                // DASH manifests (.mpd) are adaptive: mistyping them as VIDEO breaks playback.
                 val type = if (s.isM3u8 || s.url.contains(".m3u8", ignoreCase = true)) {
                     ExtractorLinkType.M3U8
+                } else if (s.isDash || s.url.contains(".mpd", ignoreCase = true)) {
+                    ExtractorLinkType.DASH
                 } else ExtractorLinkType.VIDEO
                 // Streams come back without headers.
                 val refererHeader = src.referer ?: src.url

@@ -27,6 +27,8 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import org.jsoup.nodes.Document
@@ -71,6 +73,30 @@ internal object HttpKit {
     suspend fun getJson(url: String, headers: Map<String, String> = emptyMap(), budgetMs: Long = 8_000L): JSONObject? =
         get(url, headers, budgetMs)?.let { raw ->
             runCatching { JSONObject(raw) }.getOrNull()
+        }
+
+    /** Form POST, returning the response body text, or null on failure / timeout after. */
+    suspend fun postForm(
+        url: String,
+        fields: Map<String, String>,
+        headers: Map<String, String> = emptyMap(),
+        budgetMs: Long = 8_000L,
+    ): String? =
+        withContext(Dispatchers.IO) {
+            withTimeoutOrNull(budgetMs) {
+                runCatching {
+                    val form = fields.entries.joinToString("&") { (k, v) ->
+                        URLEncoder.encode(k, "UTF-8") + "=" + URLEncoder.encode(v, "UTF-8")
+                    }
+                    val body = form.toRequestBody("application/x-www-form-urlencoded; charset=UTF-8".toMediaType())
+                    val req = Request.Builder().url(url).post(body)
+                    headers.forEach { (k, v) -> req.header(k, v) }
+                    client.newCall(req.build()).execute().use { resp ->
+                        if (!resp.isSuccessful) return@use null
+                        resp.body.string()
+                    }
+                }.getOrNull()
+            }
         }
 }
 
