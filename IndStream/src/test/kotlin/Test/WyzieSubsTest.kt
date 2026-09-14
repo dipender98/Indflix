@@ -29,9 +29,16 @@ class WyzieSubsTest {
         val url = WyzieSubs.buildUrl("tt1375666", 0, 0, linkedSetOf("hi", "en"), "wyzie-abc123")
         assertTrue(url!!.startsWith("https://sub.wyzie.io/search?id=tt1375666"), url)
         assertTrue(url.contains("language=hi,en"), url)
-        assertTrue(url.contains("source=all"), url)
+        assertTrue(!url.contains("source="), url)
         assertTrue(url.contains("key=wyzie-abc123"), url)
         assertTrue(!url.contains("season="), url)
+    }
+
+    @Test
+    fun buildUrl_scopesToKeySources() {
+        val url = WyzieSubs.buildUrl("tt1375666", 0, 0, setOf("en"), "wyzie-abc123", listOf("charlie", "lima"))
+        assertTrue(url!!.contains("source=charlie,lima"), url)
+        assertTrue(!url.contains("source=all"), url)
     }
 
     @Test
@@ -134,6 +141,34 @@ class WyzieSubsTest {
     @Test
     fun failureReason_languageError_requestRejected() {
         assertEquals("request rejected", WyzieSubs.failureReason(null, """{"message":"Invalid language parameter"}"""))
+    }
+
+    @Test
+    fun failureReason_noSubtitlesFound_isHealthyEmpty() {
+        val noSubs = """{"code":400,"message":"No subtitles found","details":"No subtitles found, sorry"}"""
+        assertEquals(null, WyzieSubs.failureReason(400, noSubs))
+        assertEquals(null, WyzieSubs.failureReason(200, noSubs))
+        assertEquals(null, WyzieSubs.failureReason(null, noSubs))
+    }
+
+    @Test
+    fun failureReason_400And403Bodies_classified() {
+        assertEquals("request rejected", WyzieSubs.failureReason(400, ""))
+        assertEquals("request rejected", WyzieSubs.failureReason(400, """{"message":"No results"}"""))
+        assertEquals("key rejected", WyzieSubs.failureReason(403, """{"code":403,"message":"Invalid API key"}"""))
+        assertEquals("server error (500)", WyzieSubs.failureReason(500, "boom"))
+    }
+
+    @Test
+    fun parseSources_availableList_allFreeFallback_invalidKey() {
+        val scoped = """{"sources":["bravo","charlie","lima"],"available":["charlie","lima"],"allFree":false}"""
+        assertEquals(listOf("charlie", "lima"), WyzieSubs.parseSources(scoped))
+        val allFree = """{"sources":["charlie","lima"],"allFree":true}"""
+        assertEquals(listOf("charlie", "lima"), WyzieSubs.parseSources(allFree))
+        val badKey = """{"sources":["charlie","lima"],"key":{"valid":false,"reason":"not_found"}}"""
+        assertEquals(emptyList<String>(), WyzieSubs.parseSources(badKey))
+        assertEquals(emptyList<String>(), WyzieSubs.parseSources(null))
+        assertEquals(emptyList<String>(), WyzieSubs.parseSources("not json"))
     }
 
     @Test
