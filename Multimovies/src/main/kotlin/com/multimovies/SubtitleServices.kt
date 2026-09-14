@@ -120,16 +120,6 @@ object SubtilesProvider {
         "Gujarati" to "gu", "Nepali" to "ne", "Sinhala" to "si",
     )
 
-    /** Original-only codes: world languages reachable solely via the title's original language. */
-    private val FOREIGN_CODES = mapOf(
-        "Arabic" to "ar", "Spanish" to "es", "French" to "fr",
-        "German" to "de", "Italian" to "it", "Portuguese" to "pt",
-        "Russian" to "ru", "Chinese" to "zh", "Japanese" to "ja",
-        "Korean" to "ko", "Turkish" to "tr", "Thai" to "th",
-        "Indonesian" to "id", "Malaysian" to "ms", "Vietnamese" to "vi",
-        "Filipino" to "tl", "Dutch" to "nl", "Polish" to "pl",
-    )
-
     /** Canonical language names mapped to supported SubSense ISO-3 codes. */
     private val SENSE_ISO3 = mapOf(
         "English" to "eng", "Hindi" to "hin", "Tamil" to "tam", "Telugu" to "tel",
@@ -146,19 +136,21 @@ object SubtilesProvider {
 
     private val cache = ConcurrentHashMap<String, Pair<Long, List<SubtitleFile>>>()
 
-    /** Every language worth requesting when the video starts - Indian block, then the rest global. */
+    /** English + Indian block, plus the title's own original language (a 2-letter TMDB code) when present. */
     fun desiredLanguages(originalLang: String? = null): Set<String> {
         val wanted = CODES.keys.toCollection(LinkedHashSet())
-        originalLang?.let { SubtitleServices.canonicalName(it) }?.let { wanted.add(it) }
+        originalLang?.takeIf { it.length == 2 }?.lowercase()?.let { wanted.add(it) }
         return wanted
     }
 
-    /** Maps canonical names to ordered addon codes, dropping unsupported names. */
+    /** Canonical names -> ISO-1 codes; a 2-letter code (the title's original language) passes through as-is. */
     internal fun codesFromLangs(langs: Set<String>): Set<String> =
-        langs.mapNotNull { codeForLang(it) }.toCollection(LinkedHashSet())
+        langs.mapNotNull { lang ->
+            if (lang.length == 2) lang.lowercase() else codeForLang(lang)
+        }.toCollection(LinkedHashSet())
 
-    /** Code for one canonical name, requested block or original-only map. */
-    internal fun codeForLang(name: String): String? = CODES[name] ?: FOREIGN_CODES[name]
+    /** ISO-1 code for one canonical language name (English + Indian block only). */
+    internal fun codeForLang(name: String): String? = CODES[name]
 
     /** ISO-1 codes for Indian languages — always batch-pulled first so they land at the top of the menu. */
     private val INDIAN_LANG_CODES: Set<String> = linkedSetOf(
@@ -325,7 +317,7 @@ object SubtilesProvider {
         if (missing.isEmpty()) return 0
         val codes = codesFromLangs(missing)
         if (codes.isEmpty()) return 0
-        val originalCode = originalLang?.let { SubtitleServices.canonicalName(it) }?.let { codeForLang(it) }
+        val originalCode = originalLang?.takeIf { it.length == 2 }?.lowercase()
 
         val key = "$imdb|$season|$episode|${codes.sorted().joinToString(",")}"
         cache[key]?.let { (exp, subs) ->

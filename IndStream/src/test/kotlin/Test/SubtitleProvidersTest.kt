@@ -76,8 +76,9 @@ class SubtitleProvidersTest {
     @Test
     fun originalLanguage_ridesAlongWithCode() {
         val withOrig = SubtilesProvider.desiredLanguages("ko")
-        assertTrue(withOrig.contains("Korean"))
-        assertEquals("ko", SubtilesProvider.codeForLang("Korean"))
+        assertTrue(withOrig.contains("ko"))
+        assertTrue(withOrig.contains("English"))
+        assertTrue(withOrig.contains("Hindi"))
         assertTrue(SubtilesProvider.codesFromLangs(withOrig).contains("ko"))
     }
 
@@ -93,7 +94,7 @@ class SubtitleProvidersTest {
     @Test
     fun groupRequests_hindiFirst_thenEnglishOriginal_thenIndianChunked() {
         val all = SubtilesProvider.codesFromLangs(
-            linkedSetOf("English", "Hindi", "Tamil", "Telugu", "Japanese"),
+            linkedSetOf("English", "Hindi", "Tamil", "Telugu", "ja"),
         )
         val groups = SubtilesProvider.groupRequests(all, "ja")
         assertEquals(linkedSetOf("hi"), groups[0])

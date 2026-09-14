@@ -82,7 +82,7 @@ class SubtitleProvidersMmTest {
     @Test
     fun desiredLanguages_includesOriginalLang() {
         val withOrig = SubtilesProvider.desiredLanguages("ja")
-        assertTrue(withOrig.contains("Japanese"))
+        assertTrue(withOrig.contains("ja"))
         assertTrue(withOrig.contains("Hindi"))
         assertTrue(withOrig.contains("English"))
     }
@@ -99,8 +99,9 @@ class SubtitleProvidersMmTest {
     @Test
     fun originalLanguage_ridesAlongWithCode() {
         val withOrig = SubtilesProvider.desiredLanguages("ja")
-        assertTrue(withOrig.contains("Japanese"))
-        assertEquals("ja", SubtilesProvider.codeForLang("Japanese"))
+        assertTrue(withOrig.contains("ja"))
+        assertTrue(withOrig.contains("Hindi"))
+        assertTrue(withOrig.contains("English"))
         assertTrue(SubtilesProvider.codesFromLangs(withOrig).contains("ja"))
     }
 

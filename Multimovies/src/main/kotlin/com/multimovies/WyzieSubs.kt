@@ -55,6 +55,13 @@ object WyzieSubs {
 
     private fun enc(s: String): String = URLEncoder.encode(s, "UTF-8")
 
+    /** Wyzie serves subtitle files from a key-gated host; the search JSON url is unsigned, so the
+     * player's direct download of it fails ("no reply"). Re-sign each file url with the key. */
+    private fun signFileUrl(url: String, key: String): String {
+        if (key.isBlank() || !url.startsWith("http")) return url
+        return if (url.contains("?")) "$url&key=${enc(key)}" else "$url?key=${enc(key)}"
+    }
+
     /** Tolerant parse: array root, {"subtitles":[...]}, or a single object. */
     internal fun parse(text: String, wantCodes: Set<String>): List<SubtilesProvider.SubTrack> {
         val arr = runCatching {
@@ -177,7 +184,7 @@ object WyzieSubs {
                 return 0
             }
         }
-        tracks.forEach { onTrack(SubtitleFile(it.menu, it.url)) }
+        tracks.forEach { onTrack(SubtitleFile(it.menu, signFileUrl(it.url, masked))) }
         Log.d(TAG, "${tracks.size} wyzie subs for $imdbId")
         return tracks.size
     }

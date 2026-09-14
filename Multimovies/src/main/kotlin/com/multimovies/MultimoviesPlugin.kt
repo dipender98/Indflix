@@ -1082,25 +1082,26 @@ class MultimoviesProvider : MainAPI() {
                     }
                 }
                 val base = SubtilesProvider.desiredLanguages(null)
+                val baseCodes = SubtilesProvider.codesFromLangs(base)
                 // Original-language lookup overlaps subtitle fetching instead of delaying it.
                 val origLang = async {
                     detail?.originalLanguage ?: meta.tmdbId?.toIntOrNull()?.let { id ->
                         withTimeoutOrNull(4000L) { TmdbService.fetchMeta(id, type) }?.originalLanguage
                     }
                 }
-                // One extra single-language request when the original isn't in the base set.
+                // One extra single-language request for the title's own original language (a TMDB 2-letter code),
+                // only when it isn't already covered by the English/Indian base set.
                 suspend fun topUpOriginal(wyzieKey: String?): Int {
-                    val name = origLang.await()?.let { SubtitleServices.canonicalName(it) }
-                        ?.takeIf { it !in base } ?: return 0
-                    if (SubtilesProvider.codeForLang(name) == null) return 0
+                    val code = origLang.await()?.takeIf { it.length == 2 }?.lowercase() ?: return 0
+                    if (code in baseCodes) return 0
                     return if (wyzieKey != null) {
                         WyzieSubs.fetchAndDeliver(
                             imdb, meta.tmdbId, meta.season, meta.episode,
-                            setOf(name), wyzieKey, quiet = true,
+                            setOf(code), wyzieKey, quiet = true,
                         ) { runCatching { subtitleCallback(it) } }
                     } else {
                         SubtilesProvider.fetchAndDeliver(
-                            imdb, meta.season, meta.episode, setOf(name), name,
+                            imdb, meta.season, meta.episode, setOf(code), code,
                         ) { runCatching { subtitleCallback(it) } }
                     }
                 }
