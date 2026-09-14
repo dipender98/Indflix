@@ -14,7 +14,6 @@ import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
-import android.view.Window
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -106,9 +105,9 @@ object Settings {
 
     /** Dark (not pitch-black) settings dialog: key field, redeem link, save/clear. */
     fun openSettings(context: Context) {
-        val bgColor = Color.parseColor("#161618")
-        val cardColor = Color.parseColor("#1C1C1F")
-        val fieldColor = Color.parseColor("#242428")
+        val bgColor = Color.parseColor("#0F0F11")
+        val cardColor = Color.parseColor("#161619")
+        val fieldColor = Color.parseColor("#1E1E22")
         val textColor = Color.parseColor("#EDEDF2")
         val hintColor = Color.parseColor("#A3A3AD")
         val accentColor = Color.parseColor("#2F7CF6")
@@ -212,10 +211,9 @@ object Settings {
             overScrollMode = View.OVER_SCROLL_NEVER
             addView(body)
         }
-        // Plain Dialog (not AlertDialog): the alert container theme draws edge shading
-        // around the content, which we don't want - flat solid background instead.
-        val dialog = Dialog(context).apply {
-            requestWindowFeature(Window.FEATURE_NO_TITLE)
+        // Flat dialog theme strips system floating-window border/shadow so
+        // the background is a single solid colour with no edge gradient.
+        val dialog = Dialog(context, R.style.Multimovies_FlatDialog).apply {
             setContentView(scroll)
         }
         clearBtn.setOnClickListener {
@@ -232,11 +230,13 @@ object Settings {
             }
         }
         dialog.show()
-        dialog.window?.setBackgroundDrawable(ColorDrawable(bgColor))
-        dialog.window?.let { w ->
-            val lp = w.attributes
-            lp.width = (context.resources.displayMetrics.widthPixels * 0.88).toInt()
-            w.attributes = lp
+        dialog.window?.apply {
+            setBackgroundDrawable(ColorDrawable(bgColor))
+            setLayout(
+                (context.resources.displayMetrics.widthPixels * 0.88).toInt(),
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            )
+            setGravity(Gravity.CENTER)
         }
     }
 }
