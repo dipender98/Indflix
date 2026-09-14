@@ -30,9 +30,11 @@ object WyzieSubs {
         val id = imdbId?.takeIf { it.startsWith("tt") } ?: return null
         val out = StringBuilder("$BASE/search?id=${enc(id)}")
         if (season > 0 && episode > 0) out.append("&season=$season&episode=$episode")
-        val langs = codes.filter { it.isNotBlank() }.distinct().joinToString(",")
-        if (langs.isNotBlank()) out.append("&language=${enc(langs)}")
-        out.append("&key=${enc(key)}")
+        // Raw commas (docs show language=en,es) - each code encoded on its own.
+        val langs = codes.filter { it.isNotBlank() }.distinct().joinToString(",") { enc(it) }
+        if (langs.isNotBlank()) out.append("&language=$langs")
+        // Query every source like the proven CSX integration - the default is too narrow.
+        out.append("&source=all&key=${enc(key)}")
         return out.toString()
     }
 
@@ -71,20 +73,23 @@ object WyzieSubs {
     }
 
     /** Null when the body looks like usable subtitle data; else a short failure reason. */
-    internal fun failureReason(text: String?): String? {
+    internal fun failureReason(code: Int?, text: String?): String? {
+        if (code == 401) return "key rejected"
+        if (code == 429 || code == 402) return "limit reached"
+        if (code != null && code !in 200..299) return "server error ($code)"
         if (text.isNullOrBlank()) return null
         val t = text.trim()
         if (t.startsWith("[")) return null
         if (!t.startsWith("{")) return "server error"
         val o = runCatching { org.json.JSONObject(t) }.getOrNull() ?: return "server error"
         if (o.has("subtitles") || o.has("url")) return null
-        val msg = (o.optString("message") + " " + o.optString("error") + " " + o.opt("code")).lowercase()
+        val msg = (o.optString("message") + " " + o.optString("error")).lowercase()
         return when {
-            msg.contains("401") || msg.contains("unauthor") || msg.contains("invalid") ||
+            msg.contains("unauthor") || msg.contains("invalid") ||
                 msg.contains("api key") -> "key rejected"
-            msg.contains("429") || msg.contains("402") || msg.contains("rate") ||
-                msg.contains("limit") || msg.contains("quota") || msg.contains("top-up") ||
-                msg.contains("topup") -> "limit reached"
+            msg.contains("rate") || msg.contains("limit") ||
+                msg.contains("quota") || msg.contains("top-up") ||
+                msg.contains("top up") || msg.contains("topup") -> "limit reached"
             else -> "server error"
         }
     }
@@ -104,14 +109,14 @@ object WyzieSubs {
         val deadline = System.currentTimeMillis() + FETCH_BUDGET_MS
         val url = buildUrl(imdbId, season, episode, codes, apiKey) ?: return 0
         Log.d(TAG, "GET ${url.replace(apiKey.trim(), "***")}")
-        val text = get(url, deadline)
+        val (code, text) = get(url, deadline)
         if (text.isNullOrBlank()) {
             Log.w(TAG, "no reply - caller falls back to built-in subtitles")
             Settings.notifyWyzieFailed("no reply")
             return 0
         }
-        failureReason(text)?.let { reason ->
-            Log.w(TAG, "wyzie failed ($reason) - caller falls back to built-in subtitles")
+        failureReason(code, text)?.let { reason ->
+            Log.w(TAG, "wyzie HTTP $code failed ($reason) - caller falls back to built-in subtitles")
             Settings.notifyWyzieFailed(reason)
             return 0
         }
@@ -121,8 +126,8 @@ object WyzieSubs {
             // server-side - one unfiltered retry, the client-side filter still applies.
             Log.d(TAG, "empty with filter - one unfiltered retry")
             buildUrl(imdbId, season, episode, emptySet(), apiKey)?.let { retryUrl ->
-                val retryText = get(retryUrl, deadline)
-                if (!retryText.isNullOrBlank() && failureReason(retryText) == null) {
+                val (retryCode, retryText) = get(retryUrl, deadline)
+                if (!retryText.isNullOrBlank() && failureReason(retryCode, retryText) == null) {
                     tracks = runCatching { parse(retryText, codes) }.getOrDefault(emptyList())
                 }
             }
@@ -132,14 +137,27 @@ object WyzieSubs {
         return tracks.size
     }
 
-    /** GET bounded by the shared deadline; null on any failure/timeout. */
-    private suspend fun get(url: String, deadline: Long): String? {
+    /** Live key check used by the Verify link and the save check. Never throws. */
+    suspend fun testKey(apiKey: String): Pair<Boolean, String> {
+        val key = apiKey.trim()
+        if (key.isEmpty()) return false to "Enter a key first"
+        val url = "$BASE/search?id=tt1375666&source=all&key=${enc(key)}"
+        val (code, text) = get(url, System.currentTimeMillis() + FETCH_BUDGET_MS)
+        failureReason(code, text)?.let { return false to "Key failed ($it)" }
+        val n = runCatching { parse(text.orEmpty(), setOf("en")) }.getOrDefault(emptyList()).size
+        return if (n > 0) true to "Key works - $n English subs found"
+        else false to "Key accepted but no subs returned"
+    }
+
+    /** GET bounded by the shared deadline; (status code, body), nulls on failure/timeout. */
+    private suspend fun get(url: String, deadline: Long): Pair<Int?, String?> {
         val budget = deadline - System.currentTimeMillis()
-        if (budget <= 0) return null
+        if (budget <= 0) return null to null
         return withTimeoutOrNull(budget) {
             runCatching {
-                app.get(url, timeout = (budget / 1000L).coerceAtLeast(1L)).text
+                val r = app.get(url, timeout = (budget / 1000L).coerceAtLeast(1L))
+                r.code to r.text
             }.getOrNull()
-        }
+        } ?: (null to null)
     }
 }

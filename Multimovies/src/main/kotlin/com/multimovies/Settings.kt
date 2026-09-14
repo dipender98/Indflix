@@ -1,11 +1,10 @@
 package com.multimovies
 
-import android.app.Dialog
+import android.app.AlertDialog
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
-import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.text.InputType
@@ -106,8 +105,8 @@ object Settings {
     /** Dark (not pitch-black) settings dialog: key field, redeem link, save/clear. */
     fun openSettings(context: Context) {
         val bgColor = Color.parseColor("#0F0F11")
-        val cardColor = Color.parseColor("#161619")
-        val fieldColor = Color.parseColor("#1E1E22")
+        val cardColor = Color.parseColor("#141416")
+        val fieldColor = Color.parseColor("#19191C")
         val textColor = Color.parseColor("#EDEDF2")
         val hintColor = Color.parseColor("#A3A3AD")
         val accentColor = Color.parseColor("#2F7CF6")
@@ -140,7 +139,28 @@ object Settings {
         val spacer1 = TextView(context).apply { text = "" }
         body.addView(spacer1)
 
-        addLabel("Wyzie Subs API Key", 14f, textColor, bold = true)
+        val keyHeader = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val keyLabel = TextView(context).apply {
+            text = "Wyzie Subs API Key"
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            setTextColor(textColor)
+            setTypeface(null, Typeface.BOLD)
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        val verifyLink = TextView(context).apply {
+            text = "Verify"
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            setTextColor(linkColor)
+            setPadding(dp(8), dp(4), dp(8), dp(4))
+            isClickable = true
+            isFocusable = true
+        }
+        keyHeader.addView(keyLabel)
+        keyHeader.addView(verifyLink)
+        body.addView(keyHeader)
         val input = EditText(context).apply {
             setText(apiKey().orEmpty())
             setHint("wyzie-...")
@@ -211,32 +231,57 @@ object Settings {
             overScrollMode = View.OVER_SCROLL_NEVER
             addView(body)
         }
-        // Flat dialog theme strips system floating-window border/shadow so
-        // the background is a single solid colour with no edge gradient.
-        val dialog = Dialog(context, R.style.Multimovies_FlatDialog).apply {
-            setContentView(scroll)
+        // CSX pattern: AlertDialog with the Material dialog theme and a rounded
+        // window background - no floating-theme edge gradient.
+        val dialog = AlertDialog.Builder(context, android.R.style.Theme_Material_Dialog)
+            .setView(scroll)
+            .create()
+        fun verifyNow(key: String) {
+            if (!isValidKey(key)) {
+                input.error = "Key looks too short"
+                return
+            }
+            status.text = "Verifying key..."
+            Thread {
+                val msg = runCatching {
+                    kotlinx.coroutines.runBlocking { WyzieSubs.testKey(key) }.second
+                }.getOrDefault("Verify failed - no network?")
+                input.post { status.text = msg }
+            }.start()
         }
+        verifyLink.setOnClickListener { verifyNow(input.text.toString()) }
         clearBtn.setOnClickListener {
             clear(context)
             Toast.makeText(context, "Cleared - using built-in subtitles", Toast.LENGTH_SHORT).show()
             dialog.dismiss()
         }
         saveBtn.setOnClickListener {
-            if (save(context, input.text.toString())) {
+            val typed = input.text.toString()
+            if (save(context, typed)) {
                 Toast.makeText(context, "Saved", Toast.LENGTH_SHORT).show()
                 dialog.dismiss()
+                // Verify on save: error toast when the key fails.
+                Thread {
+                    val msg = runCatching {
+                        kotlinx.coroutines.runBlocking { WyzieSubs.testKey(typed) }.second
+                    }.getOrDefault("Verify failed - no network?")
+                    if (!msg.startsWith("Key works")) {
+                        android.os.Handler(android.os.Looper.getMainLooper()).post {
+                            Toast.makeText(context, "Wyzie: $msg", Toast.LENGTH_LONG).show()
+                        }
+                    }
+                }.start()
             } else {
                 input.error = "Key looks too short"
             }
         }
+        dialog.window?.setBackgroundDrawable(rounded(bgColor, 20))
         dialog.show()
         dialog.window?.apply {
-            setBackgroundDrawable(ColorDrawable(bgColor))
             setLayout(
                 (context.resources.displayMetrics.widthPixels * 0.88).toInt(),
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             )
-            setGravity(Gravity.CENTER)
         }
     }
 }

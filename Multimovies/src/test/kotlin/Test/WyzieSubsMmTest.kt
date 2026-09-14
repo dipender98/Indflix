@@ -28,7 +28,8 @@ class WyzieSubsMmTest {
     fun buildUrl_movie_imdbAndLangsAndKey() {
         val url = WyzieSubs.buildUrl("tt1375666", null, null, null, linkedSetOf("hi", "en"), "wyzie-abc123")
         assertTrue(url!!.startsWith("https://sub.wyzie.io/search?id=tt1375666"), url)
-        assertTrue(url.contains("language=hi%2Cen"), url)
+        assertTrue(url.contains("language=hi,en"), url)
+        assertTrue(url.contains("source=all"), url)
         assertTrue(url.contains("key=wyzie-abc123"), url)
         assertTrue(!url.contains("season="), url)
     }
@@ -101,28 +102,38 @@ class WyzieSubsMmTest {
     }
 
     @Test
+    fun failureReason_statusCodes_win() {
+        assertEquals("key rejected", WyzieSubs.failureReason(401, ""))
+        assertEquals("key rejected", WyzieSubs.failureReason(401, null))
+        assertEquals("limit reached", WyzieSubs.failureReason(429, null))
+        assertEquals("limit reached", WyzieSubs.failureReason(402, ""))
+        assertEquals("server error (500)", WyzieSubs.failureReason(500, "boom"))
+        assertEquals(null, WyzieSubs.failureReason(200, wyzieJson))
+        assertEquals(null, WyzieSubs.failureReason(null, null))
+    }
+
+    @Test
     fun failureReason_live401Body_keyRejected() {
         val err = """{"code":401,"message":"API key required","details":"Include a valid API key"}"""
-        assertEquals("key rejected", WyzieSubs.failureReason(err))
+        assertEquals("key rejected", WyzieSubs.failureReason(null, err))
     }
 
     @Test
     fun failureReason_rateAndPaymentBodies_limitReached() {
-        assertEquals("limit reached", WyzieSubs.failureReason("""{"code":429,"message":"Rate limit exceeded"}"""))
-        assertEquals("limit reached", WyzieSubs.failureReason("""{"code":402,"message":"Top up required"}"""))
+        assertEquals("limit reached", WyzieSubs.failureReason(null, """{"code":429,"message":"Rate limit exceeded"}"""))
+        assertEquals("limit reached", WyzieSubs.failureReason(null, """{"code":402,"message":"Top up required"}"""))
     }
 
     @Test
     fun failureReason_healthyBodies_null() {
-        assertEquals(null, WyzieSubs.failureReason(wyzieJson))
-        assertEquals(null, WyzieSubs.failureReason("""{"subtitles":[]}"""))
-        assertEquals(null, WyzieSubs.failureReason(null))
-        assertEquals(null, WyzieSubs.failureReason("  "))
+        assertEquals(null, WyzieSubs.failureReason(null, wyzieJson))
+        assertEquals(null, WyzieSubs.failureReason(null, """{"subtitles":[]}"""))
+        assertEquals(null, WyzieSubs.failureReason(null, "  "))
     }
 
     @Test
     fun failureReason_htmlGarbage_serverError() {
-        assertEquals("server error", WyzieSubs.failureReason("<html>denied</html>"))
+        assertEquals("server error", WyzieSubs.failureReason(null, "<html>denied</html>"))
     }
 
     @Test
