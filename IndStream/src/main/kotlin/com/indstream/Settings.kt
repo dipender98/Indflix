@@ -12,6 +12,7 @@ import android.text.InputType
 import android.text.method.LinkMovementMethod
 import android.util.TypedValue
 import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup
 import android.view.Window
 import android.widget.Button
@@ -105,9 +106,9 @@ object Settings {
 
     /** Dark (not pitch-black) settings dialog: key field, redeem link, save/clear. */
     fun openSettings(context: Context) {
-        val bgColor = Color.parseColor("#1D1D20")
-        val cardColor = Color.parseColor("#25252A")
-        val fieldColor = Color.parseColor("#303036")
+        val bgColor = Color.parseColor("#161618")
+        val cardColor = Color.parseColor("#1C1C1F")
+        val fieldColor = Color.parseColor("#242428")
         val textColor = Color.parseColor("#EDEDF2")
         val hintColor = Color.parseColor("#A3A3AD")
         val accentColor = Color.parseColor("#2F7CF6")
@@ -205,6 +206,10 @@ object Settings {
         val scroll = ScrollView(context).apply {
             setBackgroundColor(bgColor)
             setPadding(dp(4), dp(4), dp(4), dp(4))
+            // No fading-edge gradient or overscroll glow near the edges - flat only.
+            isVerticalFadingEdgeEnabled = false
+            isHorizontalFadingEdgeEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
             addView(body)
         }
         // Plain Dialog (not AlertDialog): the alert container theme draws edge shading
