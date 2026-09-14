@@ -1,4 +1,4 @@
-package com.multimovies
+package com.indstream
 
 import android.app.Dialog
 import android.content.Context
@@ -21,13 +21,13 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 
-/** FILE: WyzieSettings.kt - optional user Wyzie Subs API key store + settings dialog. */
-object WyzieSettings {
+/** FILE: Settings.kt - plugin settings store + settings dialog (Wyzie Subs API key today). */
+object Settings {
 
     /** Where users redeem a free key (shown under the field in small font). */
     const val KEY_LINK = "https://store.wyzie.io/redeem"
 
-    private const val PREFS = "multimovies_settings"
+    private const val PREFS = "indstream_settings"
     private const val KEY = "wyzie_api_key"
 
     @Volatile

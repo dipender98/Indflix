@@ -33,10 +33,10 @@ import org.jsoup.nodes.Element
 @CloudstreamPlugin
 class Multimovies : Plugin() {
     override fun load(context: Context) {
-        WyzieSettings.init(context)
+        Settings.init(context)
         // All providers/extractors added here are registered in the app.
         registerMainAPI(MultimoviesProvider())
-        openSettings = { ctx -> WyzieSettings.openSettings(ctx) }
+        openSettings = { ctx -> Settings.openSettings(ctx) }
     }
 }
 
@@ -1066,7 +1066,7 @@ class MultimoviesProvider : MainAPI() {
                 }
             }
             // User key set: Wyzie replaces the built-in stack for this play (0 = fall through).
-            WyzieSettings.apiKey()?.let { key ->
+            Settings.apiKey()?.let { key ->
                 val n = WyzieSubs.fetchAndDeliver(
                     imdb, meta.tmdbId, meta.season, meta.episode,
                     SubtilesProvider.desiredLanguages(), key,

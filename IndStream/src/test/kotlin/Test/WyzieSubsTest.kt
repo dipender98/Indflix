@@ -1,6 +1,6 @@
 package Test
 
-import com.indstream.WyzieSettings
+import com.indstream.Settings
 import com.indstream.WyzieSubs
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -91,16 +91,16 @@ class WyzieSubsTest {
 
     @Test
     fun keyValidation_trimsAndLengthGates() {
-        assertTrue(WyzieSettings.isValidKey("wyzie-abc123"))
-        assertTrue(WyzieSettings.isValidKey("  wyzie-abc123  "))
-        assertTrue(!WyzieSettings.isValidKey("short"))
-        assertTrue(!WyzieSettings.isValidKey(null))
-        assertTrue(!WyzieSettings.isValidKey("   "))
-        assertEquals("wyzie-abc123", WyzieSettings.normalizeKey("  wyzie-abc123 "))
+        assertTrue(Settings.isValidKey("wyzie-abc123"))
+        assertTrue(Settings.isValidKey("  wyzie-abc123  "))
+        assertTrue(!Settings.isValidKey("short"))
+        assertTrue(!Settings.isValidKey(null))
+        assertTrue(!Settings.isValidKey("   "))
+        assertEquals("wyzie-abc123", Settings.normalizeKey("  wyzie-abc123 "))
     }
 
     @Test
     fun apiKey_nullWithoutInit_neverThrowsOnJvm() {
-        assertNull(WyzieSettings.apiKey())
+        assertNull(Settings.apiKey())
     }
 }

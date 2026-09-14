@@ -27,9 +27,9 @@ import kotlinx.coroutines.withTimeoutOrNull
 @CloudstreamPlugin
 class IndStream : Plugin() {
     override fun load(context: Context) {
-        WyzieSettings.init(context)
+        Settings.init(context)
         registerMainAPI(IndStreamProvider())
-        openSettings = { ctx -> WyzieSettings.openSettings(ctx) }
+        openSettings = { ctx -> Settings.openSettings(ctx) }
         // MovieBox bearer pre-warm: the x-user token lives for hours, so one background GET now removes a serial round-trip.
         CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
             runCatching { StreamEngine.prewarmMovieBoxToken() }
@@ -481,7 +481,7 @@ class IndStreamProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
     ) {
         val wanted = SubtilesProvider.desiredLanguages(originalLang)
-        WyzieSettings.apiKey()?.let { key ->
+        Settings.apiKey()?.let { key ->
             val n = WyzieSubs.fetchAndDeliver(imdbId, season, episode, wanted, key) {
                 runCatching { subtitleCallback(it) }
             }
