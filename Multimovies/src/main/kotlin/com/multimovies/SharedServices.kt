@@ -176,6 +176,24 @@ object TmdbService {
     private const val IMG_BASE = "https://image.tmdb.org/t/p/w500"
     private const val IMG_BACKDROP = "https://image.tmdb.org/t/p/w1280"
 
+    /** Personal key from Settings when saved, else the built-in key. */
+    private fun tmdbKey(): String = Settings.tmdbApiKey() ?: TMDB_API_KEY
+
+    /** Lightweight key check for Settings Verify: /configuration answers 200 for a valid v3 key. Never throws. */
+    suspend fun testTmdbKey(raw: String): String {
+        val key = raw.trim()
+        if (key.isEmpty()) return "Enter a key first"
+        if (key.startsWith("eyJ")) return "That's the Read Access Token - paste the API Key (v3)"
+        return runCatching {
+            val r = app.get("$TMDB_API/configuration?api_key=$key", timeout = 8)
+            when (r.code) {
+                in 200..299 -> "Key works - TMDB connected"
+                401 -> "Key rejected (401) - check the API Key (v3)"
+                else -> "TMDB error (${r.code})"
+            }
+        }.getOrDefault("Verify failed - no network?")
+    }
+
     /** Cache of fetched detail metadata, keyed "tmdbId|type". */
     private val detailCache = ConcurrentHashMap<String, TmdbDetail>()
     /** Cache of imdb-id -> (tmdbId, type) lookups. */
@@ -197,6 +215,7 @@ object TmdbService {
         val tmdbId: Int? = null,
         val imdbId: String? = null,
         val name: String? = null,
+        val originalLanguage: String? = null,
         val poster: String? = null,
         val backdrop: String? = null,
         val year: String? = null,
@@ -247,7 +266,7 @@ object TmdbService {
         val cacheKey = "$tmdbId|$type"
         detailCache[cacheKey]?.let { return it }
         val path = if (type == "movie") "movie" else "tv"
-        val url = "$TMDB_API/$path/$tmdbId?api_key=$TMDB_API_KEY&language=en-US&append_to_response=external_ids,credits"
+        val url = "$TMDB_API/$path/$tmdbId?api_key=${tmdbKey()}&language=en-US&append_to_response=external_ids,credits"
         val detail = runCatching { parseTmdbDetail(app.get(url, timeout = 6).text, type) }.getOrNull()
         if (detail != null) detailCache[cacheKey] = detail
         return detail
@@ -257,7 +276,7 @@ object TmdbService {
     suspend fun findByImdb(imdbId: String): Pair<Int, String>? {
         if (!imdbId.startsWith("tt")) return null
         imdbFindCache[imdbId]?.let { return it }
-        val url = "$TMDB_API/find/$imdbId?api_key=$TMDB_API_KEY&external_source=imdb_id&language=en-US"
+        val url = "$TMDB_API/find/$imdbId?api_key=${tmdbKey()}&external_source=imdb_id&language=en-US"
         val result = runCatching {
             val root = JSONObject(app.get(url, timeout = 5).text)
             val movie = root.optJSONArray("movie_results")?.optJSONObject(0)
@@ -308,7 +327,7 @@ object TmdbService {
         val encoded = URLEncoder.encode(query.trim(), "UTF-8")
         val json = runCatching {
             app.get(
-                "$TMDB_API/search/multi?api_key=$TMDB_API_KEY&query=$encoded&language=en-US&include_adult=false&page=1",
+                "$TMDB_API/search/multi?api_key=${tmdbKey()}&query=$encoded&language=en-US&include_adult=false&page=1",
                 timeout = 5,
             ).text
         }.getOrElse { t ->
@@ -424,6 +443,7 @@ object TmdbService {
                 tmdbId = m.optInt("id", -1).takeIf { it > 0 },
                 imdbId = m.optJSONObject("external_ids")?.let { str(it, "imdb_id") },
                 name = name,
+                originalLanguage = str(m, "original_language"),
                 poster = str(m, "poster_path")?.let { "$IMG_BASE$it" },
                 backdrop = str(m, "backdrop_path")?.let { "$IMG_BACKDROP$it" },
                 year = (str(m, "release_date") ?: str(m, "first_air_date"))?.take(4),
@@ -440,7 +460,7 @@ object TmdbService {
     }
 
     private suspend fun fetchSeason(tmdbId: Int, season: Int): List<Triple<Int, Int, TmdbEpisode>> {
-        val url = "$TMDB_API/tv/$tmdbId/season/$season?api_key=$TMDB_API_KEY&language=en-US"
+        val url = "$TMDB_API/tv/$tmdbId/season/$season?api_key=${tmdbKey()}&language=en-US"
         return runCatching {
             val root = JSONObject(app.get(url, timeout = 5).text)
             root.optJSONArray("episodes")?.let { arr ->
@@ -594,7 +614,7 @@ internal fun titleDistance(itemTitle: String, target: String): Int {
     }
 }
 
-/** Query words that carry meaning (>=2 chars); digit tokens such as years are kept so "iron man 2010" can match a. release year too. */
+/** Query words that carry meaning (>=2 chars); digit tokens such as years are kept so a dated title still matches its release year. */
 internal fun significantQueryTokens(query: String): List<String> =
     normalizeTitle(query).split(' ').filter { it.length >= 2 }.distinct()
 

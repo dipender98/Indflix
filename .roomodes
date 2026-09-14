@@ -3,3 +3,4 @@
 ## Code style
 - Comments: 1-2 lines max. No paragraph explanations or long doc blocks.
 - Explain what/why briefly; let the code show the how.
+- Comments stay generic: no developer/plugin names, no website names, no movie/show titles as examples. Say what the code does.

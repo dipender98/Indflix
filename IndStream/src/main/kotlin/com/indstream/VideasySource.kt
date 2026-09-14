@@ -132,7 +132,7 @@ object VideasySource {
     internal fun keystreamForTest(state: State, counter: Int): Int = keystreamU32(state, counter)
     internal fun decryptForTest(b64: String, seed: String, mediaId: Int): String = decrypt(b64, seed, mediaId)
 
-    /** Player routes (verified Sept 2026): hdmovie is the Hindi upstream; the rest add mirrors. Boolean = movies-only. */
+    /** Player routes: hdmovie is the Hindi upstream; the rest add mirrors. Boolean = movies-only. */
     internal val ROUTES: Map<String, Boolean> = linkedMapOf(
         "hdmovie" to false, "cdn" to false, "lamovie" to false, "meine" to true,
     )

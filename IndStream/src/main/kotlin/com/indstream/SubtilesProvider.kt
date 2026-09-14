@@ -1,4 +1,4 @@
-﻿package com.indstream
+package com.indstream
 
 import android.util.Log
 import com.lagradost.cloudstream3.SubtitleFile
@@ -31,18 +31,22 @@ object SubtilesProvider {
     /** How many codes one addon request carries; the addon slows down on big multi-language requests, so the rest is fetched in parallel chunks. */
     internal const val GROUP_SIZE = 6
 
-    /** Every subtitle language we request - the full available menu, Indian block first (map order = desired order + chunking). */
+    /** Always requested: English + the Indian block (map order = desired order + chunking). */
     private val CODES = mapOf(
         "Hindi" to "hi", "English" to "en", "Tamil" to "ta", "Telugu" to "te",
         "Malayalam" to "ml", "Bengali" to "bn", "Urdu" to "ur",
         "Marathi" to "mr", "Kannada" to "kn", "Punjabi" to "pa",
         "Gujarati" to "gu", "Nepali" to "ne", "Sinhala" to "si",
+    )
+
+    /** Original-only codes: world languages reachable solely via the title's original language. */
+    private val FOREIGN_CODES = mapOf(
         "Arabic" to "ar", "Spanish" to "es", "French" to "fr",
         "German" to "de", "Italian" to "it", "Portuguese" to "pt",
         "Russian" to "ru", "Chinese" to "zh", "Japanese" to "ja",
         "Korean" to "ko", "Turkish" to "tr", "Thai" to "th",
         "Indonesian" to "id", "Malaysian" to "ms", "Vietnamese" to "vi",
-        "Filipino" to "fil", "Dutch" to "nl", "Polish" to "pl",
+        "Filipino" to "tl", "Dutch" to "nl", "Polish" to "pl",
     )
 
     /** Canonical language -> SubSense ISO-3 codes (probe: the response `lang`/id carry ISO-3; the same request codes are. accepted). Only. */
@@ -72,9 +76,12 @@ object SubtilesProvider {
     fun missingLanguages(covered: Set<String>, desired: Set<String>): Set<String> =
         desired - covered
 
-    /** Canonical names -> the addon's ISO-1 codes, requested order, unmapped names dropped. Pure; the empty-input fallback. lives in. */
+    /** Canonical names -> ISO-1 codes, requested order, unmapped names dropped. Pure. */
     internal fun codesFromLangs(langs: Set<String>): Set<String> =
-        langs.mapNotNull { CODES[it] }.toCollection(LinkedHashSet())
+        langs.mapNotNull { codeForLang(it) }.toCollection(LinkedHashSet())
+
+    /** Code for one canonical name, requested block or original-only map. */
+    internal fun codeForLang(name: String): String? = CODES[name] ?: FOREIGN_CODES[name]
 
     /** ISO-1 codes for Indian languages — always batch-pulled first so they land at the top of the menu. */
     private val INDIAN_LANG_CODES: Set<String> = linkedSetOf(
@@ -166,7 +173,7 @@ object SubtilesProvider {
         return out
     }
 
-    /** Parse the SubSense response keeping per language. REAL, Inception + GOT s01e01): {"subtitles": - …", "source". "opensubtitles", "fileName". */
+    /** Parse the SubSense response keeping per language. Shape: {"subtitles":[{...}]}. */
     internal fun parseSubSense(text: String): List<SubTrack> {
         val arr = org.json.JSONObject(text).optJSONArray("subtitles") ?: return emptyList()
         val perLang = HashMap<String, Int>()
@@ -239,7 +246,7 @@ object SubtilesProvider {
         if (missing.isEmpty()) return 0
         val codes = codesFromLangs(missing)
         if (codes.isEmpty()) return 0
-        val originalCode = originalLang?.let { LinkNaming.languageTag(it) }?.let { CODES[it] }
+        val originalCode = originalLang?.let { LinkNaming.languageTag(it) }?.let { codeForLang(it) }
 
         val key = "$imdb|$season|$episode|${codes.sorted().joinToString(",")}"
         cache[key]?.let { (exp, subs) ->

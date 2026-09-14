@@ -137,6 +137,11 @@ class WyzieSubsMmTest {
     }
 
     @Test
+    fun failureReason_languageError_requestRejected() {
+        assertEquals("request rejected", WyzieSubs.failureReason(null, """{"message":"Invalid language parameter"}"""))
+    }
+
+    @Test
     fun keyValidation_trimsAndLengthGates() {
         assertTrue(Settings.isValidKey("wyzie-abc123"))
         assertTrue(Settings.isValidKey("  wyzie-abc123  "))
@@ -149,5 +154,24 @@ class WyzieSubsMmTest {
     @Test
     fun apiKey_nullWithoutInit_neverThrowsOnJvm() {
         assertNull(Settings.apiKey())
+    }
+
+    @Test
+    fun tmdbKeyValidation_shortV3Ok_tokenRejected() {
+        assertTrue(Settings.isValidTmdbKey("0123456789abcdef0123456789abcdef"))
+        assertTrue(Settings.isValidTmdbKey("  0123456789abcdef0123456789abcdef  "))
+        assertTrue(!Settings.isValidTmdbKey("eyJhbGciOiJIUzI1NiJ9.payload.sig"))
+        assertTrue(!Settings.isValidTmdbKey("short"))
+        assertTrue(!Settings.isValidTmdbKey(null))
+        assertTrue(!Settings.isValidTmdbKey("   "))
+        assertNull(Settings.tmdbApiKey())
+    }
+
+    @Test
+    fun tmdbKeyProblem_namesExactIssue() {
+        assertNull(Settings.tmdbKeyProblem("0123456789abcdef0123456789abcdef"))
+        assertNull(Settings.tmdbKeyProblem("   "))
+        assertTrue(Settings.tmdbKeyProblem("eyJhbGciOiJIUzI1NiJ9.x")!!.contains("Read Access Token"))
+        assertTrue(Settings.tmdbKeyProblem("abc")!!.contains("32-char"))
     }
 }

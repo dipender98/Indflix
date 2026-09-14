@@ -88,11 +88,20 @@ class SubtitleProvidersMmTest {
     }
 
     @Test
-    fun desiredLanguages_isTheFullMenu() {
+    fun desiredLanguages_isIndianPlusEnglish() {
         val all = SubtilesProvider.desiredLanguages()
-        assertTrue(all.containsAll(setOf("Hindi", "English", "Tamil", "Telugu", "Arabic", "Japanese")))
+        assertTrue(all.containsAll(setOf("Hindi", "English", "Tamil", "Telugu", "Malayalam", "Nepali", "Sinhala")))
+        assertTrue("Japanese" !in all && "Arabic" !in all)
         val codes = SubtilesProvider.codesFromLangs(all)
         assertEquals(all.size, codes.size, "every desired name maps to a code")
+    }
+
+    @Test
+    fun originalLanguage_ridesAlongWithCode() {
+        val withOrig = SubtilesProvider.desiredLanguages("ja")
+        assertTrue(withOrig.contains("Japanese"))
+        assertEquals("ja", SubtilesProvider.codeForLang("Japanese"))
+        assertTrue(SubtilesProvider.codesFromLangs(withOrig).contains("ja"))
     }
 
     @Test

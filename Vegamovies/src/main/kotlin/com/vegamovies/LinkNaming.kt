@@ -167,7 +167,7 @@ internal object LinkNaming {
         else -> ""
     }
 
-    /** Archive marker. "Complete"/"All Episodes" are title noise (Reacher S1), not packs. */
+    /** Archive marker. "Complete"/"All Episodes" are title noise, not packs. */
     fun isPack(text: String?): Boolean =
         text != null && Regex("""(?i)\b(batch|pack|zip)\b""").containsMatchIn(text)
 

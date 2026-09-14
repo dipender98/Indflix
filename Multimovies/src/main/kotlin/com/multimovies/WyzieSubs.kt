@@ -4,6 +4,9 @@ import android.util.Log
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
 import java.net.URLEncoder
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withTimeoutOrNull
 
 /** FILE: WyzieSubs.kt - Wyzie Subs client, used only when the user saved their own key. */
@@ -17,6 +20,13 @@ object WyzieSubs {
 
     /** Cap per language so one source can't flood the menu. */
     internal const val MAX_PER_LANG = 5
+
+    // One language-group fetch outcome: tracks, hard failure, or blank reply.
+    private data class GroupResult(
+        val tracks: List<SubtilesProvider.SubTrack>,
+        val failure: String?,
+        val blank: Boolean,
+    )
 
     /** Build the /search URL. Prefers IMDB (always present here), falls back to TMDB. */
     fun buildUrl(
@@ -38,7 +48,7 @@ object WyzieSubs {
         // Raw commas (docs show language=en,es) - each code encoded on its own.
         val langs = codes.filter { it.isNotBlank() }.distinct().joinToString(",") { enc(it) }
         if (langs.isNotBlank()) out.append("&language=$langs")
-        // Query every source like the proven CSX integration - the default is too narrow.
+        // Query every source - the default is too narrow.
         out.append("&source=all&key=${enc(key)}")
         return out.toString()
     }
@@ -90,6 +100,7 @@ object WyzieSubs {
         if (o.has("subtitles") || o.has("url")) return null
         val msg = (o.optString("message") + " " + o.optString("error")).lowercase()
         return when {
+            msg.contains("language") -> "request rejected"
             msg.contains("unauthor") || msg.contains("invalid") ||
                 msg.contains("api key") -> "key rejected"
             msg.contains("rate") || msg.contains("limit") ||
@@ -99,7 +110,7 @@ object WyzieSubs {
         }
     }
 
-    /** One Wyzie request (+ one unfiltered retry when the filter yields nothing). */
+    // Chunked fetch: small parallel requests per language group, not one giant query.
     suspend fun fetchAndDeliver(
         imdbId: String?,
         tmdbId: String?,
@@ -107,35 +118,63 @@ object WyzieSubs {
         episode: Int?,
         missing: Set<String>,
         apiKey: String,
+        quiet: Boolean = false,
         onTrack: suspend (SubtitleFile) -> Unit,
     ): Int {
         if (missing.isEmpty()) return 0
         val codes = SubtilesProvider.codesFromLangs(missing)
         if (codes.isEmpty()) return 0
+        val groups = SubtilesProvider.groupRequests(codes)
+        if (groups.isEmpty()) return 0
         val deadline = System.currentTimeMillis() + FETCH_BUDGET_MS
-        val url = buildUrl(imdbId, tmdbId, season, episode, codes, apiKey) ?: return 0
-        Log.d(TAG, "GET ${url.replace(apiKey.trim(), "***")}")
-        val (code, text) = get(url, deadline)
-        if (text.isNullOrBlank()) {
-            Log.w(TAG, "no reply - caller falls back to built-in subtitles")
-            Settings.notifyWyzieFailed("no reply")
-            return 0
-        }
-        failureReason(code, text)?.let { reason ->
-            Log.w(TAG, "wyzie HTTP $code failed ($reason) - caller falls back to built-in subtitles")
-            Settings.notifyWyzieFailed(reason)
-            return 0
-        }
-        var tracks = runCatching { parse(text, codes) }.getOrDefault(emptyList())
-        if (tracks.isEmpty() && System.currentTimeMillis() < deadline) {
-            // Empty but healthy: the language filter may have excluded everything
-            // server-side - one unfiltered retry, the client-side filter still applies.
-            Log.d(TAG, "empty with filter - one unfiltered retry")
-            buildUrl(imdbId, tmdbId, season, episode, emptySet(), apiKey)?.let { retryUrl ->
-                val (retryCode, retryText) = get(retryUrl, deadline)
-                if (!retryText.isNullOrBlank() && failureReason(retryCode, retryText) == null) {
-                    tracks = runCatching { parse(retryText, codes) }.getOrDefault(emptyList())
+        val masked = apiKey.trim()
+        // One small request per group, all in flight at once.
+        val results = coroutineScope {
+            groups.map { group ->
+                async {
+                    val url = buildUrl(imdbId, tmdbId, season, episode, group, apiKey)
+                        ?: return@async GroupResult(emptyList(), null, false)
+                    Log.d(TAG, "GET ${url.replace(masked, "***")}")
+                    val (code, text) = get(url, deadline)
+                    if (text.isNullOrBlank()) return@async GroupResult(emptyList(), null, true)
+                    failureReason(code, text)?.let { return@async GroupResult(emptyList(), it, false) }
+                    GroupResult(runCatching { parse(text, group) }.getOrDefault(emptyList()), null, false)
                 }
+            }.awaitAll()
+        }
+        // Merge priority-first, deduped by url and capped per language.
+        val seen = HashSet<String>()
+        val perLang = HashMap<String, Int>()
+        var tracks = results.flatMap { it.tracks }.filter { t ->
+            if (!seen.add(t.url)) return@filter false
+            if ((perLang[t.lang] ?: 0) >= MAX_PER_LANG) return@filter false
+            perLang[t.lang] = (perLang[t.lang] ?: 0) + 1
+            true
+        }
+        if (tracks.isEmpty()) {
+            results.mapNotNull { it.failure }.firstOrNull()?.let { reason ->
+                Log.w(TAG, "wyzie failed ($reason) - caller falls back to built-in subtitles")
+                if (!quiet) Settings.notifyWyzieFailed(reason)
+                return 0
+            }
+            if (System.currentTimeMillis() < deadline) {
+                // Empty but healthy: the filter may have excluded everything server-side.
+                Log.d(TAG, "empty with filter - one unfiltered retry")
+                buildUrl(imdbId, tmdbId, season, episode, emptySet(), apiKey)?.let { retryUrl ->
+                    val (retryCode, retryText) = get(retryUrl, deadline)
+                    if (!retryText.isNullOrBlank() && failureReason(retryCode, retryText) == null) {
+                        tracks = runCatching { parse(retryText, codes) }.getOrDefault(emptyList())
+                    }
+                }
+            }
+            if (tracks.isEmpty()) {
+                if (results.all { it.blank }) {
+                    Log.w(TAG, "no reply - caller falls back to built-in subtitles")
+                    if (!quiet) Settings.notifyWyzieFailed("no reply")
+                } else {
+                    Log.d(TAG, "0 wyzie subs for $imdbId")
+                }
+                return 0
             }
         }
         tracks.forEach { onTrack(SubtitleFile(it.menu, it.url)) }

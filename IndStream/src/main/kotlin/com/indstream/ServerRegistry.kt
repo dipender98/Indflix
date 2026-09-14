@@ -1,4 +1,4 @@
-﻿package com.indstream
+package com.indstream
 
 import kotlin.math.min
 
@@ -26,7 +26,7 @@ data class ServerSpec(
 object ServerFarm {
 
     val allServers: List<ServerSpec> = listOf(
-        // ── multi-language expansion) ──. py): Inception + RRR (te) + Jailer (ta) movies, GoT S1E1 + Family Man S1E1 (hi) TV.
+        // Multi-language expansion (movies + TV).
 // NHD RE-ENABLED below: TV.
         ServerSpec(
             id = "vidlink", name = "VidLink",
@@ -77,8 +77,8 @@ object ServerFarm {
             movieUrl = "https://h5-api.aoneroom.com/wefeed-h5api-bff",
             tvUrl = "https://h5-api.aoneroom.com/wefeed-h5api-bff",
             isJsonApi = true, referer = "https://fmoviesunblocked.net/",
-            // timeoutSec 30→40 (user report: MovieBox absent while the reference plugin works on the SAME device/network - sends.
-// no per-request timeout, so.
+            // timeoutSec 30→40 (user report: MovieBox absent on the same
+            // device/network): slow responses were cut off early.
             hasSubtitles = true, timeoutSec = 55,
         ),
         // PrimeSrc (primesrc. me, ): IMDB-keyed JSON API. GET /api/v1/s?imdb={id}&type=movie|tv returns servers ({name, key.
@@ -143,7 +143,7 @@ object ServerFarm {
             hasSubtitles = true, timeoutSec = 50,
             declaredLanguages = emptySet(),
         ),
-        // VixSrc (vixsrc.to, verified live Sept 2026): TMDB-keyed JSON API.
+        // VixSrc: TMDB-keyed JSON API.
         // GET /api/movie/{tmdb} (or /api/tv/{tmdb}/{s}/{e}) -> {src: "/embed/.."}.
         // Embed page carries token/expires/playlist; master is signed HLS.
         ServerSpec(
@@ -154,7 +154,7 @@ object ServerFarm {
             isJsonApi = true, referer = "https://vixsrc.to/",
             hasSubtitles = true, timeoutSec = 30,
         ),
-        // ZXCStreams (portal-discovered backend, verified live Sept 2026): TMDB-keyed.
+        // ZXCStreams (portal-discovered backend): TMDB-keyed.
         // Portal (zxcstream.xyz/zxcprime.xyz) redirect -> base; sha512 token POST.
         // 4 sub-servers (Icarus/Berkas/Orion/Athena) queried in parallel.
         ServerSpec(
@@ -166,7 +166,7 @@ object ServerFarm {
             // Discovery + token + 4 servers + master-measure pass.
             hasSubtitles = false, timeoutSec = 30,
         ),
-        // DahmerMovies (title-keyed file index + worker proxy, verified live Sept 2026).
+        // DahmerMovies (title-keyed file index + worker proxy).
         // Directory listing per title carries 4K REMUX + Hindi/Tamil/Telugu dubs.
         ServerSpec(
             id = "dahmermovies", name = "DahmerMovies",
@@ -176,7 +176,7 @@ object ServerFarm {
             referer = "https://a.111477.xyz/",
             hasSubtitles = false, timeoutSec = 25,
         ),
-        // VidAPI (vaplayer.ru embed, page live Sept 2026): TMDB-keyed embed page.
+        // VidAPI (vaplayer.ru embed): TMDB-keyed embed page.
         // Generic pipeline (unwrap/harvest/extractor registry), no custom crypto.
         ServerSpec(
             id = "vidapi", name = "VidAPI",
@@ -186,7 +186,7 @@ object ServerFarm {
             referer = "https://vaplayer.ru/",
             hasSubtitles = true, timeoutSec = 15,
         ),
-        // 2Embed (embed page, servers Vsrc/Videm/Vcr live Sept 2026): IMDB-keyed.
+        // 2Embed (embed page, servers Vsrc/Videm/Vcr): IMDB-keyed.
         // Generic pipeline handles the iframe chain.
         ServerSpec(
             id = "twoembed", name = "2Embed",

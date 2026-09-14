@@ -328,7 +328,12 @@ object TmdbService {
      * Returns the 2xx body on success, a genuine non-key error body untouched (so callers keep their
      * prior empty-parse behavior for e.g. 404), or null once both keys are exhausted. */
     private suspend fun tmdbGet(op: String, path: String, query: String, timeout: Long = 5): String? {
-        val keys = listOf("primary" to API_KEY_PRIMARY, "fallback" to API_KEY_FALLBACK)
+        // Personal key first when the user saved one in Settings.
+        val keys = buildList {
+            Settings.tmdbApiKey()?.let { add("personal" to it) }
+            add("primary" to API_KEY_PRIMARY)
+            add("fallback" to API_KEY_FALLBACK)
+        }
         var lastReason = "no keys configured"
         for ((index, pair) in keys.withIndex()) {
             val (label, key) = pair
@@ -362,6 +367,21 @@ object TmdbService {
     private fun fallingBack(index: Int, keys: List<Pair<String, String>>): String =
         if (index < keys.lastIndex) " → trying ${keys[index + 1].first}" else " → no keys left"
 
+    /** Lightweight key check for Settings Verify: /configuration answers 200 for a valid v3 key. Never throws. */
+    suspend fun testTmdbKey(raw: String): String {
+        val key = raw.trim()
+        if (key.isEmpty()) return "Enter a key first"
+        if (key.startsWith("eyJ")) return "That's the Read Access Token - paste the API Key (v3)"
+        return runCatching {
+            val r = app.get("$API/configuration?api_key=$key", timeout = 8)
+            when (r.code) {
+                in 200..299 -> "Key works - TMDB connected"
+                401 -> "Key rejected (401) - check the API Key (v3)"
+                else -> "TMDB error (${r.code})"
+            }
+        }.getOrDefault("Verify failed - no network?")
+    }
+
     /** If the 2xx error body carries `success:false` with a *key*-level TMDB status code (7 invalid, 10 suspended,
      * 30 rate-limit exceeded) return that code; otherwise null (the response is either a valid 2xx payload or
      * some other error the caller can treat as an empty result). */
@@ -374,12 +394,13 @@ object TmdbService {
         }
     }
 
-    private fun safeSnippet(s: String): String =
-        s.filter { !it.isISOControl() }
+    private fun safeSnippet(s: String): String {
+        var out = s.filter { !it.isISOControl() }
             .replace(API_KEY_PRIMARY, "***")
             .replace(API_KEY_FALLBACK, "***")
-            .take(200)
-            .trim()
+        Settings.tmdbApiKey()?.let { out = out.replace(it, "***") }
+        return out.take(200).trim()
+    }
 
     private data class SearchEntry(val items: List<TmdbItem>, val expiresAt: Long)
 

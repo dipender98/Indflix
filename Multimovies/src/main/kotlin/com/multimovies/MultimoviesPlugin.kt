@@ -114,6 +114,19 @@ internal val SOURCE_PRIORITY: List<String> = listOf(
 /** CSS selector for the item containers on a search-results page. */
 private val SEARCH_ITEMS_SELECTOR = "div#archive-content div.item, div.search-page div.result-item, article.item, div.ml-items div.item, div.results div.result, ul.ml-posts li, div#content div.post, div.items div.item"
 
+/** Visible headings first: the meta title carries a site-name affix. */
+private const val TITLE_SELECTOR = "div.sheader h1, h1, meta[property=og:title]"
+
+/** Drop a leading/trailing site-name affix ("Site | Title", "Title - Site") from scraped titles. Pure. */
+internal fun stripSiteAffix(raw: String, siteName: String = "Multimovies"): String {
+    val t = raw.trim()
+    if (t.isEmpty() || siteName.isBlank()) return t
+    val site = Regex.escape(siteName.trim())
+    val lead = Regex("""(?i)^$site\s*[|:-]\s*""")
+    val trail = Regex("""(?i)\s*[|:-]\s*$site$""")
+    return trail.replace(lead.replace(t, ""), "").trim().takeIf { it.isNotEmpty() } ?: t
+}
+
 /** a CloudStream provider that scrapes the site. */
 class MultimoviesProvider : MainAPI() {
 
@@ -444,9 +457,9 @@ class MultimoviesProvider : MainAPI() {
             val guessUrl = "$base$variant/"
             val guessed = fetchDoc(guessUrl, timeoutSeconds = 6, required = false) ?: continue
             if (isChallenge(guessed)) continue
-            val guessedTitle = guessed.selectFirst("h1, div.sheader h1, meta[property=og:title]")?.let {
+            val guessedTitle = guessed.selectFirst(TITLE_SELECTOR)?.let {
                 if (it.tagName() == "meta") it.attr("content") else it.text()
-            }?.trim()
+            }?.trim()?.let(::stripSiteAffix)
             if (guessedTitle != null && titleDistance(guessedTitle, title) <= 1) {
                 imdbUrlCache[key] = guessUrl
                 mmDocCache[guessUrl] = guessed
@@ -629,10 +642,11 @@ class MultimoviesProvider : MainAPI() {
             val imdbId = resolvedDetail?.imdbId
                 ?: if (tmdb == null) TmdbService.extractImdbId(doc) else null
 
-            // Page-scraped fallbacks (only when TMDB gave nothing).
-            val pageTitle = doc.selectFirst("h1, div.sheader h1, meta[property=og:title]")?.let {
+            // Page-scraped fallbacks (only when TMDB gave nothing). Visible
+            // headings first: the meta title carries a site-name affix.
+            val pageTitle = doc.selectFirst(TITLE_SELECTOR)?.let {
                 if (it.tagName() == "meta") it.attr("content") else it.text()
-            }?.trim()
+            }?.trim()?.let(::stripSiteAffix)
             val title = resolvedDetail?.name ?: pageTitle
                 ?: throw ErrorLoadingException("No title found on $realUrl")
             val poster = resolvedDetail?.poster ?: upgradePosterUrl(
@@ -1055,28 +1069,56 @@ class MultimoviesProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
     ) {
         runCatching {
-            // Tmdb-only titles store "": resolve imdb via TMDB so subs still land instead of silently empty.
-            var imdb = meta.imdbId.takeIf { it.startsWith("tt") }
-            if (imdb == null) {
-                val tmdb = meta.tmdbId?.toIntOrNull()
-                if (tmdb != null) {
-                    val type = if (meta.season != null || meta.episode != null) "tv" else "movie"
-                    imdb = withTimeoutOrNull(4000L) { TmdbService.fetchMeta(tmdb, type) }
-                        ?.imdbId?.takeIf { it.startsWith("tt") }
+            coroutineScope {
+                val type = if (meta.season != null || meta.episode != null) "tv" else "movie"
+                // Tmdb-only titles store "": resolve imdb via TMDB so subs still land instead of silently empty.
+                var imdb = meta.imdbId.takeIf { it.startsWith("tt") }
+                var detail: TmdbService.TmdbDetail? = null
+                if (imdb == null) {
+                    val tmdb = meta.tmdbId?.toIntOrNull()
+                    if (tmdb != null) {
+                        detail = withTimeoutOrNull(4000L) { TmdbService.fetchMeta(tmdb, type) }
+                        imdb = detail?.imdbId?.takeIf { it.startsWith("tt") }
+                    }
+                }
+                val base = SubtilesProvider.desiredLanguages(null)
+                // Original-language lookup overlaps subtitle fetching instead of delaying it.
+                val origLang = async {
+                    detail?.originalLanguage ?: meta.tmdbId?.toIntOrNull()?.let { id ->
+                        withTimeoutOrNull(4000L) { TmdbService.fetchMeta(id, type) }?.originalLanguage
+                    }
+                }
+                // One extra single-language request when the original isn't in the base set.
+                suspend fun topUpOriginal(wyzieKey: String?): Int {
+                    val name = origLang.await()?.let { SubtitleServices.canonicalName(it) }
+                        ?.takeIf { it !in base } ?: return 0
+                    if (SubtilesProvider.codeForLang(name) == null) return 0
+                    return if (wyzieKey != null) {
+                        WyzieSubs.fetchAndDeliver(
+                            imdb, meta.tmdbId, meta.season, meta.episode,
+                            setOf(name), wyzieKey, quiet = true,
+                        ) { runCatching { subtitleCallback(it) } }
+                    } else {
+                        SubtilesProvider.fetchAndDeliver(
+                            imdb, meta.season, meta.episode, setOf(name), name,
+                        ) { runCatching { subtitleCallback(it) } }
+                    }
+                }
+                // User key set: Wyzie replaces the built-in stack for this play (0 = fall through).
+                var wyzieBase = 0
+                Settings.apiKey()?.let { key ->
+                    wyzieBase = WyzieSubs.fetchAndDeliver(
+                        imdb, meta.tmdbId, meta.season, meta.episode, base, key,
+                    ) { runCatching { subtitleCallback(it) } }
+                    topUpOriginal(key)
+                }
+                if (wyzieBase == 0) {
+                    SubtilesProvider.fetchAndDeliver(
+                        imdb, meta.season, meta.episode, base, null,
+                    ) { runCatching { subtitleCallback(it) } }
+                    topUpOriginal(null)
                 }
             }
-            // User key set: Wyzie replaces the built-in stack for this play (0 = fall through).
-            Settings.apiKey()?.let { key ->
-                val n = WyzieSubs.fetchAndDeliver(
-                    imdb, meta.tmdbId, meta.season, meta.episode,
-                    SubtilesProvider.desiredLanguages(), key,
-                ) { runCatching { subtitleCallback(it) } }
-                if (n > 0) return@runCatching
-            }
-            SubtilesProvider.fetchAndDeliver(
-                imdb, meta.season, meta.episode,
-                SubtilesProvider.desiredLanguages(),
-            ) { runCatching { subtitleCallback(it) } }
         }.onFailure { android.util.Log.w("Multimovies", "fallback subs failed: ${it.message}") }
     }
 
