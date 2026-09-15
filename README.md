@@ -15,8 +15,6 @@ https://raw.githubusercontent.com/dipender98/Indflix/builds/repo.json
 
 ## Features
 
-- 🎬 **Streaming** — use **Multimovies** and **IndStream** for online
-  streaming
 - 🌐 **Multi-language audio** — Hindi, English, Tamil, Telugu, Kannada,
   Malayalam, Bengali, dual-audio; each stream is labelled with its
   actual audio language
