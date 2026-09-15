@@ -17,7 +17,7 @@ object WyzieSubs {
     private const val TAG = "WyzieSubs"
 
     /** Single-request budget; the app keeps filling streams while this runs. */
-    const val FETCH_BUDGET_MS = 10_000L
+    const val FETCH_BUDGET_MS = 30_000L
 
     /** Source-list budget; the lookup is cached afterwards. */
     internal const val SOURCES_BUDGET_MS = 2_500L
