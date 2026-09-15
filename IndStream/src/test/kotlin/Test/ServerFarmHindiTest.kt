@@ -170,7 +170,7 @@ class ServerFarmHindiTest {
     @Test
     fun farm_withinServerCap() {
         // No registry cap: the farm grows freely, ranked fastest-first at emit.
-        assertTrue(ServerFarm.allServers.size >= 28, "farm keeps every live server")
+        assertTrue(ServerFarm.allServers.size >= 27, "farm keeps every live server")
         assertTrue(ServerFarm.allServers.isNotEmpty())
         assertNotNull(ServerFarm.allServers.firstOrNull { it.id == "vidlink" })
     }
@@ -243,7 +243,7 @@ class ServerFarmHindiTest {
             "vidfast", "autoembed", "vidphantom", "vsembed", "twoembed-skin",
             "vidsrc-to", "vidsrcme", "nontongo",
             "castletv", "streamflix", "4khdhub",
-            "vidsrc-pm", "rive", "vidzy")
+            "vidsrc-pm", "rive")
         for (id in ids) {
             assertNotNull(
                 ServerFarm.allServers.firstOrNull { it.id == id },
@@ -252,7 +252,7 @@ class ServerFarmHindiTest {
         }
         // Disabled/dead servers must NOT be in the live farm (vixsrc re-enabled Sept 2026).
         val disabled = setOf("mp4hydra", "vidzee", "streamprovider", "primesrc",
-            "myflixer-hindi", "videm", "8stream", "videasy-hindi", "dahmermovies")
+            "myflixer-hindi", "videm", "8stream", "videasy-hindi", "dahmermovies", "vidzy")
         for (id in disabled) {
             assertNull(
                 ServerFarm.allServers.firstOrNull { it.id == id },
@@ -264,6 +264,6 @@ class ServerFarmHindiTest {
     @Test
     fun farm_withinExpandedCap() {
         // Uncapped farm: size only grows, never trimmed to fit.
-        assertTrue(ServerFarm.allServers.size >= 28, "farm keeps every live server")
+        assertTrue(ServerFarm.allServers.size >= 27, "farm keeps every live server")
     }
 }

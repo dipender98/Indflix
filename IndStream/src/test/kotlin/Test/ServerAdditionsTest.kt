@@ -142,7 +142,6 @@ class ServerAdditionsTest {
             "vidsrc-pm" to Pair("https://vidsrc.pm/embed/movie/27205", "https://vidsrc.pm/embed/tv/1399/1/1"),
             "rive" to Pair("https://www.rivestream.app/embed?type=movie&id=27205",
                 "https://www.rivestream.app/embed?type=tv&id=1399&season=1&episode=1"),
-            "vidzy" to Pair("https://vidzy.org/movie/27205", "https://vidzy.org/serie/1399/1/1"),
         )
         for ((id, urls) in expected) {
             val s = ServerFarm.allServers.firstOrNull { it.id == id }

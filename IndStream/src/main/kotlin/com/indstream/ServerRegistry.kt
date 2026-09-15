@@ -286,14 +286,6 @@ object ServerFarm {
             referer = "https://www.rivestream.app/",
             hasSubtitles = true, timeoutSec = 15,
         ),
-        ServerSpec(
-            id = "vidzy", name = "Vidzy",
-            idType = ServerIdType.TMDB,
-            movieUrl = "https://vidzy.org/movie/{id}",
-            tvUrl = "https://vidzy.org/serie/{id}/{season}/{episode}",
-            referer = "https://vidzy.org/",
-            hasSubtitles = true, timeoutSec = 15,
-        ),
     )
 
     fun buildMovieUrl(spec: ServerSpec, id: String): String =
