@@ -6,6 +6,7 @@ import com.multimovies.LinkCache
 import com.multimovies.MultiSourcePuller
 import kotlinx.coroutines.runBlocking
 import com.multimovies.NxshaProtocol
+import com.multimovies.NxshaServer
 import com.multimovies.ResolvedEmbed
 import com.multimovies.dooplayOptionKey
 import com.multimovies.embedIdentity
@@ -73,6 +74,27 @@ class AuditFixesMmTest {
         val p = NxshaProtocol.parseIdsFromUrl("https://nxsha.space/embed/tv/1396/1/1")
         assertEquals("1396", p.tmdbId)
         assertEquals("tv", p.type)
+    }
+
+    @Test
+    fun nxshaOrder_priorityThenPosition_noHardcodedTop() {
+        val servers = listOf(
+            NxshaServer("Nitro", "nitro", 0, Int.MAX_VALUE),
+            NxshaServer("MbPly", "mbox", 1, 2),
+            NxshaServer("MhPly", "mhbox", 2, 1),
+        )
+        assertEquals(listOf("MhPly", "MbPly", "Nitro"), NxshaProtocol.orderServers(servers).map { it.name })
+    }
+
+    @Test
+    fun nxshaParse_dropsRetiredAndUnsupported() {
+        val arr = org.json.JSONArray(
+            """[{"name":"Vip-4K","scraper":"vidking","position":13,"web_support":true},""" +
+                """{"name":"MbPly","scraper":"mbox","position":1,"high_priority":2,"web_support":true,"types":["movie","tv"]},""" +
+                """{"name":"Off","scraper":"x","position":2,"web_support":false}]""",
+        )
+        val out = NxshaProtocol.parseServers(arr, "movie")
+        assertEquals(listOf("MbPly"), out.map { it.name })
     }
 
     @Test

@@ -431,21 +431,20 @@ internal object NxshaProtocol {
         return ParsedIds(tmdb, imdb, type, season, episode)
     }
 
-    /** Server ordering: Nitro first (), then high_priority asc, then listed position asc. Stable sort keeps API order for ties. */
+    /** Server ordering: high_priority asc, then listed position asc. No provider gets a hardcoded top slot. */
     fun orderServers(servers: List<NxshaServer>): List<NxshaServer> =
-        servers.sortedWith(
-            compareByDescending<NxshaServer> {
-                it.scraper.contains("nitro", ignoreCase = true) || it.name.contains("nitro", ignoreCase = true)
-            }.thenBy { it.highPriority }
-                .thenBy { it.position }
-        )
+        servers.sortedWith(compareBy<NxshaServer> { it.highPriority }.thenBy { it.position })
 
-    /** Filter the raw servers array to usable entries: web_support, not disabled, serves (missing `types` = compatible). then ordered. */
+    /** Retired upstream scrapers: listed online but never resolve (fail/timeout every call). */
+    private val RETIRED_SCRAPERS = setOf("vidking")
+
+    /** Filter the raw servers array to usable entries: web_support, not disabled, not retired, serves (missing `types` = compatible). then ordered. */
     fun parseServers(arr: JSONArray?, type: String): List<NxshaServer> {
         if (arr == null) return emptyList()
         val out = mutableListOf<NxshaServer>()
         for (i in 0 until arr.length()) {
             val o = arr.optJSONObject(i) ?: continue
+            if (o.optString("scraper") in RETIRED_SCRAPERS) continue
             if (!o.optBoolean("web_support", true)) continue
             if (o.optBoolean("isDisable", false)) continue
             val servesTypes = o.optJSONArray("types")
