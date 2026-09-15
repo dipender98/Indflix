@@ -3,7 +3,7 @@ import java.util.Properties
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
-version = 38
+version = 39
 
 plugins {
     id("com.lagradost.cloudstream3.gradle")
@@ -12,7 +12,7 @@ plugins {
 cloudstream {
     language = "hi"
     authors = listOf("Indflix")
-    description = "Federated embed-server resolver keyed by TMDB/IMDB id. Races dozens of independent HLS/DASH servers, picks the fastest CDN per title, and exposes multi-language audio + per-quality links."
+    description = "Federated embed-server resolver keyed by TMDB/IMDB id. Races dozens of independent HLS/DASH servers, picks the fastest CDN per title, and exposes multi-language audio + per-quality [...]
     status = 1
     tvTypes = listOf("Movie", "TvSeries")
     requiresResources = false
