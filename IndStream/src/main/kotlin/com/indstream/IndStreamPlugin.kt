@@ -12,6 +12,7 @@ import com.lagradost.cloudstream3.plugins.Plugin
 import com.lagradost.cloudstream3.utils.*
 import java.util.Collections
 import java.util.HashSet
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -21,6 +22,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
 
 /** Registers the provider with CloudStream. */
@@ -472,7 +475,7 @@ class IndStreamProvider : MainAPI() {
         job.invokeOnCompletion { warmFarms.remove(key, job) }
     }
 
-    /** Subtitle provider: user Wyzie key replaces the built-in stack, else OpenSubtitles fallback. */
+    /** Race user key against the built-in stack: both fire at once, first tracks win. */
     private suspend fun topUpSubtitles(
         imdbId: String?,
         season: Int,
@@ -481,15 +484,25 @@ class IndStreamProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
     ) {
         val wanted = SubtilesProvider.desiredLanguages(originalLang)
-        Settings.apiKey()?.let { key ->
-            val n = WyzieSubs.fetchAndDeliver(imdbId, season, episode, wanted, key) {
-                runCatching { subtitleCallback(it) }
-            }
-            if (n > 0) return
+        val seen = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
+        val emitLock = Mutex()
+        suspend fun emit(t: SubtitleFile) {
+            if (!seen.add(t.url)) return
+            emitLock.withLock { runCatching { subtitleCallback(t) } }
         }
-        // Progressive: hi/en emit first so tracks land at playback start, rest follow within budget.
-        SubtilesProvider.fetchAndDeliver(imdbId, season, episode, wanted, originalLang) {
-            runCatching { subtitleCallback(it) }
+        coroutineScope {
+            Settings.apiKey()?.let { key ->
+                launch {
+                    runCatching {
+                        WyzieSubs.fetchAndDeliver(imdbId, season, episode, wanted, key) { emit(it) }
+                    }
+                }
+            }
+            launch {
+                runCatching {
+                    SubtilesProvider.fetchAndDeliver(imdbId, season, episode, wanted, originalLang) { emit(it) }
+                }
+            }
         }
     }
 }

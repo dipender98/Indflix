@@ -1089,6 +1089,13 @@ class MultimoviesProvider : MainAPI() {
                         withTimeoutOrNull(4000L) { TmdbService.fetchMeta(id, type) }?.originalLanguage
                     }
                 }
+                // Shared emitter: both providers race, first tracks win, no duplicates.
+                val seen = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
+                val emitLock = Mutex()
+                suspend fun emit(t: SubtitleFile) {
+                    if (!seen.add(t.url)) return
+                    emitLock.withLock { runCatching { subtitleCallback(t) } }
+                }
                 // One extra single-language request for the title's own original language (a TMDB 2-letter code),
                 // only when it isn't already covered by the English/Indian base set.
                 suspend fun topUpOriginal(wyzieKey: String?): Int {
@@ -1098,26 +1105,33 @@ class MultimoviesProvider : MainAPI() {
                         WyzieSubs.fetchAndDeliver(
                             imdb, meta.tmdbId, meta.season, meta.episode,
                             setOf(code), wyzieKey, quiet = true,
-                        ) { runCatching { subtitleCallback(it) } }
+                        ) { emit(it) }
                     } else {
                         SubtilesProvider.fetchAndDeliver(
                             imdb, meta.season, meta.episode, setOf(code), code,
-                        ) { runCatching { subtitleCallback(it) } }
+                        ) { emit(it) }
                     }
                 }
-                // User key set: Wyzie replaces the built-in stack for this play (0 = fall through).
-                var wyzieBase = 0
-                Settings.apiKey()?.let { key ->
-                    wyzieBase = WyzieSubs.fetchAndDeliver(
-                        imdb, meta.tmdbId, meta.season, meta.episode, base, key,
-                    ) { runCatching { subtitleCallback(it) } }
-                    topUpOriginal(key)
-                }
-                if (wyzieBase == 0) {
-                    SubtilesProvider.fetchAndDeliver(
-                        imdb, meta.season, meta.episode, base, null,
-                    ) { runCatching { subtitleCallback(it) } }
-                    topUpOriginal(null)
+                // Race user key against the built-in stack: both fire at once, first tracks win.
+                coroutineScope {
+                    Settings.apiKey()?.let { key ->
+                        launch {
+                            runCatching {
+                                WyzieSubs.fetchAndDeliver(
+                                    imdb, meta.tmdbId, meta.season, meta.episode, base, key,
+                                ) { emit(it) }
+                                topUpOriginal(key)
+                            }
+                        }
+                    }
+                    launch {
+                        runCatching {
+                            SubtilesProvider.fetchAndDeliver(
+                                imdb, meta.season, meta.episode, base, null,
+                            ) { emit(it) }
+                            topUpOriginal(null)
+                        }
+                    }
                 }
             }
         }.onFailure { android.util.Log.w("Multimovies", "fallback subs failed: ${it.message}") }

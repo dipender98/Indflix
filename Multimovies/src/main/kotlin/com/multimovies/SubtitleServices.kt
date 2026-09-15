@@ -8,6 +8,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
 
 /** Normalizes subtitle language names and provides fallback subtitle sources. */
@@ -304,7 +306,7 @@ object SubtilesProvider {
         return out
     }
 
-    /** Progressive fetch: priority (hi/en/original) emits first so tracks land at playback start, rest + top-up follow. */
+    /** Race every source at once: addon groups plus SubSense fire together, first answers win. */
     suspend fun fetchAndDeliver(
         imdbId: String?,
         season: Int?,
@@ -334,30 +336,31 @@ object SubtilesProvider {
         val seen = HashSet<String>()
         val perLang = HashMap<String, Int>()
         val collected = mutableListOf<SubTrack>()
+        val emitLock = Mutex()
         var delivered = 0
         suspend fun emit(tracks: List<SubTrack>) {
-            for (t in tracks) {
-                if (!seen.add(t.url)) continue
-                if ((perLang[t.lang] ?: 0) >= SENSE_MAX_PER_LANG) continue
-                perLang[t.lang] = (perLang[t.lang] ?: 0) + 1
-                collected.add(t)
-                onTrack(SubtitleFile(t.menu, t.url))
-                delivered++
+            val fresh = emitLock.withLock {
+                tracks.filter { t ->
+                    if (!seen.add(t.url)) false
+                    else if ((perLang[t.lang] ?: 0) >= SENSE_MAX_PER_LANG) false
+                    else {
+                        perLang[t.lang] = (perLang[t.lang] ?: 0) + 1
+                        collected.add(t)
+                        delivered++
+                        true
+                    }
+                }
             }
+            fresh.forEach { onTrack(SubtitleFile(it.menu, it.url)) }
         }
         coroutineScope {
-            // Single wave: every group launches at once and awaits in priority order, so hi/en
-            // still emit first while a slow group can no longer starve the rest of the budget
-            // (sequential phases meant one cold group ate it all and only English landed, late).
-            groups.map { launchFetch(imdb, season, episode, it, deadline) }
-                .forEach { emit(it.await()) }
+            // Addon groups and SubSense launch together; awaiting in order keeps hi/en first.
+            val pending = groups.map { launchFetch(imdb, season, episode, it, deadline) } +
+                async { fetchSubSense(imdb, season, episode, missing, deadline) }
+            pending.forEach { emit(it.await()) }
             if (delivered == 0 && System.currentTimeMillis() < deadline) {
                 Log.d("SubtilesProvider", "all groups empty - one priority retry")
                 groups.firstOrNull()?.let { emit(launchFetch(imdb, season, episode, it, deadline).await()) }
-            }
-            val gaps = stillMissing(missing, collected)
-            if (gaps.isNotEmpty() && System.currentTimeMillis() < deadline) {
-                emit(fetchSubSense(imdb, season, episode, gaps, deadline))
             }
         }
         if (collected.isNotEmpty()) put(key, collected.map { SubtitleFile(it.menu, it.url) })
