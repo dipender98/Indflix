@@ -146,7 +146,12 @@ class IndStreamProvider : MainAPI() {
         val (tmdbId, type) = tmdb
         val isMovie = type == "movie"
 
-        val meta = withTimeoutOrNull(12000L) { TmdbService.fetchMeta(tmdbId, type) }
+        // One transient blip must not blank the page: a single retry rides out
+        // fast-failing 429s inside the same budget; the cache makes repeats free.
+        val meta = withTimeoutOrNull(12000L) {
+            TmdbService.fetchMeta(tmdbId, type)
+                ?: run { delay(1200L); TmdbService.fetchMeta(tmdbId, type) }
+        }
 
         val title = meta?.name ?: return null
         val poster = meta?.poster
@@ -174,7 +179,11 @@ class IndStreamProvider : MainAPI() {
         }
 
         // TV: enumerate seasons, then fetch episodes per season.
-        val seasons = TmdbService.fetchTvSeasons(tmdbId)
+        // Same single-retry policy as the meta fetch above, bounded by its own cap.
+        val seasons = withTimeoutOrNull(15000L) {
+            TmdbService.fetchTvSeasons(tmdbId)
+                .ifEmpty { delay(1200L); TmdbService.fetchTvSeasons(tmdbId) }
+        }.orEmpty()
         if (seasons.isEmpty()) return null
 
         val episodes = coroutineScope {

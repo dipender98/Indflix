@@ -1,9 +1,9 @@
 package Test
 
+import com.indstream.CastleTvSource
 import com.indstream.ServerFarm
 import com.indstream.ServerIdType
 import com.indstream.StreamEngine
-import com.indstream.VideasySource
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -11,7 +11,7 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-/** Guards the Sept 2026 farm expansion: VixSrc, ZXCStreams, DahmerMovies, VidAPI, 2Embed. */
+/** Guards the Sept 2026 farm expansion: VixSrc, ZXCStreams, VidAPI, 2Embed, CastleTV, StreamFlix, 4KHDHub. */
 class ServerAdditionsTest {
 
     @Test
@@ -35,14 +35,6 @@ class ServerAdditionsTest {
     }
 
     @Test
-    fun dahmermovies_presentAndTitled() {
-        val s = ServerFarm.allServers.first { it.id == "dahmermovies" }
-        assertEquals("DahmerMovies", s.name)
-        assertEquals(ServerIdType.TMDB, s.idType)
-        assertEquals("https://a.111477.xyz/", s.referer)
-    }
-
-    @Test
     fun vidapi_presentAndTmdbKeyed() {
         val s = ServerFarm.allServers.first { it.id == "vidapi" }
         assertEquals("VidAPI", s.name)
@@ -58,6 +50,29 @@ class ServerAdditionsTest {
         assertEquals(ServerIdType.IMDB, s.idType)
         assertEquals("https://2embed.cc/embed/tt1375666", ServerFarm.buildMovieUrl(s, "tt1375666"))
         assertEquals("https://2embed.cc/embedtv/tt0944947&s=1&e=1", ServerFarm.buildTvUrl(s, "tt0944947", 1, 1))
+    }
+
+    @Test
+    fun fastBatch_presentAndTmdbKeyed() {
+        // Fast embed batch: all TMDB-keyed (no id lookup wait), generic pipeline, 15s kill.
+        val expected = mapOf(
+            "vidfast" to Pair("https://vidfast.pro/movie/27205?autoPlay=true", "https://vidfast.pro/tv/1399/1/1?autoPlay=true"),
+            "autoembed" to Pair("https://autoembed.co/movie/tmdb/27205", "https://autoembed.co/tv/tmdb/1399-1-1"),
+            "vidphantom" to Pair("https://vidphantom.com/movie/27205", "https://vidphantom.com/tv/1399/1/1"),
+            "vsembed" to Pair("https://vsembed.su/embed/movie/27205", "https://vsembed.su/embed/tv/1399/1/1"),
+            "twoembed-skin" to Pair("https://www.2embed.skin/embed/27205", "https://www.2embed.skin/embedtv/1399&s=1&e=1"),
+            "vidsrc-to" to Pair("https://vidsrc.to/embed/movie/27205", "https://vidsrc.to/embed/tv/1399/1/1"),
+            "vidsrcme" to Pair("https://vidsrcme.su/embed/movie/27205", "https://vidsrcme.su/embed/tv/1399/1/1"),
+            "nontongo" to Pair("https://www.nontongo.win/embed/movie/27205", "https://www.nontongo.win/embed/tv/1399/1/1"),
+        )
+        for ((id, urls) in expected) {
+            val s = ServerFarm.allServers.firstOrNull { it.id == id }
+            assertNotNull(s, "$id must be in the farm")
+            assertEquals(ServerIdType.TMDB, s.idType, "$id must be TMDB-keyed")
+            assertEquals(15, s.timeoutSec, "$id farm kill must stay fast")
+            assertEquals(urls.first, ServerFarm.buildMovieUrl(s, "27205"), "$id movie url")
+            assertEquals(urls.second, ServerFarm.buildTvUrl(s, "1399", 1, 1), "$id tv url")
+        }
     }
 
     @Test
@@ -103,105 +118,105 @@ class ServerAdditionsTest {
     }
 
     @Test
-    fun dahmerParseRows_filtersMediaFiles() {
-        val html = "<table><tr><td><a href=\"../\">../</a></td></tr>" +
-            "<tr><td><a href=\"Inception.2010.1080p.mkv\">Inception.2010.1080p.mkv</a></td>" +
-            "<td>9.2 GB</td></tr>" +
-            "<tr><td><a href=\"notes.nfo\">notes.nfo</a></td><td>1 KB</td></tr></table>"
-        val rows = StreamEngine.dahmerParseRows(html)
-        assertEquals(1, rows.size)
-        assertEquals("Inception.2010.1080p.mkv", rows[0].second)
-        assertEquals("9.2 GB", rows[0].third)
-        assertTrue(StreamEngine.dahmerParseRows("<html>empty</html>").isEmpty())
+    fun hindiBatch_presentAndTmdbKeyed() {
+        val castle = ServerFarm.allServers.first { it.id == "castletv" }
+        assertEquals("CastleTV", castle.name)
+        assertEquals(ServerIdType.TMDB, castle.idType)
+        assertEquals(30, castle.timeoutSec)
+        assertEquals(setOf("Hindi", "Tamil", "Telugu"), castle.declaredLanguages)
+        val flix = ServerFarm.allServers.first { it.id == "streamflix" }
+        assertEquals("StreamFlix", flix.name)
+        assertEquals(ServerIdType.TMDB, flix.idType)
+        assertEquals(25, flix.timeoutSec)
+        val hub = ServerFarm.allServers.first { it.id == "4khdhub" }
+        assertEquals("4KHDHub", hub.name)
+        assertEquals(ServerIdType.TMDB, hub.idType)
+        assertEquals(60, hub.timeoutSec)
+        assertEquals(setOf("Hindi"), hub.declaredLanguages)
     }
 
     @Test
-    fun dahmerLanguageOf_releaseTags() {
-        assertEquals("Hindi", StreamEngine.dahmerLanguageOf("Inception.2010.1080p.AMZN.WEB-DL.HINDI.DDP2.0.H.265-GTM.mkv"))
-        assertEquals("Tamil", StreamEngine.dahmerLanguageOf("Inception.2010.720p.WEB-DL.TAMIL.DDP2.0.H.265-GTM.mkv"))
-        assertEquals("Telugu", StreamEngine.dahmerLanguageOf("Inception.2010.720p.WEB-DL.TELUGU.DDP2.0.H.265-GTM.mkv"))
-        assertEquals("Multi", StreamEngine.dahmerLanguageOf("Inception.2010.1080p.AMZN.WEB-DL.MULTI.DDP2.0.H.264-GTM.mkv"))
-        assertEquals("Multi", StreamEngine.dahmerLanguageOf("Show.S01E02.DUAL-N3G4N.mkv"))
-        // No language tag at all -> honest blank, never guessed.
-        assertEquals("", StreamEngine.dahmerLanguageOf("Inception.2010.1080p.BluRay.x264.DTS-WiKi.mkv"))
-        assertEquals("English", StreamEngine.dahmerLanguageOf("Movie.2024.1080p.WEB-DL.ENGLISH.DDP5.1.H.264.mkv"))
-    }
-
-    @Test
-    fun dahmerResolutionOf_releaseTags() {
-        assertEquals(2160, StreamEngine.dahmerResolutionOf("Inception.2010.2160p.UHD.BluRay.x265-CtrlHD.mkv"))
-        assertEquals(2160, StreamEngine.dahmerResolutionOf("Movie.2024.4K.WEB-DL.mkv"))
-        assertEquals(1080, StreamEngine.dahmerResolutionOf("Inception.2010.1080p.BluRay.x264.mkv"))
-        assertEquals(720, StreamEngine.dahmerResolutionOf("Inception.2010.720p.HDTV.mkv"))
-        assertEquals(0, StreamEngine.dahmerResolutionOf("Inception.2010.DVDSCR.mkv"))
-    }
-
-    @Test
-    fun dahmerEpisodeMatch_forms() {
-        assertTrue(StreamEngine.dahmerEpisodeMatch("Show.S01E02.1080p.WEB.mkv", 1, 2))
-        assertTrue(StreamEngine.dahmerEpisodeMatch("Show.S1E2.720p.mkv", 1, 2))
-        assertTrue(StreamEngine.dahmerEpisodeMatch("Show.E02.HDTV.mkv", 1, 2))
-        assertTrue(StreamEngine.dahmerEpisodeMatch("Show.Episode.2.1080p.mkv", 1, 2))
-        assertTrue(!StreamEngine.dahmerEpisodeMatch("Show.S01E03.1080p.WEB.mkv", 1, 2))
-    }
-
-    @Test
-    fun videasyRoutes_coverHindiMirrors() {
-        assertEquals(setOf("hdmovie", "cdn", "lamovie", "meine"), VideasySource.ROUTES.keys)
-        assertEquals(true, VideasySource.ROUTES["meine"])
-        assertEquals(false, VideasySource.ROUTES["hdmovie"])
-    }
-
-    @Test
-    fun videasyHindiRank_tiers() {
-        assertEquals(2, VideasySource.hindiRank("Hindi"))
-        assertEquals(2, VideasySource.hindiRank("hindi"))
-        assertEquals(1, VideasySource.hindiRank("Multi"))
-        assertEquals(1, VideasySource.hindiRank("Dual Audio"))
-        assertEquals(0, VideasySource.hindiRank("1080p"))
-        assertEquals(0, VideasySource.hindiRank("English"))
-    }
-
-    @Test
-    fun dahmerSizeMb_units() {
-        assertEquals(36147, StreamEngine.dahmerSizeMb("35.3 GB"))
-        assertEquals(970, StreamEngine.dahmerSizeMb("970.6 MB"))
-        assertEquals(450, StreamEngine.dahmerSizeMb("450MB"))
-        assertEquals(1638, StreamEngine.dahmerSizeMb("1.6 GB"))
-        assertNull(StreamEngine.dahmerSizeMb(""))
-        assertNull(StreamEngine.dahmerSizeMb("N/A"))
-    }
-
-    @Test
-    fun dahmerPool_prefersStreamableSizes() {
-        fun row(name: String, size: String) = Triple("https://a.111477.xyz/$name", name, size)
-        val rows = listOf(
-            row("Big.2010.2160p.REMUX.mkv", "35.3 GB"),
-            row("Mid.2010.1080p.WEB.mkv", "9.2 GB"),
-            row("Small.2010.720p.HINDI.mkv", "970.6 MB"),
-        )
-        val pool = StreamEngine.dahmerPool(rows)
-        assertEquals(2, pool.size)
-        assertTrue(pool.none { it.second.startsWith("Big.") })
-        // All giants: two smallest survive.
-        val giants = listOf(row("G1.mkv", "66.0 GB"), row("G2.mkv", "35.3 GB"), row("G3.mkv", "25.7 GB"))
-        val gp = StreamEngine.dahmerPool(giants)
-        assertEquals(2, gp.size)
-        assertEquals("G3.mkv", gp[0].second)
-        assertEquals("G2.mkv", gp[1].second)
-    }
-
-    @Test
-    fun dahmerEncodeUri_marksPassThrough() {
+    fun castleDecrypt_liveVector() {
+        // Captured against the live API: secKey + cipher must round-trip.
         assertEquals(
-            "https://a.111477.xyz/movies/Inception%20(2010)/Inception.2010.1080p.mkv",
-            StreamEngine.dahmerEncodeUri("https://a.111477.xyz/movies/Inception (2010)/Inception.2010.1080p.mkv"),
+            "hello-castle-1080p",
+            CastleTvSource.decrypt("XP4abirPGczy5P0SITVv+4mF5GM4XmyP1UXyVmi8ouA=", "ZkpBVG0qa2dmSg=="),
         )
-        // Existing escapes survive (JS encodeURI parity); raw % never doubles.
-        assertEquals(
-            "https://a.111477.xyz/movies/Film%20X%2FY.mkv",
-            StreamEngine.dahmerEncodeUri("https://a.111477.xyz/movies/Film%20X%2FY.mkv"),
-        )
+        assertNull(CastleTvSource.decrypt("!!!not-base64!!!", "ZkpBVG0qa2dmSg=="))
+    }
+
+    @Test
+    fun castlePickTrack_hindiFirst() {
+        fun t(id: String, name: String, v: Boolean) = CastleTvSource.Track(id, name, v)
+        val tracks = listOf(t("1", "English", true), t("2", "Hindi", true), t("3", "Tamil", false))
+        assertEquals("2", CastleTvSource.pickTrack(tracks)?.languageId)
+        assertEquals("1", CastleTvSource.pickTrack(listOf(t("1", "English", true)))?.languageId)
+        assertNull(CastleTvSource.pickTrack(emptyList()))
+    }
+
+    @Test
+    fun castleQualityOf_labels() {
+        assertEquals("1080p", CastleTvSource.qualityOf("FHD 1080p", 3))
+        assertEquals("4K", CastleTvSource.qualityOf("UHD", 4))
+        assertEquals("720p", CastleTvSource.qualityOf(null, 2))
+        assertEquals("", CastleTvSource.qualityOf(null, 0))
+    }
+
+    @Test
+    fun releaseLanguageOf_tags() {
+        assertEquals("Hindi", StreamEngine.releaseLanguageOf("Jawan 2023 Hindi WEB-DL"))
+        assertEquals("Tamil", StreamEngine.releaseLanguageOf("Film TAMIL HDRip"))
+        assertEquals("Telugu", StreamEngine.releaseLanguageOf("Film TELUGU"))
+        assertEquals("Hindi", StreamEngine.releaseLanguageOf("Film Dual Audio Hindi-English"))
+        assertEquals("Multi", StreamEngine.releaseLanguageOf("Show S01 DUAL"))
+        assertEquals("", StreamEngine.releaseLanguageOf("Inception 2010 BluRay"))
+    }
+
+    @Test
+    fun releaseHeightOf_ladder() {
+        assertEquals(2160, StreamEngine.releaseHeightOf("Film 2160p"))
+        assertEquals(2160, StreamEngine.releaseHeightOf("Film 4K"))
+        assertEquals(1080, StreamEngine.releaseHeightOf("1080p"))
+        assertEquals(720, StreamEngine.releaseHeightOf("720p"))
+        assertEquals(0, StreamEngine.releaseHeightOf("CAMRip"))
+    }
+
+    @Test
+    fun hubParseCards_cards() {
+        val html = "<div class=\"card-grid\">" +
+            "<a href=\"/inception-movie-509/\" class=\"movie-card\" aria-label=\"Inception details\">" +
+            "<a href=\"https://other.example/x\" class=\"movie-card\" aria-label=\"Other details\">"
+        val cards = StreamEngine.hubParseCards(html, "https://4khdhub.one")
+        assertEquals(2, cards.size)
+        assertEquals("https://4khdhub.one/inception-movie-509/", cards[0].first)
+        assertEquals("Inception", cards[0].second)
+        assertTrue(StreamEngine.hubParseCards("<html>empty</html>", "https://4khdhub.one").isEmpty())
+    }
+
+    @Test
+    fun hubPostYearOk_gate() {
+        val html = "<html><head><meta property=\"og:title\" content=\"Jawan 2023 Hindi\" /></head></html>"
+        assertTrue(StreamEngine.hubPostYearOk(html, "2023"))
+        assertTrue(!StreamEngine.hubPostYearOk(html, "2024"))
+        assertTrue(StreamEngine.hubPostYearOk(html, null))
+    }
+
+    @Test
+    fun hubDriveLinks_extracts() {
+        val html = "<a href=\"https://hubcloud.ist/drive/abc123\">HubCloud</a>" +
+            "<a href=\"https://hubcloud.ist/drive/abc123\">dup</a>" +
+            "<a href=\"https://example.com/x\">other</a>"
+        assertEquals(listOf("https://hubcloud.ist/drive/abc123"), StreamEngine.hubDriveLinks(html))
+    }
+
+    @Test
+    fun hubFileButtons_pixeldrainConvert() {
+        val html = "<div class=\"card-header\">Jawan 2023 720p</div><div class=\"card-body\">" +
+            "<h2><a class=\"btn\" href=\"https://pixeldrain.dev/u/AbC123\">Download File</a></h2></div>"
+        val out = StreamEngine.hubFileButtons(html)
+        assertEquals(1, out.size)
+        assertEquals("https://pixeldrain.dev/api/file/AbC123", out[0].first)
+        assertEquals("720p", out[0].second)
     }
 
     @Test

@@ -37,6 +37,15 @@ class TmdbKeyFallbackGuards {
     }
 
     @Test
+    fun rate_limit_retries_same_key_once() {
+        assertEquals(1500L, TmdbService.rateLimitRetryDelayMs(429, 0))
+        assertNull(TmdbService.rateLimitRetryDelayMs(429, 1))
+        assertNull(TmdbService.rateLimitRetryDelayMs(500, 0))
+        assertNull(TmdbService.rateLimitRetryDelayMs(200, 0))
+        assertNull(TmdbService.rateLimitRetryDelayMs(404, 0))
+    }
+
+    @Test
     fun key_trip_200_bodies_fallback_via_shouldTryNextKey() {
         assertTrue(TmdbService.shouldTryNextKey(200, TmdbService.tmdbKeyTripCode("""{"success":false,"status_code":7}""")))
         assertTrue(TmdbService.shouldTryNextKey(200, TmdbService.tmdbKeyTripCode("""{"success":false,"status_code":30}""")))

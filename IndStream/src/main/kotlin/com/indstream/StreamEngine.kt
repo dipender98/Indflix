@@ -428,12 +428,7 @@ object StreamEngine {
             failServer(spec, "primesrc returned no streams")
             return emptyList()
         }
-        if (spec.id == "videasy-hindi") {
-            val result = resolveVideasyHindi(spec, tmdbId, imdbId, type, season, episode)
-            if (result.isNotEmpty()) { okServer(spec, start, "videasy-hindi", result.size); return result }
-            failServer(spec, "videasy-hindi returned no streams")
-            return emptyList()
-        }
+
         if (spec.id == "nhd") {
             val result = resolveNhd(spec, tmdbId, imdbId, type, season, episode)
             if (result.isNotEmpty()) { okServer(spec, start, "nhd", result.size); return result }
@@ -530,10 +525,22 @@ object StreamEngine {
             failServer(spec, "zxcstreams returned no streams")
             return emptyList()
         }
-        if (spec.id == "dahmermovies") {
-            val result = resolveDahmer(spec, tmdbId, type, season, episode)
-            if (result.isNotEmpty()) { okServer(spec, start, "dahmermovies index", result.size); return result }
-            failServer(spec, "dahmermovies returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
+        if (spec.id == "castletv") {
+            val result = resolveCastleTv(spec, tmdbId, type, season, episode)
+            if (result.isNotEmpty()) { okServer(spec, start, "castletv api", result.size); return result }
+            failServer(spec, "castletv returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
+            return emptyList()
+        }
+        if (spec.id == "streamflix") {
+            val result = resolveStreamFlix(spec, tmdbId, type, season, episode)
+            if (result.isNotEmpty()) { okServer(spec, start, "streamflix direct", result.size); return result }
+            failServer(spec, "streamflix returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
+            return emptyList()
+        }
+        if (spec.id == "4khdhub") {
+            val result = resolveHub4k(spec, tmdbId, type, season, episode)
+            if (result.isNotEmpty()) { okServer(spec, start, "hub file links", result.size); return result }
+            failServer(spec, "hub returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
             return emptyList()
         }
 
@@ -965,67 +972,7 @@ object StreamEngine {
         }
         return out
     }
-    /**
-     * Videasy "Fade" (Hindi) resolver: the decrypted API returns per-audio
-     * muxed streams - the "Hindi" quality entry IS a Hindi-dubbed HLS master.
-     * Hindi + Multi/Dual sources are emitted (this server exists for
-     * Hindi; English comes from the rest of the farm). HLS masters are
-     * quality-labelled 360→1080p; a master URL without a known height gets
-     * qualityHint 0 (adaptive).
-     */
-    private suspend fun resolveVideasyHindi(
-        spec: ServerSpec,
-        tmdbId: Int,
-        imdbId: String?,
-        type: String,
-        season: Int,
-        episode: Int,
-    ): List<RawStream> {
-        // Title/year help the upstream match; fetch them best-effort.
-        val meta = runCatching {
-            TmdbService.fetchMeta(tmdbId, type)
-        }.getOrNull()
-        val title = meta?.name
-        val year = meta?.year?.take(4)?.toIntOrNull()
 
-        val fetched = VideasySource.fetchAllSources(
-            tmdbId = tmdbId, imdbId = imdbId, title = title, year = year,
-            mediaType = type, season = season, episode = episode,
-        )
-        // API-level failure (timeout/5xx/decrypt): a genuine outage - let the
-        // breaker do its job. The upstream flaps in SHORT windows (all-empty
-        // then all-populated within 2 minutes), so a hard trip here was
-        // locking the server out long after recovery.
-        if (!fetched.httpOk) return emptyList()
-        // API answered but nothing for this title (or mid-flap): CLEAN miss �
-        // no breaker trip, the next tap retries immediately instead of the
-        // server vanishing from the farm (user report: "appears in some
-        // movies/series, not in others").
-        if (fetched.sources.isEmpty()) {
-            throw CleanMissException("upstream answered, no entry (flap or library miss)")
-        }
-
-        val out = fetched.sources
-            .filter { VideasySource.hindiRank(it.quality) > 0 }
-            .map { s ->
-                val isHls = s.url.contains(".m3u8", ignoreCase = true)
-                RawStream(
-                    serverId = spec.id,
-                    serverName = if (s.route == "hdmovie") spec.name
-                        else "${spec.name} ${s.route.replaceFirstChar { it.uppercase() }}".trim(),
-                    url = s.url, isM3u8 = isHls,
-                    referer = null, qualityHint = 0, // adaptive master; heights come.
-                    audioPriority = 4, audioLabel = if (VideasySource.hindiRank(s.quality) == 2) "Hindi" else "Multi",
-                    extraHeaders = VideasySource.apiHeaders(),
-                )
-            }
-        // The host exists only for Hindi: an English-only title is a CLEAN miss (no breaker trip), otherwise three straight.
-// taps on English-only content.
-        if (out.isEmpty()) {
-            throw CleanMissException("sources present but no Hindi/Multi label: ${fetched.sources.map { it.quality }}")
-        }
-        return out
-    }
 
     /** Fetch (and cache) the MovieBox bearer token. The token lives for hours (MOVIEBOX_TOKEN_TTL_MS). */
     private suspend fun fetchMovieBoxBearer(forceRefresh: Boolean): String? {
@@ -2034,120 +1981,163 @@ object StreamEngine {
         }
     }
 
-    /**
-     * DahmerMovies resolver: title-keyed file index,
-     * direct files through the worker proxy. 4K first, dubs labelled.
-     */
-    private suspend fun resolveDahmer(
+
+
+    /** CastleTV: title search, Hindi-first audio track, single 1080p resolve. */
+    private suspend fun resolveCastleTv(
         spec: ServerSpec,
-        tmdbId: Int?,
+        tmdbId: Int,
         type: String,
         season: Int,
         episode: Int,
     ): List<RawStream> {
-        val meta = runCatching { TmdbService.fetchMeta(tmdbId ?: 0, type) }.getOrNull()
-        val title = meta?.name?.replace(":", "")?.takeIf { it.isNotBlank() }
-            ?: throw CleanMissException("no title for tmdb=$tmdbId (title-keyed index)")
+        val meta = runCatching { TmdbService.fetchMeta(tmdbId, type) }.getOrNull()
+        val title = meta?.name?.takeIf { it.isNotBlank() }
+            ?: throw CleanMissException("no title for tmdb=$tmdbId")
         val year = meta?.year?.take(4)
-        val api = "https://a.111477.xyz"
-        fun enc(s: String) = java.net.URLEncoder.encode(s, "UTF-8").replace("+", "%20")
-        val dirs = if (type == "movie") {
-            listOfNotNull(year?.let { "$api/movies/${enc("$title ($it)")}/" }, "$api/movies/${enc(title)}/")
-        } else {
-            if (season <= 0 || episode <= 0) throw CleanMissException("tv request without season/episode")
-            val ss = "%02d".format(season)
-            listOf("$api/tvs/${enc(title)}/Season%20$ss/", "$api/tvs/${enc(title)}/Season%20$season/")
+        val sec = CastleTvSource.securityKey() ?: throw CleanMissException("no security key")
+        val rows = CastleTvSource.search(sec, if (year != null) "$title $year" else title)
+        if (rows.isEmpty()) throw CleanMissException("no title match")
+        val best = rows.maxByOrNull { TitleMatch.titleDistance(title, it.second) }
+            ?: throw CleanMissException("no title match")
+        if (!TitleMatch.isRelevant(title, best.second, year?.toIntOrNull(), null)) {
+            throw CleanMissException("match too weak: ${best.second}")
         }
-        var rows: List<Triple<String, String, String>> = emptyList()
-        var dirUrl = ""
-        for (d in dirs) {
-            val html = withTimeoutOrNull(8_000L) {
-                runCatching { app.get(d, timeout = 8, headers = okHeaders("$api/")).text }.getOrNull()
-            } ?: continue
-            val parsed = dahmerParseRows(html)
-            if (parsed.isNotEmpty()) { rows = parsed; dirUrl = d; break }
-        }
-        if (rows.isEmpty()) throw CleanMissException("no index entries")
+        var det = CastleTvSource.details(sec, best.first) ?: throw CleanMissException("no details")
+        var activeId = best.first
         if (type != "movie") {
-            val ep = rows.filter { dahmerEpisodeMatch(it.second, season, episode) }
-            if (ep.isNotEmpty()) rows = ep
-        }
-        // Streamable first: giant REMUXes stall the worker proxy, so they only
-        // serve when nothing 12GB-or-under exists (then the 2 smallest).
-        return dahmerPool(rows).sortedByDescending { dahmerResolutionOf(it.second) }.take(6).mapNotNull { (href, file, _) ->
-            val direct = when {
-                href.startsWith("http") -> href
-                href.startsWith("/") -> api + href
-                else -> dirUrl + href
+            if (season <= 0 || episode <= 0) throw CleanMissException("tv without season/episode")
+            val seasons = det.optJSONArray("seasons")
+            if (seasons != null) {
+                for (i in 0 until seasons.length()) {
+                    val s = seasons.optJSONObject(i) ?: continue
+                    if (s.optInt("number", -1) == season) {
+                        val sid = s.opt("movieId")?.takeIf { it != org.json.JSONObject.NULL }?.toString()
+                        if (!sid.isNullOrBlank() && sid != activeId) {
+                            det = CastleTvSource.details(sec, sid) ?: det
+                            activeId = sid
+                        }
+                        break
+                    }
+                }
             }
-            if (file.isBlank()) return@mapNotNull null
-            RawStream(
-                serverId = spec.id, serverName = spec.name,
-                url = "https://p.111477.xyz/bulk?u=" + dahmerEncodeUri(direct),
-                isM3u8 = file.endsWith(".m3u8", true) || direct.contains(".m3u8", true),
-                referer = "$api/", qualityHint = dahmerResolutionOf(file),
-                audioLabel = dahmerLanguageOf(file),
-                extraHeaders = mapOf("Range" to "bytes=0-"),
+        }
+        val eps = det.optJSONArray("episodes") ?: throw CleanMissException("no episodes")
+        val epEntry: org.json.JSONObject? = if (type == "movie") eps.optJSONObject(0)
+        else (0 until eps.length()).mapNotNull { eps.optJSONObject(it) }
+            .firstOrNull { it.optInt("number", -1) == episode }
+        val epId = epEntry?.opt("id")?.takeIf { it != org.json.JSONObject.NULL }?.toString()
+            ?: throw CleanMissException("no episode id")
+        val tracksJson = epEntry.optJSONArray("tracks")
+        val tracks = (0 until (tracksJson?.length() ?: 0)).mapNotNull { i ->
+            val t = tracksJson!!.optJSONObject(i) ?: return@mapNotNull null
+            CastleTvSource.Track(
+                t.optString("languageId"),
+                t.optString("languageName").ifBlank { t.optString("abbreviate") },
+                t.optBoolean("existIndividualVideo"),
             )
         }
-    }
-
-    /** Max pick size: bigger files stall the worker proxy past watchability. */
-    private const val DAHMER_SIZE_CAP_MB = 12 * 1024L
-
-    /** Rows that fit the size cap, else the 2 smallest. Pure. */
-    internal fun dahmerPool(rows: List<Triple<String, String, String>>): List<Triple<String, String, String>> {
-        val small = rows.filter { (dahmerSizeMb(it.third) ?: 0) <= DAHMER_SIZE_CAP_MB }
-        if (small.isNotEmpty()) return small
-        return rows.sortedBy { dahmerSizeMb(it.third) ?: Long.MAX_VALUE }.take(2)
-    }
-
-    /** "35.3 GB"/"970.6 MB"/"450MB" to MB, or null when absent. Pure. */
-    internal fun dahmerSizeMb(size: String): Long? {
-        val m = Regex("""(\d+(?:\.\d+)?)\s?([KMGT])B""", RegexOption.IGNORE_CASE).find(size.trim()) ?: return null
-        val n = m.groupValues[1].toDoubleOrNull() ?: return null
-        val mult = when (m.groupValues[2].uppercase()) {
-            "K" -> 1.0 / 1024; "M" -> 1.0; "G" -> 1024.0; "T" -> 1024.0 * 1024; else -> return null
+        val pick = CastleTvSource.pickTrack(tracks)
+        val vids = mutableListOf<CastleTvSource.Video>()
+        if (pick != null) {
+            CastleTvSource.video(sec, activeId, epId, pick.languageId.takeIf { it.isNotBlank() }, 3)
+                ?.let { vids += CastleTvSource.videosOf(it, 3) }
         }
-        return (n * mult).toLong()
+        if (vids.isEmpty()) {
+            CastleTvSource.video(sec, activeId, epId, null, 3)
+                ?.let { vids += CastleTvSource.videosOf(it, 3) }
+        }
+        if (vids.isEmpty()) throw CleanMissException("no video urls")
+        val hindi = pick?.languageName?.contains("hindi", ignoreCase = true) == true
+        val langLabel = if (hindi) "Hindi" else pick?.languageName.orEmpty()
+        return vids.take(4).map {
+            RawStream(spec.id, "${spec.name} $langLabel".trim(), it.url,
+                it.url.contains(".m3u8", ignoreCase = true), null, releaseHeightOf(it.quality),
+                audioPriority = if (hindi) 4 else 1, audioLabel = langLabel)
+        }
     }
 
-    /** Directory rows as (href, text, size). Pure. */
-    internal fun dahmerParseRows(html: String): List<Triple<String, String, String>> {
-        val rowRe = Regex("""<tr[^>]*>(.*?)</tr>""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
-        val linkRe = Regex("""<a[^>]*href=["']([^"']*)["'][^>]*>([^<]*)</a>""", RegexOption.IGNORE_CASE)
-        val extRe = Regex("""\.(mkv|mp4|avi|webm|m3u8)$""", RegexOption.IGNORE_CASE)
-        val sizeRe = Regex("""<td[^>]*>(\d+(?:\.\d+)?\s?[KMGT]B)</td>""", RegexOption.IGNORE_CASE)
-        val out = mutableListOf<Triple<String, String, String>>()
-        for (m in rowRe.findAll(html)) {
-            val row = m.groupValues[1]
-            val link = linkRe.find(row) ?: continue
-            val href = link.groupValues[1]
-            val file = link.groupValues[2].trim()
-            if (file.isBlank() || href == "../") continue
-            if (!extRe.containsMatchIn(file)) continue
-            val size = sizeRe.find(row)?.groupValues?.get(1)?.trim().orEmpty()
-            out += Triple(href, file, size)
+    @Volatile private var streamflixData: String? = null
+    @Volatile private var streamflixDataAt: Long = 0L
+    private const val STREAMFLIX_TTL_MS = 30 * 60 * 1000L
+    private const val STREAMFLIX_BASE = "https://cf.streamflixserver.site/"
+
+    /** StreamFlix: TMDB-keyed catalog match, direct file links. */
+    private suspend fun resolveStreamFlix(
+        spec: ServerSpec,
+        tmdbId: Int,
+        type: String,
+        season: Int,
+        episode: Int,
+    ): List<RawStream> {
+        val now = System.currentTimeMillis()
+        var data = if (now - streamflixDataAt < STREAMFLIX_TTL_MS) streamflixData else null
+        if (data == null) {
+            data = withTimeoutOrNull(20_000L) {
+                runCatching {
+                    app.get("https://api.streamflix.app/data.json", timeout = 20, headers = okHeaders(null)).text
+                }.getOrNull()
+            }
+            if (data != null) { streamflixData = data; streamflixDataAt = now }
         }
-        return out
+        val items = data?.let { runCatching { org.json.JSONObject(it).optJSONArray("data") }.getOrNull() }
+            ?: throw CleanMissException("no catalog")
+        var item: org.json.JSONObject? = null
+        for (i in 0 until items.length()) {
+            val it = items.optJSONObject(i) ?: continue
+            if (it.opt("tmdb")?.toString() == tmdbId.toString()) { item = it; break }
+        }
+        val found = item ?: throw CleanMissException("title not in catalog")
+        var base = STREAMFLIX_BASE
+        withTimeoutOrNull(8_000L) {
+            runCatching {
+                app.get("https://api.streamflix.app/config/config-streamflixapp.json",
+                    timeout = 8, headers = okHeaders(null)).text
+            }.getOrNull()?.let { org.json.JSONObject(it).optJSONArray("download")?.optString(0) }
+                ?.takeIf { s -> s.isNotBlank() }?.let { base = it }
+        }
+        val links = mutableListOf<String>()
+        if (type == "movie") {
+            found.optString("movielink").takeIf { it.isNotBlank() }?.let { links += it }
+        } else {
+            if (season <= 0 || episode <= 0) throw CleanMissException("tv without season/episode")
+            val key = found.optString("moviekey").takeIf { it.isNotBlank() }
+                ?: throw CleanMissException("no series key")
+            val epsText = withTimeoutOrNull(10_000L) {
+                runCatching {
+                    app.get("https://chilflix-410be-default-rtdb.asia-southeast1.firebasedatabase.app" +
+                        "/Data/$key/seasons/$season/episodes.json", timeout = 10, headers = okHeaders(null)).text
+                }.getOrNull()
+            } ?: throw CleanMissException("no episode index")
+            val eps = runCatching { org.json.JSONObject(epsText) }.getOrNull()
+                ?: throw CleanMissException("no episode index")
+            val ep = eps.optJSONObject((episode - 1).toString()) ?: eps.optJSONObject(episode.toString())
+            ep?.optString("link")?.takeIf { it.isNotBlank() }?.let { links += it }
+        }
+        if (links.isEmpty()) throw CleanMissException("no file links")
+        return links.take(3).map { link ->
+            val url = if (link.startsWith("http")) link else base.trimEnd('/') + "/" + link.trimStart('/')
+            RawStream(spec.id, spec.name, url, url.contains(".m3u8", ignoreCase = true),
+                null, releaseHeightOf(link))
+        }
     }
 
     /** Release-tag language to canonical label. Pure. */
-    internal fun dahmerLanguageOf(fileName: String): String {
-        val u = fileName.uppercase()
+    internal fun releaseLanguageOf(text: String?): String {
+        val u = (text ?: "").uppercase()
         return when {
             Regex("""\bHINDI\b""").containsMatchIn(u) -> "Hindi"
             Regex("""\bTAMIL\b""").containsMatchIn(u) -> "Tamil"
             Regex("""\bTELUGU\b""").containsMatchIn(u) -> "Telugu"
-            Regex("""\b(MULTI|DUAL|DUBBED|MULTI-AUDIO)\b""").containsMatchIn(u) -> "Multi"
+            Regex("""\b(MULTI|DUAL|DUBBED)\b""").containsMatchIn(u) -> "Multi"
             Regex("""\b(ENGLISH|ENG)\b""").containsMatchIn(u) -> "English"
             else -> ""
         }
     }
 
     /** Release-tag resolution to ladder height. Pure. */
-    internal fun dahmerResolutionOf(fileName: String): Int {
-        val u = fileName.uppercase()
+    internal fun releaseHeightOf(text: String?): Int {
+        val u = (text ?: "").uppercase()
         return when {
             u.contains("2160P") || Regex("""\b4K\b""").containsMatchIn(u) -> 2160
             u.contains("1080P") -> 1080
@@ -2157,25 +2147,121 @@ object StreamEngine {
         }
     }
 
-    /** S01E02 / E02 / Episode 2 matcher. Pure. */
-    internal fun dahmerEpisodeMatch(fileName: String, season: Int, episode: Int): Boolean {
-        val ss = "%02d".format(season)
-        val ee = "%02d".format(episode)
-        val u = fileName.uppercase()
-        if (u.contains("S${ss}E$ee") || u.contains("S${season}E${episode}")) return true
-        if (Regex("""\bE$ee\b""").containsMatchIn(u)) return true
-        return Regex("""EPISODE[\s._-]*0*$episode\b""", RegexOption.IGNORE_CASE).containsMatchIn(fileName)
+    /** Hub-family search cards as (url, title). Pure. */
+    internal fun hubParseCards(html: String, base: String): List<Pair<String, String>> {
+        val re = Regex("""<a\s+href="([^"]+)"\s+class="movie-card"\s+aria-label="([^"]+)"""", RegexOption.IGNORE_CASE)
+        return re.findAll(html).mapNotNull { m ->
+            val href = m.groupValues[1]
+            val title = m.groupValues[2].removeSuffix(" details").trim()
+            if (href.isBlank() || title.isBlank()) return@mapNotNull null
+            val url = when {
+                href.startsWith("http") -> href
+                href.startsWith("/") -> base.trimEnd('/') + href
+                else -> base.trimEnd('/') + "/" + href
+            }
+            url to title
+        }.toList()
     }
 
-    /** encodeURI equivalent: marks + existing escapes pass through. Pure. */
-    internal fun dahmerEncodeUri(s: String): String {
-        val marks = ";,/?:@&=+$-_.!~*()#%"
-        return buildString {
-            for (ch in s) {
-                if (ch.isLetterOrDigit() || ch in marks || ch == 39.toChar()) append(ch)
-                else append(ch.toString().toByteArray(Charsets.UTF_8).joinToString("") { "%%%02X".format(it.toInt() and 0xFF) })
+    /** Hub post year check via og:title/<title>. Pure. */
+    internal fun hubPostYearOk(html: String, year: String?): Boolean {
+        if (year.isNullOrBlank()) return true
+        val title = Regex("""<meta\s+property="og:title"\s+content="([^"]+)"""", RegexOption.IGNORE_CASE)
+            .find(html)?.groupValues?.get(1)
+            ?: Regex("""<title>([^<]+)</title>""", RegexOption.IGNORE_CASE).find(html)?.groupValues?.get(1)
+            ?: return true
+        return title.contains(year)
+    }
+
+    /** Hub post file-host links (hubcloud drive pages). Pure. */
+    internal fun hubDriveLinks(html: String): List<String> {
+        return Regex("""href="(https?://hubcloud\.ist/drive/[^"]+)"""", RegexOption.IGNORE_CASE)
+            .findAll(html).map { it.groupValues[1] }.distinct().toList()
+    }
+
+    /** Hubcloud download-page buttons as (url, quality). Pure. */
+    internal fun hubFileButtons(html: String): List<Pair<String, String>> {
+        val header = Regex("""card-header[^>]*>(.*?)</""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+            .find(html)?.groupValues?.get(1).orEmpty()
+        val headQ = releaseHeightOf(header)
+        val btnRe = Regex("""<a[^>]+class="[^"]*\bbtn\b[^"]*"[^>]+href="([^"]+)"[^>]*>([^<]{0,60})""",
+            setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+        val altRe = Regex("""<a[^>]+href="([^"]+)"[^>]+class="[^"]*\bbtn\b[^"]*"[^>]*>([^<]{0,60})""",
+            setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+        val out = mutableListOf<Pair<String, String>>()
+        for (m in btnRe.findAll(html) + altRe.findAll(html)) {
+            var url = m.groupValues[1]
+            if (!url.startsWith("http")) continue
+            if (url.contains("facebook.") || url.contains("twitter.") || url.contains("t.me")) continue
+            url = Regex("""pixeldrain\.[a-z]+/u/([a-zA-Z0-9]+)""").find(url)?.let {
+                url.replace("/u/${it.groupValues[1]}", "/api/file/${it.groupValues[1]}")
+            } ?: url
+            val q = releaseHeightOf(m.groupValues[2]).takeIf { it > 0 } ?: headQ
+            out += url to (if (q > 0) "${q}p" else "")
+        }
+        return out.distinctBy { it.first }
+    }
+
+    /** Single hubcloud drive page to file links (token used fresh, inline). */
+    private suspend fun hubDriveFiles(driveUrl: String, referer: String): List<Pair<String, String>> {
+        val drive = withTimeoutOrNull(8_000L) {
+            runCatching { app.get(driveUrl, timeout = 8, headers = okHeaders(referer)).text }.getOrNull()
+        } ?: return emptyList()
+        val tokenHref = Regex("""hubcloud\.php\?[^"' ]+""").find(drive)?.value ?: return emptyList()
+        val tokenUrl = if (tokenHref.startsWith("http")) tokenHref else "https://hubcloud.ist/$tokenHref"
+        val page = withTimeoutOrNull(10_000L) {
+            runCatching { app.get(tokenUrl, timeout = 10, headers = okHeaders(driveUrl)).text }.getOrNull()
+        } ?: return emptyList()
+        return hubFileButtons(page).take(4)
+    }
+
+    /** Hub-family (Hindi-dub file index): search, year-verified post, file-host links. */
+    private suspend fun resolveHub4k(
+        spec: ServerSpec,
+        tmdbId: Int,
+        type: String,
+        season: Int,
+        episode: Int,
+    ): List<RawStream> {
+        val meta = runCatching { TmdbService.fetchMeta(tmdbId, type) }.getOrNull()
+        val title = meta?.name?.takeIf { it.isNotBlank() }
+            ?: throw CleanMissException("no title for tmdb=$tmdbId")
+        val year = meta?.year?.take(4)
+        val base = "https://4khdhub.one"
+        fun enc(s: String) = java.net.URLEncoder.encode(s, "UTF-8")
+        val searchHtml = withTimeoutOrNull(8_000L) {
+            runCatching { app.get("$base/?s=${enc(title)}", timeout = 8, headers = okHeaders(base)).text }.getOrNull()
+        } ?: throw CleanMissException("no search answer")
+        val cards = hubParseCards(searchHtml, base)
+        if (cards.isEmpty()) throw CleanMissException("no search hits")
+        val ranked = cards.map { it to TitleMatch.titleDistance(title, it.second) }
+            .sortedByDescending { it.second }.take(3)
+        if (ranked.isEmpty() || ranked[0].second < 0.6) throw CleanMissException("no match")
+        for ((card, _) in ranked.take(2)) {
+            val post = withTimeoutOrNull(8_000L) {
+                runCatching { app.get(card.first, timeout = 8, headers = okHeaders(base)).text }.getOrNull()
+            } ?: continue
+            if (!hubPostYearOk(post, year)) continue
+            val lang = releaseLanguageOf(
+                Regex("""<meta\s+property="og:title"\s+content="([^"]+)"""", RegexOption.IGNORE_CASE)
+                    .find(post)?.groupValues?.get(1).orEmpty() + " " + card.second,
+            )
+            val drives = hubDriveLinks(post).take(3)
+            for (d in drives) {
+                val files = hubDriveFiles(d, card.first)
+                if (files.isNotEmpty()) {
+                    val hindi = lang == "Hindi"
+                    return files.map { (url, q) ->
+                        RawStream(spec.id, "${spec.name} $q".trim(),
+                            url, url.contains(".m3u8", ignoreCase = true),
+                            "https://hubcloud.ist/", releaseHeightOf(q),
+                            audioPriority = if (hindi) 4 else if (lang == "Multi") 2 else 1,
+                            audioLabel = lang)
+                    }
+                }
             }
         }
+        throw CleanMissException("no file links")
     }
 
     private suspend fun resolveVidrock(
@@ -2186,12 +2272,12 @@ object StreamEngine {
         episode: Int,
     ): List<RawStream> {
         val id = tmdbId ?: return emptyList()
-        val apiUrl = if (type == "movie") "https://vidrock.ru/api/movie/$id/"
-        else "https://vidrock.ru/api/tv/$id/$season/$episode/"
+        val apiUrl = if (type == "movie") "https://vidrock.to/api/movie/$id/"
+        else "https://vidrock.to/api/tv/$id/$season/$episode/"
         val headers = mapOf(
             "User-Agent" to HttpKit.userAgent,
-            "Origin" to "https://vidrock.ru",
-            "Referer" to "https://vidrock.ru/",
+            "Origin" to "https://vidrock.to",
+            "Referer" to "https://vidrock.to/",
         )
         Log.d("VidRock", "GET $apiUrl")
 
@@ -2219,7 +2305,7 @@ object StreamEngine {
                 serverId = spec.id, serverName = "${spec.name} $serverName".trim(),
                 url = decrypted,
                 isM3u8 = decrypted.contains(".m3u8", true) || sd.optString("type") == "hls",
-                referer = "https://vidrock.ru/",
+                referer = "https://vidrock.to/",
                 qualityHint = 0,
                 audioPriority = if (isHindi) 4 else 1,
                 audioLabel = lang.ifBlank { "" },

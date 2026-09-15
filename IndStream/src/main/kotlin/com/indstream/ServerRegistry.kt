@@ -52,22 +52,10 @@ object ServerFarm {
         ServerSpec(
             id = "vidrock", name = "VidRock",
             idType = ServerIdType.TMDB,
-            movieUrl = "https://vidrock.ru/api/movie/{id}/",
-            tvUrl = "https://vidrock.ru/api/tv/{id}/{season}/{episode}/",
-            isJsonApi = true, referer = "https://vidrock.ru/",
+            movieUrl = "https://vidrock.to/api/movie/{id}/",
+            tvUrl = "https://vidrock.to/api/tv/{id}/{season}/{episode}/",
+            isJsonApi = true, referer = "https://vidrock.to/",
             hasSubtitles = false, timeoutSec = 12,
-        ),
-        // VidEm (2embed. cc's real player, reversed): IMDB-keyed. Embed page carries a signed `Q` object with per-server refs.
-// each ref exchanges at api.
-        ServerSpec(
-            id = "videasy-hindi", name = "Videasy Hindi",
-            idType = ServerIdType.TMDB,
-            movieUrl = "https://api.speedracelight.com/hdmovie/sources-with-title?tmdbId={id}",
-            tvUrl = "https://api.speedracelight.com/hdmovie/sources-with-title?tmdbId={id}",
-            isJsonApi = true, referer = "https://player.videasy.net/",
-            // 4 parallel routes (hdmovie/cdn/lamovie/meine): seed 6s + slowest route 10s.
-            hasSubtitles = false, timeoutSec = 20,
-            declaredLanguages = setOf("Hindi"),
         ),
         // MyFlixer Hindi (hindi. myflixerapi. com): IMDB-keyed with the id in the path (/embed/tt. . . ). Whole host is Hindi.
 // audio.
@@ -166,16 +154,7 @@ object ServerFarm {
             // Discovery + token + 4 servers + master-measure pass.
             hasSubtitles = false, timeoutSec = 30,
         ),
-        // DahmerMovies (title-keyed file index + worker proxy).
-        // Directory listing per title carries 4K REMUX + Hindi/Tamil/Telugu dubs.
-        ServerSpec(
-            id = "dahmermovies", name = "DahmerMovies",
-            idType = ServerIdType.TMDB,
-            movieUrl = "https://a.111477.xyz/movies/",
-            tvUrl = "https://a.111477.xyz/tvs/",
-            referer = "https://a.111477.xyz/",
-            hasSubtitles = false, timeoutSec = 25,
-        ),
+
         // VidAPI (vaplayer.ru embed): TMDB-keyed embed page.
         // Generic pipeline (unwrap/harvest/extractor registry), no custom crypto.
         ServerSpec(
@@ -195,6 +174,100 @@ object ServerFarm {
             tvUrl = "https://2embed.cc/embedtv/{id}&s={season}&e={episode}",
             referer = "https://2embed.cc/",
             hasSubtitles = true, timeoutSec = 15,
+        ),
+        // Fast TMDB-keyed embed batch: direct iframe chains, no crypto.
+        // All eight run through the generic pipeline (fetch, unwrap, harvest, extractor registry).
+        ServerSpec(
+            id = "vidfast", name = "VidFast",
+            idType = ServerIdType.TMDB,
+            movieUrl = "https://vidfast.pro/movie/{id}?autoPlay=true",
+            tvUrl = "https://vidfast.pro/tv/{id}/{season}/{episode}?autoPlay=true",
+            referer = "https://vidfast.pro/",
+            hasSubtitles = true, timeoutSec = 15,
+        ),
+        ServerSpec(
+            id = "autoembed", name = "AutoEmbed",
+            idType = ServerIdType.TMDB,
+            movieUrl = "https://autoembed.co/movie/tmdb/{id}",
+            tvUrl = "https://autoembed.co/tv/tmdb/{id}-{season}-{episode}",
+            referer = "https://autoembed.co/",
+            hasSubtitles = true, timeoutSec = 15,
+        ),
+        ServerSpec(
+            id = "vidphantom", name = "VidPhantom",
+            idType = ServerIdType.TMDB,
+            movieUrl = "https://vidphantom.com/movie/{id}",
+            tvUrl = "https://vidphantom.com/tv/{id}/{season}/{episode}",
+            referer = "https://vidphantom.com/",
+            hasSubtitles = true, timeoutSec = 15,
+        ),
+        ServerSpec(
+            id = "vsembed", name = "VsEmbed",
+            idType = ServerIdType.TMDB,
+            movieUrl = "https://vsembed.su/embed/movie/{id}",
+            tvUrl = "https://vsembed.su/embed/tv/{id}/{season}/{episode}",
+            referer = "https://vsembed.su/",
+            hasSubtitles = false, timeoutSec = 15,
+        ),
+        ServerSpec(
+            id = "twoembed-skin", name = "2EmbedSkin",
+            idType = ServerIdType.TMDB,
+            movieUrl = "https://www.2embed.skin/embed/{id}",
+            tvUrl = "https://www.2embed.skin/embedtv/{id}&s={season}&e={episode}",
+            referer = "https://www.2embed.skin/",
+            hasSubtitles = true, timeoutSec = 15,
+        ),
+        ServerSpec(
+            id = "vidsrc-to", name = "VidsrcTo",
+            idType = ServerIdType.TMDB,
+            movieUrl = "https://vidsrc.to/embed/movie/{id}",
+            tvUrl = "https://vidsrc.to/embed/tv/{id}/{season}/{episode}",
+            referer = "https://vidsrc.to/",
+            hasSubtitles = false, timeoutSec = 15,
+        ),
+        ServerSpec(
+            id = "vidsrcme", name = "VidsrcMe",
+            idType = ServerIdType.TMDB,
+            movieUrl = "https://vidsrcme.su/embed/movie/{id}",
+            tvUrl = "https://vidsrcme.su/embed/tv/{id}/{season}/{episode}",
+            referer = "https://vidsrcme.su/",
+            hasSubtitles = false, timeoutSec = 15,
+        ),
+        ServerSpec(
+            id = "nontongo", name = "Nontongo",
+            idType = ServerIdType.TMDB,
+            movieUrl = "https://www.nontongo.win/embed/movie/{id}",
+            tvUrl = "https://www.nontongo.win/embed/tv/{id}/{season}/{episode}",
+            referer = "https://www.nontongo.win/",
+            hasSubtitles = true, timeoutSec = 15,
+        ),
+        // Hindi/Indian-language expansion: per-language audio tracks (TMDB title-keyed API).
+        ServerSpec(
+            id = "castletv", name = "CastleTV",
+            idType = ServerIdType.TMDB,
+            movieUrl = "https://api.hlowb.com/",
+            tvUrl = "https://api.hlowb.com/",
+            referer = "https://api.hlowb.com/",
+            hasSubtitles = false, timeoutSec = 30,
+            declaredLanguages = setOf("Hindi", "Tamil", "Telugu"),
+        ),
+        // TMDB-keyed catalog match with direct file links.
+        ServerSpec(
+            id = "streamflix", name = "StreamFlix",
+            idType = ServerIdType.TMDB,
+            movieUrl = "https://api.streamflix.app/data.json",
+            tvUrl = "https://api.streamflix.app/data.json",
+            hasSubtitles = false, timeoutSec = 25,
+        ),
+        // Hindi-dub file index (title search, year-verified post, file-host links).
+        ServerSpec(
+            id = "4khdhub", name = "4KHDHub",
+            idType = ServerIdType.TMDB,
+            movieUrl = "https://4khdhub.one/",
+            tvUrl = "https://4khdhub.one/",
+            referer = "https://4khdhub.one/",
+            hasSubtitles = false, timeoutSec = 60,
+            declaredLanguages = setOf("Hindi"),
         ),
     )
 

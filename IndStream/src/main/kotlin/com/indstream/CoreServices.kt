@@ -18,6 +18,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
@@ -323,6 +324,13 @@ object TmdbService {
             httpCode == 429 ||
             httpCode >= 500
 
+    /** Pause before retrying an IP rate limit on the same key. */
+    internal const val TMDB_429_RETRY_DELAY_MS = 1500L
+
+    /** Rate-limit retry: once, same key, short pause. Key rotation can't help an IP-based 429. */
+    internal fun rateLimitRetryDelayMs(httpCode: Int, attempt: Int): Long? =
+        if (httpCode == 429 && attempt == 0) TMDB_429_RETRY_DELAY_MS else null
+
     /** GET a TMDB endpoint, falling back primary→second key on a tripped/rate-limited/broken key.
      * Logs the reason for every rejected key, and never logs the keys themselves.
      * Returns the 2xx body on success, a genuine non-key error body untouched (so callers keep their
@@ -338,27 +346,39 @@ object TmdbService {
         for ((index, pair) in keys.withIndex()) {
             val (label, key) = pair
             val url = "$API$path?api_key=$key&$query"
-            val responded: Pair<Int, String>? = runCatching {
-                val r = app.get(url, timeout = timeout)
-                r.code to r.text
-            }.getOrElse { t ->
-                lastReason = "$label NET-FAIL(${t.javaClass.simpleName}: ${(t.message ?: "").take(120)})"
-                android.util.Log.w(LOG_TAG, "TMDB $op $lastReason${fallingBack(index, keys)}")
-                null
+            var attempt = 0
+            while (true) {
+                val responded: Pair<Int, String>? = runCatching {
+                    val r = app.get(url, timeout = timeout)
+                    r.code to r.text
+                }.getOrElse { t ->
+                    lastReason = "$label NET-FAIL(${t.javaClass.simpleName}: ${(t.message ?: "").take(120)})"
+                    android.util.Log.w(LOG_TAG, "TMDB $op $lastReason${fallingBack(index, keys)}")
+                    null
+                }
+                if (responded == null) break
+                val (code, body) = responded
+                // IP rate limits ignore key rotation: pause once and retry
+                // the same key before burning the next key.
+                val retryMs = rateLimitRetryDelayMs(code, attempt)
+                if (retryMs != null) {
+                    attempt++
+                    android.util.Log.w(LOG_TAG, "TMDB $op $label HTTP 429: retrying same key in ${retryMs}ms")
+                    delay(retryMs)
+                    continue
+                }
+                val trip = if (code in 200..299) tmdbKeyTripCode(body) else null
+                if (shouldTryNextKey(code, trip)) {
+                    lastReason = "$label HTTP $code${trip?.let { " tmdb_status=$it" } ?: ""}: ${safeSnippet(body)}"
+                    android.util.Log.w(LOG_TAG, "TMDB $op API-KEY-LIMITED $lastReason${fallingBack(index, keys)}")
+                    break
+                }
+                if (code in 200..299) return body
+                // Resource-level HTTP error (400/404/…): not a key issue, so don't burn the second key. Surface the
+                // reason and hand the body to the caller, which parses it to an empty result just as before.
+                android.util.Log.w(LOG_TAG, "TMDB $op $label HTTP $code (not a key issue: no fallback): ${safeSnippet(body)}")
+                return body
             }
-            if (responded == null) continue
-            val (code, body) = responded
-            val trip = if (code in 200..299) tmdbKeyTripCode(body) else null
-            if (shouldTryNextKey(code, trip)) {
-                lastReason = "$label HTTP $code${trip?.let { " tmdb_status=$it" } ?: ""}: ${safeSnippet(body)}"
-                android.util.Log.w(LOG_TAG, "TMDB $op API-KEY-LIMITED $lastReason${fallingBack(index, keys)}")
-                continue
-            }
-            if (code in 200..299) return body
-            // Resource-level HTTP error (400/404/…): not a key issue, so don't burn the second key. Surface the
-            // reason and hand the body to the caller, which parses it to an empty result just as before.
-            android.util.Log.w(LOG_TAG, "TMDB $op $label HTTP $code (not a key issue: no fallback): ${safeSnippet(body)}")
-            return body
         }
         android.util.Log.e(LOG_TAG, "TMDB $op ABANDONED after ${keys.size} keys: $lastReason")
         return null

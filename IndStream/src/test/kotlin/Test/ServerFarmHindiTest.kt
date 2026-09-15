@@ -7,8 +7,6 @@ import com.indstream.ServerIdType
 import com.indstream.ServerSpec
 import com.indstream.StreamEngine
 import com.indstream.VidlinkSource
-import com.indstream.VideasySource
-
 /** FILE: ServerFarmHindiTest. kt â€” guards ServerRegistry. kt for the Hindi MyFlixerAPI entry. Verifies the SeedspÃ©c. + URL builders emit the. */
 
 import kotlin.test.Test
@@ -64,9 +62,9 @@ class ServerFarmHindiTest {
         assertEquals("VidRock", s.name)
         assertEquals(ServerIdType.TMDB, s.idType)
         val m = ServerFarm.buildMovieUrl(s, "550")
-        assertEquals("https://vidrock.ru/api/movie/550/", m)
+        assertEquals("https://vidrock.to/api/movie/550/", m)
         val tv = ServerFarm.buildTvUrl(s, "1399", 1, 1)
-        assertEquals("https://vidrock.ru/api/tv/1399/1/1/", tv)
+        assertEquals("https://vidrock.to/api/tv/1399/1/1/", tv)
     }
 
     @Test
@@ -172,7 +170,7 @@ class ServerFarmHindiTest {
     @Test
     fun farm_withinServerCap() {
         // No registry cap: the farm grows freely, ranked fastest-first at emit.
-        assertTrue(ServerFarm.allServers.size >= 16, "farm keeps every live server")
+        assertTrue(ServerFarm.allServers.size >= 25, "farm keeps every live server")
         assertTrue(ServerFarm.allServers.isNotEmpty())
         assertNotNull(ServerFarm.allServers.firstOrNull { it.id == "vidlink" })
     }
@@ -239,9 +237,12 @@ class ServerFarmHindiTest {
     fun bulletTrainServers_present() {
         // The fast direct-API servers (, no embed chain). mp4hydra, vidzee, vixsrc, streamprovider and 8stream are disabled ().
 // kept out of the farm so.
-        val ids = setOf("vidlink", "vaplayer", "vidrock", "videasy-hindi", "moviebox", "vidnest",
+        val ids = setOf("vidlink", "vaplayer", "vidrock", "moviebox", "vidnest",
             "vidup", "vidcore", "allmovieland", "nhd", "netmirror",
-            "vixsrc", "zxcstreams", "dahmermovies", "vidapi", "twoembed")
+            "vixsrc", "zxcstreams", "vidapi", "twoembed",
+            "vidfast", "autoembed", "vidphantom", "vsembed", "twoembed-skin",
+            "vidsrc-to", "vidsrcme", "nontongo",
+            "castletv", "streamflix", "4khdhub")
         for (id in ids) {
             assertNotNull(
                 ServerFarm.allServers.firstOrNull { it.id == id },
@@ -250,7 +251,7 @@ class ServerFarmHindiTest {
         }
         // Disabled/dead servers must NOT be in the live farm (vixsrc re-enabled Sept 2026).
         val disabled = setOf("mp4hydra", "vidzee", "streamprovider", "primesrc",
-            "myflixer-hindi", "videm", "8stream")
+            "myflixer-hindi", "videm", "8stream", "videasy-hindi", "dahmermovies")
         for (id in disabled) {
             assertNull(
                 ServerFarm.allServers.firstOrNull { it.id == id },
@@ -262,6 +263,6 @@ class ServerFarmHindiTest {
     @Test
     fun farm_withinExpandedCap() {
         // Uncapped farm: size only grows, never trimmed to fit.
-        assertTrue(ServerFarm.allServers.size >= 16, "farm keeps every live server")
+        assertTrue(ServerFarm.allServers.size >= 25, "farm keeps every live server")
     }
 }
