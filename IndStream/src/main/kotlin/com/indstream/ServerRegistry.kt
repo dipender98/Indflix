@@ -269,6 +269,31 @@ object ServerFarm {
             hasSubtitles = false, timeoutSec = 60,
             declaredLanguages = setOf("Hindi"),
         ),
+        // Fast global batch: TMDB-keyed embeds, generic pipeline, 15s kill.
+        ServerSpec(
+            id = "vidsrc-pm", name = "VidsrcPm",
+            idType = ServerIdType.TMDB,
+            movieUrl = "https://vidsrc.pm/embed/movie/{id}",
+            tvUrl = "https://vidsrc.pm/embed/tv/{id}/{season}/{episode}",
+            referer = "https://vidsrc.pm/",
+            hasSubtitles = true, timeoutSec = 15,
+        ),
+        ServerSpec(
+            id = "rive", name = "Rive",
+            idType = ServerIdType.TMDB,
+            movieUrl = "https://www.rivestream.app/embed?type=movie&id={id}",
+            tvUrl = "https://www.rivestream.app/embed?type=tv&id={id}&season={season}&episode={episode}",
+            referer = "https://www.rivestream.app/",
+            hasSubtitles = true, timeoutSec = 15,
+        ),
+        ServerSpec(
+            id = "vidzy", name = "Vidzy",
+            idType = ServerIdType.TMDB,
+            movieUrl = "https://vidzy.org/movie/{id}",
+            tvUrl = "https://vidzy.org/serie/{id}/{season}/{episode}",
+            referer = "https://vidzy.org/",
+            hasSubtitles = true, timeoutSec = 15,
+        ),
     )
 
     fun buildMovieUrl(spec: ServerSpec, id: String): String =

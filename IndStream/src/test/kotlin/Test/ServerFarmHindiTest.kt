@@ -170,7 +170,7 @@ class ServerFarmHindiTest {
     @Test
     fun farm_withinServerCap() {
         // No registry cap: the farm grows freely, ranked fastest-first at emit.
-        assertTrue(ServerFarm.allServers.size >= 25, "farm keeps every live server")
+        assertTrue(ServerFarm.allServers.size >= 28, "farm keeps every live server")
         assertTrue(ServerFarm.allServers.isNotEmpty())
         assertNotNull(ServerFarm.allServers.firstOrNull { it.id == "vidlink" })
     }
@@ -242,7 +242,8 @@ class ServerFarmHindiTest {
             "vixsrc", "zxcstreams", "vidapi", "twoembed",
             "vidfast", "autoembed", "vidphantom", "vsembed", "twoembed-skin",
             "vidsrc-to", "vidsrcme", "nontongo",
-            "castletv", "streamflix", "4khdhub")
+            "castletv", "streamflix", "4khdhub",
+            "vidsrc-pm", "rive", "vidzy")
         for (id in ids) {
             assertNotNull(
                 ServerFarm.allServers.firstOrNull { it.id == id },
@@ -263,6 +264,6 @@ class ServerFarmHindiTest {
     @Test
     fun farm_withinExpandedCap() {
         // Uncapped farm: size only grows, never trimmed to fit.
-        assertTrue(ServerFarm.allServers.size >= 25, "farm keeps every live server")
+        assertTrue(ServerFarm.allServers.size >= 28, "farm keeps every live server")
     }
 }

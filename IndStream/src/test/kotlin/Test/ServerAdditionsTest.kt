@@ -136,6 +136,25 @@ class ServerAdditionsTest {
     }
 
     @Test
+    fun fastBatch2_presentAndTmdbKeyed() {
+        // Fast global batch: TMDB-keyed embeds, generic pipeline, 15s kill.
+        val expected = mapOf(
+            "vidsrc-pm" to Pair("https://vidsrc.pm/embed/movie/27205", "https://vidsrc.pm/embed/tv/1399/1/1"),
+            "rive" to Pair("https://www.rivestream.app/embed?type=movie&id=27205",
+                "https://www.rivestream.app/embed?type=tv&id=1399&season=1&episode=1"),
+            "vidzy" to Pair("https://vidzy.org/movie/27205", "https://vidzy.org/serie/1399/1/1"),
+        )
+        for ((id, urls) in expected) {
+            val s = ServerFarm.allServers.firstOrNull { it.id == id }
+            assertNotNull(s, "$id must be in the farm")
+            assertEquals(ServerIdType.TMDB, s.idType, "$id must be TMDB-keyed")
+            assertEquals(15, s.timeoutSec, "$id farm kill must stay fast")
+            assertEquals(urls.first, ServerFarm.buildMovieUrl(s, "27205"), "$id movie url")
+            assertEquals(urls.second, ServerFarm.buildTvUrl(s, "1399", 1, 1), "$id tv url")
+        }
+    }
+
+    @Test
     fun castleDecrypt_liveVector() {
         // Captured against the live API: secKey + cipher must round-trip.
         assertEquals(
