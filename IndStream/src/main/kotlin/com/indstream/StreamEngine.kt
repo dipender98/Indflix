@@ -438,12 +438,6 @@ object StreamEngine {
             return emptyList()
         }
 
-        if (spec.id == "nhd") {
-            val result = resolveNhd(spec, tmdbId, imdbId, type, season, episode)
-            if (result.isNotEmpty()) { okServer(spec, start, "nhd", result.size); return result }
-            failServer(spec, "nhd returned no streams")
-            return emptyList()
-        }
         if (spec.id == "vaplayer") {
             val result = resolveVaplayer(spec, tmdbId, imdbId, type, season, episode)
             if (result.isNotEmpty()) { okServer(spec, start, "vaplayer", result.size); return result }
@@ -460,6 +454,12 @@ object StreamEngine {
             val result = resolveVideasy(spec, tmdbId, imdbId, type, season, episode, imdbIdProvider)
             if (result.isNotEmpty()) { okServer(spec, start, "videasy fan-out", result.size); return result }
             failServer(spec, "videasy returned no streams")
+            return emptyList()
+        }
+        if (spec.id == "onetouchtv") {
+            val result = resolveOneTouchTv(spec, tmdbId, type, season, episode)
+            if (result.isNotEmpty()) { okServer(spec, start, "onetouchtv api", result.size); return result }
+            failServer(spec, "onetouchtv returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
             return emptyList()
         }
         if (spec.id == "vidnest") {
@@ -532,12 +532,6 @@ object StreamEngine {
             val result = resolveVixsrc(spec, tmdbId, type, season, episode)
             if (result.isNotEmpty()) { okServer(spec, start, "vixsrc signed hls", result.size); return result }
             failServer(spec, "vixsrc returned no streams")
-            return emptyList()
-        }
-        if (spec.id == "zxcstreams") {
-            val result = resolveZxcstreams(spec, tmdbId, imdbId, type, season, episode, imdbIdProvider)
-            if (result.isNotEmpty()) { okServer(spec, start, "zxcstreams fan-out", result.size); return result }
-            failServer(spec, "zxcstreams returned no streams")
             return emptyList()
         }
         if (spec.id == "castletv") {
@@ -1371,88 +1365,7 @@ object StreamEngine {
         return null
     }
 
-    /** NHD resolver (reversed): the extraction API key is embedded PER-PAGE-LOAD (stale keys 401), so: 1. GET nhdapi. com/movie/{id} (or. */
-    private suspend fun resolveNhd(
-        spec: ServerSpec,
-        tmdbId: Int?,
-        imdbId: String?,
-        type: String,
-        season: Int,
-        episode: Int,
-    ): List<RawStream> {
-        val id = tmdbId?.toString() ?: return emptyList()
-        // MOVIE GUARD (probe): the host's TV pipeline is live (GoT/Family Man resolved playable HLS) but the movie pipeline is.
-// dead upstream � extraction.
-        if (type == "movie") {
-            throw CleanMissException("nhd: movie pipeline dead upstream (playUrl 404) � clean miss, TV path stays live")
-        }
-        val pageUrl = "https://nhdapi.com/tv/$id/$season/$episode"
-        val referer = "https://nhdapi.com/"
-        Log.d("NHD", "page=$pageUrl")
-
-        // 1. Page first - carries the per-load API key.
-        val pageText = withTimeoutOrNull(8_000L) {
-            runCatching { app.get(pageUrl, timeout = 8, headers = okHeaders(referer)).text }.getOrNull()
-        } ?: run { Log.w("NHD", "page fetch failed"); return emptyList() }
-        val apiKey = Regex("""var\s+API_KEY\s*=\s*"([^"]+)"""").find(pageText)?.groupValues?.get(1)
-        if (apiKey.isNullOrBlank()) {
-            Log.w("NHD", "no API_KEY in page (keys embedded only when service is up)")
-            return emptyList()
-        }
-        val apiPath = Regex("""var\s+API_PATH\s*=\s*"([^"]+)"""").find(pageText)?.groupValues?.get(1)
-            ?: "/api/tv/$id"
-
-        // 2. Extraction API.
-        val apiUrl = "https://nhdapi.com$apiPath?key=$apiKey"
-        val jsonText = withTimeoutOrNull(10_000L) {
-            runCatching {
-                app.get(apiUrl, timeout = 10, headers = okHeaders(pageUrl)).text
-            }.getOrNull()
-        } ?: run { Log.w("NHD", "extraction API no response"); return emptyList() }
-        val json = runCatching { org.json.JSONObject(jsonText) }.getOrElse {
-            Log.w("NHD", "non-JSON extraction response: ${safeSnippet(jsonText)}")
-            return emptyList()
-        }
-        if (!json.optBoolean("success", false)) {
-            Log.w("NHD", "extraction API success=false: ${safeSnippet(jsonText)}")
-            return emptyList()
-        }
-
-        val playUrl = json.optString("playUrl").takeIf { it.isNotBlank() }
-        val kind = json.optString("kind").ifBlank { "hls" }
-        val audioTracks = json.optJSONArray("audioTracks")
-
-        // audioTracks is null on the single-dub path; per-dub sibling URLs list
-        // each dub as its own manifest. Hindi naming appears in the label.
-        val out = mutableListOf<RawStream>()
-        if (audioTracks != null && audioTracks.length() > 0) {
-            for (i in 0 until audioTracks.length()) {
-                val t = audioTracks.optJSONObject(i) ?: continue
-                val url = t.optString("url").takeIf { it.isNotBlank() } ?: continue
-                val label = t.optString("label").ifBlank { t.optString("name") }.ifBlank { "Audio" }
-                val isHindi = label.contains("hindi", ignoreCase = true)
-                out += RawStream(
-                    serverId = spec.id, serverName = spec.name,
-                    url = url, isM3u8 = url.contains(".m3u8", true) || kind == "hls",
-                    referer = null, qualityHint = 0,
-                    audioPriority = if (isHindi) 4 else 1,
-                    audioLabel = if (isHindi) "Hindi" else label,
-                    extraHeaders = mapOf("User-Agent" to NHD_UA),
-                )
-            }
-        } else if (!playUrl.isNullOrBlank()) {
-            out += RawStream(
-                serverId = spec.id, serverName = spec.name,
-                url = playUrl, isM3u8 = kind != "mp4",
-                referer = null, qualityHint = 0,
-                extraHeaders = mapOf("User-Agent" to NHD_UA),
-            )
-        }
-        if (out.isEmpty()) Log.w("NHD", "no playUrl/audioTracks in response; keys=${namesOf(json)}")
-        return out
-    }
-
-    /**
+        /**
      * VaPlayer resolver: IMDB-keyed JSON
      * API → `data.stream_urls[]` are DIRECT HLS master playlists (up to
      * 1920x800 ≈ 1080p). Zero crypto. Referer nextgencloudfabric.com required
@@ -1788,230 +1701,7 @@ object StreamEngine {
         return exp * 1000 - 60_000 >= nowMs
     }
 
-    /**
-     * ZXCStreams resolver: portal discovery finds the
-     * backend base, a sha512 token unlocks 4 sub-servers queried in parallel.
-     */
-    private suspend fun resolveZxcstreams(
-        spec: ServerSpec,
-        tmdbId: Int?,
-        imdbId: String?,
-        type: String,
-        season: Int,
-        episode: Int,
-        imdbIdProvider: (suspend () -> String?)? = null,
-    ): List<RawStream> {
-        val id = tmdbId?.takeIf { it > 0 } ?: return emptyList()
-        if (type != "movie" && (season <= 0 || episode <= 0)) return emptyList()
-        val meta = runCatching { TmdbService.fetchMeta(id, type) }.getOrNull()
-        val title = meta?.name ?: throw CleanMissException("no title for tmdb=$id (title-sent backend)")
-        val imdb = imdbId ?: imdbIdProvider?.invoke()
-        if (imdb.isNullOrBlank()) throw CleanMissException("zxcstreams: IMDB id unavailable (TMDB lookup miss)")
-        val year = meta?.year?.take(4).orEmpty()
-        val base = zxcBase()
-        val zType = if (type == "movie") "movie" else "tv"
-        return coroutineScope {
-            ZXC_SERVERS.map { server ->
-                async {
-                    runCatching {
-                        zxcFetchServer(base, server, id.toString(), title, year, imdb, zType, season, episode, spec)
-                    }.getOrDefault(emptyList())
-                }
-            }.awaitAll()
-        }.flatten().distinctBy { it.url }
-    }
-
-    private const val ZXC_SALT = "3435443433"
-    private const val ZXC_BASE_TTL_MS = 10 * 60 * 1000L
-    private val ZXC_PORTALS = listOf("https://zxcstream.xyz", "https://zxcprime.xyz")
-    private val ZXC_SUBDOMAINS = listOf("r1", "r2", "r3", "r4", "r5", "r6", "v4", "cdn", "api", "stream")
-    private val ZXC_SERVERS = listOf("icarus", "berkas", "orion", "athena")
-    private const val ZX_ID = "rgrwsdsdfgwrwrwwr"
-    private const val ZX_FTOKEN = "xfgdfgdsffgrwgrwyjhkjt"
-    private const val ZX_TS = "rdghhdghhfssft"
-    private const val ZX_TOKEN = "ZDDVHJFGHYRHG"
-    private const val ZX_TITLE = "TUKTHFSSFGDGHJS"
-    private const val ZX_YEAR = "53653TRFG647GF"
-    private const val ZX_SEASON = "adkljfhdahfladhfjahfjlahfhfljkadfdf"
-    private const val ZX_EPISODE = "546745ygy46ytfgty"
-    private const val ZX_IMDB = "564745ygtuy5yi75yuy"
-    @Volatile private var zxcBaseUrl = "https://r1.zxcstream.xyz"
-    @Volatile private var zxcBaseAt = 0L
-
-    /** sha512 hex of a string. Pure JVM. */
-    internal fun zxcSha512Hex(s: String): String {
-        val md = java.security.MessageDigest.getInstance("SHA-512")
-        return md.digest(s.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
-    }
-
-    /** Cached backend base; rediscovers across portals + subdomains. */
-    private suspend fun zxcBase(): String {
-        if (System.currentTimeMillis() - zxcBaseAt < ZXC_BASE_TTL_MS) return zxcBaseUrl
-        val found = firstSuccess(ZXC_PORTALS + ZXC_SUBDOMAINS.map { "https://$it.zxcstream.xyz" }) { zxcVerifyBase(it) }
-        if (found != null) { zxcBaseUrl = found; zxcBaseAt = System.currentTimeMillis() }
-        return zxcBaseUrl
-    }
-
-    /** POST the probe token; base if the backend answers one. */
-    private suspend fun zxcVerifyBase(base: String): String? {
-        val rt = System.currentTimeMillis()
-        val xt = zxcSha512Hex("$rt:$ZXC_SALT:550").take(64)
-        val text = withTimeoutOrNull(6_000L) {
-            runCatching {
-                app.post("$base/backend/token", timeout = 6, headers = mapOf(
-                    "User-Agent" to HttpKit.userAgent,
-                    "Accept" to "application/json, text/plain, */*",
-                    "Content-Type" to "application/json",
-                    "Origin" to base,
-                    "Referer" to "$base/player/movie/550",
-                ), json = mapOf(ZX_ID to "550", ZX_FTOKEN to xt, ZX_TS to rt.toString())).text
-            }.getOrNull()
-        } ?: return null
-        return runCatching { org.json.JSONObject(text) }
-            .getOrNull()?.takeIf { it.has(ZX_TOKEN) }?.let { base }
-    }
-
-    /** One ZXC sub-server fan-out arm. */
-    private suspend fun zxcFetchServer(
-        base: String,
-        server: String,
-        tmdbId: String,
-        title: String,
-        year: String,
-        imdbId: String,
-        type: String,
-        season: Int,
-        episode: Int,
-        spec: ServerSpec,
-    ): List<RawStream> {
-        val referer = "$base/player/$type/$tmdbId" + if (type != "movie") "/$season/$episode" else ""
-        val rt = System.currentTimeMillis()
-        val xt = zxcSha512Hex("$rt:$ZXC_SALT:$tmdbId").take(64)
-        val tokenText = withTimeoutOrNull(8_000L) {
-            runCatching {
-                app.post("$base/backend/token", timeout = 8, headers = mapOf(
-                    "User-Agent" to HttpKit.userAgent,
-                    "Accept" to "application/json, text/plain, */*",
-                    "Content-Type" to "application/json",
-                    "Origin" to base,
-                    "Referer" to referer,
-                ), json = mapOf(ZX_ID to tmdbId, ZX_FTOKEN to xt, ZX_TS to rt.toString())).text
-            }.getOrNull()
-        } ?: return emptyList()
-        val tokenJson = runCatching { org.json.JSONObject(tokenText) }.getOrNull() ?: return emptyList()
-        val serverToken = tokenJson.optString(ZX_TOKEN).takeIf { it.isNotBlank() } ?: return emptyList()
-        val serverTs = tokenJson.optString(ZX_TS).takeIf { it.isNotBlank() } ?: return emptyList()
-        val params = LinkedHashMap<String, String>().apply {
-            put(ZX_ID, tmdbId); put("b", type); put(ZX_TS, serverTs); put(ZX_TOKEN, serverToken)
-            put(ZX_FTOKEN, xt); put(ZX_TITLE, title); put(ZX_YEAR, year)
-            put("date", year); put(ZX_IMDB, imdbId)
-            if (type != "movie") { put(ZX_SEASON, season.toString()); put(ZX_EPISODE, episode.toString()) }
-        }
-        val qs = params.entries.joinToString("&") { (k, v) -> "$k=${java.net.URLEncoder.encode(v, "UTF-8")}" }
-        val text = withTimeoutOrNull(10_000L) {
-            runCatching {
-                app.get("$base/backend_/servers/$server?$qs", timeout = 10, headers = mapOf(
-                    "User-Agent" to HttpKit.userAgent,
-                    "Accept" to "application/json, text/plain, */*",
-                    "Origin" to base,
-                    "Referer" to referer,
-                )).text
-            }.getOrNull()
-        } ?: return emptyList()
-        val links = runCatching {
-            val root = org.json.JSONObject(text)
-            if (!root.optBoolean("success", false)) return emptyList()
-            root.optJSONArray("links")
-        }.getOrNull() ?: return emptyList()
-        val out = mutableListOf<RawStream>()
-        for (i in 0 until links.length()) {
-            val o = links.optJSONObject(i) ?: continue
-            val link = o.optString("link").takeIf { it.startsWith("http") } ?: continue
-            val kind = o.optString("type").takeIf { it.isNotBlank() }
-                ?: if (link.contains(".m3u8", true)) "hls" else "mp4"
-            out += RawStream(
-                serverId = spec.id,
-                serverName = "${spec.name} ${server.replaceFirstChar { it.uppercase() }}".trim(),
-                url = link, isM3u8 = kind == "hls" || link.contains(".m3u8", true),
-                referer = referer, qualityHint = zxcHeightOf(zxcRawRes(o)),
-                extraHeaders = mapOf("Origin" to base),
-            )
-        }
-        // HLS masters carry their real peak: measure once so a low ladder tag
-        // never sticks on an adaptive master (badge + rank follow the master).
-        val measured = coroutineScope {
-            out.filter { it.isM3u8 }.map { s ->
-                async {
-                    val t = withTimeoutOrNull(6_000L) {
-                        runCatching {
-                            app.get(s.url, timeout = 6, headers = mapOf(
-                                "User-Agent" to HttpKit.userAgent,
-                                "Referer" to (s.referer ?: ""),
-                            )).text
-                        }.getOrNull()
-                    }
-                    s to t
-                }
-            }.awaitAll()
-        }
-        return out.map { s ->
-            val t = measured.firstOrNull { it.first.url == s.url }?.second
-            if (t != null && t.contains("#EXT-X-STREAM-INF")) {
-                val (label, h) = probeAudioInlineHeight(t)
-                s.copy(
-                    qualityHint = if (h > 0) h else s.qualityHint,
-                    audioLabel = label.ifBlank { s.audioLabel },
-                    inlineManifest = t,
-                )
-            } else s
-        }
-    }
-
-    /** Raw resolution/source token out of a ZXC link object. */
-    internal fun zxcRawRes(o: org.json.JSONObject): Any? {
-        val r = o.opt("resolution")
-        if (r != null && r != org.json.JSONObject.NULL) return r
-        val s = o.opt("source")
-        return if (s != null && s != org.json.JSONObject.NULL) s else null
-    }
-
-    /** ZXC resolution token to ladder height (0-4 are ladder indexes). Pure. */
-    internal fun zxcHeightOf(res: Any?): Int {
-        if (res == null) return 0
-        if (res is Number) {
-            val n = res.toInt()
-            return if (n in 0..4) intArrayOf(360, 480, 720, 1080, 2160)[n] else n
-        }
-        val s = res.toString().trim()
-        if (s.equals("4k", ignoreCase = true)) return 2160
-        val digit = s.toIntOrNull()
-        if (s.length == 1 && digit != null && digit in 0..4) return intArrayOf(360, 480, 720, 1080, 2160)[digit]
-        return Regex("""(\d{3,4})""").find(s)?.groupValues?.get(1)?.toIntOrNull() ?: 0
-    }
-
-    /** First succeeding candidate wins, rest cancelled. */
-    private suspend fun firstSuccess(urls: List<String>, block: suspend (String) -> String?): String? {
-        if (urls.isEmpty()) return null
-        if (urls.size == 1) return runCatching { block(urls[0]) }.onFailure { if (it is kotlinx.coroutines.CancellationException) throw it }.getOrNull()
-        return coroutineScope {
-            val winner = CompletableDeferred<String?>()
-            val pending = java.util.concurrent.atomic.AtomicInteger(urls.size)
-            val jobs = urls.map { u ->
-                launch {
-                    val r = runCatching { block(u) }.onFailure { if (it is kotlinx.coroutines.CancellationException) throw it }.getOrNull()
-                    if (r != null) winner.complete(r)
-                    else if (pending.decrementAndGet() == 0 && !winner.isCompleted) winner.complete(null)
-                }
-            }
-            val out = winner.await()
-            jobs.forEach { it.cancel() }
-            out
-        }
-    }
-
-
-
-    /** CastleTV: title search, Hindi-first audio track, single 1080p resolve. */
+        /** CastleTV: title search, Hindi-first audio track, single 1080p resolve. */
     private suspend fun resolveCastleTv(
         spec: ServerSpec,
         tmdbId: Int,
@@ -2331,6 +2021,45 @@ object StreamEngine {
         }.distinctBy { it.url }
     }
 
+    /** OneTouchTV resolver: title search, AES envelope, per-episode HLS sources. */
+    private suspend fun resolveOneTouchTv(
+        spec: ServerSpec,
+        tmdbId: Int?,
+        type: String,
+        season: Int,
+        episode: Int,
+    ): List<RawStream> {
+        val id = tmdbId ?: return emptyList()
+        if (type != "movie" && (season <= 0 || episode <= 0)) return emptyList()
+        val meta = runCatching { TmdbService.fetchMeta(id, type) }.getOrNull()
+        val title = meta?.name ?: throw CleanMissException("no title for tmdb=$id (title-keyed API)")
+        val year = meta?.year?.take(4)?.toIntOrNull()
+        val hits = OneTouchTvSource.search(title)
+        if (hits.isEmpty()) throw CleanMissException("no search hits for '$title'")
+        val hit = OneTouchTvSource.matchTitle(hits, title, year, type)
+            ?: throw CleanMissException("no title match for '$title' in ${hits.size} rows")
+        val eps = OneTouchTvSource.episodes(hit.id)
+        if (eps.isEmpty()) throw CleanMissException("no episodes for '${hit.title}'")
+        val wantEp = if (type == "movie") 1 else {
+            // Absolute-episode backends number continuously; S1 maps directly.
+            if (season <= 1) episode.coerceAtLeast(1)
+            else throw CleanMissException("multi-season absolute mapping unsupported (S$season)")
+        }
+        val ep = eps.firstOrNull { it.number == wantEp } ?: eps.firstOrNull()
+            ?: throw CleanMissException("episode $wantEp missing")
+        val (sources, _) = OneTouchTvSource.streams(hit.id, ep.playId)
+        if (sources.isEmpty()) throw CleanMissException("no sources for '${hit.title}' ep ${ep.number}")
+        return sources.map { s ->
+            RawStream(
+                serverId = spec.id, serverName = spec.name,
+                url = s.url, isM3u8 = s.url.contains(".m3u8", true) || s.type.equals("hls", true),
+                referer = OneTouchTvSource.playbackReferer(),
+                qualityHint = OneTouchTvSource.heightOf(s.quality),
+                extraHeaders = OneTouchTvSource.playbackHeaders(),
+            )
+        }.distinctBy { it.url }
+    }
+
     private suspend fun resolveVidrock(
         spec: ServerSpec,
         tmdbId: Int?,
@@ -2388,7 +2117,8 @@ object StreamEngine {
         val keyBytes = keyHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
         val std = payload.replace('-', '+').replace('_', '/')
         val padded = std + "=".repeat((4 - std.length % 4) % 4)
-        val data = android.util.Base64.decode(padded, android.util.Base64.DEFAULT)
+        // java.util (not android.util): unit-test safe, identical on device.
+        val data = java.util.Base64.getDecoder().decode(padded)
         require(data.size > 12 + 16) { "payload too short" }
         val nonce = data.copyOfRange(0, 12)
         val cipherText = data.copyOfRange(12, data.size)
@@ -3397,9 +3127,6 @@ object StreamEngine {
         if (!referer.isNullOrBlank()) h["Referer"] = referer
         return h
     }
-
-    /** UA nhdapi's HLS proxy expects at playback (the extraction API echoes it back; using the browser UA gets 502). */
-    private const val NHD_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 
     /** JSON key listing for failure logs (shape changes are one log line away). Keys are server-controlled: strip control. chars (log-forgery) and cap length. */
     private fun namesOf(obj: org.json.JSONObject): String =

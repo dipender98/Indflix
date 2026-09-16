@@ -11,7 +11,7 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-/** Guards the Sept 2026 farm expansion: ZXCStreams, VidAPI, 2Embed, CastleTV, StreamFlix, 4KHDHub. */
+/** Guards the Sept 2026 farm expansion: 2Embed, CastleTV, StreamFlix, 4KHDHub. */
 class ServerAdditionsTest {
 
     @Test
@@ -21,12 +21,11 @@ class ServerAdditionsTest {
     }
 
     @Test
-    fun zxcstreams_presentAndTmdbKeyed() {
-        val s = ServerFarm.allServers.first { it.id == "zxcstreams" }
-        assertEquals("ZXCStreams", s.name)
-        assertEquals(ServerIdType.TMDB, s.idType)
-        assertEquals("https://zxcstream.xyz/player/movie/27205", ServerFarm.buildMovieUrl(s, "27205"))
-        assertEquals("https://zxcstream.xyz/player/tv/1399/1/1", ServerFarm.buildTvUrl(s, "1399", 1, 1))
+    fun deadServers_stayOut() {
+        // v46 removals (verified dead): nhd 404, vidapi DNS, zxc sub DNS, vidsrc-to/nontongo Cloudflare.
+        for (id in setOf("nhd", "vidapi", "zxcstreams", "vidsrc-to", "nontongo")) {
+            assertNull(ServerFarm.allServers.firstOrNull { it.id == id }, "$id must stay out")
+        }
     }
 
     @Test
@@ -48,12 +47,12 @@ class ServerAdditionsTest {
     }
 
     @Test
-    fun vidapi_presentAndTmdbKeyed() {
-        val s = ServerFarm.allServers.first { it.id == "vidapi" }
-        assertEquals("VidAPI", s.name)
+    fun onetouchtv_presentAndTmdbKeyed() {
+        val s = ServerFarm.allServers.first { it.id == "onetouchtv" }
+        assertEquals("OneTouchTV", s.name)
         assertEquals(ServerIdType.TMDB, s.idType)
-        assertEquals("https://vaplayer.ru/embed/movie/27205", ServerFarm.buildMovieUrl(s, "27205"))
-        assertEquals("https://vaplayer.ru/embed/tv/1399/1/1", ServerFarm.buildTvUrl(s, "1399", 1, 1))
+        assertEquals(30, s.timeoutSec)
+        assertTrue(s.hasSubtitles)
     }
 
     @Test
@@ -74,9 +73,7 @@ class ServerAdditionsTest {
             "vidphantom" to Pair("https://vidphantom.com/movie/27205", "https://vidphantom.com/tv/1399/1/1"),
             "vsembed" to Pair("https://vsembed.su/embed/movie/27205", "https://vsembed.su/embed/tv/1399/1/1"),
             "twoembed-skin" to Pair("https://www.2embed.skin/embed/27205", "https://www.2embed.skin/embedtv/1399&s=1&e=1"),
-            "vidsrc-to" to Pair("https://vidsrc.to/embed/movie/27205", "https://vidsrc.to/embed/tv/1399/1/1"),
             "vidsrcme" to Pair("https://vidsrcme.su/embed/movie/27205", "https://vidsrcme.su/embed/tv/1399/1/1"),
-            "nontongo" to Pair("https://www.nontongo.win/embed/movie/27205", "https://www.nontongo.win/embed/tv/1399/1/1"),
         )
         for ((id, urls) in expected) {
             val s = ServerFarm.allServers.firstOrNull { it.id == id }
@@ -108,26 +105,19 @@ class ServerAdditionsTest {
     }
 
     @Test
-    fun zxcSha512Hex_knownVector() {
-        assertEquals(
-            "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a" +
-                "2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f",
-            StreamEngine.zxcSha512Hex("abc"),
+    fun onetouchtv_pureHelpers() {
+        assertEquals(1080, com.indstream.OneTouchTvSource.heightOf("1080p"))
+        assertEquals(720, com.indstream.OneTouchTvSource.heightOf("720p"))
+        assertEquals(2160, com.indstream.OneTouchTvSource.heightOf("4K"))
+        assertEquals(0, com.indstream.OneTouchTvSource.heightOf("Auto"))
+        assertEquals(0, com.indstream.OneTouchTvSource.heightOf(null))
+        val hits = listOf(
+            com.indstream.OneTouchTvSource.Hit("a", "Dune Part Two (2024)", "2024", "movie"),
+            com.indstream.OneTouchTvSource.Hit("b", "Dune (2021)", "2021", "movie"),
         )
-    }
-
-    @Test
-    fun zxcHeightOf_ladderAndRaw() {
-        assertEquals(1080, StreamEngine.zxcHeightOf(3))
-        assertEquals(2160, StreamEngine.zxcHeightOf(4))
-        assertEquals(360, StreamEngine.zxcHeightOf(0))
-        assertEquals(1080, StreamEngine.zxcHeightOf(1080))
-        assertEquals(2160, StreamEngine.zxcHeightOf("4K"))
-        assertEquals(720, StreamEngine.zxcHeightOf("720p"))
-        assertEquals(720, StreamEngine.zxcHeightOf("2"))
-        assertEquals(1080, StreamEngine.zxcHeightOf("3"))
-        assertEquals(0, StreamEngine.zxcHeightOf(null))
-        assertEquals(0, StreamEngine.zxcHeightOf("default"))
+        assertEquals("a", com.indstream.OneTouchTvSource.matchTitle(hits, "Dune Part Two", 2024, "movie")?.id)
+        assertEquals(null, com.indstream.OneTouchTvSource.matchTitle(hits, "Dune Part Two", 2021, "movie")?.id)
+        assertEquals(null, com.indstream.OneTouchTvSource.matchTitle(emptyList(), "Dune", 2024, "movie"))
     }
 
     @Test

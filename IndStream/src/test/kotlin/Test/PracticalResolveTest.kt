@@ -117,6 +117,54 @@ class PracticalResolveTest {
     }
 
     @Test
+    fun farmDiagnose_missingServers() = runBlocking {
+        // Per-server resolve with exception capture: WHY do servers land empty?
+        val ids = listOf("vidrock", "vidnest", "vidcore",
+            "twoembed", "autoembed", "vidphantom", "vsembed", "twoembed-skin",
+            "vidsrcme", "vidsrc-pm", "rive", "onetouchtv")
+        for (id in ids) {
+            val spec = com.indstream.ServerFarm.allServers.first { it.id == id }
+            val t0 = System.currentTimeMillis()
+            try {
+                val out = kotlinx.coroutines.withTimeoutOrNull(spec.timeoutSec * 1000L) {
+                    StreamEngine.resolveOne(spec, 27205, "tt1375666", "movie", 1, 1, null)
+                }
+                println("DIAG $id: ${out?.size ?: "TIMEOUT"} streams in ${System.currentTimeMillis() - t0}ms")
+            } catch (e: Exception) {
+                println("DIAG $id: ${e.javaClass.simpleName}: ${e.message?.take(150)} in ${System.currentTimeMillis() - t0}ms")
+            }
+        }
+    }
+
+    @Test
+    fun farmTiming_allServers() = runBlocking {
+        // Full-farm timing: which servers land streams and how fast (diagnoses UI no-shows).
+        val t0 = System.currentTimeMillis()
+        val rows = java.util.Collections.synchronizedList(mutableListOf<Triple<String, Int, Long>>())
+        StreamEngine.resolveRealtime(27205, "movie", -1, -1, imdbIdProvider = { "tt1375666" }) { sid, streams ->
+            rows += Triple(sid, streams.size, System.currentTimeMillis() - t0)
+        }
+        val total = System.currentTimeMillis() - t0
+        println("FARM TIMING total=${total}ms servers=${rows.size}")
+        for ((sid, n, ms) in rows.sortedBy { it.third }) println("  +${ms}ms $sid x$n")
+        val landed = rows.map { it.first }.toSet()
+        val missing = com.indstream.ServerFarm.allServers.map { it.id }.toSet() - landed
+        println("MISSING: ${missing.joinToString()}")
+    }
+
+    @Test
+    fun onetouchtv_fullChain() = runBlocking {
+        // Dune Part Two (TMDB 693134) carries OneTouchTV; Inception does not (library gap, not a bug).
+        val spec = com.indstream.ServerFarm.allServers.first { it.id == "onetouchtv" }
+        val out = StreamEngine.resolveOne(spec, 693134, "tt15239678", "movie", 1, 1, null)
+        println("OneTouchTV streams: ${out.size} ${out.map { it.qualityHint to it.url.take(70) }}")
+        assertTrue(out.isNotEmpty(), "onetouchtv must resolve streams")
+        val live = out.map { it to (HttpKit.aliveCheck(it.url, it.referer, it.extraHeaders) != false) }
+        live.forEach { (s, ok) -> println("  ${s.qualityHint}p alive=$ok ${s.url.take(70)}") }
+        assertTrue(live.any { it.second }, "at least one onetouchtv stream must be playable")
+    }
+
+    @Test
     fun vidnest_movieboxAdDropped() {
         // Synthetic ad payload (one static file under every label) must parse to zero streams.
         val spec = com.indstream.ServerFarm.allServers.first { it.id == "vidnest" }

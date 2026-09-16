@@ -111,14 +111,7 @@ object ServerFarm {
         ),
         // MP4Hydra (mp4hydra. org): title-slug keyed multipart POST to /info2 returns per-quality HLS sources across Beta.
 // servers with embedded subtitle.
-        ServerSpec(
-            id = "nhd", name = "NHD",
-            idType = ServerIdType.TMDB,
-            movieUrl = "https://nhdapi.com/movie/{id}",
-            tvUrl = "https://nhdapi.com/tv/{id}/{season}/{episode}",
-            referer = "https://nhdapi.com/",
-            hasSubtitles = true, timeoutSec = 20,
-        ),
+// NHD removed (v46): upstream movie pipeline 404s, TV path untested without movies.
         // (net27. cc - Netflix-grade OTT, ): TMDB-keyed JSON API. Default GET /api/embed-tmdb/{tmdb} → {ok, streams: } =.
 // Netflix-ladder MP4 360→1080p.
         ServerSpec(
@@ -130,29 +123,8 @@ object ServerFarm {
             hasSubtitles = true, timeoutSec = 50,
             declaredLanguages = emptySet(),
         ),
-        // ZXCStreams (portal-discovered backend): TMDB-keyed.
-        // Portal (zxcstream.xyz/zxcprime.xyz) redirect -> base; sha512 token POST.
-        // 4 sub-servers (Icarus/Berkas/Orion/Athena) queried in parallel.
-        ServerSpec(
-            id = "zxcstreams", name = "ZXCStreams",
-            idType = ServerIdType.TMDB,
-            movieUrl = "https://zxcstream.xyz/player/movie/{id}",
-            tvUrl = "https://zxcstream.xyz/player/tv/{id}/{season}/{episode}",
-            referer = "https://zxcstream.xyz/",
-            // Discovery + token + 4 servers + master-measure pass.
-            hasSubtitles = false, timeoutSec = 30,
-        ),
-
-        // VidAPI (vaplayer.ru embed): TMDB-keyed embed page.
-        // Generic pipeline (unwrap/harvest/extractor registry), no custom crypto.
-        ServerSpec(
-            id = "vidapi", name = "VidAPI",
-            idType = ServerIdType.TMDB,
-            movieUrl = "https://vaplayer.ru/embed/movie/{id}",
-            tvUrl = "https://vaplayer.ru/embed/tv/{id}/{season}/{episode}",
-            referer = "https://vaplayer.ru/",
-            hasSubtitles = true, timeoutSec = 30,
-        ),
+        // ZXCStreams removed (v46): sub-server hosts NXDOMAIN, portal chain dead.
+        // VidAPI removed (v46): vaplayer.ru DNS dead.
         // 2Embed (embed page, servers Vsrc/Videm/Vcr): IMDB-keyed.
         // Generic pipeline handles the iframe chain.
         ServerSpec(
@@ -164,7 +136,7 @@ object ServerFarm {
             hasSubtitles = true, timeoutSec = 30,
         ),
         // Fast TMDB-keyed embed batch: direct iframe chains, no crypto.
-        // All eight run through the generic pipeline (fetch, unwrap, harvest, extractor registry).
+        // Survivors run through the generic pipeline (fetch, unwrap, harvest, extractor registry).
         ServerSpec(
             id = "vidfast", name = "VidFast",
             idType = ServerIdType.TMDB,
@@ -205,14 +177,7 @@ object ServerFarm {
             referer = "https://www.2embed.skin/",
             hasSubtitles = true, timeoutSec = 30,
         ),
-        ServerSpec(
-            id = "vidsrc-to", name = "VidsrcTo",
-            idType = ServerIdType.TMDB,
-            movieUrl = "https://vidsrc.to/embed/movie/{id}",
-            tvUrl = "https://vidsrc.to/embed/tv/{id}/{season}/{episode}",
-            referer = "https://vidsrc.to/",
-            hasSubtitles = false, timeoutSec = 30,
-        ),
+        // VidsrcTo removed (v46): Cloudflare bot challenge on embed pages.
         ServerSpec(
             id = "vidsrcme", name = "VidsrcMe",
             idType = ServerIdType.TMDB,
@@ -221,14 +186,7 @@ object ServerFarm {
             referer = "https://vidsrcme.su/",
             hasSubtitles = false, timeoutSec = 30,
         ),
-        ServerSpec(
-            id = "nontongo", name = "Nontongo",
-            idType = ServerIdType.TMDB,
-            movieUrl = "https://www.nontongo.win/embed/movie/{id}",
-            tvUrl = "https://www.nontongo.win/embed/tv/{id}/{season}/{episode}",
-            referer = "https://www.nontongo.win/",
-            hasSubtitles = true, timeoutSec = 30,
-        ),
+        // Nontongo removed (v46): Cloudflare bot challenge on embed pages.
         // Hindi/Indian-language expansion: per-language audio tracks (TMDB title-keyed API).
         // Chain entry is the security-key fetch; search/detail/video are POSTs needing that key.
         ServerSpec(
@@ -274,6 +232,16 @@ object ServerFarm {
             tvUrl = "https://api.speedracelight.com/seed?mediaId={id}",
             referer = "https://player.videasy.net/",
             hasSubtitles = false, timeoutSec = 30,
+        ),
+        // OneTouchTV (api3.devcorp.me): title search, AES-256-CBC envelope, per-episode HLS.
+        // Chain entry is a title search; detail + episode calls need the matched id.
+        ServerSpec(
+            id = "onetouchtv", name = "OneTouchTV",
+            idType = ServerIdType.TMDB,
+            movieUrl = "https://api3.devcorp.me/vod/search?keyword={id}",
+            tvUrl = "https://api3.devcorp.me/vod/search?keyword={id}",
+            referer = "https://onetouchtv.xyz/",
+            hasSubtitles = true, timeoutSec = 30,
         ),
     )
 
