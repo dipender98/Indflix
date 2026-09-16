@@ -188,6 +188,38 @@ class PracticalResolveTest {
     }
 
     @Test
+    fun vidnest_klikxxiShapeDrift() {
+        // The host answers two entry shapes; both must yield streams.
+        val spec = com.indstream.ServerFarm.allServers.first { it.id == "vidnest" }
+        val m = StreamEngine::class.java.getDeclaredMethod(
+            "parseVidnestSub", String::class.java, org.json.JSONObject::class.java,
+            com.indstream.ServerSpec::class.java,
+        )
+        m.isAccessible = true
+        @Suppress("UNCHECKED_CAST")
+        fun parse(sub: String, json: String) =
+            m.invoke(StreamEngine, sub, org.json.JSONObject(json), spec) as List<com.indstream.StreamEngine.RawStream>
+
+        val legacy = """{"sources":[
+            {"url":"https://x.example/a1080.mp4","quality":"1080p","type":"mp4"},
+            {"url":"https://x.example/a720.mp4","quality":"720p","type":"mp4"}]}"""
+        assertEquals(2, parse("klikxxi", legacy).size, "url/quality shape must parse")
+
+        val drifted = """{"sources":[
+            {"file":"https://x.example/b1080.mp4","label":"1080p","type":"mp4"},
+            {"file":"https://x.example/b720.mp4","label":"720p","type":"mp4"}]}"""
+        assertEquals(2, parse("klikxxi", drifted).size, "file/label shape must parse")
+
+        // JSON-null url must not shadow the file fallback (optString renders null as "null").
+        val nullUrl = """{"sources":[{"url":null,"file":"https://x.example/c1080.mp4","label":"1080p","type":"mp4"}]}"""
+        val got = parse("klikxxi", nullUrl)
+        assertEquals(1, got.size, "null url must fall through to file")
+        assertEquals("https://x.example/c1080.mp4", got.first().url)
+
+        assertEquals(0, parse("klikxxi", """{"nope":1}""").size, "unrecognized shape yields nothing")
+    }
+
+    @Test
     fun vidnest_livePayloadDecodes() = runBlocking {
         val headers = mapOf(
             "Referer" to "https://vidnest.fun/",

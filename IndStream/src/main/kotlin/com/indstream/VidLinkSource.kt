@@ -9,7 +9,7 @@ import java.math.BigInteger
 object VidlinkSource {
 
     /** VidLink production secretbox key (hex). Rotate here when the site rotates. */
-    private const val KEY_HEX =
+    internal const val KEY_HEX =
         "c75136c5668bbfe65a7ecad431a745db68b5f381555b38d8f6c699449cf11fcd"
 
     /** Headers the CDN serving the stream URLs requires at PLAYBACK time. . hakunaymatata. com (vidlink's host): - mwVault. sources (the majority of. */
@@ -46,8 +46,15 @@ object VidlinkSource {
     fun tvHeaders(tmdbId: String, season: Int, episode: Int): Map<String, String> =
         headers("https://vidlink.pro/tv/$tmdbId/$season/$episode")
 
+    /** Timestamp offset ladder retried on API 2004: skewed device clocks push unix+480s outside the server window. */
+    internal val TOKEN_OFFSETS = listOf(TIME_OFFSET_S, 0L, 960L)
+
     /** Encrypt + (now +) into a base64url token. */
     fun token(mediaId: String): String = token(mediaId, System.currentTimeMillis() / 1000L + TIME_OFFSET_S)
+
+    /** Token with an explicit clock offset — a 2004 retry variant. */
+    internal fun tokenWithOffset(mediaId: String, offsetSec: Long): String =
+        token(mediaId, System.currentTimeMillis() / 1000L + offsetSec)
 
     /** Internal overload with an explicit timestamp - used by unit tests to cross-check token bytes against a reference. implementation. */
     internal fun token(mediaId: String, timestampSeconds: Long): String {
@@ -71,12 +78,19 @@ object VidlinkSource {
     }
 
     /** Build the movie API URL for a TMDB id. */
-    fun movieApiUrl(tmdbId: String): String =
-        "https://vidlink.pro/api/b/movie/${token(tmdbId)}?multiLang=1"
+    fun movieApiUrl(tmdbId: String): String = movieApiUrlAt(tmdbId, TIME_OFFSET_S)
+
+    /** Movie API URL with an explicit clock offset (2004 retry). */
+    internal fun movieApiUrlAt(tmdbId: String, offsetSec: Long): String =
+        "https://vidlink.pro/api/b/movie/${tokenWithOffset(tmdbId, offsetSec)}?multiLang=1"
 
     /** Build the TV API URL for a TMDB id + season/episode. */
     fun tvApiUrl(tmdbId: String, season: Int, episode: Int): String =
-        "https://vidlink.pro/api/b/tv/${token(tmdbId)}/$season/$episode?multiLang=1"
+        tvApiUrlAt(tmdbId, season, episode, TIME_OFFSET_S)
+
+    /** TV API URL with an explicit clock offset (2004 retry). */
+    internal fun tvApiUrlAt(tmdbId: String, season: Int, episode: Int, offsetSec: Long): String =
+        "https://vidlink.pro/api/b/tv/${tokenWithOffset(tmdbId, offsetSec)}/$season/$episode?multiLang=1"
 
     private fun hexToBytes(hex: String): ByteArray {
         val out = ByteArray(hex.length / 2)

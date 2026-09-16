@@ -36,8 +36,8 @@ object VideasySource {
         "Referer" to REFERER,
     )
 
-    /** Playback sends no Origin/Referer: the CDN 403s the player Origin, the mirror 403s the player Referer. */
-    fun playbackHeaders(): Map<String, String> = emptyMap()
+    /** Playback keeps a browser UA but no Origin/Referer: the segment CDN 403s non-browser UAs, the player Origin and the mirror Referer. */
+    fun playbackHeaders(): Map<String, String> = mapOf("User-Agent" to HttpKit.userAgent)
 
     /** FNV-1a with the cipher's final mix. */
     private fun fnv1a(s: String): Int {
@@ -264,8 +264,15 @@ object VideasySource {
         val seed = fetchSeed(tmdbId) ?: return Result(emptyList(), emptyList(), httpOk = false)
         val first = fetchRoutes(seed, tmdbId, imdbId, title, year, mediaType, season, episode, flipCasing = false)
         if (first.sources.isNotEmpty()) return first
+        // If the first pass failed due to decrypt errors (seed expired),
+        // retry immediately with a fresh seed before trying flipped casing.
+        if (!first.httpOk) {
+            val fresh = fetchSeed(tmdbId) ?: return first
+            val retry = fetchRoutes(fresh, tmdbId, imdbId, title, year, mediaType, season, episode, flipCasing = false)
+            if (retry.sources.isNotEmpty()) return retry
+            if (retry.httpOk) return retry
+        }
         // Retry once with a fresh seed (30s TTL) and flipped casing.
-        if (!first.httpOk) return first
         val fresh = fetchSeed(tmdbId) ?: return first
         return fetchRoutes(fresh, tmdbId, imdbId, title, year, mediaType, season, episode, flipCasing = true)
     }
@@ -302,13 +309,21 @@ object VideasySource {
     private suspend fun fetchSeed(tmdbId: Int): String? {
         return try {
             val seedJson = com.lagradost.cloudstream3.app.get(
-                "$API/seed?mediaId=$tmdbId", timeout = 6, headers = apiHeaders(),
+                "$API/seed?mediaId=$tmdbId", timeout = 10, headers = apiHeaders(),
             ).text
-            JSONObject(seedJson).optString("seed").takeIf { it.isNotBlank() }
+            val seed = JSONObject(seedJson).optString("seed").takeIf { it.isNotBlank() }
+            if (seed == null) Log.w("Videasy", "seed response missing 'seed' key: ${safeSnippet(seedJson)}")
+            seed
         } catch (e: Exception) {
-            Log.w("Videasy", "seed fetch failed: ${e.message}")
+            Log.w("Videasy", "seed fetch failed for tmdb=$tmdbId: ${e.message}")
             null
         }
+    }
+
+    /** Safe snippet for logging: first 120 chars, no newlines. */
+    private fun safeSnippet(s: String?, max: Int = 120): String {
+        if (s.isNullOrBlank()) return "<empty>"
+        return s.replace(Regex("\\s+"), " ").take(max)
     }
 
     /** Query + decrypt one route. Never throws. */
@@ -328,9 +343,15 @@ object VideasySource {
             val url = routeUrl(route, title, year, tmdbId, imdbId, mediaType, season, episode, seed, flipCasing)
             val enc = com.lagradost.cloudstream3.app.get(url, timeout = 10, headers = apiHeaders()).text
             if (enc.isBlank() || enc.startsWith("<") || enc.length < 20) {
+                Log.w("Videasy", "${route.path}: empty/HTML response (${enc.length}B)")
                 return Result(emptyList(), emptyList(), httpOk = false)
             }
-            parseResult(decrypt(enc, seed, tmdbId), route.path)
+            val decrypted = runCatching { decrypt(enc, seed, tmdbId) }.getOrNull()
+            if (decrypted == null) {
+                Log.w("Videasy", "${route.path}: decrypt failed (enc len=${enc.length}, preview=${safeSnippet(enc)})")
+                return Result(emptyList(), emptyList(), httpOk = true)
+            }
+            parseResult(decrypted, route.path)
         } catch (e: Exception) {
             Log.w("Videasy", "fetchRoute ${route.path} failed: ${e.message}")
             Result(emptyList(), emptyList(), httpOk = false)

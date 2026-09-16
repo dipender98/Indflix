@@ -64,9 +64,9 @@ object ServerFarm {
             movieUrl = "https://h5-api.aoneroom.com/wefeed-h5api-bff/app/get-latest-app-pkgs?app_name=moviebox",
             tvUrl = "https://h5-api.aoneroom.com/wefeed-h5api-bff/app/get-latest-app-pkgs?app_name=moviebox",
             isJsonApi = true, referer = "https://fmoviesunblocked.net/",
-            // timeoutSec 30→40 (user report: MovieBox absent on the same
-            // device/network): slow responses were cut off early.
-            hasSubtitles = true, timeoutSec = 55,
+            // timeoutSec raised to 65: 4-step chain (bearer→search→detail→download+play)
+            // with 8s sub-timeouts needs headroom; 55 was cutting off slow upstreams.
+            hasSubtitles = true, timeoutSec = 65,
         ),
         // PrimeSrc (primesrc. me, ): IMDB-keyed JSON API. GET /api/v1/s?imdb={id}&type=movie|tv returns servers ({name, key.
 // file_name, audio_language.
@@ -76,7 +76,9 @@ object ServerFarm {
             movieUrl = "https://new.vidnest.fun/{server}/movie/{id}",
             tvUrl = "https://new.vidnest.fun/{server}/tv/{id}/{season}/{episode}",
             isJsonApi = true, referer = "https://vidnest.fun/",
-            hasSubtitles = false, timeoutSec = 20,
+            // timeoutSec raised to 28: 7 sub-servers need per-sub headroom
+            // to avoid false 502s from slow cold-starts.
+            hasSubtitles = false, timeoutSec = 28,
         ),
         // Vidup (vidup. to, ): TMDB-keyed (accepts IMDB too via the URL path). 4-step enc-dec. app pipeline: 1) page → "en".
 // "token" → enc-dec.
@@ -242,6 +244,16 @@ object ServerFarm {
             tvUrl = "https://api3.devcorp.me/vod/search?keyword={id}",
             referer = "https://onetouchtv.xyz/",
             hasSubtitles = true, timeoutSec = 30,
+        ),
+        // VidCore (vidcore.org -> vidrack API): TMDB-keyed JSON API.
+        // Returns multi-quality HLS sources (up to 4K) via peakstorm CDN.
+        ServerSpec(
+            id = "vidcore-api", name = "VidCore",
+            idType = ServerIdType.TMDB,
+            movieUrl = "https://vidrack.created.app/api/sources/movy?id={id}",
+            tvUrl = "https://vidrack.created.app/api/sources/movy?id={id}&season={season}&episode={episode}",
+            isJsonApi = true, referer = "https://www.vidcore.org/",
+            hasSubtitles = false, timeoutSec = 20,
         ),
     )
 

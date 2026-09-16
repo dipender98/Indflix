@@ -229,10 +229,9 @@ class ServerFarmHindiTest {
 
     @Test
     fun moviebox_timeoutBudgetFitsFarmKill() {
-        // latency). Budgets: bearer 8 (prewarmed→0) + search 15 + auth-only retry + detail 8 + dl/play 8 ⇒ single chain ≈ 39s.
-// full reject chain ≈ 51s; the.
+        // Budgets: bearer 8 + search 15 + auth retry 12 + throttle retry 10+2 + detail 8 + dl/play 8 ⇒ worst chain ≈ 63s.
         val s = ServerFarm.allServers.first { it.id == "moviebox" }
-        assertEquals(55, s.timeoutSec, "MovieBox latency-parity budgets (8/15[+8/12]/8/8) must fit this kill")
+        assertEquals(65, s.timeoutSec, "MovieBox chain ceilings (8/15[+12]/[10+2]/8/8) must fit this kill")
     }
 
     @Test

@@ -161,6 +161,15 @@ class VideasySourceTest {
     }
 
     @Test
+    fun playbackHeaders_browserUaWithoutOriginOrReferer() {
+        // Segment CDN 403s non-browser UAs and any player Origin/mirror Referer.
+        val h = VideasySource.playbackHeaders()
+        assertTrue((h["User-Agent"] ?: "").contains("Mozilla"), "playback needs a browser UA")
+        assertFalse(h.containsKey("Referer"), "player Referer 403s the mirror")
+        assertFalse(h.containsKey("Origin"), "player Origin 403s the CDN")
+    }
+
+    @Test
     fun parseResult_sourcesAndSubtitles() {
         val json = """{"sources":[{"quality":"1080p","url":"https://x.example/a.m3u8"},
             {"quality":"Hindi","url":"https://x.example/b.m3u8"}],

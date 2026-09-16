@@ -9,6 +9,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.withTimeoutOrNull
@@ -22,11 +23,15 @@ object StreamEngine {
     // Socket guard only (the farm itself is uncapped); sub-fan-outs add up.
     private const val MAX_CONCURRENT = 32
     private const val MAX_UNWRAP = 4
+    // Delay before a failed VidNest sub-server gets its single retry.
+    private const val VIDNEST_SUB_RETRY_DELAY_MS = 1_500L
 
     /** MovieBox bearer token cache (): the x-user token lives for hours; caching it removes one serial round-trip. */
     @Volatile private var movieBoxToken: String? = null
     @Volatile private var movieBoxTokenAt: Long = 0L
     private const val MOVIEBOX_TOKEN_TTL_MS = 6 * 60 * 60 * 1000L
+    // Throttle backoff: a single delayed search retry on HTTP 429 (bearer is never the problem there).
+    private const val MOVIEBOX_THROTTLE_RETRY_MS = 2_000L
     private val STREAM_REGEX = listOf(
         Regex("""https?://[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*"""),
         Regex("""https?://[^\s"'<>\\]+\.mp4[^\s"'<>\\]*"""),
@@ -552,6 +557,12 @@ object StreamEngine {
             failServer(spec, "hub returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
             return emptyList()
         }
+        if (spec.id == "vidcore-api") {
+            val result = resolveVidcore(spec, tmdbId, type, season, episode)
+            if (result.isNotEmpty()) { okServer(spec, start, "vidcore api", result.size); return result }
+            failServer(spec, "vidcore returned no streams")
+            return emptyList()
+        }
 
         // 0. JSON API branch (api. shows. st style): parse JSON, take source. url + source. qualities + subtitles.
         if (spec.isJsonApi) {
@@ -713,44 +724,61 @@ object StreamEngine {
         season: Int,
         episode: Int,
     ): List<RawStream> {
-        val apiUrl = if (type == "movie") VidlinkSource.movieApiUrl(tmdbId.toString())
-        else VidlinkSource.tvApiUrl(tmdbId.toString(), season, episode)
         val mediaPage = if (type == "movie") "https://vidlink.pro/movie/$tmdbId"
         else "https://vidlink.pro/tv/$tmdbId/$season/$episode"
-        Log.d("VidLink", "apiUrl=$apiUrl mediaPage=$mediaPage")
+        Log.d("VidLink", "mediaPage=$mediaPage")
 
-        val jsonText = withTimeoutOrNull(6_000L) {
-            runCatching {
-                app.get(apiUrl, timeout = 6, headers = vidlinkHeaders(mediaPage)).text
-            }.getOrNull()
-        }
-        if (jsonText.isNullOrBlank()) {
-            Log.w("VidLink", "no API response (timeout/HTTP error) for $mediaPage")
-            return emptyList()
-        }
-        // 200 + literal `null` body (RRR, probe): the site knows this title but has no multiLang source for it � a library.
-// miss, not a host failure.
-        if (jsonText.trim() == "null") {
-            throw CleanMissException("vidlink: api returned null body (no multiLang source) for $mediaPage")
-        }
-        Log.d("VidLink", "API response length=${jsonText.length}, preview=${safeSnippet(jsonText)}")
-        val root = runCatching { org.json.JSONObject(jsonText) }.getOrElse {
-            Log.w("VidLink", "non-JSON response for $mediaPage (${jsonText.length}B, starts: ${safeSnippet(jsonText)})")
-            return emptyList()
-        }
-
-        // VidLink API error response: {"error": "Invalid token", "code": 2004} code 2004 here is the API's token error � NOT.
-// ExoPlayer's.
-        if (root.has("error") || root.has("code")) {
-            val err = root.optJSONObject("error") ?: root
+        // 2004 ("Invalid token") also fires on skewed device clocks: the token
+        // embeds unix+480s, so walk the offset ladder before giving up.
+        var root: org.json.JSONObject? = null
+        for ((attempt, offset) in VidlinkSource.TOKEN_OFFSETS.withIndex()) {
+            val apiUrl = if (type == "movie") VidlinkSource.movieApiUrlAt(tmdbId.toString(), offset)
+            else VidlinkSource.tvApiUrlAt(tmdbId.toString(), season, episode, offset)
+            val jsonText = withTimeoutOrNull(6_000L) {
+                runCatching {
+                    app.get(apiUrl, timeout = 6, headers = vidlinkHeaders(mediaPage)).text
+                }.getOrNull()
+            }
+            if (jsonText.isNullOrBlank()) {
+                Log.w("VidLink", "no API response (timeout/HTTP error) for $mediaPage")
+                return emptyList()
+            }
+            // Literal `null` body: the site knows the title but has no multiLang source (library miss).
+            if (jsonText.trim() == "null") {
+                throw CleanMissException("vidlink: api returned null body (no multiLang source) for $mediaPage")
+            }
+            Log.d("VidLink", "attempt ${attempt + 1} offset +${offset}s: ${jsonText.length}B preview=${safeSnippet(jsonText)}")
+            val parsed = runCatching { org.json.JSONObject(jsonText) }.getOrElse {
+                Log.w("VidLink", "non-JSON response for $mediaPage (${jsonText.length}B, starts: ${safeSnippet(jsonText)})")
+                return emptyList()
+            }
+            if (!parsed.has("error") && !parsed.has("code")) {
+                root = parsed
+                break
+            }
+            val err = parsed.optJSONObject("error") ?: parsed
             val code = err.optInt("code", -1)
             val msg = err.optString("message").ifBlank { err.optString("error") }.ifBlank { "unknown" }
-            Log.w("VidLink", "API error code=$code msg=$msg (code 2004 = token key rotated; update VidlinkSource.KEY_HEX)")
+            if (code == 2004 && attempt < VidlinkSource.TOKEN_OFFSETS.lastIndex) {
+                Log.w("VidLink", "2004 at offset +${offset}s — retrying with next offset")
+                continue
+            }
+            // VidLink API error response: {"error": "Invalid token", "code": 2004} code 2004 here is the API's token error — NOT
+            // ExoPlayer's. The token is generated client-side using XSalsa20-Poly1305 secretbox;
+            // when the server rotates its key, ALL tokens are rejected with 2004.
+            if (code == 2004) {
+                Log.e("VidLink", "CRITICAL: code 2004 — encryption key rotated! Update VidlinkSource.KEY_HEX immediately. " +
+                    "Extract the new key from https://vidlink.pro player JS bundles (look for 64-char hex near secretbox/sodium). " +
+                    "Current key: ${VidlinkSource.KEY_HEX.take(8)}...${VidlinkSource.KEY_HEX.takeLast(8)}")
+            } else {
+                Log.w("VidLink", "API error code=$code msg=$msg")
+            }
             return emptyList()
         }
+        val resolved = root ?: return emptyList()
 
-        val stream = root.optJSONObject("stream") ?: run {
-            Log.w("VidLink", "no \"stream\" object; root keys=${namesOf(root)}")
+        val stream = resolved.optJSONObject("stream") ?: run {
+            Log.w("VidLink", "no \"stream\" object; root keys=${namesOf(resolved)}")
             return emptyList()
         }
 
@@ -788,9 +816,9 @@ object StreamEngine {
 
         // Legacy shape: stream. playlist (HLS master) � kept for when VidLink serves an adaptive playlist again.
         val masterUrl = stream.optString("playlist").takeIf { it.isNotBlank() }
-            ?: root.optString("url").takeIf { it.isNotBlank() }
+            ?: resolved.optString("url").takeIf { it.isNotBlank() }
             ?: run {
-                Log.w("VidLink", "no qualities/playlist/url; stream keys=${namesOf(stream)} root keys=${namesOf(root)}")
+                Log.w("VidLink", "no qualities/playlist/url; stream keys=${namesOf(stream)} root keys=${namesOf(resolved)}")
                 return emptyList()
             }
 
@@ -1052,13 +1080,13 @@ object StreamEngine {
         }
         var baseHeaders: Map<String, String> = emptyMap()
         var searchItems: org.json.JSONArray? = null
+        var throttleRetried = false
         val mbStart = System.currentTimeMillis()
         for (attempt in 0 until 2) {
             val budgetSec = if (attempt == 0) 15L else 12L
-            // F8 budget guard: the second (auth-retry) pass only pays off when the first answer was a FAST rejection. If =25s is.
-// already spent, the remaining.
-            if (attempt == 1 && System.currentTimeMillis() - mbStart > 25_000) {
-                Log.w("MovieBox", "skipping auth-retry (>25s already spent) � keeps the chain inside the 55s kill")
+            // Budget guard: auth-retry only pays off on a FAST rejection.
+            if (attempt == 1 && System.currentTimeMillis() - mbStart > 30_000) {
+                Log.w("MovieBox", "skipping auth-retry (>30s already spent) \u2014 keeps the chain inside the 65s kill")
                 break
             }
             val token = movieBoxBearer(forceRefresh = attempt > 0) ?: return emptyList()
@@ -1097,8 +1125,29 @@ object StreamEngine {
             }
             val jsonCode = root?.optString("code", "")?.takeIf { it.isNotBlank() } ?: "0"
             if (resp.code == 429) {
-                // Throttled: transient miss, no token retry (the bearer is fine).
-                Log.w("MovieBox", "search throttled (HTTP 429)")
+                // Throttled but never rejected: one delayed retry with the same bearer before giving up.
+                if (!throttleRetried) {
+                    throttleRetried = true
+                    Log.w("MovieBox", "search throttled (HTTP 429) — retrying once after delay")
+                    delay(MOVIEBOX_THROTTLE_RETRY_MS)
+                    val retryItems = withTimeoutOrNull(10_000L) {
+                        runCatching {
+                            app.post("$base/wefeed-h5api-bff/subject/search", timeout = 10, headers = baseHeaders,
+                                json = mapOf(
+                                    "keyword" to title, "page" to 1, "perPage" to 24,
+                                    "subjectType" to subjectType,
+                                ))
+                        }.getOrNull()
+                    }?.let { r -> runCatching { org.json.JSONObject(r.text) }.getOrNull() }
+                        ?.let { unwrapData(it).optJSONArray("items") }
+                    if (retryItems != null && retryItems.length() > 0) {
+                        searchItems = retryItems
+                        break
+                    }
+                    Log.w("MovieBox", "throttle retry answered with no items")
+                } else {
+                    Log.w("MovieBox", "search throttled (HTTP 429)")
+                }
                 break
             }
             val authRejected = movieboxAuthRejected(resp.code, jsonCode)
@@ -2060,6 +2109,47 @@ object StreamEngine {
         }.distinctBy { it.url }
     }
 
+    private suspend fun resolveVidcore(
+        spec: ServerSpec, tmdbId: Int?, type: String, season: Int, episode: Int,
+    ): List<RawStream> {
+        val id = tmdbId ?: return emptyList()
+        val url = if (type == "movie") "https://vidrack.created.app/api/sources/movy?id=$id"
+        else "https://vidrack.created.app/api/sources/movy?id=$id&season=$season&episode=$episode"
+        val headers = mapOf("Referer" to "https://www.vidcore.org/", "User-Agent" to HttpKit.userAgent)
+        Log.d("VidCore", "GET $url")
+        val jsonText = withTimeoutOrNull(15_000L) {
+            runCatching { app.get(url, timeout = 15, headers = headers).text }.getOrNull()
+        } ?: run { Log.w("VidCore", "no API response"); return emptyList() }
+        val root = runCatching { org.json.JSONObject(jsonText) }.getOrElse {
+            Log.w("VidCore", "non-JSON: ${safeSnippet(jsonText)}"); return emptyList()
+        }
+        val sources = root.optJSONArray("sources") ?: return emptyList()
+        val out = mutableListOf<RawStream>()
+        for (i in 0 until sources.length()) {
+            val s = sources.optJSONObject(i) ?: continue
+            val streamUrl = s.optString("url").takeIf { it.isNotBlank() } ?: continue
+            val quality = s.optString("quality", "")
+            val label = s.optString("label", quality)
+            val streamHeaders = mutableMapOf("User-Agent" to HttpKit.userAgent)
+            val h = s.optJSONObject("headers")
+            if (h != null) {
+                h.keys().forEach { k -> streamHeaders[k] = h.optString(k) }
+            } else {
+                streamHeaders["Referer"] = "https://www.movy.bz/"
+                streamHeaders["Origin"] = "https://www.movy.bz"
+            }
+            out += RawStream(
+                serverId = spec.id, serverName = "$spec.name $label".trim(),
+                url = streamUrl, isM3u8 = streamUrl.contains(".m3u8", true),
+                referer = streamHeaders["Referer"] ?: "https://www.movy.bz/",
+                qualityHint = VideasySource.heightOf(quality),
+                extraHeaders = streamHeaders,
+            )
+        }
+        Log.d("VidCore", "parsed ${out.size} sources")
+        return out
+    }
+
     private suspend fun resolveVidrock(
         spec: ServerSpec,
         tmdbId: Int?,
@@ -2169,6 +2259,10 @@ object StreamEngine {
             t.contains("error 50", ignoreCase = true)
     }
 
+    /** Retry-worthy sub answers: blank or error pages only. A parsed-but-empty answer is a title miss. Pure. */
+    internal fun vidnestShouldRetry(text: String?): Boolean =
+        text.isNullOrBlank() || vidnestIsErrorPage(text)
+
     /** Url -> "season|episode" of the request that FIRST surfaced it. The
      *  VidNest moviebox sub-server answers different (se,ep) paths with the
      *  IDENTICAL generic file (same file for different episodes) - a stream
@@ -2204,9 +2298,16 @@ object StreamEngine {
                     val url = if (type == "movie")
                         "https://new.vidnest.fun/$sub/movie/$id"
                     else "https://new.vidnest.fun/$sub/tv/$id/$season/$episode"
-                    val raw = withTimeoutOrNull(subTimeout) {
-                        runCatching { app.get(url, timeout = subTimeout / 1000, headers = headers).text }
+                    suspend fun fetchOnce(budgetMs: Long): String? = withTimeoutOrNull(budgetMs) {
+                        runCatching { app.get(url, timeout = budgetMs / 1000, headers = headers).text }
                             .getOrNull()
+                    }
+                    var raw = fetchOnce(subTimeout)
+                    if (vidnestShouldRetry(raw)) {
+                        // Subs 502 transiently on cold starts: one delayed retry before counting it down.
+                        delay(VIDNEST_SUB_RETRY_DELAY_MS)
+                        raw = fetchOnce((subTimeout / 2).coerceAtLeast(2_000L))
+                        if (!vidnestShouldRetry(raw)) Log.d("VidNest", "$sub: retry answered")
                     }
                     if (raw.isNullOrBlank()) return@async SubResult(sub, answered = false, streams = emptyList())
                     if (vidnestIsErrorPage(raw)) {
@@ -2221,8 +2322,15 @@ object StreamEngine {
                         val root = org.json.JSONObject(raw)
                         if (root.optBoolean("encrypted") && !root.isNull("data")) {
                             val payload = root.optString("data")
-                            if (payload.isBlank()) return@runCatching null
-                            val json = decodeVidnestPayload(payload) ?: return@runCatching null
+                            if (payload.isBlank()) {
+                                Log.w("VidNest", "$sub: encrypted but empty data payload")
+                                return@runCatching null
+                            }
+                            val json = decodeVidnestPayload(payload)
+                            if (json == null) {
+                                Log.w("VidNest", "$sub: base64 decode failed (${payload.length} chars, preview=${safeSnippet(payload)})")
+                                return@runCatching null
+                            }
                             org.json.JSONObject(json)
                         } else {
                             root
@@ -2282,6 +2390,17 @@ object StreamEngine {
                 audioLabel = lang,
             )
         }
+        // First usable value across candidate keys. Guards the JSON-null trap:
+        // optString renders a null field as the literal "null", which is non-blank
+        // and would shadow the real fallback key on a drifted shape.
+        fun pick(o: org.json.JSONObject, vararg keys: String): String {
+            for (k in keys) {
+                if (o.isNull(k)) continue
+                val v = o.optString(k).trim()
+                if (v.isNotEmpty() && v != "null") return v
+            }
+            return ""
+        }
         when (sub) {
             "moviebox" -> root.optJSONArray("url")?.let { arr ->
                 // Ad guard: proxy serves one static promo file under every resolution label.
@@ -2303,10 +2422,18 @@ object StreamEngine {
                     add(o.optString("url"), o.optString("language"), "", o.optString("type") == "mp4")
                 }
             }
-            "klikxxi" -> root.optJSONArray("sources")?.let { arr ->
-                for (i in 0 until arr.length()) {
-                    val o = arr.optJSONObject(i) ?: continue
-                    add(o.optString("url"), "", o.optString("quality"), o.optString("type") == "mp4")
+            "klikxxi" -> {
+                // Shape drift: entries carry the file under url|file and the
+                // rendition label under quality|label.
+                val arr = root.optJSONArray("sources")
+                if (arr == null) {
+                    Log.d("VidNest", "klikxxi: no 'sources' array; keys=${namesOf(root)}")
+                } else {
+                    for (i in 0 until arr.length()) {
+                        val o = arr.optJSONObject(i) ?: continue
+                        add(pick(o, "url", "file"), "", pick(o, "quality", "label"),
+                            o.optString("type") == "mp4")
+                    }
                 }
             }
             "hollymoviehd" -> root.optJSONArray("sources")?.let { arr ->

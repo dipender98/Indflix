@@ -2,9 +2,11 @@ package Test
 
 import com.indstream.ServerFarm
 import com.indstream.ServerIdType
+import com.indstream.StreamEngine
 import java.net.HttpURLConnection
 import java.net.URL
 import kotlin.test.Test
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /** Live network probe: exercises every farm server's real chain entry and reports health. Manual run only (needs network). */
@@ -127,6 +129,18 @@ class ServerProbeTest {
         val token = f.header("x-user")?.contains("token") == true
         return listOf(ProbeResult(id, "token", f.code == 200 && token,
             "HTTP ${f.code} x-user=${if (token) "present" else "MISSING"} ${f.error ?: ""}".trim()))
+    }
+
+    @Test
+    fun vidnestShouldRetry_blankAndErrorPagesOnly() {
+        // Blank answers and 502/error pages deserve the single delayed retry.
+        assertTrue(StreamEngine.vidnestShouldRetry(null))
+        assertTrue(StreamEngine.vidnestShouldRetry("  "))
+        assertTrue(StreamEngine.vidnestShouldRetry("""{"error_name":"x","message":"Error 502: Bad gateway"}"""))
+        assertTrue(StreamEngine.vidnestShouldRetry("<html>origin error</html>"))
+        // Answered payloads never retry, even when they carry no streams.
+        assertFalse(StreamEngine.vidnestShouldRetry("""{"sources":[]}"""))
+        assertFalse(StreamEngine.vidnestShouldRetry("""{"encrypted":true,"data":"e30="}"""))
     }
 
     // Fan-out host: probe every sub-server's movie URL, mirroring the resolver's fan-out.

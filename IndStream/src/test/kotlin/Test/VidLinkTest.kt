@@ -89,6 +89,28 @@ class VidlinkTest {
     }
 
     @Test
+    fun vidlinkTokenOffsets_defaultFirstThenSkewVariants() {
+        // Offset ladder: site default first, then clock-skew variants for 2004 retries.
+        assertEquals(listOf(480L, 0L, 960L), VidlinkSource.TOKEN_OFFSETS)
+    }
+
+    @Test
+    fun vidlinkTokenWithOffset_distinctTokensPerOffset() {
+        val a = VidlinkSource.tokenWithOffset("603", 0L)
+        val b = VidlinkSource.tokenWithOffset("603", 960L)
+        assertEquals(68, a.length, "unexpected token length: $a")
+        assertTrue(a != b, "different offsets must yield different tokens")
+    }
+
+    @Test
+    fun vidlinkApiUrlAt_embedsOffsetToken() {
+        val movie = VidlinkSource.movieApiUrlAt("603", 0L)
+        assertTrue(movie.startsWith("https://vidlink.pro/api/b/movie/") && movie.endsWith("?multiLang=1"))
+        val tv = VidlinkSource.tvApiUrlAt("603", 1, 2, 960L)
+        assertTrue(tv.contains("/api/b/tv/") && tv.endsWith("/1/2?multiLang=1"))
+    }
+
+    @Test
     fun vidlinkPlayerHeaders_useNativePlayerAgent() {
         // The bcdn. hakunaymatata. com CDN User-Agent-fingerprints requests: browser UAs get 428, a native player UA gets 206.
 // Playback headers therefore.
