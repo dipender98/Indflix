@@ -265,7 +265,7 @@ object ServerFarm {
             referer = "https://www.rivestream.app/",
             hasSubtitles = true, timeoutSec = 30,
         ),
-        // Videasy multi-route API with local mvm1 decrypt. CDN carries HLS up to 2160p; hdmovie carries Hindi.
+        // Videasy multi-route API with local mvm1 decrypt. CDN carries HLS up to 2160p.
         // Chain entry is the per-title seed fetch; route queries need that seed plus title and media type.
         ServerSpec(
             id = "videasy", name = "Videasy",

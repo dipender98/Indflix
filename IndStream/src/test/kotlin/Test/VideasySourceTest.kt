@@ -136,10 +136,9 @@ class VideasySourceTest {
     fun routes_pinnedPathsAndCasing() {
         val byPath = VideasySource.ROUTES.associateBy { it.path }
         assertTrue(byPath.containsKey("cdn"), "CDN route (4K ladder) must stay")
-        assertTrue(byPath.containsKey("hdmovie"), "Hindi route must stay")
+        assertTrue(!byPath.containsKey("hdmovie"), "hdmovie 500s upstream")
         assertEquals("Movie", byPath.getValue("cdn").movieType)
         assertEquals("TV Series", byPath.getValue("cdn").tvType)
-        assertEquals("movie", byPath.getValue("hdmovie").movieType)
         assertEquals("movie", byPath.getValue("m4uhd").movieType)
         assertEquals("TV Series", byPath.getValue("m4uhd").tvType)
         assertTrue(byPath.getValue("lamovie").moviesOnly, "lamovie answers movies only")

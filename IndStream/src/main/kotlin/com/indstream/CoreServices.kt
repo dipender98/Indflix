@@ -95,7 +95,7 @@ object HttpKit {
         }
     }
 
-    /** Cheap liveness check for REPLAYED (possibly stale/expired) stream URLs: one tiny ranged request. Returns TRUE (alive. 2xx/3xx/416), FALSE (dead. */
+    /** Cheap liveness check for REPLAYED (possibly stale/expired) stream URLs: one tiny ranged request. Returns TRUE (alive. 2xx/3xx/416), FALSE (dead. 429 rate-limit is UNKNOWN (null), not dead. */
     suspend fun aliveCheck(
         url: String,
         referer: String? = null,
@@ -110,6 +110,7 @@ object HttpKit {
                 put("Range", "bytes=0-0")
             }
             val code = app.get(url, timeout = timeoutSec, headers = headers).code
+            if (code == 429) return@runCatching null
             code in 200..399 || code == 416
         }.getOrNull()
     }

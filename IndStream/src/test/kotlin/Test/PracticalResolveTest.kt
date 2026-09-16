@@ -9,6 +9,7 @@ import com.indstream.VideasySource
 import com.lagradost.cloudstream3.app
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
@@ -69,7 +70,8 @@ class PracticalResolveTest {
         println("Videasy routes: ${r.sources.groupBy { it.route }.mapValues { it.value.size }}")
         assertTrue(r.httpOk, "routes must answer")
         assertTrue(r.sources.isNotEmpty(), "sources must decrypt")
-        val live = r.sources.map { it to (HttpKit.aliveCheck(it.url, "https://player.videasy.net/") != false) }
+        // Playback carries no Origin/Referer (CDN 403s the player Origin, mirror 403s the player Referer).
+        val live = r.sources.map { it to (HttpKit.aliveCheck(it.url, null) != false) }
         live.forEach { (s, ok) -> println("  ${s.route} ${s.quality} alive=$ok ${s.url.take(70)}") }
         assertTrue(live.any { it.second }, "at least one source must be playable")
     }
@@ -99,6 +101,42 @@ class PracticalResolveTest {
         assertNotNull(items, "items array")
         println("MovieBox items: ${items.length()}")
         assertTrue(items.length() > 0, "search must hit")
+    }
+
+    @Test
+    fun moviebox_fullChain() = runBlocking {
+        // Real single-server resolve: token + search + detail + play/download.
+        val spec = com.indstream.ServerFarm.allServers.first { it.id == "moviebox" }
+        val out = StreamEngine.resolveOne(spec, 27205, "tt1375666", "movie", 1, 1, null)
+        println("MovieBox streams: ${out.size} ${out.map { it.qualityHint to it.url.take(70) }}")
+        assertTrue(out.isNotEmpty(), "moviebox must resolve streams")
+        assertTrue(out.all { it.url.startsWith("http") && it.qualityHint > 0 }, "streams carry urls + heights")
+        // Liveness is best-effort (CDN 429s test IPs); logged, not asserted.
+        val live = out.map { it to (HttpKit.aliveCheck(it.url, it.referer, it.extraHeaders) != false) }
+        live.forEach { (s, ok) -> println("  ${s.qualityHint}p alive=$ok ${s.url.take(70)}") }
+    }
+
+    @Test
+    fun vidnest_movieboxAdDropped() {
+        // Synthetic ad payload (one static file under every label) must parse to zero streams.
+        val spec = com.indstream.ServerFarm.allServers.first { it.id == "vidnest" }
+        val m = StreamEngine::class.java.getDeclaredMethod(
+            "parseVidnestSub", String::class.java, org.json.JSONObject::class.java,
+            com.indstream.ServerSpec::class.java,
+        )
+        m.isAccessible = true
+        @Suppress("UNCHECKED_CAST")
+        fun parse(sub: String, json: String) =
+            m.invoke(StreamEngine, sub, org.json.JSONObject(json), spec) as List<com.indstream.StreamEngine.RawStream>
+        val ad = """{"url":[
+            {"lang":"English","link":"https://x.example/ad.mp4","resolution":"360p","type":"mp4"},
+            {"lang":"English","link":"https://x.example/ad.mp4","resolution":"480p","type":"mp4"},
+            {"lang":"English","link":"https://x.example/ad.mp4","resolution":"1080p","type":"mp4"}]}"""
+        assertTrue(parse("moviebox", ad).isEmpty(), "single-file ad must drop")
+        val real = """{"url":[
+            {"lang":"English","link":"https://x.example/a360.mp4","resolution":"360p","type":"mp4"},
+            {"lang":"English","link":"https://x.example/a480.mp4","resolution":"480p","type":"mp4"}]}"""
+        assertEquals(2, parse("moviebox", real).size, "distinct files must pass")
     }
 
     @Test

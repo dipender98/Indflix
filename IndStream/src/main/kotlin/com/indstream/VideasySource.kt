@@ -6,7 +6,7 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import org.json.JSONObject
 
-/** Videasy multi-server source (api.speedracelight.com). The player backend fans out per route; the CDN route. carries a per-resolution HLS ladder up to 2160p, hdmovie carries Hindi audio. */
+/** Videasy multi-server source (api.speedracelight.com). The player backend fans out per route; the CDN route. carries a per-resolution HLS ladder up to 2160p. */
 object VideasySource {
 
     private const val API = "https://api.speedracelight.com"
@@ -21,10 +21,9 @@ object VideasySource {
         val moviesOnly: Boolean = false,
     )
 
-    /** Live routes (probed): cdn answers "Movie"/"TV Series" with a 480p-2160p ladder; hdmovie answers lowercase. */
+    /** Live routes (probed): cdn answers "Movie"/"TV Series" with a 480p-2160p ladder. hdmovie 500s upstream (retired). */
     internal val ROUTES: List<Route> = listOf(
         Route("cdn", movieType = "Movie", tvType = "TV Series"),
-        Route("hdmovie", movieType = "movie", tvType = "tv"),
         Route("m4uhd", movieType = "movie", tvType = "TV Series"),
         Route("lamovie", movieType = "Movie", tvType = "TV Series", moviesOnly = true),
     )
@@ -36,6 +35,9 @@ object VideasySource {
         "Origin" to ORIGIN,
         "Referer" to REFERER,
     )
+
+    /** Playback sends no Origin/Referer: the CDN 403s the player Origin, the mirror 403s the player Referer. */
+    fun playbackHeaders(): Map<String, String> = emptyMap()
 
     /** FNV-1a with the cipher's final mix. */
     private fun fnv1a(s: String): Int {

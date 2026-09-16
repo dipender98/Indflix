@@ -48,6 +48,14 @@ object StreamEngine {
         val extraHeaders: Map<String, String> = emptyMap(),
     )
 
+    /** MovieBox search hit: subject id, season coverage end, audio tag, search detailPath. */
+    private data class SubjectRef(
+        val id: String,
+        val seasonEnd: Int,
+        val language: String?,
+        val detailPath: String,
+    )
+
     /** A resolver throws this when the host legitimately carries no source for this title/episode: library miss. unsupported media type, no Hindi dub. */
     class CleanMissException(message: String) : Exception(message)
 
@@ -372,7 +380,8 @@ object StreamEngine {
 
     // Internals � multi-strategy pipeline (proven).
 
-    private suspend fun resolveOne(
+    /** Single-server resolve (internal for live-chain tests). */
+    internal suspend fun resolveOne(
         spec: ServerSpec,
         tmdbId: Int,
         imdbId: String?,
@@ -1117,7 +1126,7 @@ object StreamEngine {
         val bracketGroups = Regex("""[\[(]([^\])]+)[\])]""", RegexOption.IGNORE_CASE)
         val norm: (String) -> String = { t -> t.lowercase().replace(Regex("""[^a-z0-9]"""), "") }
         val titleNorm = norm(title)
-        val subjects = mutableListOf<Triple<String, Int, String?>>() // id, seasonEnd, language.
+        val subjects = mutableListOf<SubjectRef>() // id, seasonEnd, language, search detailPath.
         for (i in 0 until items.length()) {
             val item = items.optJSONObject(i) ?: continue
             val id = item.optString("subjectId").takeIf { it.isNotBlank() } ?: continue
@@ -1139,13 +1148,13 @@ object StreamEngine {
                 (titleNorm.length >= 4 && cleanNorm.startsWith(titleNorm))
             if (!matched) continue
             // 0 = no explicit "S1-S3" coverage marker: the subject is presumed to cover every season (the play/download APIs take.
-// se/ep directly). Treating a.
-            subjects += Triple(id, seasonEnd ?: 0, audioTag)
+            // se/ep directly). Treating a.
+            subjects += SubjectRef(id, seasonEnd ?: 0, audioTag, item.optString("detailPath", ""))
         }
         if (subjects.isEmpty()) {
             throw CleanMissException("no exact title match for '$title' in ${items.length()} search rows")
         }
-        Log.d("MovieBox", "subjects=${subjects.map { it.first + ":S-end" + it.second + ":" + (it.third ?: "orig") }}")
+        Log.d("MovieBox", "subjects=${subjects.map { it.id + ":S-end" + it.seasonEnd + ":" + (it.language ?: "orig") }}")
 
         val refererBase = "https://fmoviesunblocked.net/"
         val out = mutableListOf<RawStream>()
@@ -1153,24 +1162,27 @@ object StreamEngine {
 
         // Subjects resolve concurrently ().
         val subjectResults = kotlinx.coroutines.coroutineScope {
-            subjects.map { (subjectId, seasonEnd, language) ->
+            subjects.map { ref ->
                 async {
+                    val subjectId = ref.id
+                    val language = ref.language
                     // Series entry EXPLICITLY covering fewer seasons than requested can't serve this episode (library splits shows into.
-// S1-S3 / S4-�). seasonEnd==0 (no.
-                    if (type != "movie" && seasonEnd in 1 until season) return@async emptyList<RawStream>()
+                    // S1-S3 / S4-�). seasonEnd==0 (no.
+                    if (type != "movie" && ref.seasonEnd in 1 until season) return@async emptyList<RawStream>()
 
-                    // 3. detailPath lookup �. get on the h5. aoneroom. com web host).
-                    val detailText = withTimeoutOrNull(8_000L) {
+                    // 3. detailPath: search already carries it; h5 lookup is fallback only.
+                    val detailPath = ref.detailPath.takeIf { it.isNotBlank() } ?: withTimeoutOrNull(8_000L) {
                         runCatching {
                             app.get("https://h5.aoneroom.com/wefeed-h5-bff/web/post/list/subject?id=$subjectId",
                                 timeout = 8).text
                         }.getOrNull()
-                    } ?: return@async emptyList<RawStream>()
-                    val detailPath = runCatching { org.json.JSONObject(detailText) }.getOrNull()
-                        ?.optJSONObject("data")
-                        ?.optJSONArray("items")?.optJSONObject(0)
-                        ?.optJSONObject("subject")
-                        ?.optString("detailPath", "").orEmpty()
+                    }?.let { t ->
+                        runCatching { org.json.JSONObject(t) }.getOrNull()
+                            ?.optJSONObject("data")
+                            ?.optJSONArray("items")?.optJSONObject(0)
+                            ?.optJSONObject("subject")
+                            ?.optString("detailPath", "").orEmpty()
+                    }.orEmpty()
                     if (detailPath.isBlank()) return@async emptyList<RawStream>()
 
                     val reqHeaders = baseHeaders + mapOf(
@@ -1206,13 +1218,13 @@ object StreamEngine {
                     }
 
                     // (Server subtitle tracks in the play response are ignored: SubtilesProvider is the only subtitle provider. ).
-
+                    var lockedTotal = 0
                     fun addStreams(arr: org.json.JSONArray?, dash: Boolean): List<RawStream> {
                         if (arr == null) return emptyList()
                         val added = mutableListOf<RawStream>()
                         for (i in 0 until arr.length()) {
                             val s = arr.optJSONObject(i) ?: continue
-                            if (s.optBoolean("vipLocked", false)) continue
+                            if (s.optBoolean("vipLocked", false)) { lockedTotal++; continue }
                             val url = s.optString("url").takeIf { it.isNotBlank() } ?: continue
                             if (!seenUrls.add(url)) continue
                             val resolution = s.optString("resolutions", "").toIntOrNull()
@@ -1229,18 +1241,19 @@ object StreamEngine {
                                 qualityHint = resolution,
                                 audioPriority = if (isHindi) 4 else 2,
                                 audioLabel = language ?: "",
-                                // ).
+                                // Browser parity: media GETs carry Referer, never Origin (Origin 403s CDNs).
                                 extraHeaders = mapOf(
                                     "Referer" to refererBase,
-                                    "Origin" to refererBase.trimEnd('/'),
                                 ),
                             )
                         }
                         return added
                     }
-                    addStreams(unwrapData(downloadObj).optJSONArray("downloads"), dash = false) +
+                    val streams = addStreams(unwrapData(downloadObj).optJSONArray("downloads"), dash = false) +
                         addStreams(unwrapData(playObj).optJSONArray("streams"), dash = false) +
                         addStreams(unwrapData(playObj).optJSONArray("dash"), dash = true)
+                    if (lockedTotal > 0) Log.i("MovieBox", "$subjectId: $lockedTotal VIP-locked rendition(s) skipped")
+                    streams
                 }
             }.awaitAll()
         }
@@ -1248,9 +1261,9 @@ object StreamEngine {
         // Every matched subject explicitly covers fewer seasons than requested ("S1-S3" markers only) � the episode is a.
 // library miss, not a host failure.
         if (out.isEmpty() && type != "movie" && subjects.isNotEmpty() &&
-            subjects.all { it.second in 1 until season }
+            subjects.all { it.seasonEnd in 1 until season }
         ) {
-            throw CleanMissException("subjects cover up to S${subjects.maxOf { it.second }}, requested S$season")
+            throw CleanMissException("subjects cover up to S${subjects.maxOf { it.seasonEnd }}, requested S$season")
         }
 
         Log.d("MovieBox", "got ${out.size} streams from ${subjects.size} subjects")
@@ -2279,7 +2292,7 @@ object StreamEngine {
         throw CleanMissException("no file links")
     }
 
-    /** Videasy resolver: multi-route API with local mvm1 decrypt. CDN carries HLS up to 2160p, hdmovie carries Hindi. */
+    /** Videasy resolver: multi-route API with local mvm1 decrypt. CDN carries HLS up to 2160p. */
     private suspend fun resolveVideasy(
         spec: ServerSpec,
         tmdbId: Int?,
@@ -2304,7 +2317,7 @@ object StreamEngine {
         if (fetched.sources.isEmpty()) {
             throw CleanMissException("upstream answered, no entry (flap or library miss)")
         }
-        val referer = "https://player.videasy.net/"
+        val referer: String? = null
         return fetched.sources.map { s ->
             val lang = VideasySource.languageOf(s.quality)
             RawStream(
@@ -2313,7 +2326,7 @@ object StreamEngine {
                 url = s.url, isM3u8 = VideasySource.isHls(s.url),
                 referer = referer, qualityHint = VideasySource.heightOf(s.quality),
                 audioLabel = lang,
-                extraHeaders = VideasySource.apiHeaders(),
+                extraHeaders = VideasySource.playbackHeaders(),
             )
         }.distinctBy { it.url }
     }
@@ -2541,6 +2554,14 @@ object StreamEngine {
         }
         when (sub) {
             "moviebox" -> root.optJSONArray("url")?.let { arr ->
+                // Ad guard: proxy serves one static promo file under every resolution label.
+                val links = (0 until arr.length()).mapNotNull { i ->
+                    arr.optJSONObject(i)?.optString("link")?.takeIf { it.isNotBlank() }
+                }.toSet()
+                if (arr.length() > 1 && links.size == 1) {
+                    Log.w("VidNest", "moviebox: single file for ${arr.length()} labels, ad drop")
+                    return@let
+                }
                 for (i in 0 until arr.length()) {
                     val o = arr.optJSONObject(i) ?: continue
                     add(o.optString("link"), o.optString("lang"), o.optString("resolution"), o.optString("type") == "mp4")
