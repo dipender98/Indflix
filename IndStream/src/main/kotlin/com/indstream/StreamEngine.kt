@@ -447,6 +447,12 @@ object StreamEngine {
             failServer(spec, "vidrock returned no streams")
             return emptyList()
         }
+        if (spec.id == "videasy") {
+            val result = resolveVideasy(spec, tmdbId, imdbId, type, season, episode, imdbIdProvider)
+            if (result.isNotEmpty()) { okServer(spec, start, "videasy fan-out", result.size); return result }
+            failServer(spec, "videasy returned no streams")
+            return emptyList()
+        }
         if (spec.id == "vidnest") {
             val (result, answered) = resolveVidnest(spec, tmdbId, type, season, episode)
             if (result.isNotEmpty()) { okServer(spec, start, "vidnest fan-out", result.size); return result }
@@ -2262,6 +2268,45 @@ object StreamEngine {
             }
         }
         throw CleanMissException("no file links")
+    }
+
+    /** Videasy resolver: multi-route API with local mvm1 decrypt. CDN carries HLS up to 2160p, hdmovie carries Hindi. */
+    private suspend fun resolveVideasy(
+        spec: ServerSpec,
+        tmdbId: Int?,
+        imdbId: String?,
+        type: String,
+        season: Int,
+        episode: Int,
+        imdbIdProvider: (suspend () -> String?)? = null,
+    ): List<RawStream> {
+        val id = tmdbId ?: return emptyList()
+        if (type != "movie" && (season <= 0 || episode <= 0)) return emptyList()
+        val meta = runCatching { TmdbService.fetchMeta(id, type) }.getOrNull()
+        val title = meta?.name ?: throw CleanMissException("no title for tmdb=$id (title-keyed API)")
+        val year = meta?.year?.take(4)?.toIntOrNull()
+        val imdb = imdbId ?: imdbIdProvider?.invoke()
+
+        val fetched = VideasySource.fetchAllSources(
+            tmdbId = id, imdbId = imdb, title = title, year = year,
+            mediaType = type, season = season, episode = episode,
+        )
+        if (!fetched.httpOk) return emptyList()
+        if (fetched.sources.isEmpty()) {
+            throw CleanMissException("upstream answered, no entry (flap or library miss)")
+        }
+        val referer = "https://player.videasy.net/"
+        return fetched.sources.map { s ->
+            val lang = VideasySource.languageOf(s.quality)
+            RawStream(
+                serverId = spec.id,
+                serverName = "${spec.name} ${s.route.replaceFirstChar { it.uppercase() }}".trim(),
+                url = s.url, isM3u8 = VideasySource.isHls(s.url),
+                referer = referer, qualityHint = VideasySource.heightOf(s.quality),
+                audioLabel = lang,
+                extraHeaders = VideasySource.apiHeaders(),
+            )
+        }.distinctBy { it.url }
     }
 
     private suspend fun resolveVidrock(

@@ -239,20 +239,20 @@ class ServerFarmHindiTest {
 // kept out of the farm so.
         val ids = setOf("vidlink", "vaplayer", "vidrock", "moviebox", "vidnest",
             "vidup", "vidcore", "allmovieland", "nhd", "netmirror",
-            "vixsrc", "zxcstreams", "vidapi", "twoembed",
+            "zxcstreams", "vidapi", "twoembed",
             "vidfast", "autoembed", "vidphantom", "vsembed", "twoembed-skin",
             "vidsrc-to", "vidsrcme", "nontongo",
             "castletv", "streamflix", "4khdhub",
-            "vidsrc-pm", "rive")
+            "vidsrc-pm", "rive", "videasy")
         for (id in ids) {
             assertNotNull(
                 ServerFarm.allServers.firstOrNull { it.id == id },
                 "$id must be in the farm",
             )
         }
-        // Disabled/dead servers must NOT be in the live farm (vixsrc re-enabled Sept 2026).
+        // Disabled/dead servers must NOT be in the live farm (vixsrc dropped: bot challenge on the whole domain).
         val disabled = setOf("mp4hydra", "vidzee", "streamprovider", "primesrc",
-            "myflixer-hindi", "videm", "8stream", "videasy-hindi", "dahmermovies", "vidzy")
+            "myflixer-hindi", "videm", "8stream", "dahmermovies", "vidzy", "vixsrc")
         for (id in disabled) {
             assertNull(
                 ServerFarm.allServers.firstOrNull { it.id == id },

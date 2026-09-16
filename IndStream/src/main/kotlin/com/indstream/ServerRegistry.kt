@@ -57,13 +57,12 @@ object ServerFarm {
             isJsonApi = true, referer = "https://vidrock.to/",
             hasSubtitles = false, timeoutSec = 12,
         ),
-        // MyFlixer Hindi (hindi. myflixerapi. com): IMDB-keyed with the id in the path (/embed/tt. . . ). Whole host is Hindi.
-// audio.
+        // MovieBox app API: bearer token first, then a title-keyed POST search.
         ServerSpec(
             id = "moviebox", name = "MovieBox",
             idType = ServerIdType.TMDB,
-            movieUrl = "https://h5-api.aoneroom.com/wefeed-h5api-bff",
-            tvUrl = "https://h5-api.aoneroom.com/wefeed-h5api-bff",
+            movieUrl = "https://h5-api.aoneroom.com/wefeed-h5api-bff/app/get-latest-app-pkgs?app_name=moviebox",
+            tvUrl = "https://h5-api.aoneroom.com/wefeed-h5api-bff/app/get-latest-app-pkgs?app_name=moviebox",
             isJsonApi = true, referer = "https://fmoviesunblocked.net/",
             // timeoutSec 30→40 (user report: MovieBox absent on the same
             // device/network): slow responses were cut off early.
@@ -130,17 +129,6 @@ object ServerFarm {
             isJsonApi = true, referer = "https://net27.cc/",
             hasSubtitles = true, timeoutSec = 50,
             declaredLanguages = emptySet(),
-        ),
-        // VixSrc: TMDB-keyed JSON API.
-        // GET /api/movie/{tmdb} (or /api/tv/{tmdb}/{s}/{e}) -> {src: "/embed/.."}.
-        // Embed page carries token/expires/playlist; master is signed HLS.
-        ServerSpec(
-            id = "vixsrc", name = "VixSrc",
-            idType = ServerIdType.TMDB,
-            movieUrl = "https://vixsrc.to/api/movie/{id}",
-            tvUrl = "https://vixsrc.to/api/tv/{id}/{season}/{episode}",
-            isJsonApi = true, referer = "https://vixsrc.to/",
-            hasSubtitles = true, timeoutSec = 30,
         ),
         // ZXCStreams (portal-discovered backend): TMDB-keyed.
         // Portal (zxcstream.xyz/zxcprime.xyz) redirect -> base; sha512 token POST.
@@ -242,11 +230,12 @@ object ServerFarm {
             hasSubtitles = true, timeoutSec = 15,
         ),
         // Hindi/Indian-language expansion: per-language audio tracks (TMDB title-keyed API).
+        // Chain entry is the security-key fetch; search/detail/video are POSTs needing that key.
         ServerSpec(
             id = "castletv", name = "CastleTV",
             idType = ServerIdType.TMDB,
-            movieUrl = "https://api.hlowb.com/",
-            tvUrl = "https://api.hlowb.com/",
+            movieUrl = "https://api.hlowb.com/v0.1/system/getSecurityKey/1?channel=IndiaA&clientType=1&lang=en-US",
+            tvUrl = "https://api.hlowb.com/v0.1/system/getSecurityKey/1?channel=IndiaA&clientType=1&lang=en-US",
             referer = "https://api.hlowb.com/",
             hasSubtitles = false, timeoutSec = 30,
             declaredLanguages = setOf("Hindi", "Tamil", "Telugu"),
@@ -285,6 +274,16 @@ object ServerFarm {
             tvUrl = "https://www.rivestream.app/embed?type=tv&id={id}&season={season}&episode={episode}",
             referer = "https://www.rivestream.app/",
             hasSubtitles = true, timeoutSec = 15,
+        ),
+        // Videasy multi-route API with local mvm1 decrypt. CDN carries HLS up to 2160p; hdmovie carries Hindi.
+        // Chain entry is the per-title seed fetch; route queries need that seed plus title and media type.
+        ServerSpec(
+            id = "videasy", name = "Videasy",
+            idType = ServerIdType.TMDB,
+            movieUrl = "https://api.speedracelight.com/seed?mediaId={id}",
+            tvUrl = "https://api.speedracelight.com/seed?mediaId={id}",
+            referer = "https://player.videasy.net/",
+            hasSubtitles = false, timeoutSec = 30,
         ),
     )
 

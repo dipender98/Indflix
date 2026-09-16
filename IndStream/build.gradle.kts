@@ -3,7 +3,7 @@ import java.util.Properties
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
-version = 41
+version = 43
 
 plugins {
     id("com.lagradost.cloudstream3.gradle")
@@ -55,6 +55,42 @@ dependencies {
     ).files.filter { !it.name.contains("sources") && !it.name.contains("javadoc") }
     if (cryptoJars.isNotEmpty()) {
         testImplementation(files(cryptoJars))
+    }
+    // NiceHttp serializes POST bodies with kotlinx-serialization; same guarded pattern.
+    val serialJars = fileTree(
+        mapOf(
+            "dir" to File(project.gradle.gradleUserHomeDir, "caches/modules-2/files-2.1/org.jetbrains.kotlinx"),
+            "include" to listOf("kotlinx-serialization-json-jvm/**/*.jar", "kotlinx-serialization-core-jvm/**/*.jar"),
+        )
+    ).files.filter { !it.name.contains("sources") && !it.name.contains("javadoc") }
+    if (serialJars.isNotEmpty()) {
+        testImplementation(files(serialJars))
+    }
+    // NiceHttp builds POST bodies with Jackson; same guarded pattern.
+    val jacksonJars = fileTree(
+        mapOf(
+            "dir" to File(project.gradle.gradleUserHomeDir, "caches/modules-2/files-2.1/com.fasterxml.jackson.core"),
+            "include" to listOf("jackson-databind/**/*.jar", "jackson-core/**/*.jar", "jackson-annotations/**/*.jar"),
+        )
+    ).files.filter { !it.name.contains("sources") && !it.name.contains("javadoc") } +
+        fileTree(
+            mapOf(
+                "dir" to File(project.gradle.gradleUserHomeDir, "caches/modules-2/files-2.1/com.fasterxml.jackson.module"),
+                "include" to listOf("jackson-module-kotlin/**/*.jar"),
+            )
+        ).files.filter { !it.name.contains("sources") && !it.name.contains("javadoc") }
+    if (jacksonJars.isNotEmpty()) {
+        testImplementation(files(jacksonJars))
+    }
+    // Jackson-kotlin needs kotlin-reflect at runtime; same guarded pattern.
+    val reflectJars = fileTree(
+        mapOf(
+            "dir" to File(project.gradle.gradleUserHomeDir, "caches/modules-2/files-2.1/org.jetbrains.kotlin"),
+            "include" to listOf("kotlin-reflect/**/*.jar"),
+        )
+    ).files.filter { !it.name.contains("sources") && !it.name.contains("javadoc") }
+    if (reflectJars.isNotEmpty()) {
+        testImplementation(files(reflectJars))
     }
 }
 

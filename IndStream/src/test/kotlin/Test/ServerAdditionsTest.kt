@@ -11,18 +11,13 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-/** Guards the Sept 2026 farm expansion: VixSrc, ZXCStreams, VidAPI, 2Embed, CastleTV, StreamFlix, 4KHDHub. */
+/** Guards the Sept 2026 farm expansion: ZXCStreams, VidAPI, 2Embed, CastleTV, StreamFlix, 4KHDHub. */
 class ServerAdditionsTest {
 
     @Test
-    fun vixsrv_presentAndTmdbKeyed() {
-        val s = ServerFarm.allServers.first { it.id == "vixsrc" }
-        assertEquals("VixSrc", s.name)
-        assertEquals(ServerIdType.TMDB, s.idType)
-        assertTrue(s.isJsonApi)
-        assertEquals("https://vixsrc.to/", s.referer)
-        assertEquals("https://vixsrc.to/api/movie/27205", ServerFarm.buildMovieUrl(s, "27205"))
-        assertEquals("https://vixsrc.to/api/tv/1399/1/1", ServerFarm.buildTvUrl(s, "1399", 1, 1))
+    fun vixsrc_disabledCloudflareChallenge() {
+        // Disabled (whole domain serves a bot challenge to automated clients) - assert the DISABLED state so a re-enable is a conscious act.
+        assertNull(ServerFarm.allServers.firstOrNull { it.id == "vixsrc" })
     }
 
     @Test
@@ -32,6 +27,24 @@ class ServerAdditionsTest {
         assertEquals(ServerIdType.TMDB, s.idType)
         assertEquals("https://zxcstream.xyz/player/movie/27205", ServerFarm.buildMovieUrl(s, "27205"))
         assertEquals("https://zxcstream.xyz/player/tv/1399/1/1", ServerFarm.buildTvUrl(s, "1399", 1, 1))
+    }
+
+    @Test
+    fun videasy_presentAndTmdbKeyed() {
+        val s = ServerFarm.allServers.first { it.id == "videasy" }
+        assertEquals("Videasy", s.name)
+        assertEquals(ServerIdType.TMDB, s.idType)
+        assertEquals("https://player.videasy.net/", s.referer)
+        assertTrue(s.declaredLanguages.isEmpty(), "multi-route host: per-source labels win")
+        assertEquals(30, s.timeoutSec, "seed 6s + parallel routes 10s + one fresh-seed retry must fit")
+        assertEquals(
+            "https://api.speedracelight.com/seed?mediaId=27205",
+            ServerFarm.buildMovieUrl(s, "27205"),
+        )
+        assertEquals(
+            "https://api.speedracelight.com/seed?mediaId=1399",
+            ServerFarm.buildTvUrl(s, "1399", 1, 1),
+        )
     }
 
     @Test
