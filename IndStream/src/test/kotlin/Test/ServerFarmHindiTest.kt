@@ -97,6 +97,18 @@ class ServerFarmHindiTest {
     }
 
     @Test
+    fun moviebox_rejectionClass() {
+        // 429 is transient throttling (no token retry); 401/403 or non-zero body codes reject the bearer.
+        assertTrue(!StreamEngine.movieboxAuthRejected(429, "429"))
+        assertTrue(!StreamEngine.movieboxAuthRejected(429, "0"))
+        assertTrue(!StreamEngine.movieboxAuthRejected(200, "0"))
+        assertTrue(StreamEngine.movieboxAuthRejected(401, "0"))
+        assertTrue(StreamEngine.movieboxAuthRejected(403, "0"))
+        assertTrue(StreamEngine.movieboxAuthRejected(200, "400"))
+        assertTrue(StreamEngine.movieboxAuthRejected(400, "400"))
+    }
+
+    @Test
     fun primesrc_presentAndImdbKeyed() {
         val s = ServerFarm.allServers.firstOrNull { it.id == "primesrc" }
         // Disabled (API returns no streams) - assert the DISABLED state so a re-enable is a conscious act.
@@ -170,7 +182,7 @@ class ServerFarmHindiTest {
     @Test
     fun farm_withinServerCap() {
         // No registry cap: the farm grows freely, ranked fastest-first at emit.
-        assertTrue(ServerFarm.allServers.size >= 27, "farm keeps every live server")
+        assertTrue(ServerFarm.allServers.size >= 26, "farm keeps every live server")
         assertTrue(ServerFarm.allServers.isNotEmpty())
         assertNotNull(ServerFarm.allServers.firstOrNull { it.id == "vidlink" })
     }
@@ -242,7 +254,7 @@ class ServerFarmHindiTest {
             "zxcstreams", "vidapi", "twoembed",
             "vidfast", "autoembed", "vidphantom", "vsembed", "twoembed-skin",
             "vidsrc-to", "vidsrcme", "nontongo",
-            "castletv", "streamflix", "4khdhub",
+            "castletv", "streamflix",
             "vidsrc-pm", "rive", "videasy")
         for (id in ids) {
             assertNotNull(
@@ -252,7 +264,7 @@ class ServerFarmHindiTest {
         }
         // Disabled/dead servers must NOT be in the live farm (vixsrc dropped: bot challenge on the whole domain).
         val disabled = setOf("mp4hydra", "vidzee", "streamprovider", "primesrc",
-            "myflixer-hindi", "videm", "8stream", "dahmermovies", "vidzy", "vixsrc")
+            "myflixer-hindi", "videm", "8stream", "dahmermovies", "vidzy", "vixsrc", "4khdhub")
         for (id in disabled) {
             assertNull(
                 ServerFarm.allServers.firstOrNull { it.id == id },
@@ -264,6 +276,6 @@ class ServerFarmHindiTest {
     @Test
     fun farm_withinExpandedCap() {
         // Uncapped farm: size only grows, never trimmed to fit.
-        assertTrue(ServerFarm.allServers.size >= 27, "farm keeps every live server")
+        assertTrue(ServerFarm.allServers.size >= 26, "farm keeps every live server")
     }
 }

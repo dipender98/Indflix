@@ -151,7 +151,7 @@ object ServerFarm {
             movieUrl = "https://vaplayer.ru/embed/movie/{id}",
             tvUrl = "https://vaplayer.ru/embed/tv/{id}/{season}/{episode}",
             referer = "https://vaplayer.ru/",
-            hasSubtitles = true, timeoutSec = 15,
+            hasSubtitles = true, timeoutSec = 30,
         ),
         // 2Embed (embed page, servers Vsrc/Videm/Vcr): IMDB-keyed.
         // Generic pipeline handles the iframe chain.
@@ -161,7 +161,7 @@ object ServerFarm {
             movieUrl = "https://2embed.cc/embed/{id}",
             tvUrl = "https://2embed.cc/embedtv/{id}&s={season}&e={episode}",
             referer = "https://2embed.cc/",
-            hasSubtitles = true, timeoutSec = 15,
+            hasSubtitles = true, timeoutSec = 30,
         ),
         // Fast TMDB-keyed embed batch: direct iframe chains, no crypto.
         // All eight run through the generic pipeline (fetch, unwrap, harvest, extractor registry).
@@ -171,7 +171,7 @@ object ServerFarm {
             movieUrl = "https://vidfast.pro/movie/{id}?autoPlay=true",
             tvUrl = "https://vidfast.pro/tv/{id}/{season}/{episode}?autoPlay=true",
             referer = "https://vidfast.pro/",
-            hasSubtitles = true, timeoutSec = 15,
+            hasSubtitles = true, timeoutSec = 30,
         ),
         ServerSpec(
             id = "autoembed", name = "AutoEmbed",
@@ -179,7 +179,7 @@ object ServerFarm {
             movieUrl = "https://autoembed.co/movie/tmdb/{id}",
             tvUrl = "https://autoembed.co/tv/tmdb/{id}-{season}-{episode}",
             referer = "https://autoembed.co/",
-            hasSubtitles = true, timeoutSec = 15,
+            hasSubtitles = true, timeoutSec = 30,
         ),
         ServerSpec(
             id = "vidphantom", name = "VidPhantom",
@@ -187,7 +187,7 @@ object ServerFarm {
             movieUrl = "https://vidphantom.com/movie/{id}",
             tvUrl = "https://vidphantom.com/tv/{id}/{season}/{episode}",
             referer = "https://vidphantom.com/",
-            hasSubtitles = true, timeoutSec = 15,
+            hasSubtitles = true, timeoutSec = 30,
         ),
         ServerSpec(
             id = "vsembed", name = "VsEmbed",
@@ -195,7 +195,7 @@ object ServerFarm {
             movieUrl = "https://vsembed.su/embed/movie/{id}",
             tvUrl = "https://vsembed.su/embed/tv/{id}/{season}/{episode}",
             referer = "https://vsembed.su/",
-            hasSubtitles = false, timeoutSec = 15,
+            hasSubtitles = false, timeoutSec = 30,
         ),
         ServerSpec(
             id = "twoembed-skin", name = "2EmbedSkin",
@@ -203,7 +203,7 @@ object ServerFarm {
             movieUrl = "https://www.2embed.skin/embed/{id}",
             tvUrl = "https://www.2embed.skin/embedtv/{id}&s={season}&e={episode}",
             referer = "https://www.2embed.skin/",
-            hasSubtitles = true, timeoutSec = 15,
+            hasSubtitles = true, timeoutSec = 30,
         ),
         ServerSpec(
             id = "vidsrc-to", name = "VidsrcTo",
@@ -211,7 +211,7 @@ object ServerFarm {
             movieUrl = "https://vidsrc.to/embed/movie/{id}",
             tvUrl = "https://vidsrc.to/embed/tv/{id}/{season}/{episode}",
             referer = "https://vidsrc.to/",
-            hasSubtitles = false, timeoutSec = 15,
+            hasSubtitles = false, timeoutSec = 30,
         ),
         ServerSpec(
             id = "vidsrcme", name = "VidsrcMe",
@@ -219,7 +219,7 @@ object ServerFarm {
             movieUrl = "https://vidsrcme.su/embed/movie/{id}",
             tvUrl = "https://vidsrcme.su/embed/tv/{id}/{season}/{episode}",
             referer = "https://vidsrcme.su/",
-            hasSubtitles = false, timeoutSec = 15,
+            hasSubtitles = false, timeoutSec = 30,
         ),
         ServerSpec(
             id = "nontongo", name = "Nontongo",
@@ -227,7 +227,7 @@ object ServerFarm {
             movieUrl = "https://www.nontongo.win/embed/movie/{id}",
             tvUrl = "https://www.nontongo.win/embed/tv/{id}/{season}/{episode}",
             referer = "https://www.nontongo.win/",
-            hasSubtitles = true, timeoutSec = 15,
+            hasSubtitles = true, timeoutSec = 30,
         ),
         // Hindi/Indian-language expansion: per-language audio tracks (TMDB title-keyed API).
         // Chain entry is the security-key fetch; search/detail/video are POSTs needing that key.
@@ -248,24 +248,14 @@ object ServerFarm {
             tvUrl = "https://api.streamflix.app/data.json",
             hasSubtitles = false, timeoutSec = 25,
         ),
-        // Hindi-dub file index (title search, year-verified post, file-host links).
-        ServerSpec(
-            id = "4khdhub", name = "4KHDHub",
-            idType = ServerIdType.TMDB,
-            movieUrl = "https://4khdhub.one/",
-            tvUrl = "https://4khdhub.one/",
-            referer = "https://4khdhub.one/",
-            hasSubtitles = false, timeoutSec = 60,
-            declaredLanguages = setOf("Hindi"),
-        ),
-        // Fast global batch: TMDB-keyed embeds, generic pipeline, 15s kill.
+        // Fast global batch: TMDB-keyed embeds, generic pipeline, 30s kill.
         ServerSpec(
             id = "vidsrc-pm", name = "VidsrcPm",
             idType = ServerIdType.TMDB,
             movieUrl = "https://vidsrc.pm/embed/movie/{id}",
             tvUrl = "https://vidsrc.pm/embed/tv/{id}/{season}/{episode}",
             referer = "https://vidsrc.pm/",
-            hasSubtitles = true, timeoutSec = 15,
+            hasSubtitles = true, timeoutSec = 30,
         ),
         ServerSpec(
             id = "rive", name = "Rive",
@@ -273,7 +263,7 @@ object ServerFarm {
             movieUrl = "https://www.rivestream.app/embed?type=movie&id={id}",
             tvUrl = "https://www.rivestream.app/embed?type=tv&id={id}&season={season}&episode={episode}",
             referer = "https://www.rivestream.app/",
-            hasSubtitles = true, timeoutSec = 15,
+            hasSubtitles = true, timeoutSec = 30,
         ),
         // Videasy multi-route API with local mvm1 decrypt. CDN carries HLS up to 2160p; hdmovie carries Hindi.
         // Chain entry is the per-title seed fetch; route queries need that seed plus title and media type.

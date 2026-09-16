@@ -67,7 +67,7 @@ class ServerAdditionsTest {
 
     @Test
     fun fastBatch_presentAndTmdbKeyed() {
-        // Fast embed batch: all TMDB-keyed (no id lookup wait), generic pipeline, 15s kill.
+        // Fast embed batch: all TMDB-keyed (no id lookup wait), generic pipeline, 30s kill.
         val expected = mapOf(
             "vidfast" to Pair("https://vidfast.pro/movie/27205?autoPlay=true", "https://vidfast.pro/tv/1399/1/1?autoPlay=true"),
             "autoembed" to Pair("https://autoembed.co/movie/tmdb/27205", "https://autoembed.co/tv/tmdb/1399-1-1"),
@@ -82,7 +82,7 @@ class ServerAdditionsTest {
             val s = ServerFarm.allServers.firstOrNull { it.id == id }
             assertNotNull(s, "$id must be in the farm")
             assertEquals(ServerIdType.TMDB, s.idType, "$id must be TMDB-keyed")
-            assertEquals(15, s.timeoutSec, "$id farm kill must stay fast")
+            assertEquals(30, s.timeoutSec, "$id farm kill fits the background fill")
             assertEquals(urls.first, ServerFarm.buildMovieUrl(s, "27205"), "$id movie url")
             assertEquals(urls.second, ServerFarm.buildTvUrl(s, "1399", 1, 1), "$id tv url")
         }
@@ -141,16 +141,17 @@ class ServerAdditionsTest {
         assertEquals("StreamFlix", flix.name)
         assertEquals(ServerIdType.TMDB, flix.idType)
         assertEquals(25, flix.timeoutSec)
-        val hub = ServerFarm.allServers.first { it.id == "4khdhub" }
-        assertEquals("4KHDHub", hub.name)
-        assertEquals(ServerIdType.TMDB, hub.idType)
-        assertEquals(60, hub.timeoutSec)
-        assertEquals(setOf("Hindi"), hub.declaredLanguages)
+    }
+
+    @Test
+    fun hubDisabledJsGateway() {
+        // Disabled (post pages moved download buttons behind a JS gateway; no direct drive links) - assert the DISABLED state so a re-enable is a conscious act.
+        assertNull(ServerFarm.allServers.firstOrNull { it.id == "4khdhub" })
     }
 
     @Test
     fun fastBatch2_presentAndTmdbKeyed() {
-        // Fast global batch: TMDB-keyed embeds, generic pipeline, 15s kill.
+        // Fast global batch: TMDB-keyed embeds, generic pipeline, 30s kill.
         val expected = mapOf(
             "vidsrc-pm" to Pair("https://vidsrc.pm/embed/movie/27205", "https://vidsrc.pm/embed/tv/1399/1/1"),
             "rive" to Pair("https://www.rivestream.app/embed?type=movie&id=27205",
@@ -160,7 +161,7 @@ class ServerAdditionsTest {
             val s = ServerFarm.allServers.firstOrNull { it.id == id }
             assertNotNull(s, "$id must be in the farm")
             assertEquals(ServerIdType.TMDB, s.idType, "$id must be TMDB-keyed")
-            assertEquals(15, s.timeoutSec, "$id farm kill must stay fast")
+            assertEquals(30, s.timeoutSec, "$id farm kill fits the background fill")
             assertEquals(urls.first, ServerFarm.buildMovieUrl(s, "27205"), "$id movie url")
             assertEquals(urls.second, ServerFarm.buildTvUrl(s, "1399", 1, 1), "$id tv url")
         }

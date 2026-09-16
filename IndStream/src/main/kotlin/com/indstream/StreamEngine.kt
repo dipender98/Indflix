@@ -1007,7 +1007,11 @@ object StreamEngine {
     /** Public pre-warm, called once at plugin load: the token lives for hours, so one background GET at app start removes a. serial round-trip (~0. 5-1s). */
     suspend fun prewarmMovieBoxToken(): String? = fetchMovieBoxBearer(forceRefresh = false)
 
-    /** MovieBox resolver (h5-api. aoneroom. com app API, , ). Title-keyed, 4-step chain: 1. */
+    /** Search rejection class: 429 is transient throttling (no token burn); 401/403 or a non-zero body code means the bearer was rejected. Pure. */
+    internal fun movieboxAuthRejected(httpCode: Int, jsonCode: String): Boolean =
+        httpCode != 429 && (httpCode == 401 || httpCode == 403 || jsonCode != "0")
+
+    /** MovieBox resolver (title-keyed app API, 4-step chain). */
     internal fun movieboxSeasonEnd(rawTitle: String): Int? {
         val m = Regex("""\s+S(\d+)(?:\s*-\s*S?(\d+))?$""", RegexOption.IGNORE_CASE)
             .find(rawTitle) ?: return null
@@ -1089,7 +1093,12 @@ object StreamEngine {
                 break
             }
             val jsonCode = root?.optString("code", "")?.takeIf { it.isNotBlank() } ?: "0"
-            val authRejected = resp.code == 401 || resp.code == 403 || jsonCode != "0"
+            if (resp.code == 429) {
+                // Throttled: transient miss, no token retry (the bearer is fine).
+                Log.w("MovieBox", "search throttled (HTTP 429)")
+                break
+            }
+            val authRejected = movieboxAuthRejected(resp.code, jsonCode)
             if (!authRejected) {
                 // Answered, accepted, just no rows for this title � a real miss, not a token problem; retrying would only burn 12s.
                 Log.w("MovieBox", "search answered with no items")
