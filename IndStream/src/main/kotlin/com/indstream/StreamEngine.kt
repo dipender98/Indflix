@@ -51,6 +51,8 @@ object StreamEngine {
         val inlineManifest: String? = null, // HLS master playlist text delivered inline (JSON API) Extra HTTP headers the player must send when fetching (e. g.
 // "User-Agent: ExoPlayer" for CDNs.
         val extraHeaders: Map<String, String> = emptyMap(),
+        // DASH flag; isM3u8 stays the adaptive marker.
+        val isDash: Boolean = false,
     )
 
     /** MovieBox search hit: subject id, season coverage end, audio tag, search detailPath. */
@@ -336,25 +338,18 @@ object StreamEngine {
                 originalLang = originalLang,
             )
 
-            if (isAdaptive) {
-                onLink(newExtractorLink(
-                    source = label, name = label,
-                    url = raw.url, type = ExtractorLinkType.M3U8,
-                ) {
-                    referer = raw.referer ?: ""
-                    this.quality = quality
-                    this.headers = linkHeaders
-                })
-            } else {
-                onLink(newExtractorLink(
-                    source = label, name = label,
-                    url = raw.url, type = ExtractorLinkType.VIDEO,
-                ) {
-                    referer = raw.referer ?: ""
-                    this.quality = quality
-                    this.headers = linkHeaders
-                })
-            }
+            // DASH manifests need DASH type; HLS stays M3U8.
+            val linkType = if (raw.isDash) ExtractorLinkType.DASH
+            else if (isAdaptive) ExtractorLinkType.M3U8
+            else ExtractorLinkType.VIDEO
+            onLink(newExtractorLink(
+                source = label, name = label,
+                url = raw.url, type = linkType,
+            ) {
+                referer = raw.referer ?: ""
+                this.quality = quality
+                this.headers = linkHeaders
+            })
         }
         floorDroppedByServer.forEach { (sid, n) ->
             if ((emittedByServer[sid] ?: 0) == 0) {
@@ -593,8 +588,9 @@ object StreamEngine {
             val result = direct.map { url ->
                 val probed = HttpKit.probeSpeed(url, referer)
                 val (label, h) = probeAudioHeight(url, referer)
-                RawStream(spec.id, spec.name, url, url.contains(".m3u8", ignoreCase = true), referer, h, probed,
-                    audioLabel = label)
+                val dash = url.contains(".mpd", ignoreCase = true)
+                RawStream(spec.id, spec.name, url, url.contains(".m3u8", ignoreCase = true) || dash, referer, h, probed,
+                    audioLabel = label, isDash = dash)
             }
             okServer(spec, start, "direct harvest", result.size)
             return result
@@ -619,9 +615,10 @@ object StreamEngine {
             val result = regLinks.map { link ->
                 val probed = HttpKit.probeSpeed(link.url, link.referer)
                 val (label, h) = probeAudioHeight(link.url, link.referer)
-                RawStream(spec.id, spec.name, link.url, link.type == ExtractorLinkType.M3U8, link.referer,
+                val dash = link.type == ExtractorLinkType.DASH || link.url.contains(".mpd", ignoreCase = true)
+                RawStream(spec.id, spec.name, link.url, link.type == ExtractorLinkType.M3U8 || dash, link.referer,
                     ManifestKit.maxQuality(link.quality, h), probed,
-                    audioLabel = label)
+                    audioLabel = label, isDash = dash)
             }
             okServer(spec, start, "extractor registry", result.size)
             return result
@@ -636,8 +633,9 @@ object StreamEngine {
             val result = jsUrls.map { url ->
                 val probed = HttpKit.probeSpeed(url, referer)
                 val (label, h) = probeAudioHeight(url, referer)
-                RawStream(spec.id, spec.name, url, url.contains(".m3u8", ignoreCase = true), referer, h, probed,
-                    audioLabel = label)
+                val dash = url.contains(".mpd", ignoreCase = true)
+                RawStream(spec.id, spec.name, url, url.contains(".m3u8", ignoreCase = true) || dash, referer, h, probed,
+                    audioLabel = label, isDash = dash)
             }
             okServer(spec, start, "js config harvest", result.size)
             return result
@@ -652,8 +650,9 @@ object StreamEngine {
             val probed = HttpKit.probeSpeed(videoSrc, referer)
             val (label, h) = probeAudioHeight(videoSrc, referer)
             okServer(spec, start, "video tag", 1)
-            return listOf(RawStream(spec.id, spec.name, videoSrc, videoSrc.contains(".m3u8", ignoreCase = true), referer, h, probed,
-                audioLabel = label))
+            val dash = videoSrc.contains(".mpd", ignoreCase = true)
+            return listOf(RawStream(spec.id, spec.name, videoSrc, videoSrc.contains(".m3u8", ignoreCase = true) || dash, referer, h, probed,
+                audioLabel = label, isDash = dash))
         } else {
             Log.d("IndStream", "${spec.id}: no video tag")
         }
@@ -1050,6 +1049,91 @@ object StreamEngine {
         return m.groupValues[2].toIntOrNull() ?: m.groupValues[1].toIntOrNull()
     }
 
+    // Single-flight for play calls; staggered to respect per-IP budget.
+    private val movieBoxPlayGate = Semaphore(1)
+    @Volatile private var movieBoxPlayLastAt = 0L
+    private const val MOVIEBOX_PLAY_STAGGER_MS = 1_500L
+
+    // Normalize signCookie into a Cookie header value.
+    internal fun cloudFrontCookie(signCookie: String?): String? {
+        if (signCookie.isNullOrBlank()) return null
+        val parts = signCookie.split(";").map { it.trim().trim('"') }
+            .filter { it.contains("=") && it.substringAfter("=").isNotBlank() }
+        if (parts.isEmpty()) return null
+        return parts.joinToString("; ")
+    }
+
+    // Drop deprecation-notice clips served from the notice path.
+    internal fun isMovieboxNoticeUrl(url: String): Boolean =
+        url.contains("macdn.aoneroom.com/other/", ignoreCase = true)
+
+    // Standard base64 decode without java.util (minSdk 21).
+    internal fun decodeBase64Standard(input: String): ByteArray? = runCatching {
+        val alpha = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+        val rev = IntArray(128) { -1 }
+        alpha.forEachIndexed { i, c -> rev[c.code] = i }
+        val s = input.filterNot { it.isWhitespace() }.trimEnd('=')
+        require(s.isNotEmpty() && s.length % 4 != 1) { "bad b64" }
+        require(s.all { it.code < 128 && rev[it.code] >= 0 }) { "bad b64" }
+        val out = ByteArray(s.length * 3 / 4 + 3)
+        var w = 0
+        var i = 0
+        while (i < s.length) {
+            val c0 = rev[s[i].code]
+            val c1 = if (i + 1 < s.length) rev[s[i + 1].code] else 0
+            val c2 = if (i + 2 < s.length) rev[s[i + 2].code] else 0
+            val c3 = if (i + 3 < s.length) rev[s[i + 3].code] else 0
+            out[w++] = ((c0 shl 2) or (c1 shr 4)).toByte()
+            if (i + 2 < s.length) out[w++] = (((c1 and 0xF) shl 4) or (c2 shr 2)).toByte()
+            if (i + 3 < s.length) out[w++] = (((c2 and 0x3) shl 6) or c3).toByte()
+            i += 4
+        }
+        out.copyOf(w)
+    }.getOrNull()
+
+    // Rebuild DASH manifest URL from the signed policy Resource.
+    internal fun dashManifestFromPolicy(signCookie: String?): String? = runCatching {
+        if (signCookie.isNullOrBlank()) return@runCatching null
+        val raw = signCookie.split(";").map { it.trim() }
+            .firstOrNull { it.startsWith("CloudFront-Policy=") }
+            ?.substringAfter("=")?.trim()?.trim('"')?.takeIf { it.isNotBlank() }
+            ?: return@runCatching null
+        // Reverse URL-safe variant.
+        var std = raw.replace('-', '+').replace('~', '/').replace('_', '=')
+        std = std.filterNot { it.isWhitespace() }
+        if (std.isEmpty()) return@runCatching null
+        val stripped = std.trimEnd('=')
+        // Padding only valid at end; length mod 4 == 1 never valid.
+        if (stripped.isEmpty() || stripped.contains('=')) return@runCatching null
+        if (stripped.length % 4 == 1) return@runCatching null
+        val pad = (4 - stripped.length % 4) % 4
+        std = stripped + "=".repeat(pad)
+        val json = decodeBase64Standard(std)?.let { String(it, Charsets.UTF_8) }
+            ?: return@runCatching null
+        val res = org.json.JSONObject(json)
+            .optJSONArray("Statement")?.optJSONObject(0)?.optString("Resource")
+            ?.takeIf { it.isNotBlank() } ?: return@runCatching null
+        val base = res.trim().trimEnd('*').trimEnd('/')
+        if (base.isBlank() || !base.startsWith("http")) return@runCatching null
+        if (base.endsWith(".mpd", ignoreCase = true)) base else "$base/index.mpd"
+    }.getOrNull()
+
+    // Serialize play calls with stagger; cancellation-safe via finally.
+    internal suspend fun <T> withMovieBoxPlayPermit(block: suspend () -> T): T {
+        movieBoxPlayGate.acquire()
+        try {
+            val wait = MOVIEBOX_PLAY_STAGGER_MS - (System.currentTimeMillis() - movieBoxPlayLastAt)
+            if (wait > 0) delay(wait)
+            try {
+                return block()
+            } finally {
+                movieBoxPlayLastAt = System.currentTimeMillis()
+            }
+        } finally {
+            movieBoxPlayGate.release()
+        }
+    }
+
     private suspend fun resolveMovieBox(
         spec: ServerSpec,
         tmdbId: Int?,
@@ -1239,8 +1323,7 @@ object StreamEngine {
                         append("&detailPath=$detailPath")
                     }
 
-                    // 4. download + play endpoints in parallel (runs them back-to-back; parallel keeps the combined wall time at this ONE.
-// 8s budget shared by both).
+                    // 4. download + play endpoints; play is gated (per-IP budget).
                     val (downloadObj, playObj) = kotlinx.coroutines.coroutineScope {
                         val d = async {
                             withTimeoutOrNull(8_000L) {
@@ -1251,12 +1334,14 @@ object StreamEngine {
                             }?.let { t -> runCatching { org.json.JSONObject(t) }.getOrNull() }
                         }
                         val p = async {
-                            withTimeoutOrNull(8_000L) {
-                                runCatching {
-                                    app.get("$base/wefeed-h5api-bff/subject/play?$params",
-                                        timeout = 8, headers = reqHeaders).text
-                                }.getOrNull()
-                            }?.let { t -> runCatching { org.json.JSONObject(t) }.getOrNull() }
+                            withMovieBoxPlayPermit {
+                                withTimeoutOrNull(8_000L) {
+                                    runCatching {
+                                        app.get("$base/wefeed-h5api-bff/subject/play?$params",
+                                            timeout = 8, headers = reqHeaders).text
+                                    }.getOrNull()
+                                }?.let { t -> runCatching { org.json.JSONObject(t) }.getOrNull() }
+                            }
                         }
                         (d.await() ?: org.json.JSONObject()) to (p.await() ?: org.json.JSONObject())
                     }
@@ -1269,26 +1354,45 @@ object StreamEngine {
                         for (i in 0 until arr.length()) {
                             val s = arr.optJSONObject(i) ?: continue
                             if (s.optBoolean("vipLocked", false)) { lockedTotal++; continue }
-                            val url = s.optString("url").takeIf { it.isNotBlank() } ?: continue
-                            if (!seenUrls.add(url)) continue
+                            val rawUrl = s.optString("url").takeIf { it.isNotBlank() } ?: continue
+                            val sign = s.optString("signCookie").takeIf { it.isNotBlank() }
+                            val cookie = cloudFrontCookie(sign)
+                            // DASH ladder carries the manifest inside the policy.
+                            var finalUrl = rawUrl
+                            var isDashEntry = dash
+                            if (dash) {
+                                val manifest = dashManifestFromPolicy(sign)
+                                if (manifest != null) finalUrl = manifest
+                                else {
+                                    if (isMovieboxNoticeUrl(rawUrl)) continue
+                                    continue
+                                }
+                                isDashEntry = true
+                            } else {
+                                if (isMovieboxNoticeUrl(rawUrl)) continue
+                                if (rawUrl.contains(".mpd", ignoreCase = true)) isDashEntry = true
+                            }
+                            if (!seenUrls.add(finalUrl)) continue
                             val resolution = s.optString("resolutions", "").toIntOrNull()
                                 ?: s.optInt("resolution", 0)
-                            // Audio tag may be "Hindi", "Hindi Dubbed", "Dual Audio " etc � any mention of Hindi ranks as Hindi (priority 4).
                             val isHindi = language?.contains("hindi", ignoreCase = true) == true
-                            // No " Auto" name suffix () 4K"; a literal "MovieBox Auto" hid the real rendition).
+                            val headers = LinkedHashMap<String, String>()
+                            headers["Referer"] = refererBase
+                            headers["User-Agent"] = HttpKit.userAgent
+                            if (cookie != null) headers["Cookie"] = cookie
+                            val isHls = finalUrl.contains(".m3u8", ignoreCase = true)
+                            val isMpd = isDashEntry || finalUrl.contains(".mpd", ignoreCase = true)
                             added += RawStream(
                                 serverId = spec.id,
                                 serverName = spec.name,
-                                url = url,
-                                isM3u8 = url.contains(".m3u8", ignoreCase = true) || dash,
+                                url = finalUrl,
+                                isM3u8 = isHls || isMpd,
                                 referer = refererBase,
                                 qualityHint = resolution,
                                 audioPriority = if (isHindi) 4 else 2,
                                 audioLabel = language ?: "",
-                                // Browser parity: media GETs carry Referer, never Origin (Origin 403s CDNs).
-                                extraHeaders = mapOf(
-                                    "Referer" to refererBase,
-                                ),
+                                extraHeaders = headers,
+                                isDash = isMpd,
                             )
                         }
                         return added
@@ -1388,10 +1492,12 @@ object StreamEngine {
         val direct = harvestUrls(unwrapped) + harvestJsUrls(unwrapped)
         if (direct.isNotEmpty()) {
             return direct.map { url ->
+                val dash = url.contains(".mpd", ignoreCase = true)
                 RawStream(
                     serverId = spec.id, serverName = spec.name,
-                    url = url, isM3u8 = url.contains(".m3u8", ignoreCase = true),
+                    url = url, isM3u8 = url.contains(".m3u8", ignoreCase = true) || dash,
                     referer = referer, audioPriority = audioPriority, audioLabel = audioLabel,
+                    isDash = dash,
                 )
             }
         }
@@ -1404,11 +1510,13 @@ object StreamEngine {
         }
         if (regLinks.isNotEmpty()) {
             return regLinks.map { l ->
+                val dash = l.type == ExtractorLinkType.DASH || l.url.contains(".mpd", ignoreCase = true)
                 RawStream(
                     serverId = spec.id, serverName = spec.name,
-                    url = l.url, isM3u8 = l.type == ExtractorLinkType.M3U8,
+                    url = l.url, isM3u8 = l.type == ExtractorLinkType.M3U8 || dash,
                     referer = l.referer, qualityHint = l.quality,
                     audioPriority = audioPriority, audioLabel = audioLabel,
+                    isDash = dash,
                 )
             }
         }
@@ -2196,6 +2304,10 @@ object StreamEngine {
                 qualityHint = 0,
                 audioPriority = if (isHindi) 4 else 1,
                 audioLabel = lang.ifBlank { "" },
+                extraHeaders = mapOf(
+                    "Referer" to "https://vidrock.to",
+                    "Origin" to "https://vidrock.to",
+                ),
             )
         }
         Log.d("VidRock", "got ${out.size} servers (${out.map { it.audioLabel }.distinct()})")

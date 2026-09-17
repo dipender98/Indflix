@@ -250,6 +250,19 @@ object VideasySource {
         return Result(sources, subtitles, httpOk = true)
     }
 
+    /** True when sources exist but none came from cdn. Pure. */
+    internal fun needsCdnBackfill(result: Result): Boolean =
+        result.sources.isNotEmpty() && result.sources.none { it.route == "cdn" }
+
+    /** Merge a cdn-only patch into a base result, deduped by url. Pure. */
+    internal fun mergePatch(base: Result, patch: Result): Result {
+        if (patch.sources.isEmpty()) return base
+        val seen = HashSet<String>(base.sources.size + patch.sources.size)
+        base.sources.forEach { seen.add(it.url) }
+        val sources = base.sources + patch.sources.filter { seen.add(it.url) }
+        return Result(sources, (base.subtitles + patch.subtitles).distinct(), httpOk = base.httpOk || patch.httpOk)
+    }
+
     /** Fetch + decrypt across all routes in parallel, deduped by url. */
     suspend fun fetchAllSources(
         tmdbId: Int,
@@ -263,18 +276,48 @@ object VideasySource {
         // First pass with each route's known-good casing.
         val seed = fetchSeed(tmdbId) ?: return Result(emptyList(), emptyList(), httpOk = false)
         val first = fetchRoutes(seed, tmdbId, imdbId, title, year, mediaType, season, episode, flipCasing = false)
-        if (first.sources.isNotEmpty()) return first
+        if (first.sources.isNotEmpty()) {
+            return backfillCdn(first, tmdbId, imdbId, title, year, mediaType, season, episode, flipCasing = false)
+        }
         // If the first pass failed due to decrypt errors (seed expired),
         // retry immediately with a fresh seed before trying flipped casing.
         if (!first.httpOk) {
             val fresh = fetchSeed(tmdbId) ?: return first
             val retry = fetchRoutes(fresh, tmdbId, imdbId, title, year, mediaType, season, episode, flipCasing = false)
-            if (retry.sources.isNotEmpty()) return retry
+            if (retry.sources.isNotEmpty()) {
+                return backfillCdn(retry, tmdbId, imdbId, title, year, mediaType, season, episode, flipCasing = false)
+            }
             if (retry.httpOk) return retry
         }
         // Retry once with a fresh seed (30s TTL) and flipped casing.
         val fresh = fetchSeed(tmdbId) ?: return first
-        return fetchRoutes(fresh, tmdbId, imdbId, title, year, mediaType, season, episode, flipCasing = true)
+        val last = fetchRoutes(fresh, tmdbId, imdbId, title, year, mediaType, season, episode, flipCasing = true)
+        if (last.sources.isNotEmpty()) {
+            return backfillCdn(last, tmdbId, imdbId, title, year, mediaType, season, episode, flipCasing = true)
+        }
+        return last
+    }
+
+    /** Fetch cdn alone with a fresh seed when it missed the main pass. Never throws. */
+    private suspend fun backfillCdn(
+        base: Result,
+        tmdbId: Int,
+        imdbId: String?,
+        title: String?,
+        year: Int?,
+        mediaType: String,
+        season: Int,
+        episode: Int,
+        flipCasing: Boolean,
+    ): Result {
+        if (!needsCdnBackfill(base)) return base
+        val cdn = ROUTES.first { it.path == "cdn" }
+        val fresh = fetchSeed(tmdbId) ?: return base
+        var patch = fetchRoute(cdn, fresh, tmdbId, imdbId, title, year, mediaType, season, episode, flipCasing)
+        if (patch.sources.isEmpty()) {
+            patch = fetchRoute(cdn, fresh, tmdbId, imdbId, title, year, mediaType, season, episode, !flipCasing)
+        }
+        return mergePatch(base, patch)
     }
 
     /** One parallel pass over the routes. Never throws. */

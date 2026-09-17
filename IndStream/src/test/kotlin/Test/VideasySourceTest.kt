@@ -170,6 +170,32 @@ class VideasySourceTest {
     }
 
     @Test
+    fun needsCdnBackfill_onlyWhenSourcesLackCdn() {
+        val without = VideasySource.Result(listOf(VideasySource.Source("1080p", "u1", "m4uhd")), emptyList(), true)
+        assertTrue(VideasySource.needsCdnBackfill(without))
+        val with = VideasySource.Result(
+            listOf(VideasySource.Source("1080p", "u1", "m4uhd"), VideasySource.Source("2160p", "u2", "cdn")),
+            emptyList(), true,
+        )
+        assertFalse(VideasySource.needsCdnBackfill(with))
+        assertFalse(VideasySource.needsCdnBackfill(VideasySource.Result(emptyList(), emptyList(), true)))
+    }
+
+    @Test
+    fun mergePatch_dedupesByUrlAndKeepsBase() {
+        val base = VideasySource.Result(listOf(VideasySource.Source("1080p", "u1", "m4uhd")), listOf("EN" to "s1"), true)
+        val patch = VideasySource.Result(
+            listOf(VideasySource.Source("1080p", "u1", "cdn"), VideasySource.Source("2160p", "u2", "cdn")),
+            listOf("EN" to "s1"), true,
+        )
+        val merged = VideasySource.mergePatch(base, patch)
+        assertEquals(listOf("u1", "u2"), merged.sources.map { it.url })
+        assertEquals("m4uhd", merged.sources[0].route)
+        assertTrue(merged.httpOk)
+        assertEquals(base, VideasySource.mergePatch(base, VideasySource.Result(emptyList(), emptyList(), true)))
+    }
+
+    @Test
     fun parseResult_sourcesAndSubtitles() {
         val json = """{"sources":[{"quality":"1080p","url":"https://x.example/a.m3u8"},
             {"quality":"Hindi","url":"https://x.example/b.m3u8"}],
