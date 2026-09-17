@@ -184,6 +184,8 @@ class ServerFarmHindiTest {
         assertEquals(ServerIdType.TMDB, s.idType)
         assertEquals("https://vidup.to/", s.referer)
         assertTrue(s.hasSubtitles)
+        // Budget: page 10 + enc 8 + servers 8 + dec 8 + per-sub (8+8) - a measured happy path already hit ~15s.
+        assertEquals(30, s.timeoutSec, "enc-dec chain needs headroom above the measured ~15s resolve")
         val m = ServerFarm.buildMovieUrl(s, "27205")
         assertTrue(m.contains("vidup.to/movie/27205"))
         val tv = ServerFarm.buildTvUrl(s, "1399", 1, 1)
@@ -191,14 +193,13 @@ class ServerFarmHindiTest {
     }
 
     @Test
-    fun vidcore_presentAndTmdbKeyed() {
-        val s = ServerFarm.allServers.first { it.id == "vidcore" }
-        assertEquals("VidCore", s.name)
-        assertEquals(ServerIdType.TMDB, s.idType)
-        assertEquals("https://vidcore.io/", s.referer)
-        assertTrue(s.hasSubtitles)
-        val m = ServerFarm.buildMovieUrl(s, "27205")
-        assertTrue(m.contains("vidcore.io/movie/27205"))
+    fun vidcore_retired_vidcoreApiPresent() {
+        // vidcore.io enc-dec servers endpoint 404s upstream; the working VidCore is the vidrack API.
+        assertNull(ServerFarm.allServers.firstOrNull { it.id == "vidcore" })
+        val api = ServerFarm.allServers.first { it.id == "vidcore-api" }
+        assertEquals("VidCore", api.name)
+        assertEquals("https://www.vidcore.org/", api.referer)
+        assertTrue(api.movieUrl.contains("vidrack.created.app"))
     }
 
     @Test
@@ -239,7 +240,7 @@ class ServerFarmHindiTest {
         // The fast direct-API servers (, no embed chain). mp4hydra, vidzee, vixsrc, streamprovider and 8stream are disabled ().
         // kept out of the farm so.
         val ids = setOf("vidlink", "vaplayer", "vidrock", "moviebox", "vidnest",
-            "vidup", "vidcore", "allmovieland", "netmirror",
+            "vidup", "vidcore-api", "allmovieland", "netmirror",
             "twoembed",
             "vidfast", "autoembed", "vidphantom", "vsembed", "twoembed-skin",
             "vidsrcme",
@@ -254,7 +255,7 @@ class ServerFarmHindiTest {
         // Disabled/dead servers must NOT be in the live farm (vixsrc dropped: bot challenge on the whole domain).
         val disabled = setOf("mp4hydra", "vidzee", "streamprovider", "primesrc",
             "myflixer-hindi", "videm", "8stream", "dahmermovies", "vidzy", "vixsrc", "4khdhub",
-            "nhd", "vidapi", "zxcstreams", "vidsrc-to", "nontongo")
+            "nhd", "vidapi", "zxcstreams", "vidsrc-to", "nontongo", "vidcore")
         for (id in disabled) {
             assertNull(
                 ServerFarm.allServers.firstOrNull { it.id == id },

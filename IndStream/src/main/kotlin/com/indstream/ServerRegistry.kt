@@ -88,18 +88,10 @@ object ServerFarm {
             movieUrl = "https://vidup.to/movie/{id}",
             tvUrl = "https://vidup.to/tv/{id}/{season}/{episode}",
             referer = "https://vidup.to/",
-            hasSubtitles = true, timeoutSec = 20,
+            hasSubtitles = true, timeoutSec = 30,
         ),
-        // Vidcore (vidcore. io, ): twin of Vidup - same enc-dec. app pipeline (enc-vidcore/dec-vidcore), same moon. peakstorm.
-// top HLS backend, same.
-        ServerSpec(
-            id = "vidcore", name = "VidCore",
-            idType = ServerIdType.TMDB,
-            movieUrl = "https://vidcore.io/movie/{id}",
-            tvUrl = "https://vidcore.io/tv/{id}/{season}/{episode}",
-            referer = "https://vidcore.io/",
-            hasSubtitles = true, timeoutSec = 20,
-        ),
+        // Vidcore (vidcore. io, ) removed (v48): upstream servers endpoint 404s on every play; the working VidCore is
+        // vidcore-api (vidrack) below.
         // Allmovieland (allmovieland. art, ): DLE CMS with per-language HLS playlists - Hindi, Bengali, Tamil, Telugu.
 // Pipeline: IMDB-keyed search → find.
         ServerSpec(

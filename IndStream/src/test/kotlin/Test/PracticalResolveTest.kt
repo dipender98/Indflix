@@ -119,7 +119,7 @@ class PracticalResolveTest {
     @Test
     fun farmDiagnose_missingServers() = runBlocking {
         // Per-server resolve with exception capture: WHY do servers land empty?
-        val ids = listOf("vidrock", "vidnest", "vidcore",
+        val ids = listOf("vidrock", "vidnest",
             "twoembed", "autoembed", "vidphantom", "vsembed", "twoembed-skin",
             "vidsrcme", "vidsrc-pm", "rive", "onetouchtv")
         for (id in ids) {

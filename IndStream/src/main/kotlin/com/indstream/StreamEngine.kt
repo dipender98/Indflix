@@ -560,7 +560,8 @@ object StreamEngine {
         if (spec.id == "vidcore-api") {
             val result = resolveVidcore(spec, tmdbId, type, season, episode)
             if (result.isNotEmpty()) { okServer(spec, start, "vidcore api", result.size); return result }
-            failServer(spec, "vidcore returned no streams")
+            // Soft-fail (, moviebox): the API answering with no/empty sources is a title-level miss, not a host failure.
+            failServer(spec, "vidcore api returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
             return emptyList()
         }
 
@@ -2139,7 +2140,7 @@ object StreamEngine {
                 streamHeaders["Origin"] = "https://www.movy.bz"
             }
             out += RawStream(
-                serverId = spec.id, serverName = "$spec.name $label".trim(),
+                serverId = spec.id, serverName = "${spec.name} $label".trim(),
                 url = streamUrl, isM3u8 = streamUrl.contains(".m3u8", true),
                 referer = streamHeaders["Referer"] ?: "https://www.movy.bz/",
                 qualityHint = VideasySource.heightOf(quality),
