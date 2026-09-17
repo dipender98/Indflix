@@ -187,7 +187,7 @@ class ServerProbeTest {
 
     private fun videasyHeaders(): Map<String, String> = mapOf(
         "Accept" to "*/*",
-        "Origin" to "https://player.videasy.net",
-        "Referer" to "https://player.videasy.net/",
+        "Origin" to "https://player.videasy.to",
+        "Referer" to "https://player.videasy.to/",
     )
 }

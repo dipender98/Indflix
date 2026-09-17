@@ -10,8 +10,8 @@ import org.json.JSONObject
 object VideasySource {
 
     private const val API = "https://api.speedracelight.com"
-    private const val ORIGIN = "https://player.videasy.net"
-    private const val REFERER = "https://player.videasy.net/"
+    private const val ORIGIN = "https://player.videasy.to"
+    private const val REFERER = "https://player.videasy.to/"
 
     /** One player route plus the mediaType casing it answers to. */
     data class Route(
@@ -36,8 +36,11 @@ object VideasySource {
         "Referer" to REFERER,
     )
 
-    /** Playback keeps a browser UA but no Origin/Referer: the segment CDN 403s non-browser UAs, the player Origin and the mirror Referer. */
-    fun playbackHeaders(): Map<String, String> = mapOf("User-Agent" to HttpKit.userAgent)
+    /** Playback needs the player Referer (segments 403 without it); Origin stays off. */
+    fun playbackHeaders(): Map<String, String> = mapOf(
+        "User-Agent" to HttpKit.userAgent,
+        "Referer" to REFERER,
+    )
 
     /** FNV-1a with the cipher's final mix. */
     private fun fnv1a(s: String): Int {

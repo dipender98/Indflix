@@ -161,12 +161,12 @@ class VideasySourceTest {
     }
 
     @Test
-    fun playbackHeaders_browserUaWithoutOriginOrReferer() {
-        // Segment CDN 403s non-browser UAs and any player Origin/mirror Referer.
+    fun playbackHeaders_browserUaWithPlayerReferer() {
+        // Segments 403 without the player Referer; Origin stays off.
         val h = VideasySource.playbackHeaders()
         assertTrue((h["User-Agent"] ?: "").contains("Mozilla"), "playback needs a browser UA")
-        assertFalse(h.containsKey("Referer"), "player Referer 403s the mirror")
-        assertFalse(h.containsKey("Origin"), "player Origin 403s the CDN")
+        assertEquals("https://player.videasy.to/", h["Referer"], "segments need the player Referer")
+        assertFalse(h.containsKey("Origin"), "no Origin on playback")
     }
 
     @Test

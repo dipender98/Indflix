@@ -1054,6 +1054,9 @@ object StreamEngine {
     @Volatile private var movieBoxPlayLastAt = 0L
     private const val MOVIEBOX_PLAY_STAGGER_MS = 1_500L
 
+    // Media referer: the file CDN gates on it (allowed mirror = 206, else 429).
+    internal const val MOVIEBOX_REFERER = "https://movieboxonline.net/"
+
     // Normalize signCookie into a Cookie header value.
     internal fun cloudFrontCookie(signCookie: String?): String? {
         if (signCookie.isNullOrBlank()) return null
@@ -1284,7 +1287,7 @@ object StreamEngine {
         }
         Log.d("MovieBox", "subjects=${subjects.map { it.id + ":S-end" + it.seasonEnd + ":" + (it.language ?: "orig") }}")
 
-        val refererBase = "https://fmoviesunblocked.net/"
+        val refererBase = MOVIEBOX_REFERER
         val out = mutableListOf<RawStream>()
         val seenUrls = java.util.Collections.synchronizedSet(mutableSetOf<String>())
 
@@ -1315,7 +1318,7 @@ object StreamEngine {
 
                     val reqHeaders = baseHeaders + mapOf(
                         "Referer" to "https://fmoviesunblocked.net/spa/videoPlayPage/movies/$detailPath?id=$subjectId&type=/movie/detail",
-                        "Origin" to refererBase.trimEnd('/'),
+                        "Origin" to "https://fmoviesunblocked.net",
                     )
                     val params = buildString {
                         append("subjectId=$subjectId")

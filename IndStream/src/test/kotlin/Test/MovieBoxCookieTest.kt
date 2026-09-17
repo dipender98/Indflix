@@ -24,6 +24,12 @@ class MovieBoxCookieTest {
     }
 
     @Test
+    fun referer_isAllowedMirror() {
+        // File CDN returns 429 for stale mirrors; only this passes.
+        assertEquals("https://movieboxonline.net/", StreamEngine.MOVIEBOX_REFERER)
+    }
+
+    @Test
     fun cookie_blankYieldsNull() {
         assertNull(StreamEngine.cloudFrontCookie(null))
         assertNull(StreamEngine.cloudFrontCookie("  "))

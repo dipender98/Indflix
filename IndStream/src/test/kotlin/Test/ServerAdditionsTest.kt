@@ -33,7 +33,7 @@ class ServerAdditionsTest {
         val s = ServerFarm.allServers.first { it.id == "videasy" }
         assertEquals("Videasy", s.name)
         assertEquals(ServerIdType.TMDB, s.idType)
-        assertEquals("https://player.videasy.net/", s.referer)
+        assertEquals("https://player.videasy.to/", s.referer)
         assertTrue(s.declaredLanguages.isEmpty(), "multi-route host: per-source labels win")
         assertEquals(30, s.timeoutSec, "seed 6s + parallel routes 10s + one fresh-seed retry must fit")
         assertEquals(

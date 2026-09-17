@@ -63,7 +63,7 @@ object ServerFarm {
             idType = ServerIdType.TMDB,
             movieUrl = "https://h5-api.aoneroom.com/wefeed-h5api-bff/app/get-latest-app-pkgs?app_name=moviebox",
             tvUrl = "https://h5-api.aoneroom.com/wefeed-h5api-bff/app/get-latest-app-pkgs?app_name=moviebox",
-            isJsonApi = true, referer = "https://fmoviesunblocked.net/",
+            isJsonApi = true, referer = "https://movieboxonline.net/",
             // timeoutSec raised to 65: 4-step chain (bearer→search→detail→download+play)
             // with 8s sub-timeouts needs headroom; 55 was cutting off slow upstreams.
             hasSubtitles = true, timeoutSec = 65,
@@ -224,7 +224,7 @@ object ServerFarm {
             idType = ServerIdType.TMDB,
             movieUrl = "https://api.speedracelight.com/seed?mediaId={id}",
             tvUrl = "https://api.speedracelight.com/seed?mediaId={id}",
-            referer = "https://player.videasy.net/",
+            referer = "https://player.videasy.to/",
             hasSubtitles = false, timeoutSec = 30,
         ),
         // OneTouchTV (api3.devcorp.me): title search, AES-256-CBC envelope, per-episode HLS.
