@@ -3,6 +3,8 @@ package Test
 import com.multimovies.parseImdbEpisodes
 import com.multimovies.parseImdbMeta
 import com.multimovies.parsePersonImage
+import com.multimovies.parseRuntimeMinutes
+import com.multimovies.mergeImdbCast
 import com.multimovies.parseSuggest
 
 import kotlin.test.Test
@@ -112,5 +114,31 @@ class ImdbMetaTest {
         assertEquals("https://example.com/top.jpg", parsePersonImage(raw, "Nobody Known"))
         assertNull(parsePersonImage("""{"d":[{"id":"tt1","l":"X"}]}""", "X"))
         assertNull(parsePersonImage(null, "X"))
+    }
+
+    @Test
+    fun runtimeMinutesReadsMinutes() {
+        assertEquals(181, parseRuntimeMinutes("181 min"))
+        assertNull(parseRuntimeMinutes(null))
+        assertNull(parseRuntimeMinutes(""))
+    }
+
+    @Test
+    fun metaMapsRuntime() {
+        val raw = """{"meta":{"name":"X","releaseInfo":"2021","runtime":"179 min"}}"""
+        assertEquals(179, parseImdbMeta(raw, "tt1")?.runtime)
+    }
+
+    @Test
+    fun mergeCastImdbOrderWinsTmdbFillsGaps() {
+        fun actor(name: String, img: String = "") =
+            com.lagradost.cloudstream3.ActorData(com.lagradost.cloudstream3.Actor(name, img))
+        val merged = mergeImdbCast(
+            listOf(actor("A", "imdb-a"), actor("B")),
+            listOf(actor("b", "tmdb-b"), actor("C", "tmdb-c")),
+        )!!
+        assertEquals(listOf("A", "B", "C"), merged.map { it.actor.name })
+        assertEquals("tmdb-c", merged[2].actor.image)
+        assertNull(mergeImdbCast(null, null))
     }
 }

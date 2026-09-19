@@ -5,6 +5,7 @@ import com.lagradost.cloudstream3.Actor
 import com.lagradost.cloudstream3.ActorData
 import com.lagradost.cloudstream3.app
 import java.net.URLEncoder
+import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -32,6 +33,8 @@ internal data class ImdbDetail(
     val overview: String? = null,
     val genres: List<String>? = null,
     val cast: List<ActorData>? = null,
+    /** Runtime in minutes, parsed from Cinemeta's "179 min" form. */
+    val runtime: Int? = null,
 )
 
 /** One episode row from a Cinemeta series payload. */
@@ -96,36 +99,36 @@ internal object ImdbMeta {
         })
     }
 
-    /** Headshot per actor name via person suggest (bounded, cached). Never throws. */
-    suspend fun fetchCastPhotos(names: List<String>, max: Int = 10): Map<String, String> {
+    /** Headshot per actor name via person suggest. Finished rows persist past the budget. Never throws. */
+    suspend fun fetchCastPhotos(names: List<String>, max: Int = 15): Map<String, String> {
         val wanted = names.filter { it.isNotBlank() }.distinct().take(max)
         if (wanted.isEmpty()) return emptyMap()
-        val out = HashMap<String, String>()
+        val out = Collections.synchronizedMap(HashMap<String, String>())
         val missing = ArrayList<String>()
         for (n in wanted) {
             photoCache[n.lowercase()]?.let { out[n] = it } ?: missing.add(n)
         }
-        if (missing.isEmpty()) return out
-        val found = withTimeoutOrNull(5000L) {
+        if (missing.isEmpty()) return out.toMap()
+        withTimeoutOrNull(6000L) {
             coroutineScope {
-                val sem = Semaphore(4)
+                val sem = Semaphore(6)
                 missing.map { n ->
                     async {
                         sem.acquire()
                         try {
-                            parsePersonImage(suggestRaw(n), n)?.let { n to it }
+                            parsePersonImage(suggestRaw(n), n)?.let { out[n] = it }
                         } finally {
                             sem.release()
                         }
                     }
-                }.awaitAll().filterNotNull().toMap()
+                }.awaitAll()
             }
-        }.orEmpty()
-        for ((n, url) in found) {
-            if (photoCache.size < CACHE_MAX * 4) photoCache[n.lowercase()] = url
-            out[n] = url
         }
-        return out
+        val done = out.toMap()
+        for ((n, url) in done) {
+            if (photoCache.size < CACHE_MAX * 4) photoCache[n.lowercase()] = url
+        }
+        return done
     }
 
     /** Episode map keyed by (season, episode), cached. Never throws. */
@@ -187,10 +190,17 @@ internal fun parseImdbMeta(raw: String?, imdbId: String): ImdbDetail? {
                 (0 until arr.length()).mapNotNull { i -> arr.optString(i).takeIf { it.isNotBlank() } }
             },
             cast = cast,
+            runtime = parseRuntimeMinutes(m.optString("runtime")),
         )
     } catch (e: Exception) {
         null
     }
+}
+
+/** Minutes from Cinemeta's "179 min" form, else null. Pure. */
+internal fun parseRuntimeMinutes(raw: String?): Int? {
+    if (raw.isNullOrBlank()) return null
+    return Regex("""(\d+)""").find(raw)?.groupValues?.get(1)?.toIntOrNull()?.takeIf { it > 0 }
 }
 /** Map a Cinemeta series payload to episode rows. Pure. */
 internal fun parseImdbEpisodes(raw: String?): List<ImdbEpisode> {
@@ -232,4 +242,16 @@ internal fun parsePersonImage(raw: String?, want: String): String? {
     } catch (e: Exception) {
         null
     }
+}
+
+/** Extend IMDB names with TMDB-exclusive cast rows. IMDB order and photos win. Pure. */
+internal fun mergeImdbCast(
+    imdb: List<ActorData>?,
+    tmdb: List<ActorData>?,
+    maxTotal: Int = 15,
+): List<ActorData>? {
+    if (imdb.isNullOrEmpty()) return tmdb?.take(maxTotal)
+    if (tmdb.isNullOrEmpty()) return imdb
+    val seen = imdb.map { it.actor.name.lowercase() }.toHashSet()
+    return (imdb + tmdb.filter { seen.add(it.actor.name.lowercase()) }).take(maxTotal)
 }

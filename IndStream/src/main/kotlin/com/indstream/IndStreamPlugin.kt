@@ -153,14 +153,16 @@ class IndStreamProvider : MainAPI() {
         val imdbHits = imdbJob.await()
         val tmdbHits = tmdbJob.await()
 
-        // Attach TMDB ids to top IMDB hits; bounded so a TMDB outage never fails search.
-        val tmdbByImdb = withTimeoutOrNull(5000L) { mapImdbToTmdb(imdbHits.take(8)) }.orEmpty()
-        // IMDB ratings for IMDB cards (same bounded budget; cached after the first search).
-        val imdbRatings = withTimeoutOrNull(5000L) {
+        // Attach TMDB ids to top IMDB hits and fetch IMDB ratings concurrently;
+        // each phase is bounded, so a slow source never stalls search.
+        val tmdbByImdbDef = async {
+            withTimeoutOrNull(5000L) { mapImdbToTmdb(imdbHits.take(8)) }.orEmpty()
+        }
+        val imdbRatingsDef = async {
             ImdbService.fetchRatings(imdbHits.take(12).map { it.imdbId to it.type })
-        }.orEmpty()
+        }
         // Each card shows its own source throughout: IMDB cards IMDB poster + rating, TMDB cards TMDB poster + rating.
-        val cards = buildSearchCards(query, imdbHits, tmdbHits, tmdbByImdb, imdbRatings)
+        val cards = buildSearchCards(query, imdbHits, tmdbHits, tmdbByImdbDef.await(), imdbRatingsDef.await())
         if (cards.isEmpty()) return@coroutineScope null
         cards.map { it.response }
     }
@@ -347,7 +349,7 @@ class IndStreamProvider : MainAPI() {
         val tags: List<String>?
         val score: Double?
         val cast: List<ActorData>?
-        /** Watch time in seconds; only TMDB reports runtime, so an IMDB win leaves it empty. */
+        /** Watch time in seconds, from the winner's own source (TMDB minutes, Cinemeta "179 min"). */
         val duration: Int?
         val won = tmdbMeta
         if (won != null) {
@@ -369,8 +371,8 @@ class IndStreamProvider : MainAPI() {
             plot = wonCine.overview
             tags = wonCine.genres
             score = wonCine.rating
-            cast = wonCine.cast
-            duration = null
+            cast = extendImdbCast(wonCine, tmdbId, type)
+            duration = wonCine.runtime?.let { it * 60 }
         }
         val dataUrl = if (tmdbId != null) TmdbUrlParser.tmdbUrl(tmdbId, type, resolvedImdb)
         else TmdbUrlParser.imdbUrl(resolvedImdb ?: return@coroutineScope null, type, null)
@@ -420,6 +422,19 @@ class IndStreamProvider : MainAPI() {
             resolvedImdb?.let { addImdbId(it) }
             score?.let { addScore(it.toString(), 10) }
         }
+    }
+
+    /** Extend an IMDB-won cast with TMDB-exclusive rows when the TMDB id is already known. Never throws. */
+    private suspend fun extendImdbCast(
+        wonCine: ImdbService.MetaDetail,
+        tmdbId: Int?,
+        type: String,
+    ): List<ActorData>? {
+        if (tmdbId == null || tmdbId <= 0) return wonCine.cast
+        val tmdbCast = withTimeoutOrNull(4000L) {
+            TmdbService.fetchMeta(tmdbId, type)?.cast
+        }.orEmpty()
+        return ImdbService.mergeCast(wonCine.cast, tmdbCast)
     }
 
     /** Episode rows from whichever source answers first; the loser is cancelled. */

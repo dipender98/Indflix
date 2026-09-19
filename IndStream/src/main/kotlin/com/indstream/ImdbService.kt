@@ -4,6 +4,7 @@ import com.lagradost.cloudstream3.Actor
 import com.lagradost.cloudstream3.ActorData
 import com.lagradost.cloudstream3.app
 import java.net.URLEncoder
+import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -46,6 +47,8 @@ object ImdbService {
         val overview: String? = null,
         val genres: List<String>? = null,
         val cast: List<ActorData>? = null,
+        /** Runtime in minutes, parsed from Cinemeta's "179 min" form. */
+        val runtime: Int? = null,
     )
 
     private data class Entry(val hits: List<ImdbHit>, val expiresAt: Long)
@@ -184,8 +187,15 @@ object ImdbService {
                     (0 until arr.length()).mapNotNull { i -> arr.optString(i).takeIf { it.isNotBlank() } }
                 },
                 cast = cast,
+                runtime = parseRuntimeMinutes(m.optString("runtime")),
             )
         } catch (e: Exception) { null }
+    }
+
+    /** Minutes from Cinemeta's "179 min" form, else null. Pure. */
+    fun parseRuntimeMinutes(raw: String?): Int? {
+        if (raw.isNullOrBlank()) return null
+        return Regex("""(\d+)""").find(raw)?.groupValues?.get(1)?.toIntOrNull()?.takeIf { it > 0 }
     }
 
     /** Episode rows from a Cinemeta series payload. Pure. */
@@ -210,44 +220,44 @@ object ImdbService {
         } catch (e: Exception) { emptyList() }
     }
 
-    /** Headshot per actor name via person suggest (bounded, cached). Never throws. */
-    suspend fun fetchCastPhotos(names: List<String>, max: Int = 10): Map<String, String> {
+    /** Headshot per actor name via person suggest. Finished rows persist past the budget. Never throws. */
+    suspend fun fetchCastPhotos(names: List<String>, max: Int = 15): Map<String, String> {
         val wanted = names.filter { it.isNotBlank() }.distinct().take(max)
         if (wanted.isEmpty()) return emptyMap()
-        val out = HashMap<String, String>()
+        val out = Collections.synchronizedMap(HashMap<String, String>())
         val missing = ArrayList<String>()
         for (n in wanted) {
             photoCache[n.lowercase()]?.let { out[n] = it } ?: missing.add(n)
         }
         if (missing.isEmpty()) return out
-        val found = withTimeoutOrNull(5000L) {
+        withTimeoutOrNull(6000L) {
             coroutineScope {
-                val sem = Semaphore(4)
+                val sem = Semaphore(6)
                 missing.map { n ->
                     async {
                         sem.acquire()
                         try {
-                            parsePersonImage(suggestRaw(n), n)?.let { n to it }
+                            parsePersonImage(suggestRaw(n), n)?.let { out[n] = it }
                         } finally {
                             sem.release()
                         }
                     }
-                }.awaitAll().filterNotNull().toMap()
+                }.awaitAll()
             }
-        }.orEmpty()
-        for ((n, url) in found) {
-            if (photoCache.size < CACHE_MAX * 4) photoCache[n.lowercase()] = url
-            out[n] = url
         }
-        return out
+        val done = out.toMap()
+        for ((n, url) in done) {
+            if (photoCache.size < CACHE_MAX * 4) photoCache[n.lowercase()] = url
+        }
+        return done
     }
 
-    /** IMDB ratings by id via Cinemeta (lightweight: no cast enrichment). Never throws. */
+    /** IMDB ratings by id via Cinemeta (lightweight: no cast enrichment). Finished rows persist past the budget. */
     suspend fun fetchRatings(ids: List<Pair<String, String>>): Map<String, Double> {
         val wanted = ids.distinctBy { it.first }.filter { it.first.startsWith("tt") }
         if (wanted.isEmpty()) return emptyMap()
         val now = System.currentTimeMillis()
-        val out = HashMap<String, Double>()
+        val out = Collections.synchronizedMap(HashMap<String, Double>())
         val missing = wanted.filter { (id, _) ->
             val e = ratingCache[id]
             if (e != null && now <= e.second) {
@@ -258,10 +268,10 @@ object ImdbService {
                 true
             }
         }
-        if (missing.isEmpty()) return out
-        withTimeoutOrNull(5000L) {
+        if (missing.isEmpty()) return out.toMap()
+        withTimeoutOrNull(6000L) {
             coroutineScope {
-                val sem = Semaphore(4)
+                val sem = Semaphore(6)
                 missing.map { (id, type) ->
                     async {
                         sem.acquire()
@@ -270,20 +280,31 @@ object ImdbService {
                             val text = runCatching {
                                 app.get("$CINEMETA_API/$kind/$id.json", timeout = 5).text
                             }.getOrNull()
-                            parseCinemeta(text, id)?.rating?.let { id to it }
+                            parseCinemeta(text, id)?.rating?.let { out[id] = it }
                         } finally {
                             sem.release()
                         }
                     }
-                }.awaitAll().filterNotNull().toMap()
-            }
-        }?.let { found ->
-            for ((id, r) in found) {
-                if (ratingCache.size < CACHE_MAX * 4) ratingCache[id] = r to (System.currentTimeMillis() + CACHE_TTL_MS)
-                out[id] = r
+                }.awaitAll()
             }
         }
-        return out
+        val done = out.toMap()
+        for ((id, r) in done) {
+            if (ratingCache.size < CACHE_MAX * 4) ratingCache[id] = r to (System.currentTimeMillis() + CACHE_TTL_MS)
+        }
+        return done
+    }
+
+    /** Extend IMDB names with TMDB-exclusive cast rows. IMDB order and photos win. Pure. */
+    fun mergeCast(
+        imdb: List<ActorData>?,
+        tmdb: List<ActorData>?,
+        maxTotal: Int = 15,
+    ): List<ActorData>? {
+        if (imdb.isNullOrEmpty()) return tmdb?.take(maxTotal)
+        if (tmdb.isNullOrEmpty()) return imdb
+        val seen = imdb.map { it.actor.name.lowercase() }.toHashSet()
+        return (imdb + tmdb.filter { seen.add(it.actor.name.lowercase()) }).take(maxTotal)
     }
 
     /** Raw series payload for episode listing. Never throws. */

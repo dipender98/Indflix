@@ -576,6 +576,7 @@ class MultimoviesProvider : MainAPI() {
         overview = overview,
         genres = genres,
         cast = cast,
+        runtime = runtime,
     )
 
     /** Parse a TMDB web URL into (tmdbId, type). Returns null for non-TMDB URLs. */
@@ -811,6 +812,16 @@ class MultimoviesProvider : MainAPI() {
             val tmdbId = resolvedDetail?.tmdbId ?: tmdb?.first
             val imdbId = resolvedDetail?.imdbId
                 ?: if (tmdb == null) TmdbService.extractImdbId(doc) else null
+
+            // Cinemeta rosters are short: extend the IMDB cast with TMDB-exclusive rows (bounded, silent on failure).
+            if (tmdbId == null && imdbId != null && !resolvedDetail?.cast.isNullOrEmpty()) {
+                val tmdbCast = withTimeoutOrNull(6000L) {
+                    TmdbService.findByImdb(imdbId)?.let { (id, t) -> TmdbService.fetchMeta(id, t)?.cast }
+                }.orEmpty()
+                mergeImdbCast(resolvedDetail?.cast, tmdbCast)?.let { merged ->
+                    resolvedDetail = resolvedDetail?.copy(cast = merged)
+                }
+            }
 
             // Page-scraped fallbacks (only when TMDB gave nothing). Visible
             // headings first: the meta title carries a site-name affix.

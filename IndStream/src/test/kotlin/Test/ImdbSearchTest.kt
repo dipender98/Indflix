@@ -94,4 +94,32 @@ class ImdbSearchTest {
     fun fetchRatings_emptyIdsNeedNoNetwork() = runBlocking {
         assertTrue(ImdbService.fetchRatings(emptyList()).isEmpty())
     }
+
+    @Test
+    fun parseRuntimeMinutes_readsMinutes() {
+        assertEquals(179, ImdbService.parseRuntimeMinutes("179 min"))
+        assertEquals(24, ImdbService.parseRuntimeMinutes("24 min"))
+        assertNull(ImdbService.parseRuntimeMinutes(null))
+        assertNull(ImdbService.parseRuntimeMinutes(""))
+        assertNull(ImdbService.parseRuntimeMinutes("unknown"))
+    }
+
+    @Test
+    fun mergeCast_imdbOrderWinsTmdbFillsGaps() {
+        fun actor(name: String, img: String = "") =
+            com.lagradost.cloudstream3.ActorData(com.lagradost.cloudstream3.Actor(name, img))
+        val imdb = listOf(actor("A", "imdb-a"), actor("B"))
+        val tmdb = listOf(actor("b", "tmdb-b"), actor("C", "tmdb-c"))
+        val merged = ImdbService.mergeCast(imdb, tmdb)!!
+        assertEquals(listOf("A", "B", "C"), merged.map { it.actor.name })
+        assertEquals("imdb-a", merged[0].actor.image)
+        assertEquals("tmdb-c", merged[2].actor.image)
+    }
+
+    @Test
+    fun mergeCast_nullSides() {
+        assertNull(ImdbService.mergeCast(null, null))
+        assertEquals(1, ImdbService.mergeCast(null, listOf(
+            com.lagradost.cloudstream3.ActorData(com.lagradost.cloudstream3.Actor("X", "")) ))?.size)
+    }
 }
