@@ -207,8 +207,10 @@ class IndStreamProvider : MainAPI() {
             val type = mapped?.second?.let { TmdbUrlParser.normType(it) } ?: h.type
             val url = if (mapped != null) TmdbUrlParser.tmdbUrl(mapped.first, type, h.imdbId)
             else TmdbUrlParser.imdbUrl(h.imdbId, type, null)
-            newCard(h.title, url, type, h.year, h.poster, null)?.let {
-                cards += RankedCard(it, h.title, h.year, h.rank, tmdbRatingByKey[SearchRank.dedupeKey(h.title, h.year)])
+            // IMDB hits carry no rating; reuse the TMDB row's so the card shows a score.
+            val rating = tmdbRatingByKey[SearchRank.dedupeKey(h.title, h.year)]
+            newCard(h.title, url, type, h.year, h.poster, rating)?.let {
+                cards += RankedCard(it, h.title, h.year, h.rank, rating)
             }
         }
         val imdbKeys = imdbHits.map { SearchRank.dedupeKey(it.title, it.year) }.toSet()

@@ -552,6 +552,32 @@ class MultimoviesProvider : MainAPI() {
         }
     }
 
+    /** Resolve a page title to full detail through IMDB (suggest + Cinemeta). */
+    private suspend fun resolveImdbDetail(title: String, pageType: String): TmdbService.TmdbDetail? {
+        val kind = if (pageType == "movie") "movie" else "series"
+        val hits = withTimeoutOrNull(8000L) { ImdbMeta.suggest(title) }.orEmpty()
+        val best = hits.mapNotNull { hit ->
+            if ((kind == "movie") != (hit.type == "movie")) return@mapNotNull null
+            val rel = relevanceOf(title, hit.title, hit.year)
+            if (!rel.allTokensMatched || rel.score < SEARCH_RELEVANCE_THRESHOLD) null
+            else rel.score to hit
+        }.sortedByDescending { it.first }.firstOrNull()?.second ?: return null
+        return withTimeoutOrNull(7000L) { ImdbMeta.fetchMeta(best.imdbId, kind) }?.toTmdbDetail()
+    }
+
+    /** Cinemeta detail mapped onto the shared holder (tmdbId stays null). */
+    private fun ImdbDetail.toTmdbDetail(): TmdbService.TmdbDetail = TmdbService.TmdbDetail(
+        imdbId = imdbId,
+        name = name,
+        poster = poster,
+        backdrop = backdrop,
+        year = year,
+        rating = rating,
+        overview = overview,
+        genres = genres,
+        cast = cast,
+    )
+
     /** Parse a TMDB web URL into (tmdbId, type). Returns null for non-TMDB URLs. */
     private fun parseTmdbUrl(url: String?): Pair<Int, String>? {
         if (url.isNullOrBlank()) return null
@@ -771,6 +797,15 @@ class MultimoviesProvider : MainAPI() {
                             TmdbService.findByImdb(imdb)?.let { (id, t) -> TmdbService.fetchMeta(id, t) }
                         }
                 }
+                if (resolvedDetail == null) {
+                    // Pages carry no ids, so detail and cast come from IMDB by title.
+                    val fallbackTitle = doc.selectFirst(TITLE_SELECTOR)?.let {
+                        if (it.tagName() == "meta") it.attr("content") else it.text()
+                    }?.trim()?.let(::stripSiteAffix)
+                    if (!fallbackTitle.isNullOrBlank()) {
+                        resolvedDetail = resolveImdbDetail(fallbackTitle, pageType)
+                    }
+                }
             }
 
             val tmdbId = resolvedDetail?.tmdbId ?: tmdb?.first
@@ -870,16 +905,29 @@ class MultimoviesProvider : MainAPI() {
                     }
                 }
 
-                // TMDB episode enrichment (parallel, bounded, best-effort).
-                if (tmdbId != null && seasonNums.isNotEmpty()) {
-                    val epMeta = TmdbService.fetchEpisodes(tmdbId, seasonNums)
-                    episodes.forEach { ep ->
-                        epMeta[ep.season to ep.episode]?.let { m ->
-                            if (ep.name.isNullOrBlank()) ep.name = m.name
-                            ep.description = m.overview
-                            m.released?.let { ep.addDate(it) }
-                            m.thumbnail?.let { ep.posterUrl = it }
-                            m.rating?.let { ep.score = Score.from10(it) }
+                // Episode enrichment (parallel, bounded, best-effort). TMDB ids use TMDB;
+                // IMDB-resolved pages use Cinemeta, which carries the same episode rows.
+                if (seasonNums.isNotEmpty()) {
+                    if (tmdbId != null) {
+                        val epMeta = TmdbService.fetchEpisodes(tmdbId, seasonNums)
+                        episodes.forEach { ep ->
+                            epMeta[ep.season to ep.episode]?.let { m ->
+                                if (ep.name.isNullOrBlank()) ep.name = m.name
+                                ep.description = m.overview
+                                m.released?.let { ep.addDate(it) }
+                                m.thumbnail?.let { ep.posterUrl = it }
+                                m.rating?.let { ep.score = Score.from10(it) }
+                            }
+                        }
+                    } else if (imdbId != null) {
+                        val epMeta = withTimeoutOrNull(7000L) { ImdbMeta.fetchEpisodes(imdbId) }.orEmpty()
+                        episodes.forEach { ep ->
+                            epMeta[ep.season to ep.episode]?.let { m ->
+                                if (ep.name.isNullOrBlank()) ep.name = m.name
+                                if (!m.overview.isNullOrBlank()) ep.description = m.overview
+                                m.released?.let { ep.addDate(it) }
+                                m.thumbnail?.let { ep.posterUrl = it }
+                            }
                         }
                     }
                 }
