@@ -2,14 +2,14 @@
     {
         "url": "https://raw.githubusercontent.com/dipender98/Indflix/builds/IndStream.cs3",
         "status": 1,
-        "version": 54,
+        "version": 55,
         "name": "IndStream",
         "internalName": "IndStream",
         "authors": [
             "Indflix"
         ],
         "description": "Federated embed-server resolver keyed by TMDB/IMDB id. Races dozens of independent HLS/DASH servers, picks the fastest CDN per title, and exposes multi-language audio + per-quality links.",
-        "fileSize": 205134,
+        "fileSize": 207865,
         "repositoryUrl": "https://github.com/dipender98/Indflix",
         "language": "hi",
         "tvTypes": [
@@ -18,19 +18,19 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/dipender98/Indflix/main/IndStream/icon.png",
         "apiVersion": 1,
-        "fileHash": "sha256-5447629e31e1cbd66535ea978ce45a330710886878ea67e18a914c90b8f099b7"
+        "fileHash": "sha256-d84115e7a61560897a3d4250086f44ae533d033a21202f5843738a8d7783af14"
     },
     {
         "url": "https://raw.githubusercontent.com/dipender98/Indflix/builds/Multimovies.cs3",
         "status": 1,
-        "version": 36,
+        "version": 37,
         "name": "Multimovies",
         "internalName": "Multimovies",
         "authors": [
             "Indflix"
         ],
         "description": "CloudStream provider that scrapes Multimovies and pulls sources in parallel with a per-source timeout.",
-        "fileSize": 136323,
+        "fileSize": 136593,
         "repositoryUrl": "https://github.com/dipender98/Indflix",
         "language": "hi",
         "tvTypes": [
@@ -42,7 +42,7 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/dipender98/Indflix/main/Multimovies/icon.png",
         "apiVersion": 1,
-        "fileHash": "sha256-8acf040da4422a8cdcba1e4b43a6dba7daed0b5b2bade0ef7224aeffbccf8416"
+        "fileHash": "sha256-21c706597c025b02036e661fbe9bc83b4aedda71b2fa154f4b7281f17a1e61ec"
     },
     {
         "url": "https://raw.githubusercontent.com/dipender98/Indflix/builds/Vegamovies.cs3",
@@ -63,6 +63,6 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/dipender98/Indflix/main/Vegamovies/icon.png",
         "apiVersion": 1,
-        "fileHash": "sha256-00a62aaf42bb4e6088ea9b7a43283a1414b710e8a3ee69cfe1922eb2c3968d5e"
+        "fileHash": "sha256-d25641bbc1a31ab960c554f55aa4138b143c2841d6803b8b7e2c3d271b57e345"
     }
 ]
