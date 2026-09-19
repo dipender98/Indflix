@@ -60,4 +60,32 @@ class ImdbSearchTest {
         assertEquals("Ep2", eps[0].name)
         assertNull(ImdbService.parseCinemeta(null, "tt1")?.name)
     }
+
+    @Test
+    fun parsePersonImage_prefersExactNameHit() {
+        val raw = """{"d":[
+            {"id":"nm0000001","l":"Wrong Person","i":{"imageUrl":"https://example.com/wrong.jpg"}},
+            {"id":"tt4154796","l":"Avengers: Endgame","i":{"imageUrl":"https://example.com/title.jpg"}},
+            {"id":"nm0000123","l":"Robert Downey Jr.","i":{"imageUrl":"https://example.com/rdj.jpg"}},
+            {"id":"nm9999999","l":"No Photo Person"}
+        ]}"""
+        assertEquals("https://example.com/rdj.jpg", ImdbService.parsePersonImage(raw, "robert downey jr."))
+    }
+
+    @Test
+    fun parsePersonImage_fallsBackToTopPersonHit() {
+        val raw = """{"d":[
+            {"id":"tt123","l":"Some Movie","i":{"imageUrl":"https://example.com/m.jpg"}},
+            {"id":"nm0000001","l":"Unrelated Actor","i":{"imageUrl":"https://example.com/top.jpg"}}
+        ]}"""
+        assertEquals("https://example.com/top.jpg", ImdbService.parsePersonImage(raw, "Nobody Known"))
+    }
+
+    @Test
+    fun parsePersonImage_emptyWithoutPersonHits() {
+        assertNull(ImdbService.parsePersonImage("""{"d":[{"id":"tt1","l":"X"}]}""", "X"))
+        assertNull(ImdbService.parsePersonImage(null, "X"))
+        assertNull(ImdbService.parsePersonImage("", "X"))
+        assertNull(ImdbService.parsePersonImage("nope", "X"))
+    }
 }

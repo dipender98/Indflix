@@ -2,6 +2,7 @@ package Test
 
 import com.multimovies.parseImdbEpisodes
 import com.multimovies.parseImdbMeta
+import com.multimovies.parsePersonImage
 import com.multimovies.parseSuggest
 
 import kotlin.test.Test
@@ -90,5 +91,26 @@ class ImdbMetaTest {
         assertEquals("https://img/thumb1.jpg", eps[0].thumbnail)
         assertEquals(1 to 2, eps[1].season to eps[1].episode)
         assertNull(eps[1].name)
+    }
+
+    @Test
+    fun personImagePrefersExactNameHit() {
+        val raw = """{"d":[
+            {"id":"nm0000001","l":"Wrong Person","i":{"imageUrl":"https://example.com/wrong.jpg"}},
+            {"id":"tt4154796","l":"Avengers: Endgame","i":{"imageUrl":"https://example.com/title.jpg"}},
+            {"id":"nm0000123","l":"Robert Downey Jr.","i":{"imageUrl":"https://example.com/rdj.jpg"}}
+        ]}"""
+        assertEquals("https://example.com/rdj.jpg", parsePersonImage(raw, "ROBERT DOWNEY JR."))
+    }
+
+    @Test
+    fun personImageFallsBackToTopPersonHit() {
+        val raw = """{"d":[
+            {"id":"tt123","l":"Some Movie","i":{"imageUrl":"https://example.com/m.jpg"}},
+            {"id":"nm0000001","l":"Unrelated Actor","i":{"imageUrl":"https://example.com/top.jpg"}}
+        ]}"""
+        assertEquals("https://example.com/top.jpg", parsePersonImage(raw, "Nobody Known"))
+        assertNull(parsePersonImage("""{"d":[{"id":"tt1","l":"X"}]}""", "X"))
+        assertNull(parsePersonImage(null, "X"))
     }
 }

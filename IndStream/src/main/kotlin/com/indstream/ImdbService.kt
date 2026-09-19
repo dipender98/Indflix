@@ -9,6 +9,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 
@@ -50,6 +53,8 @@ object ImdbService {
     private val inFlight = ConcurrentHashMap<String, kotlinx.coroutines.Deferred<List<ImdbHit>>>()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val metaCache = ConcurrentHashMap<String, MetaDetail>()
+    /** Actor name (lowercased) to headshot URL. */
+    private val photoCache = ConcurrentHashMap<String, String>()
 
     /** Suggest lookup with in-memory cache. Never throws. */
     suspend fun suggest(query: String): List<ImdbHit> {
@@ -74,14 +79,17 @@ object ImdbService {
         return withTimeoutOrNull(WAIT_MS) { runCatching { (existing ?: mine).await() }.getOrNull() }.orEmpty()
     }
 
-    private suspend fun suggestRemote(query: String): List<ImdbHit> {
+    private suspend fun suggestRemote(query: String): List<ImdbHit> =
+        parseSuggest(suggestRaw(query))
+
+    /** Raw suggest payload for a query. Never throws. */
+    private suspend fun suggestRaw(query: String): String? {
         // Suggest keys collapse whitespace to underscores.
         val slug = query.trim().lowercase().replace(Regex("""\s+"""), "_")
         val encoded = URLEncoder.encode(slug, "UTF-8")
-        val text = withTimeoutOrNull(6000L) {
+        return withTimeoutOrNull(6000L) {
             runCatching { app.get("$SUGGEST_API/$encoded.json", timeout = 6).text }.getOrNull()
-        } ?: return emptyList()
-        return parseSuggest(text)
+        }
     }
 
     /** Map a suggest payload to hits. Name-kind entries are dropped. Pure. */
@@ -108,7 +116,24 @@ object ImdbService {
         } catch (e: Exception) { emptyList() }
     }
 
-    /** Keyless full metadata by IMDB id. Never throws. */
+    /** Headshot for a person query: exact name hit wins, else the top person hit. Pure. */
+    fun parsePersonImage(raw: String?, want: String): String? {
+        if (raw.isNullOrBlank() || want.isBlank()) return null
+        return try {
+            val arr = JSONObject(raw).optJSONArray("d") ?: return null
+            var fallback: String? = null
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                if (!o.optString("id").startsWith("nm")) continue
+                val img = o.optJSONObject("i")?.optString("imageUrl")?.takeIf { it.isNotBlank() } ?: continue
+                if (fallback == null) fallback = img
+                if (o.optString("l").equals(want.trim(), ignoreCase = true)) return img
+            }
+            fallback
+        } catch (e: Exception) { null }
+    }
+
+    /** Keyless full metadata by IMDB id. Cast carries headshots. Never throws. */
     suspend fun fetchMeta(imdbId: String, type: String): MetaDetail? {
         if (!imdbId.startsWith("tt")) return null
         val kind = if (type == "movie") "movie" else "series"
@@ -117,9 +142,21 @@ object ImdbService {
         val text = withTimeoutOrNull(7000L) {
             runCatching { app.get("$CINEMETA_API/$kind/$imdbId.json", timeout = 7).text }.getOrNull()
         } ?: return null
-        val detail = parseCinemeta(text, imdbId) ?: return null
+        val detail = parseCinemeta(text, imdbId)?.withCastPhotos() ?: return null
         if (metaCache.size < CACHE_MAX) metaCache[key] = detail
         return detail
+    }
+
+    /** Fill cast headshots via person suggest (bounded, cached). Never throws. */
+    private suspend fun MetaDetail.withCastPhotos(): MetaDetail {
+        val names = cast.orEmpty().map { it.actor.name }.filter { it.isNotBlank() }.distinct()
+        if (names.isEmpty()) return this
+        val photos = fetchCastPhotos(names)
+        if (photos.isEmpty()) return this
+        return copy(cast = cast?.map { a ->
+            val url = photos[a.actor.name]
+            if (url.isNullOrBlank()) a else ActorData(Actor(a.actor.name, url), roleString = a.roleString)
+        })
     }
 
     /** Map a Cinemeta envelope to detail. Pure. */
@@ -169,6 +206,38 @@ object ImdbService {
                 )
             }
         } catch (e: Exception) { emptyList() }
+    }
+
+    /** Headshot per actor name via person suggest (bounded, cached). Never throws. */
+    suspend fun fetchCastPhotos(names: List<String>, max: Int = 10): Map<String, String> {
+        val wanted = names.filter { it.isNotBlank() }.distinct().take(max)
+        if (wanted.isEmpty()) return emptyMap()
+        val out = HashMap<String, String>()
+        val missing = ArrayList<String>()
+        for (n in wanted) {
+            photoCache[n.lowercase()]?.let { out[n] = it } ?: missing.add(n)
+        }
+        if (missing.isEmpty()) return out
+        val found = withTimeoutOrNull(5000L) {
+            coroutineScope {
+                val sem = Semaphore(4)
+                missing.map { n ->
+                    async {
+                        sem.acquire()
+                        try {
+                            parsePersonImage(suggestRaw(n), n)?.let { n to it }
+                        } finally {
+                            sem.release()
+                        }
+                    }
+                }.awaitAll().filterNotNull().toMap()
+            }
+        }.orEmpty()
+        for ((n, url) in found) {
+            if (photoCache.size < CACHE_MAX * 4) photoCache[n.lowercase()] = url
+            out[n] = url
+        }
+        return out
     }
 
     /** Raw series payload for episode listing. Never throws. */

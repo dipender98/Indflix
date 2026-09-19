@@ -6,6 +6,10 @@ import com.lagradost.cloudstream3.ActorData
 import com.lagradost.cloudstream3.app
 import java.net.URLEncoder
 import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 
@@ -48,20 +52,26 @@ internal object ImdbMeta {
 
     private val metaCache = ConcurrentHashMap<String, ImdbDetail>()
     private val episodeCache = ConcurrentHashMap<String, Map<Pair<Int, Int>, ImdbEpisode>>()
+    /** Actor name (lowercased) to headshot URL. */
+    private val photoCache = ConcurrentHashMap<String, String>()
 
     /** Suggest lookup by title. Never throws. */
     suspend fun suggest(query: String): List<ImdbSuggestHit> {
         if (query.isBlank()) return emptyList()
+        return parseSuggest(suggestRaw(query))
+    }
+
+    /** Raw suggest payload for a query. Never throws. */
+    private suspend fun suggestRaw(query: String): String? {
         val slug = query.trim().lowercase().replace(Regex("""\s+"""), "_")
-        val text = withTimeoutOrNull(6000L) {
+        return withTimeoutOrNull(6000L) {
             runCatching {
                 app.get("$SUGGEST_API/${URLEncoder.encode(slug, "UTF-8")}.json", timeout = 6).text
             }.getOrNull()
-        } ?: return emptyList()
-        return parseSuggest(text)
+        }
     }
 
-    /** Full detail by IMDB id, cached. Never throws. */
+    /** Full detail by IMDB id, cast carries headshots. Cached. Never throws. */
     suspend fun fetchMeta(imdbId: String, type: String): ImdbDetail? {
         if (!imdbId.startsWith("tt")) return null
         val kind = if (type == "movie") "movie" else "series"
@@ -69,9 +79,53 @@ internal object ImdbMeta {
         val text = withTimeoutOrNull(7000L) {
             runCatching { app.get("$CINEMETA_API/$kind/$imdbId.json", timeout = 7).text }.getOrNull()
         } ?: return null
-        val detail = parseImdbMeta(text, imdbId) ?: return null
+        val detail = parseImdbMeta(text, imdbId)?.withCastPhotos() ?: return null
         if (metaCache.size < CACHE_MAX) metaCache["$kind|$imdbId"] = detail
         return detail
+    }
+
+    /** Fill cast headshots via person suggest (bounded, cached). Never throws. */
+    private suspend fun ImdbDetail.withCastPhotos(): ImdbDetail {
+        val names = cast.orEmpty().map { it.actor.name }.filter { it.isNotBlank() }.distinct()
+        if (names.isEmpty()) return this
+        val photos = fetchCastPhotos(names)
+        if (photos.isEmpty()) return this
+        return copy(cast = cast?.map { a ->
+            val url = photos[a.actor.name]
+            if (url.isNullOrBlank()) a else ActorData(Actor(a.actor.name, url), roleString = a.roleString)
+        })
+    }
+
+    /** Headshot per actor name via person suggest (bounded, cached). Never throws. */
+    suspend fun fetchCastPhotos(names: List<String>, max: Int = 10): Map<String, String> {
+        val wanted = names.filter { it.isNotBlank() }.distinct().take(max)
+        if (wanted.isEmpty()) return emptyMap()
+        val out = HashMap<String, String>()
+        val missing = ArrayList<String>()
+        for (n in wanted) {
+            photoCache[n.lowercase()]?.let { out[n] = it } ?: missing.add(n)
+        }
+        if (missing.isEmpty()) return out
+        val found = withTimeoutOrNull(5000L) {
+            coroutineScope {
+                val sem = Semaphore(4)
+                missing.map { n ->
+                    async {
+                        sem.acquire()
+                        try {
+                            parsePersonImage(suggestRaw(n), n)?.let { n to it }
+                        } finally {
+                            sem.release()
+                        }
+                    }
+                }.awaitAll().filterNotNull().toMap()
+            }
+        }.orEmpty()
+        for ((n, url) in found) {
+            if (photoCache.size < CACHE_MAX * 4) photoCache[n.lowercase()] = url
+            out[n] = url
+        }
+        return out
     }
 
     /** Episode map keyed by (season, episode), cached. Never throws. */
@@ -138,7 +192,6 @@ internal fun parseImdbMeta(raw: String?, imdbId: String): ImdbDetail? {
         null
     }
 }
-
 /** Map a Cinemeta series payload to episode rows. Pure. */
 internal fun parseImdbEpisodes(raw: String?): List<ImdbEpisode> {
     if (raw.isNullOrBlank()) return emptyList()
@@ -159,5 +212,24 @@ internal fun parseImdbEpisodes(raw: String?): List<ImdbEpisode> {
         }
     } catch (e: Exception) {
         emptyList()
+    }
+}
+
+/** Headshot for a person query: exact name hit wins, else the top person hit. Pure. */
+internal fun parsePersonImage(raw: String?, want: String): String? {
+    if (raw.isNullOrBlank() || want.isBlank()) return null
+    return try {
+        val arr = JSONObject(raw).optJSONArray("d") ?: return null
+        var fallback: String? = null
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            if (!o.optString("id").startsWith("nm")) continue
+            val img = o.optJSONObject("i")?.optString("imageUrl")?.takeIf { it.isNotBlank() } ?: continue
+            if (fallback == null) fallback = img
+            if (o.optString("l").equals(want.trim(), ignoreCase = true)) return img
+        }
+        fallback
+    } catch (e: Exception) {
+        null
     }
 }
