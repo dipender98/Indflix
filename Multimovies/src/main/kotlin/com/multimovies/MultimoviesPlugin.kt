@@ -25,6 +25,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
+import org.json.JSONObject
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
@@ -127,6 +128,50 @@ internal fun stripSiteAffix(raw: String, siteName: String = "Multimovies"): Stri
     return trail.replace(lead.replace(t, ""), "").trim().takeIf { it.isNotEmpty() } ?: t
 }
 
+/** One live-search hit from the site JSON API (title, page URL, site poster, year, rating). */
+internal data class DooplayHit(
+    val title: String,
+    val url: String,
+    val poster: String?,
+    val year: String?,
+    val rating: Double?,
+)
+
+/** Map the live-search JSON payload to hits. Error bodies ("no_posts", "no_verify_nonce") yield an empty list. Pure. */
+internal fun parseDooplaySearchHits(raw: String?): List<DooplayHit> {
+    if (raw.isNullOrBlank()) return emptyList()
+    return try {
+        val root = JSONObject(raw)
+        if (root.has("error")) return emptyList()
+        val out = ArrayList<DooplayHit>()
+        val keys = root.keys()
+        while (keys.hasNext()) {
+            val item = root.optJSONObject(keys.next()) ?: continue
+            val title = item.optString("title").takeIf { it.isNotBlank() } ?: continue
+            val url = item.optString("url").takeIf { it.isNotBlank() } ?: continue
+            val img = item.optString("img").takeIf { it.isNotBlank() }
+            val extra = item.optJSONObject("extra")
+            val date = extra?.optString("date")?.takeIf { it.isNotBlank() && it[0].isDigit() }
+            val rating = when (val r = extra?.opt("imdb")) {
+                is Number -> r.toDouble().takeIf { it > 0 }
+                is String -> r.toDoubleOrNull()?.takeIf { it > 0 }
+                else -> null
+            }
+            out.add(DooplayHit(title, url, img, date, rating))
+        }
+        out
+    } catch (e: Exception) {
+        emptyList()
+    }
+}
+
+/** Scrape the live-search nonce from homepage HTML. Pure. */
+internal fun extractDooplayNonce(html: String): String? {
+    if (html.isBlank()) return null
+    val block = Regex("""dtGonza\s*=\s*\{[^}]*\}""").find(html)?.value ?: return null
+    return Regex(""""nonce"\s*:\s*"([A-Za-z0-9]+)"""").find(block)?.groupValues?.get(1)
+}
+
 /** a CloudStream provider that scrapes the site. */
 class MultimoviesProvider : MainAPI() {
 
@@ -150,6 +195,10 @@ class MultimoviesProvider : MainAPI() {
     private val mmDocCache = ConcurrentHashMap<String, Document>()
     /** Maps "tmdbId|type" to (name, year) so load() can slug-guess the MM page. */
     private val tmdbSearchCache = ConcurrentHashMap<String, Pair<String, String?>>()
+    /** Cached live-search nonce scraped from the homepage (the JSON API rejects calls without it). */
+    @Volatile private var dooplayNonce: String? = null
+    @Volatile private var dooplayNonceAt = 0L
+    private val nonceMutex = Mutex()
 
     /** In-flight link farm per EXACT load url: . . IndStreamProvider's warmFarms/single-flight model. */
     private val liveFarms = ConcurrentHashMap<String, Deferred<Unit>>()
@@ -229,6 +278,12 @@ class MultimoviesProvider : MainAPI() {
 
         /** Worst-case budget for an uncached search before giving up. */
         const val SEARCH_TOTAL_BUDGET_MS = 2500L
+
+        /** Worst-case budget for the site's own JSON search (nonce fetch + one API call). */
+        const val SITE_SEARCH_BUDGET_MS = 8000L
+
+        /** TTL for the cached live-search nonce scraped from the homepage. */
+        const val DOOPLAY_NONCE_TTL_MS = 12 * 60 * 60 * 1000L
 
         /** Live change-server window (, matches. */
         const val LIVE_FILL_MS = 90_000L
@@ -347,12 +402,19 @@ class MultimoviesProvider : MainAPI() {
         return doc
     }
 
-    // Search (TMDB/SIMKL-driven; is only.
+    // Search (site JSON API first; TMDB fallback only when the site has no relevant hit).
 
     override suspend fun search(query: String): List<SearchResponse>? = withDomainRetry(retryIf = { it == null }) {
         SearchCache.get(query)?.let { return@withDomainRetry it }
 
-        // One request to TMDB /search/multi (or SIMKL search when its client_id is set) returns posters + ratings inline - no.
+        // Primary: the site's own live-search JSON API - results link straight to
+        // site pages and carry the site's own poster, year and rating inline.
+        val site = withTimeoutOrNull(SITE_SEARCH_BUDGET_MS) { siteSearchDooplay(query) }.orEmpty()
+        if (site.isNotEmpty()) {
+            return@withDomainRetry site.also { SearchCache.put(query, it) }
+        }
+
+        // Fallback: one TMDB /search/multi request when the site index misses.
         val ranked: List<Pair<Double, TmdbService.TmdbItem>> =
             withTimeoutOrNull(SEARCH_TOTAL_BUDGET_MS) {
                 val raw = TmdbService.search(query)
@@ -410,6 +472,79 @@ class MultimoviesProvider : MainAPI() {
             }
         } else {
             newTvSeriesSearchResponse(name, url, tvType) {
+                this.posterUrl = poster
+                this.year = releaseYear
+                rating?.let { this.score = Score.from10(it) }
+            }
+        }
+    }
+
+    /** Fresh live-search nonce, scraped from the homepage and cached. */
+    private suspend fun dooplayNonce(forceRefresh: Boolean = false): String? = nonceMutex.withLock {
+        val now = System.currentTimeMillis()
+        if (!forceRefresh) {
+            dooplayNonce?.let { if (now - dooplayNonceAt < DOOPLAY_NONCE_TTL_MS) return@withLock it }
+        }
+        val html = runCatching { app.get(mainUrl, timeout = 8, headers = commonHeaders).text }.getOrNull()
+            ?: fetchDoc(mainUrl, timeoutSeconds = 8, required = false)?.html()
+            ?: return@withLock dooplayNonce
+        val fresh = extractDooplayNonce(html)
+        if (fresh != null) {
+            dooplayNonce = fresh
+            dooplayNonceAt = now
+            fresh
+        } else dooplayNonce
+    }
+
+    /** Site live-search via the theme JSON API: results + posters come from the site itself. */
+    private suspend fun siteSearchDooplay(query: String): List<SearchResponse> {
+        if (query.isBlank()) return emptyList()
+        var nonce = dooplayNonce() ?: return emptyList()
+        var text = dooplaySearchJson(query, nonce)
+        if (text != null && text.contains("no_verify_nonce")) {
+            nonce = dooplayNonce(forceRefresh = true) ?: return emptyList()
+            text = dooplaySearchJson(query, nonce)
+        }
+        if (text == null || text.contains("no_verify_nonce") || text.contains("no_posts")) return emptyList()
+        val ranked = parseDooplaySearchHits(text).mapNotNull { hit ->
+            val rel = relevanceOf(query, hit.title, hit.year)
+            if (!rel.allTokensMatched || rel.score < SEARCH_RELEVANCE_THRESHOLD) null
+            else rel.score to hit
+        }.sortedByDescending { it.first }.take(SEARCH_MAX_RESULTS)
+        if (ranked.isEmpty()) return emptyList()
+        val responses = ranked.mapNotNull { (_, hit) -> hit.toSearchResponse() }
+        // Warm the detail-page cache so tapping a result opens instantly.
+        responses.forEach { r ->
+            searchScope.launch { runCatching { cachedDocOrFetch(r.url) } }
+        }
+        backfillPosters(responses)
+        return responses
+    }
+
+    /** One GET against the live-search endpoint, or null on network failure. */
+    private suspend fun dooplaySearchJson(query: String, nonce: String): String? {
+        val url = "$mainUrl/wp-json/dooplay/search/?keyword=${URLEncoder.encode(query.trim(), "UTF-8")}&nonce=$nonce"
+        return runCatching {
+            app.get(url, timeout = 6, headers = commonHeaders + mapOf("Referer" to "$mainUrl/")).text
+        }.getOrNull()
+    }
+
+    /** Build a result from a site hit: the URL is the site page, the poster is the site image. */
+    private fun DooplayHit.toSearchResponse(): SearchResponse? {
+        if (title.isBlank() || url.isBlank()) return null
+        val pageUrl = liveUrl(url)
+        if (!isMultimoviesUrl(pageUrl)) return null
+        val poster = upgradePosterUrl(poster)
+        val releaseYear = year?.take(4)?.toIntOrNull()
+        val tvType = if (pageUrl.contains("/movies/")) TvType.Movie else TvType.TvSeries
+        return if (tvType == TvType.Movie) {
+            newMovieSearchResponse(title, pageUrl, tvType) {
+                this.posterUrl = poster
+                this.year = releaseYear
+                rating?.let { this.score = Score.from10(it) }
+            }
+        } else {
+            newTvSeriesSearchResponse(title, pageUrl, tvType) {
                 this.posterUrl = poster
                 this.year = releaseYear
                 rating?.let { this.score = Score.from10(it) }

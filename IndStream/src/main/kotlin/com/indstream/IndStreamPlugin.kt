@@ -40,9 +40,11 @@ class IndStream : Plugin() {
     }
 }
 
-/** Pure TMDB URL parser, extractable. */
+/** URL parser for both catalog forms. TMDB urls stay canonical; IMDB urls cover TMDB outages. */
 object TmdbUrlParser {
     private val tmdbWebUrl = Regex("""themoviedb\.org/(movie|tv)/(\d+)""")
+    private val imdbWebUrl = Regex("""imdb\.com/title/(tt\d+)""")
+    private val imdbEpisodeUrl = Regex("""imdb\.com/title/(tt\d+)/season/(\d+)/episode/(\d+)""")
 
     /** Parse a TMDB web URL into (tmdbId, type). Returns null for non-TMDB URLs. */
     fun parseTmdbUrl(url: String?): Pair<Int, String>? {
@@ -51,6 +53,65 @@ object TmdbUrlParser {
         val id = m.groupValues[2].toIntOrNull() ?: return null
         return id to if (m.groupValues[1] == "movie") "movie" else "tv"
     }
+
+    /** One title reference carrying both ids when known. Type is "movie" | "tv". */
+    data class TitleRef(val tmdbId: Int?, val imdbId: String?, val type: String?)
+
+    /** Parse either URL form into a [TitleRef]. Query params (?imdb=, ?tmdb=, ?type=) ride along. Pure. */
+    fun parseTitleUrl(url: String?): TitleRef? {
+        if (url.isNullOrBlank()) return null
+        val imdb = param(url, "imdb")?.takeIf { it.startsWith("tt") }
+            ?: imdbWebUrl.find(url)?.groupValues?.get(1)
+        val tmdb = param(url, "tmdb")?.toIntOrNull()
+            ?: tmdbWebUrl.find(url)?.groupValues?.get(2)?.toIntOrNull()
+        if (tmdb == null && imdb == null) return null
+        val rawType = param(url, "type")
+            ?: tmdbWebUrl.find(url)?.groupValues?.get(1)
+            ?: if (url.contains("/season/")) "tv" else null
+        return TitleRef(tmdb, imdb, rawType?.let { normType(it) })
+    }
+
+    /** Season/episode encoded in either URL form. Defaults to (-1, -1). Pure. */
+    fun parseSeasonEpisode(url: String): Pair<Int, Int> {
+        Regex("""themoviedb\.org/tv/\d+/season/(\d+)/episode/(\d+)""").find(url)?.let {
+            return (it.groupValues[1].toIntOrNull() ?: -1) to (it.groupValues[2].toIntOrNull() ?: -1)
+        }
+        imdbEpisodeUrl.find(url)?.let {
+            return (it.groupValues[2].toIntOrNull() ?: -1) to (it.groupValues[3].toIntOrNull() ?: -1)
+        }
+        return -1 to -1
+    }
+
+    /** Canonical TMDB url, carrying the IMDB id when known. */
+    fun tmdbUrl(tmdbId: Int, type: String, imdbId: String?): String {
+        val path = if (normType(type) == "movie") "movie" else "tv"
+        return "https://www.themoviedb.org/$path/$tmdbId" +
+            (imdbId?.takeIf { it.startsWith("tt") }?.let { "?imdb=$it" } ?: "")
+    }
+
+    /** Canonical TMDB episode url, carrying the IMDB id when known. */
+    fun tmdbEpisodeUrl(tmdbId: Int, imdbId: String?, season: Int, episode: Int): String {
+        val base = "https://www.themoviedb.org/tv/$tmdbId/season/$season/episode/$episode"
+        return base + (imdbId?.takeIf { it.startsWith("tt") }?.let { "?imdb=$it" } ?: "")
+    }
+    /** IMDB url fallback, carrying the TMDB id when known. */
+    fun imdbUrl(imdbId: String, type: String, tmdbId: Int?): String {
+        val t = normType(type)
+        val base = "https://www.imdb.com/title/$imdbId/"
+        return if (tmdbId != null && tmdbId > 0) "$base?tmdb=$tmdbId&type=$t" else "$base?type=$t"
+    }
+
+    /** IMDB episode url fallback. */
+    fun imdbEpisodeUrl(imdbId: String, season: Int, episode: Int, tmdbId: Int?): String {
+        val base = "https://www.imdb.com/title/$imdbId/season/$season/episode/$episode/"
+        return if (tmdbId != null && tmdbId > 0) "$base?tmdb=$tmdbId&type=tv" else "$base?type=tv"
+    }
+
+    /** Normalize "series" to "tv". */
+    fun normType(t: String?): String = if (t == "movie") "movie" else "tv"
+
+    private fun param(url: String, key: String): String? =
+        Regex("""[?&]$key=([^&#]+)""").find(url)?.groupValues?.get(1)
 }
 
 /** a federated embed-server resolver keyed by TMDB/IMDB id. */
@@ -73,9 +134,6 @@ class IndStreamProvider : MainAPI() {
     override val hasQuickSearch = true
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
 
-    private val tmdbWebUrl = Regex("""themoviedb\.org/(movie|tv)/(\d+)""")
-    private val episodeUrl = Regex("""themoviedb\.org/tv/(\d+)/season/(\d+)/episode/(\d+)""")
-
     // Home rows are TMDB-powered (the farm has no catalog of its own).
     override val mainPage
         get() = mainPageOf(
@@ -85,36 +143,142 @@ class IndStreamProvider : MainAPI() {
             Pair("popular|tv", "Popular Series"),
         )
 
-    // Search.
+    // Search: IMDB suggest + TMDB raced in parallel, fuzzy-ranked. Either source alone suffices.
 
-    override suspend fun search(query: String): List<SearchResponse>? {
-        val items = withTimeoutOrNull(12000L) { TmdbService.search(query) }.orEmpty()
-        if (items.isEmpty()) return null
-        return items.mapNotNull { it.toSearchResponse() }
+    override suspend fun search(query: String): List<SearchResponse>? = coroutineScope {
+        if (query.isBlank()) return@coroutineScope null
+        val imdbJob = async { imdbSearchFuzzy(query) }
+        val tmdbJob = async { withTimeoutOrNull(12000L) { TmdbService.search(query) }.orEmpty() }
+        val imdbHits = imdbJob.await()
+        val tmdbHits = tmdbJob.await()
+
+        // Attach TMDB ids to top IMDB hits; bounded so a TMDB outage never fails search.
+        val tmdbByImdb = withTimeoutOrNull(5000L) { mapImdbToTmdb(imdbHits.take(8)) }.orEmpty()
+        val cards = buildSearchCards(query, imdbHits, tmdbHits, tmdbByImdb)
+        if (cards.isEmpty()) return@coroutineScope null
+        backfillCardPosters(cards, imdbHits, tmdbHits)
+        cards.map { it.response }
     }
 
     override suspend fun quickSearch(query: String): List<SearchResponse>? = search(query)
 
-    private fun TmdbService.TmdbItem.toSearchResponse(): SearchResponse? {
-        val id = tmdbId ?: return null
+    /** One ranked card before poster backfill. */
+    private data class RankedCard(
+        val response: SearchResponse,
+        val name: String,
+        val year: Int?,
+        val imdbRank: Int?,
+        val tmdbRating: Double?,
+    )
+
+    /** Suggest across the query plus one typo respelling, merged by IMDB id. */
+    private suspend fun imdbSearchFuzzy(query: String): List<ImdbService.ImdbHit> = coroutineScope {
+        val queries = (listOf(query) + SearchRank.queryVariants(query, max = 1)).distinct()
+        if (queries.size == 1) return@coroutineScope ImdbService.suggest(query)
+        queries.map { q -> async { ImdbService.suggest(q) } }
+            .awaitAll().flatten().distinctBy { it.imdbId }
+    }
+
+    /** Best-effort IMDB -> (tmdbId, type) map. Empty on TMDB outage. */
+    private suspend fun mapImdbToTmdb(hits: List<ImdbService.ImdbHit>): Map<String, Pair<Int, String>> =
+        coroutineScope {
+            hits.map { h ->
+                async<Pair<String, Pair<Int, String>>?> {
+                    val found: Pair<Int, String>? = runCatching {
+                        withTimeoutOrNull(4000L) { TmdbService.findByImdb(h.imdbId) }
+                    }.getOrNull()
+                    if (found != null) h.imdbId to found else null
+                }
+            }.awaitAll().filterNotNull().toMap()
+        }
+
+    /** Merge both sources, fuzzy-rank, dedupe by (title, year). Pure apart from card builders. */
+    private fun buildSearchCards(
+        query: String,
+        imdbHits: List<ImdbService.ImdbHit>,
+        tmdbHits: List<TmdbService.TmdbItem>,
+        tmdbByImdb: Map<String, Pair<Int, String>>,
+    ): List<RankedCard> {
+        val tmdbRatingByKey = tmdbHits.associateBy(
+            { SearchRank.dedupeKey(it.name, it.year?.toIntOrNull()) }, { it.rating })
+        val cards = ArrayList<RankedCard>()
+        for (h in imdbHits) {
+            val mapped = tmdbByImdb[h.imdbId]
+            val type = mapped?.second?.let { TmdbUrlParser.normType(it) } ?: h.type
+            val url = if (mapped != null) TmdbUrlParser.tmdbUrl(mapped.first, type, h.imdbId)
+            else TmdbUrlParser.imdbUrl(h.imdbId, type, null)
+            newCard(h.title, url, type, h.year, h.poster, null)?.let {
+                cards += RankedCard(it, h.title, h.year, h.rank, tmdbRatingByKey[SearchRank.dedupeKey(h.title, h.year)])
+            }
+        }
+        val imdbKeys = imdbHits.map { SearchRank.dedupeKey(it.title, it.year) }.toSet()
+        for (t in tmdbHits) {
+            val id = t.tmdbId ?: continue
+            if (t.name.isBlank()) continue
+            // Skip TMDB rows already covered by an IMDB hit.
+            if (imdbKeys.contains(SearchRank.dedupeKey(t.name, t.year?.toIntOrNull()))) continue
+            val type = TmdbUrlParser.normType(t.type)
+            newCard(t.name, TmdbUrlParser.tmdbUrl(id, type, t.imdbId), type, t.year?.toIntOrNull(), t.poster, t.rating)?.let {
+                cards += RankedCard(it, t.name, t.year?.toIntOrNull(), null, t.rating)
+            }
+        }
+        val seen = HashSet<String>()
+        return cards.sortedWith(
+            compareByDescending<RankedCard> { SearchRank.combined(query, it.name, it.imdbRank, it.tmdbRating) }
+                .thenByDescending { it.year ?: 0 },
+        ).filter { seen.add(SearchRank.dedupeKey(it.name, it.year)) }.take(12)
+    }
+
+    /** Fill blank posters from the other source's fuzzy match. */
+    private fun backfillCardPosters(
+        cards: List<RankedCard>,
+        imdbHits: List<ImdbService.ImdbHit>,
+        tmdbHits: List<TmdbService.TmdbItem>,
+    ) {
+        for (c in cards) {
+            if (!c.response.posterUrl.isNullOrBlank()) continue
+            val imdbPoster = imdbHits.firstOrNull {
+                SearchRank.relevance(it.title, c.name) >= 0.7 &&
+                    (it.year == null || c.year == null || kotlin.math.abs(it.year - c.year) <= 2)
+            }?.poster
+            val tmdbPoster = tmdbHits.firstOrNull {
+                SearchRank.relevance(it.name, c.name) >= 0.7
+            }?.poster
+            (imdbPoster ?: tmdbPoster)?.let { c.response.posterUrl = it }
+        }
+    }
+
+    /** One search card. Type follows the resolved media kind. */
+    private fun newCard(
+        name: String,
+        url: String,
+        type: String,
+        year: Int?,
+        poster: String?,
+        rating: Double?,
+    ): SearchResponse? {
         if (name.isBlank()) return null
-        val tmdbPath = if (type == "movie") "movie" else "tv"
-        val url = "https://www.themoviedb.org/$tmdbPath/$id"
         val tvType = if (type == "movie") TvType.Movie else TvType.TvSeries
-        val releaseYear = year?.toIntOrNull()
         return if (tvType == TvType.Movie) {
             newMovieSearchResponse(name, url, tvType) {
                 this.posterUrl = poster
-                this.year = releaseYear
+                this.year = year
                 rating?.let { this.score = Score.from10(it) }
             }
         } else {
             newTvSeriesSearchResponse(name, url, tvType) {
                 this.posterUrl = poster
-                this.year = releaseYear
+                this.year = year
                 rating?.let { this.score = Score.from10(it) }
             }
         }
+    }
+
+    private fun TmdbService.TmdbItem.toSearchResponse(): SearchResponse? {
+        val id = tmdbId ?: return null
+        if (name.isBlank()) return null
+        val type = TmdbUrlParser.normType(type)
+        return newCard(name, TmdbUrlParser.tmdbUrl(id, type, imdbId), type, year?.toIntOrNull(), poster, rating)
     }
 
     // Main page (TMDB-powered rows).
@@ -139,64 +303,71 @@ class IndStreamProvider : MainAPI() {
         return newHomePageResponse(request.name, responses)
     }
 
-    // Load (detail page).
+    // Load (detail page). TMDB + keyless source raced; either one renders the page.
 
-    override suspend fun load(url: String): LoadResponse? {
-        val tmdb = TmdbUrlParser.parseTmdbUrl(url) ?: return null
-        val (tmdbId, type) = tmdb
+    override suspend fun load(url: String): LoadResponse? = coroutineScope {
+        val ref = TmdbUrlParser.parseTitleUrl(url) ?: return@coroutineScope null
+        val urlImdb = ref.imdbId
+
+        // Missing TMDB id resolves via IMDB when that endpoint is alive.
+        val foundTmdb = if (ref.tmdbId == null && urlImdb != null) {
+            withTimeoutOrNull(6000L) { TmdbService.findByImdb(urlImdb) }
+        } else null
+        val tmdbId: Int? = ref.tmdbId ?: foundTmdb?.first
+        val type: String = ref.type ?: foundTmdb?.second?.let { TmdbUrlParser.normType(it) } ?: "movie"
+
+        val tmdbMetaJob = async {
+            val id = tmdbId ?: return@async null
+            withTimeoutOrNull(12000L) {
+                TmdbService.fetchMeta(id, type)
+                    ?: run { delay(1200L); TmdbService.fetchMeta(id, type) }
+            }
+        }
+        val cineJob = async {
+            val iid = urlImdb ?: tmdbId?.let { id ->
+                runCatching { withTimeoutOrNull(6000L) { TmdbService.fetchMeta(id, type)?.imdbId } }
+                    .getOrNull()?.takeIf { it.startsWith("tt") }
+            } ?: return@async null
+            val detail = withTimeoutOrNull(9000L) { ImdbService.fetchMeta(iid, type) }
+            detail to iid
+        }
+        val tmdbMeta = tmdbMetaJob.await()
+        val cineResult = cineJob.await()
+        val cineMeta = cineResult?.first
+        val resolvedImdb: String? = tmdbMeta?.imdbId ?: cineResult?.second ?: urlImdb
+
+        val title = tmdbMeta?.name ?: cineMeta?.name ?: return@coroutineScope null
+        val poster = tmdbMeta?.poster ?: cineMeta?.poster
+        val backdrop = tmdbMeta?.backdrop ?: cineMeta?.backdrop
+        val year = (tmdbMeta?.year ?: cineMeta?.year)?.toIntOrNull()
+        val plot = tmdbMeta?.overview ?: cineMeta?.overview
+        val tags = mergeTags(tmdbMeta?.genres, cineMeta?.genres)
+        val score = tmdbMeta?.rating ?: cineMeta?.rating
+        val cast = tmdbMeta?.cast ?: cineMeta?.cast
+        val dataUrl = if (tmdbId != null) TmdbUrlParser.tmdbUrl(tmdbId, type, resolvedImdb)
+        else TmdbUrlParser.imdbUrl(resolvedImdb ?: return@coroutineScope null, type, null)
         val isMovie = type == "movie"
 
-        // One transient blip must not blank the page: a single retry rides out
-        // fast-failing 429s inside the same budget; the cache makes repeats free.
-        val meta = withTimeoutOrNull(12000L) {
-            TmdbService.fetchMeta(tmdbId, type)
-                ?: run { delay(1200L); TmdbService.fetchMeta(tmdbId, type) }
-        }
-
-        val title = meta?.name ?: return null
-        val poster = meta?.poster
-        val backdrop = meta?.backdrop
-        val year = meta?.year?.toIntOrNull()
-        val plot = meta?.overview
-        val tags = meta?.genres
-        val score = meta?.rating
-        val imdbId = meta?.imdbId
-
-        // Movie pre-warm (fast-start tier 2): resolve the whole farm while the user reads the detail page, landing links in.
-        if (isMovie) prewarm(tmdbId, imdbId, type)
+        if (isMovie) prewarm(tmdbId ?: 0, resolvedImdb, type)
 
         if (isMovie) {
-            return newMovieLoadResponse(title, url, TvType.Movie, url) {
+            return@coroutineScope newMovieLoadResponse(title, url, TvType.Movie, dataUrl) {
                 this.posterUrl = poster
                 this.backgroundPosterUrl = backdrop
                 this.year = year
                 this.plot = plot
                 this.tags = tags
-                this.actors = meta?.cast
-                imdbId?.let { addImdbId(it) }
+                this.actors = cast
+                resolvedImdb?.let { addImdbId(it) }
                 score?.let { addScore(it.toString(), 10) }
             }
         }
 
-        // TV: enumerate seasons, then fetch episodes per season.
-        // Same single-retry policy as the meta fetch above, bounded by its own cap.
-        val seasons = withTimeoutOrNull(15000L) {
-            TmdbService.fetchTvSeasons(tmdbId)
-                .ifEmpty { delay(1200L); TmdbService.fetchTvSeasons(tmdbId) }
-        }.orEmpty()
-        if (seasons.isEmpty()) return null
-
-        val episodes = coroutineScope {
-            seasons.map { season ->
-                async {
-                    withTimeoutOrNull(10000L) { TmdbService.fetchSeasonPublic(tmdbId, season) }
-                }
-            }.awaitAll().filterNotNull().flatten()
-        }
-
+        val episodes = seriesEpisodes(tmdbId, resolvedImdb, type)
+        if (episodes.isEmpty()) return@coroutineScope null
         val epList = episodes.map { ep ->
-            // Encode season/episode into the episode URL so loadLinks() can parse it.
-            val epUrl = "https://www.themoviedb.org/tv/$tmdbId/season/${ep.seasonNumber}/episode/${ep.episodeNumber}"
+            val epUrl = if (tmdbId != null) TmdbUrlParser.tmdbEpisodeUrl(tmdbId, resolvedImdb, ep.seasonNumber, ep.episodeNumber)
+            else TmdbUrlParser.imdbEpisodeUrl(resolvedImdb ?: "", ep.seasonNumber, ep.episodeNumber, null)
             newEpisode(epUrl) {
                 this.name = ep.name
                 this.season = ep.seasonNumber
@@ -208,16 +379,57 @@ class IndStreamProvider : MainAPI() {
             }
         }
 
-        return newTvSeriesLoadResponse(title, url, TvType.TvSeries, epList) {
+        return@coroutineScope newTvSeriesLoadResponse(title, url, TvType.TvSeries, epList) {
             this.posterUrl = poster
             this.backgroundPosterUrl = backdrop
             this.year = year
             this.plot = plot
             this.tags = tags
-            this.actors = meta?.cast
-            imdbId?.let { addImdbId(it) }
+            this.actors = cast
+            resolvedImdb?.let { addImdbId(it) }
             score?.let { addScore(it.toString(), 10) }
         }
+    }
+
+    /** TMDB seasons/episodes merged with keyless episode rows. Either source suffices. */
+    private suspend fun seriesEpisodes(
+        tmdbId: Int?,
+        imdbId: String?,
+        type: String,
+    ): List<TmdbService.TmdbEpisode> = coroutineScope {
+        val tmdbSeasonsJob = async {
+            if (tmdbId == null || tmdbId <= 0) return@async emptyList()
+            withTimeoutOrNull(15000L) {
+                TmdbService.fetchTvSeasons(tmdbId)
+                    .ifEmpty { delay(1200L); TmdbService.fetchTvSeasons(tmdbId) }
+            }.orEmpty()
+        }
+        val cineRawJob = async {
+            if (imdbId == null) return@async null
+            withTimeoutOrNull(9000L) { ImdbService.fetchSeriesRaw(imdbId) }
+        }
+        val seasons = tmdbSeasonsJob.await()
+        val cineRaw = cineRawJob.await()
+        val cineEps = ImdbService.parseCinemetaEpisodes(cineRaw)
+        val tmdbEps = if (tmdbId != null && tmdbId > 0 && seasons.isNotEmpty()) {
+            seasons.map { season ->
+                async { withTimeoutOrNull(10000L) { TmdbService.fetchSeasonPublic(tmdbId, season) } }
+            }.awaitAll().filterNotNull().flatten()
+        } else emptyList()
+        if (tmdbEps.isEmpty()) return@coroutineScope cineEps.sortedWith(
+            compareBy({ it.seasonNumber }, { it.episodeNumber }))
+        if (cineEps.isEmpty()) return@coroutineScope tmdbEps
+        // Prefer TMDB fields, fill episode gaps from the keyless rows.
+        val byKey = tmdbEps.associateBy { it.seasonNumber to it.episodeNumber }.toMutableMap()
+        for (c in cineEps) byKey.putIfAbsent(c.seasonNumber to c.episodeNumber, c)
+        byKey.values.sortedWith(compareBy({ it.seasonNumber }, { it.episodeNumber }))
+    }
+
+    /** Genres merged with order kept. */
+    private fun mergeTags(a: List<String>?, b: List<String>?): List<String>? {
+        if (a.isNullOrEmpty()) return b?.takeIf { it.isNotEmpty() }
+        if (b.isNullOrEmpty()) return a
+        return (a + b).distinct()
     }
 
     // Load links (the resolver). Correlation id so every line of ONE Play tap strings together in logcat (live-window.
@@ -250,10 +462,17 @@ class IndStreamProvider : MainAPI() {
         return result
     }
 
-    /** IMDb with one retry: a single failed meta fetch must not silently mean zero subtitles at playback. */
-    private suspend fun imdbWithRetry(first: suspend () -> String?, tmdbId: Int, type: String): String? {
+    /** URL id first, then cached meta, then a lookup. Never throws. */
+    private suspend fun imdbWithRetry(
+        first: suspend () -> String?,
+        tmdbId: Int,
+        type: String,
+        urlImdb: String?,
+    ): String? {
+        urlImdb?.takeIf { it.startsWith("tt") }?.let { return it }
         runCatching { withTimeoutOrNull(8000L) { first() } }.getOrNull()
             ?.takeIf { it.startsWith("tt") }?.let { return it }
+        if (tmdbId <= 0) return null
         return runCatching { withTimeoutOrNull(8000L) { TmdbService.fetchMeta(tmdbId, type)?.imdbId } }
             .getOrNull()?.takeIf { it.startsWith("tt") }
     }
@@ -265,29 +484,33 @@ class IndStreamProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
     ): Boolean {
-        val tmdb = TmdbUrlParser.parseTmdbUrl(data) ?: run {
-            android.util.Log.w("IndStream", "loadLinks: not a TMDB url: $data")
+        val ref = TmdbUrlParser.parseTitleUrl(data) ?: run {
+            android.util.Log.w("IndStream", "loadLinks: unparsable url: $data")
             return false
         }
-        val (tmdbId, type) = tmdb
+        val type = ref.type ?: "movie"
+        val tmdbId = ref.tmdbId ?: 0
+        val urlImdb = ref.imdbId
 
-        // Episodes carry season/episode in the URL; movies/episodes without it default to -1.
-        val epMatch = episodeUrl.find(data)
-        val season = epMatch?.groupValues?.get(2)?.toIntOrNull() ?: -1
-        val episode = epMatch?.groupValues?.get(3)?.toIntOrNull() ?: -1
+        // Season/episode ride in either URL form; movies default to -1.
+        val (season, episode) = TmdbUrlParser.parseSeasonEpisode(data)
 
         val needsImdb = ServerFarm.allServers.any { it.idType == ServerIdType.IMDB }
-        // No serial TMDB round-trip here: load() already warmed TmdbService's detail cache for this exact (tmdbId, type), so.
+        // Warmed detail cache answers instantly; a TMDB outage just yields null here.
         val originalLangRef = java.util.concurrent.atomic.AtomicReference<String?>()
         val metaDeferred = fastStartScope.async {
+            if (tmdbId <= 0) return@async null
             val d = withTimeoutOrNull(4000L) { TmdbService.fetchMeta(tmdbId, type) }
             originalLangRef.set(d?.originalLanguage)
             d
         }
         val originalLangNow: () -> String? = { originalLangRef.get() }
-        val cacheKey = StreamEngine.FastStartCache.key(tmdbId, type, season, episode)
+        val cacheKey = if (tmdbId > 0) StreamEngine.FastStartCache.key(tmdbId, type, season, episode)
+        else "imdb:${urlImdb ?: "none"}|$type|$season|$episode"
         val imdbDeferred = fastStartScope.async {
-            if (needsImdb) metaDeferred.await()?.imdbId else null
+            if (!needsImdb) return@async urlImdb
+            urlImdb?.let { return@async it }
+            metaDeferred.await()?.imdbId
         }
         val emitted = java.util.concurrent.atomic.AtomicInteger(0)
 
@@ -310,7 +533,7 @@ class IndStreamProvider : MainAPI() {
             // Fallback subtitles ARE the subtitle provider (): the same title-keyed OpenSubtitles set every play gets.
             // Start the fetch immediately (don't block the emit on meta resolution) and await it before returning.
             val subsJob = fastStartScope.async {
-                val imdb = imdbWithRetry({ metaDeferred.await()?.imdbId }, tmdbId, type)
+                val imdb = imdbWithRetry({ metaDeferred.await()?.imdbId }, tmdbId, type, urlImdb)
                 runCatching { topUpSubtitles(imdb, season, episode, originalLangNow(), subtitleCallback) }
                     .onFailure { android.util.Log.w("IndStream", "fallback subs failed: ${it.message}") }
             }
@@ -360,7 +583,7 @@ class IndStreamProvider : MainAPI() {
                 android.util.Log.i("IndStream", "TAP#$tap joining in-flight farm for $cacheKey (no second launch)")
                 // Subtitles start fetching immediately, in parallel with the joined farm tail.
                 val subsJob = fastStartScope.async {
-                    val imdb = imdbWithRetry({ imdbDeferred.await() }, tmdbId, type)
+                    val imdb = imdbWithRetry({ imdbDeferred.await() }, tmdbId, type, urlImdb)
                     runCatching { topUpSubtitles(imdb, season, episode, originalLangNow(), subtitleCallback) }
                         .onFailure { android.util.Log.w("IndStream", "fallback subs failed: ${it.message}") }
                 }
@@ -402,7 +625,7 @@ class IndStreamProvider : MainAPI() {
 
         val farmDone = fastStartScope.async {
             try {
-                StreamEngine.resolveRealtime(tmdbId, type, season, episode, imdbIdProvider = { imdbDeferred.await() }) { sid, streams ->
+                StreamEngine.resolveRealtime(tmdbId, type, season, episode, urlImdb, imdbIdProvider = { imdbDeferred.await() }) { sid, streams ->
                     // Subtitle-only carriers are dead weight now (server subs are not used - fallback is the provider): links only.
                     val fresh = streams.filter { it.url.isNotBlank() && pushedUrls.add(it.url) }
                     if (fresh.isEmpty()) return@resolveRealtime
@@ -431,7 +654,7 @@ class IndStreamProvider : MainAPI() {
         // Subtitles start fetching THE MOMENT the user taps play - not after the first stream resolves - so tracks are
         // ready before/at playback start. Batch-priority order (English + original + all Indian langs first, then foreign).
         val subsJob = fastStartScope.async {
-            val imdb = imdbWithRetry({ imdbDeferred.await() }, tmdbId, type)
+            val imdb = imdbWithRetry({ imdbDeferred.await() }, tmdbId, type, urlImdb)
             runCatching { topUpSubtitles(imdb, season, episode, originalLangNow(), subtitleCallback) }
                 .onFailure { android.util.Log.w("IndStream", "fallback subs failed: ${it.message}") }
         }
@@ -469,13 +692,14 @@ class IndStreamProvider : MainAPI() {
 
     /** Fire-and-forget farm resolution into StreamEngine. FastStartCache while the detail page is open so a later Play tap. */
     private fun prewarm(tmdbId: Int, imdbId: String?, type: String) {
-        val key = StreamEngine.FastStartCache.key(tmdbId, type, -1, -1)
+        val key = if (tmdbId > 0) StreamEngine.FastStartCache.key(tmdbId, type, -1, -1)
+        else "imdb:${imdbId ?: "none"}|$type|-1|-1"
         if (!prewarmed.add(key)) return
         if (StreamEngine.FastStartCache.get(key) != null) return
         val job = fastStartScope.launch {
             runCatching {
                 // load() just warmed TmdbService's cache: the lazy lookup below is an instant cache hit for IMDB-keyed servers.
-                StreamEngine.resolveRealtime(tmdbId, type, -1, -1, imdbIdProvider = { imdbId }) { _, streams ->
+                StreamEngine.resolveRealtime(tmdbId, type, -1, -1, imdbId, imdbIdProvider = { imdbId }) { _, streams ->
                     if (streams.isNotEmpty()) StreamEngine.FastStartCache.put(key, streams)
                 }
             }.onFailure { android.util.Log.w("IndStream", "prewarm failed: ${it.message}") }

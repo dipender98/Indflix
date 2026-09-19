@@ -117,15 +117,22 @@ object StreamEngine {
     /** Resolve every server, invoking with a server's results the instant that server finishes. The whole farm launches in. parallel, so completion order. */
     suspend fun resolveRealtime(
         tmdbId: Int, type: String, season: Int = -1, episode: Int = -1,
+        /** Direct IMDB id when the URL already carries one. Lets IMDB-keyed servers run during a TMDB outage. */
+        imdbId: String? = null,
         /** Lazily resolves the IMDB id for IMDB-keyed servers. Called INSIDE each server's coroutine so the (up to 3s) TMDB. lookup runs concurrently with the. */
         imdbIdProvider: (suspend () -> String?)? = null,
         onBatch: suspend (serverId: String, streams: List<RawStream>) -> Unit,
     ) {
-        if (tmdbId <= 0) {
-            Log.w("IndStream", "resolveRealtime skipped: invalid tmdbId=$tmdbId")
+        if (tmdbId <= 0 && (imdbId == null || !imdbId.startsWith("tt")) && imdbIdProvider == null) {
+            Log.w("IndStream", "resolveRealtime skipped: no usable id (tmdbId=$tmdbId)")
             return
         }
-        val servers = selectServers(tmdbId, type, season, episode)
+        // Without a TMDB id only IMDB-keyed servers (plus dual-id racers) can run.
+        val imdbOnly = tmdbId <= 0
+        val servers = selectServers(tmdbId, type, season, episode).filter { spec ->
+            if (!imdbOnly) true
+            else spec.idType == ServerIdType.IMDB || spec.id == "vidup" || spec.id == "vidcore"
+        }
         if (servers.isEmpty()) return
         val sem = Semaphore(MAX_CONCURRENT)
         coroutineScope {
@@ -135,16 +142,16 @@ object StreamEngine {
                     try {
                         // IMDB id only for the servers that need it � TMDB-keyed servers never wait for (or trigger) the lookup.
                         val serverStart = System.currentTimeMillis()
-                        val imdbId = if (spec.idType == ServerIdType.IMDB) imdbIdProvider?.invoke() else null
+                        val serverImdb = if (spec.idType == ServerIdType.IMDB) imdbId ?: imdbIdProvider?.invoke() else null
                         if (spec.idType == ServerIdType.IMDB) {
-                            Log.i("IndStream", "${spec.id}: imdb=${imdbId ?: "MISSING"} after " +
+                            Log.i("IndStream", "${spec.id}: imdb=${serverImdb ?: "MISSING"} after " +
                                 "${System.currentTimeMillis() - serverStart}ms wait")
                         }
                         // Distinguish a CRASH (resolver throw that is not a clean miss � parse bug / changed upstream shape)). Only timeouts.
 // strike the breaker: a shape.
                         var crashed: Throwable? = null
                         val outcome = withTimeoutOrNull(spec.timeoutSec * 1000L) {
-                            runCatching { resolveOne(spec, tmdbId, imdbId, type, season, episode, imdbIdProvider) }
+                            runCatching { resolveOne(spec, tmdbId, serverImdb, type, season, episode, imdbIdProvider) }
                                 .onFailure { t -> if (t !is CleanMissException) crashed = t }
                                 .recover { t ->
                                     if (t is CleanMissException) {
@@ -497,7 +504,7 @@ object StreamEngine {
             // Dual-ID race (): both hosts accept TMDB AND IMDB ids in the URL path. The TMDB arm starts at t=0; the IMDB arm joins.
 // the race as soon as the id.
             val arms = mutableListOf<suspend () -> List<RawStream>>()
-            arms.add { resolveEncDecPlayer(spec, tmdbId.toString(), type, season, episode, variant) }
+            if (tmdbId > 0) arms.add { resolveEncDecPlayer(spec, tmdbId.toString(), type, season, episode, variant) }
             if (!imdbId.isNullOrBlank()) {
                 val fixed = imdbId
                 arms.add { resolveEncDecPlayer(spec, fixed, type, season, episode, variant) }

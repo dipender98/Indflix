@@ -92,7 +92,7 @@ class ServerFarmHindiTest {
 // the id lookup.
         assertEquals(ServerIdType.TMDB, s.idType)
         // DASH ladders reach 2160p; nothing downstream may clamp quality (no per-server cap).
-        assertEquals("https://fmoviesunblocked.net/", s.referer)
+        assertEquals("https://movieboxonline.net/", s.referer)
         assertTrue(s.hasSubtitles)
     }
 
