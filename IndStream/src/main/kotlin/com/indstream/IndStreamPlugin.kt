@@ -25,6 +25,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.selects.select
 
 /** Registers the provider with CloudStream. */
 @CloudstreamPlugin
@@ -305,7 +306,7 @@ class IndStreamProvider : MainAPI() {
         return newHomePageResponse(request.name, responses)
     }
 
-    // Load (detail page). TMDB + keyless source raced; either one renders the page.
+    // Load (detail page). Open race: whichever source answers first with a title wins outright.
 
     override suspend fun load(url: String): LoadResponse? = coroutineScope {
         val ref = TmdbUrlParser.parseTitleUrl(url) ?: return@coroutineScope null
@@ -333,19 +334,54 @@ class IndStreamProvider : MainAPI() {
             val detail = withTimeoutOrNull(9000L) { ImdbService.fetchMeta(iid, type) }
             detail to iid
         }
-        val tmdbMeta = tmdbMetaJob.await()
-        val cineResult = cineJob.await()
-        val cineMeta = cineResult?.first
-        val resolvedImdb: String? = tmdbMeta?.imdbId ?: cineResult?.second ?: urlImdb
+        // Open race: the first source back with a title wins outright; the loser is cancelled.
+        // A TMDB outage answers through IMDB with no waiting, and vice versa.
+        var tmdbMeta: TmdbService.TmdbDetail? = null
+        var cineMeta: ImdbService.MetaDetail? = null
+        var cineIid: String? = null
+        select<Unit> {
+            tmdbMetaJob.onAwait { m ->
+                if (!m?.name.isNullOrBlank()) tmdbMeta = m
+                else cineJob.await()?.let { cineMeta = it.first; cineIid = it.second }
+            }
+            cineJob.onAwait { c ->
+                if (!c?.first?.name.isNullOrBlank()) { cineMeta = c?.first; cineIid = c?.second }
+                else tmdbMeta = tmdbMetaJob.await()
+            }
+        }
+        tmdbMetaJob.cancel()
+        cineJob.cancel()
+        val resolvedImdb: String? = tmdbMeta?.imdbId ?: cineIid ?: urlImdb
 
-        val title = tmdbMeta?.name ?: cineMeta?.name ?: return@coroutineScope null
-        val poster = tmdbMeta?.poster ?: cineMeta?.poster
-        val backdrop = tmdbMeta?.backdrop ?: cineMeta?.backdrop
-        val year = (tmdbMeta?.year ?: cineMeta?.year)?.toIntOrNull()
-        val plot = tmdbMeta?.overview ?: cineMeta?.overview
-        val tags = mergeTags(tmdbMeta?.genres, cineMeta?.genres)
-        val score = tmdbMeta?.rating ?: cineMeta?.rating
-        val cast = tmdbMeta?.cast ?: cineMeta?.cast
+        val title: String
+        val poster: String?
+        val backdrop: String?
+        val year: Int?
+        val plot: String?
+        val tags: List<String>?
+        val score: Double?
+        val cast: List<ActorData>?
+        val won = tmdbMeta
+        if (won != null) {
+            title = won.name ?: return@coroutineScope null
+            poster = won.poster
+            backdrop = won.backdrop
+            year = won.year?.toIntOrNull()
+            plot = won.overview
+            tags = won.genres
+            score = won.rating
+            cast = won.cast
+        } else {
+            val wonCine = cineMeta ?: return@coroutineScope null
+            title = wonCine.name ?: return@coroutineScope null
+            poster = wonCine.poster
+            backdrop = wonCine.backdrop
+            year = wonCine.year?.toIntOrNull()
+            plot = wonCine.overview
+            tags = wonCine.genres
+            score = wonCine.rating
+            cast = wonCine.cast
+        }
         val dataUrl = if (tmdbId != null) TmdbUrlParser.tmdbUrl(tmdbId, type, resolvedImdb)
         else TmdbUrlParser.imdbUrl(resolvedImdb ?: return@coroutineScope null, type, null)
         val isMovie = type == "movie"
@@ -393,45 +429,36 @@ class IndStreamProvider : MainAPI() {
         }
     }
 
-    /** TMDB seasons/episodes merged with keyless episode rows. Either source suffices. */
+    /** Episode rows from whichever source answers first; the loser is cancelled. */
     private suspend fun seriesEpisodes(
         tmdbId: Int?,
         imdbId: String?,
         type: String,
     ): List<TmdbService.TmdbEpisode> = coroutineScope {
-        val tmdbSeasonsJob = async {
+        val tmdbJob = async {
             if (tmdbId == null || tmdbId <= 0) return@async emptyList()
-            withTimeoutOrNull(15000L) {
+            val seasons = withTimeoutOrNull(15000L) {
                 TmdbService.fetchTvSeasons(tmdbId)
                     .ifEmpty { delay(1200L); TmdbService.fetchTvSeasons(tmdbId) }
             }.orEmpty()
-        }
-        val cineRawJob = async {
-            if (imdbId == null) return@async null
-            withTimeoutOrNull(9000L) { ImdbService.fetchSeriesRaw(imdbId) }
-        }
-        val seasons = tmdbSeasonsJob.await()
-        val cineRaw = cineRawJob.await()
-        val cineEps = ImdbService.parseCinemetaEpisodes(cineRaw)
-        val tmdbEps = if (tmdbId != null && tmdbId > 0 && seasons.isNotEmpty()) {
+            if (seasons.isEmpty()) return@async emptyList()
             seasons.map { season ->
                 async { withTimeoutOrNull(10000L) { TmdbService.fetchSeasonPublic(tmdbId, season) } }
             }.awaitAll().filterNotNull().flatten()
-        } else emptyList()
-        if (tmdbEps.isEmpty()) return@coroutineScope cineEps.sortedWith(
-            compareBy({ it.seasonNumber }, { it.episodeNumber }))
-        if (cineEps.isEmpty()) return@coroutineScope tmdbEps
-        // Prefer TMDB fields, fill episode gaps from the keyless rows.
-        val byKey = tmdbEps.associateBy { it.seasonNumber to it.episodeNumber }.toMutableMap()
-        for (c in cineEps) byKey.putIfAbsent(c.seasonNumber to c.episodeNumber, c)
-        byKey.values.sortedWith(compareBy({ it.seasonNumber }, { it.episodeNumber }))
-    }
-
-    /** Genres merged with order kept. */
-    private fun mergeTags(a: List<String>?, b: List<String>?): List<String>? {
-        if (a.isNullOrEmpty()) return b?.takeIf { it.isNotEmpty() }
-        if (b.isNullOrEmpty()) return a
-        return (a + b).distinct()
+        }
+        val cineJob = async {
+            if (imdbId == null) return@async emptyList()
+            val raw = withTimeoutOrNull(9000L) { ImdbService.fetchSeriesRaw(imdbId) }
+            ImdbService.parseCinemetaEpisodes(raw)
+        }
+        // First non-empty list wins outright.
+        val won = select<List<TmdbService.TmdbEpisode>> {
+            tmdbJob.onAwait { if (it.isNotEmpty()) it else cineJob.await() }
+            cineJob.onAwait { if (it.isNotEmpty()) it else tmdbJob.await() }
+        }
+        tmdbJob.cancel()
+        cineJob.cancel()
+        won.sortedWith(compareBy({ it.seasonNumber }, { it.episodeNumber }))
     }
 
     // Load links (the resolver). Correlation id so every line of ONE Play tap strings together in logcat (live-window.
