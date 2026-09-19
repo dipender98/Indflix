@@ -155,9 +155,13 @@ class IndStreamProvider : MainAPI() {
 
         // Attach TMDB ids to top IMDB hits; bounded so a TMDB outage never fails search.
         val tmdbByImdb = withTimeoutOrNull(5000L) { mapImdbToTmdb(imdbHits.take(8)) }.orEmpty()
-        val cards = buildSearchCards(query, imdbHits, tmdbHits, tmdbByImdb)
+        // IMDB ratings for IMDB cards (same bounded budget; cached after the first search).
+        val imdbRatings = withTimeoutOrNull(5000L) {
+            ImdbService.fetchRatings(imdbHits.take(12).map { it.imdbId to it.type })
+        }.orEmpty()
+        // Each card shows its own source throughout: IMDB cards IMDB poster + rating, TMDB cards TMDB poster + rating.
+        val cards = buildSearchCards(query, imdbHits, tmdbHits, tmdbByImdb, imdbRatings)
         if (cards.isEmpty()) return@coroutineScope null
-        backfillCardPosters(cards, imdbHits, tmdbHits)
         cards.map { it.response }
     }
 
@@ -193,12 +197,13 @@ class IndStreamProvider : MainAPI() {
             }.awaitAll().filterNotNull().toMap()
         }
 
-    /** Merge both sources, fuzzy-rank, dedupe by (title, year). Pure apart from card builders. */
+    /** Merge both sources, fuzzy-rank, dedupe by (title, year). TMDB ratings only order cards, never display on them. */
     private fun buildSearchCards(
         query: String,
         imdbHits: List<ImdbService.ImdbHit>,
         tmdbHits: List<TmdbService.TmdbItem>,
         tmdbByImdb: Map<String, Pair<Int, String>>,
+        imdbRatings: Map<String, Double>,
     ): List<RankedCard> {
         val tmdbRatingByKey = tmdbHits.associateBy(
             { SearchRank.dedupeKey(it.name, it.year?.toIntOrNull()) }, { it.rating })
@@ -208,10 +213,10 @@ class IndStreamProvider : MainAPI() {
             val type = mapped?.second?.let { TmdbUrlParser.normType(it) } ?: h.type
             val url = if (mapped != null) TmdbUrlParser.tmdbUrl(mapped.first, type, h.imdbId)
             else TmdbUrlParser.imdbUrl(h.imdbId, type, null)
-            // IMDB hits carry no rating; reuse the TMDB row's so the card shows a score.
-            val rating = tmdbRatingByKey[SearchRank.dedupeKey(h.title, h.year)]
+            // IMDB card, IMDB metadata throughout.
+            val rating = imdbRatings[h.imdbId]
             newCard(h.title, url, type, h.year, h.poster, rating)?.let {
-                cards += RankedCard(it, h.title, h.year, h.rank, rating)
+                cards += RankedCard(it, h.title, h.year, h.rank, tmdbRatingByKey[SearchRank.dedupeKey(h.title, h.year)])
             }
         }
         val imdbKeys = imdbHits.map { SearchRank.dedupeKey(it.title, it.year) }.toSet()
@@ -230,25 +235,6 @@ class IndStreamProvider : MainAPI() {
             compareByDescending<RankedCard> { SearchRank.combined(query, it.name, it.imdbRank, it.tmdbRating) }
                 .thenByDescending { it.year ?: 0 },
         ).filter { seen.add(SearchRank.dedupeKey(it.name, it.year)) }.take(12)
-    }
-
-    /** Fill blank posters from the other source's fuzzy match. */
-    private fun backfillCardPosters(
-        cards: List<RankedCard>,
-        imdbHits: List<ImdbService.ImdbHit>,
-        tmdbHits: List<TmdbService.TmdbItem>,
-    ) {
-        for (c in cards) {
-            if (!c.response.posterUrl.isNullOrBlank()) continue
-            val imdbPoster = imdbHits.firstOrNull {
-                SearchRank.relevance(it.title, c.name) >= 0.7 &&
-                    (it.year == null || c.year == null || kotlin.math.abs(it.year - c.year) <= 2)
-            }?.poster
-            val tmdbPoster = tmdbHits.firstOrNull {
-                SearchRank.relevance(it.name, c.name) >= 0.7
-            }?.poster
-            (imdbPoster ?: tmdbPoster)?.let { c.response.posterUrl = it }
-        }
     }
 
     /** One search card. Type follows the resolved media kind. */
@@ -361,6 +347,8 @@ class IndStreamProvider : MainAPI() {
         val tags: List<String>?
         val score: Double?
         val cast: List<ActorData>?
+        /** Watch time in seconds; only TMDB reports runtime, so an IMDB win leaves it empty. */
+        val duration: Int?
         val won = tmdbMeta
         if (won != null) {
             title = won.name ?: return@coroutineScope null
@@ -371,6 +359,7 @@ class IndStreamProvider : MainAPI() {
             tags = won.genres
             score = won.rating
             cast = won.cast
+            duration = won.runtime?.let { it * 60 }
         } else {
             val wonCine = cineMeta ?: return@coroutineScope null
             title = wonCine.name ?: return@coroutineScope null
@@ -381,6 +370,7 @@ class IndStreamProvider : MainAPI() {
             tags = wonCine.genres
             score = wonCine.rating
             cast = wonCine.cast
+            duration = null
         }
         val dataUrl = if (tmdbId != null) TmdbUrlParser.tmdbUrl(tmdbId, type, resolvedImdb)
         else TmdbUrlParser.imdbUrl(resolvedImdb ?: return@coroutineScope null, type, null)
@@ -396,6 +386,7 @@ class IndStreamProvider : MainAPI() {
                 this.plot = plot
                 this.tags = tags
                 this.actors = cast
+                this.duration = duration
                 resolvedImdb?.let { addImdbId(it) }
                 score?.let { addScore(it.toString(), 10) }
             }
@@ -414,6 +405,7 @@ class IndStreamProvider : MainAPI() {
                 ep.released?.let { this.addDate(it) }
                 ep.thumbnail?.let { this.posterUrl = it }
                 ep.rating?.let { this.score = Score.from10(it) }
+                ep.runtime?.let { this.runTime = it * 60 }
             }
         }
 
@@ -424,6 +416,7 @@ class IndStreamProvider : MainAPI() {
             this.plot = plot
             this.tags = tags
             this.actors = cast
+            this.duration = duration
             resolvedImdb?.let { addImdbId(it) }
             score?.let { addScore(it.toString(), 10) }
         }

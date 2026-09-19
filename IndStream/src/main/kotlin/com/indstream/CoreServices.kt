@@ -257,6 +257,8 @@ object TmdbService {
         val overview: String? = null,
         val genres: List<String>? = null,
         val cast: List<ActorData>? = null,
+        /** Runtime in minutes (movie `runtime`, series first `episode_run_time`). */
+        val runtime: Int? = null,
     )
 
     /** Per-episode metadata. */
@@ -268,6 +270,8 @@ object TmdbService {
         val released: String? = null,
         val thumbnail: String? = null,
         val rating: Double? = null,
+        /** Episode runtime in minutes. */
+        val runtime: Int? = null,
     )
 
     /** Search movies + series via TMDB /search/multi - cached + deduplicated. All three plugins share the TMDB key set. */
@@ -557,7 +561,8 @@ object TmdbService {
         }
     }
 
-    private fun parseTmdbDetail(raw: String?, type: String): TmdbDetail? {
+    /** Parse a TMDB detail payload (movie `runtime`, series `episode_run_time`). Testable. */
+    internal fun parseTmdbDetail(raw: String?, type: String): TmdbDetail? {
         if (raw.isNullOrBlank()) return null
         return try {
             val m = JSONObject(raw)
@@ -586,6 +591,8 @@ object TmdbService {
                     (0 until arr.length()).mapNotNull { i -> str(arr.optJSONObject(i), "name") }
                 },
                 cast = cast,
+                runtime = m.optInt("runtime", -1).takeIf { it > 0 }
+                    ?: m.optJSONArray("episode_run_time")?.optInt(0, -1)?.takeIf { it > 0 },
             )
         } catch (e: Exception) {
             null
@@ -611,6 +618,7 @@ object TmdbService {
                         released = str(e, "air_date"),
                         thumbnail = str(e, "still_path")?.let { "$IMG_BASE$it" },
                         rating = e.optDouble("vote_average", -1.0).takeIf { it > 0 },
+                        runtime = e.optInt("runtime", -1).takeIf { it > 0 },
                     )
                 }
             }

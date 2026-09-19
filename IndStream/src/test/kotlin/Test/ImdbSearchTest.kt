@@ -1,6 +1,7 @@
 package Test
 
 import com.indstream.ImdbService
+import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
@@ -87,5 +88,10 @@ class ImdbSearchTest {
         assertNull(ImdbService.parsePersonImage(null, "X"))
         assertNull(ImdbService.parsePersonImage("", "X"))
         assertNull(ImdbService.parsePersonImage("nope", "X"))
+    }
+
+    @Test
+    fun fetchRatings_emptyIdsNeedNoNetwork() = runBlocking {
+        assertTrue(ImdbService.fetchRatings(emptyList()).isEmpty())
     }
 }

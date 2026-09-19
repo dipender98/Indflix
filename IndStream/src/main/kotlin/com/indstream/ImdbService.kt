@@ -55,6 +55,8 @@ object ImdbService {
     private val metaCache = ConcurrentHashMap<String, MetaDetail>()
     /** Actor name (lowercased) to headshot URL. */
     private val photoCache = ConcurrentHashMap<String, String>()
+    /** IMDB id to (rating, expiresAt). */
+    private val ratingCache = ConcurrentHashMap<String, Pair<Double, Long>>()
 
     /** Suggest lookup with in-memory cache. Never throws. */
     suspend fun suggest(query: String): List<ImdbHit> {
@@ -236,6 +238,50 @@ object ImdbService {
         for ((n, url) in found) {
             if (photoCache.size < CACHE_MAX * 4) photoCache[n.lowercase()] = url
             out[n] = url
+        }
+        return out
+    }
+
+    /** IMDB ratings by id via Cinemeta (lightweight: no cast enrichment). Never throws. */
+    suspend fun fetchRatings(ids: List<Pair<String, String>>): Map<String, Double> {
+        val wanted = ids.distinctBy { it.first }.filter { it.first.startsWith("tt") }
+        if (wanted.isEmpty()) return emptyMap()
+        val now = System.currentTimeMillis()
+        val out = HashMap<String, Double>()
+        val missing = wanted.filter { (id, _) ->
+            val e = ratingCache[id]
+            if (e != null && now <= e.second) {
+                out[id] = e.first
+                false
+            } else {
+                if (e != null) ratingCache.remove(id)
+                true
+            }
+        }
+        if (missing.isEmpty()) return out
+        withTimeoutOrNull(5000L) {
+            coroutineScope {
+                val sem = Semaphore(4)
+                missing.map { (id, type) ->
+                    async {
+                        sem.acquire()
+                        try {
+                            val kind = if (type == "movie") "movie" else "series"
+                            val text = runCatching {
+                                app.get("$CINEMETA_API/$kind/$id.json", timeout = 5).text
+                            }.getOrNull()
+                            parseCinemeta(text, id)?.rating?.let { id to it }
+                        } finally {
+                            sem.release()
+                        }
+                    }
+                }.awaitAll().filterNotNull().toMap()
+            }
+        }?.let { found ->
+            for ((id, r) in found) {
+                if (ratingCache.size < CACHE_MAX * 4) ratingCache[id] = r to (System.currentTimeMillis() + CACHE_TTL_MS)
+                out[id] = r
+            }
         }
         return out
     }

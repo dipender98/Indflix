@@ -852,6 +852,8 @@ class MultimoviesProvider : MainAPI() {
                     this.plot = plot
                     this.tags = tags
                     this.actors = resolvedDetail?.cast
+                    // Watch time in seconds; only TMDB reports runtime, IMDB-mapped details leave it empty.
+                    this.duration = resolvedDetail?.runtime?.let { it * 60 }
                     imdbId?.let { addImdbId(it) }
                     (score ?: pageScore)?.let { addScore(it.toString(), 10) }
                 }
@@ -917,6 +919,7 @@ class MultimoviesProvider : MainAPI() {
                                 m.released?.let { ep.addDate(it) }
                                 m.thumbnail?.let { ep.posterUrl = it }
                                 m.rating?.let { ep.score = Score.from10(it) }
+                                m.runtime?.let { ep.runTime = it * 60 }
                             }
                         }
                     } else if (imdbId != null) {
@@ -939,6 +942,7 @@ class MultimoviesProvider : MainAPI() {
                     this.plot = plot
                     this.tags = tags
                     this.actors = resolvedDetail?.cast
+                    this.duration = resolvedDetail?.runtime?.let { it * 60 }
                     imdbId?.let { addImdbId(it) }
                     (score ?: pageScore)?.let { addScore(it.toString(), 10) }
                 }
