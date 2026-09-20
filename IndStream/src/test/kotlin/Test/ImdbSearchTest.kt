@@ -37,13 +37,14 @@ class ImdbSearchTest {
     @Test
     fun parseCinemeta_mapsDetail() {
         val raw = """{"meta":{"name":"Dune","poster":"https://p.jpg","background":"https://b.jpg",
-            "releaseInfo":"2021","imdbRating":"8.0","description":"Desert saga.",
+            "releaseInfo":"2021","imdbRating":"8.0","description":"Desert saga.","runtime":"155 min",
             "genres":["Sci-Fi"],"cast":["Timothee"]}}"""
         val d = ImdbService.parseCinemeta(raw, "tt1160419")
         assertEquals("Dune", d?.name)
         assertEquals("https://p.jpg", d?.poster)
         assertEquals("https://b.jpg", d?.backdrop)
         assertEquals(8.0, d?.rating)
+        assertEquals(155, d?.runtime)
         assertEquals(listOf("Sci-Fi"), d?.genres)
         assertEquals(1, d?.cast?.size)
     }

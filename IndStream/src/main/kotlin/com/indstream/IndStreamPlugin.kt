@@ -144,39 +144,42 @@ class IndStreamProvider : MainAPI() {
             Pair("popular|tv", "Popular Series"),
         )
 
-    // Search: IMDB suggest + TMDB raced in parallel, fuzzy-ranked. Either source alone suffices.
+    // Search: open race, first source back with hits wins outright.
 
     override suspend fun search(query: String): List<SearchResponse>? = coroutineScope {
         if (query.isBlank()) return@coroutineScope null
-        val imdbJob = async { imdbSearchFuzzy(query) }
-        val tmdbJob = async { withTimeoutOrNull(12000L) { TmdbService.search(query) }.orEmpty() }
-        val imdbHits = imdbJob.await()
-        val tmdbHits = tmdbJob.await()
-
-        // Attach TMDB ids to top IMDB hits and fetch IMDB ratings concurrently;
-        // each phase is bounded, so a slow source never stalls search.
-        val tmdbByImdbDef = async {
-            withTimeoutOrNull(5000L) { mapImdbToTmdb(imdbHits.take(8)) }.orEmpty()
+        val imdbDef = async { imdbSearchFuzzy(query) }
+        val tmdbDef = async { withTimeoutOrNull(12000L) { TmdbService.search(query) }.orEmpty() }
+        // Whoever answers first with hits wins outright; the loser is cancelled.
+        // TMDB's ~1s answers no longer wait on IMDB enrichment, and vice versa.
+        var imdbHits: List<ImdbService.ImdbHit>? = null
+        var tmdbHits: List<TmdbService.TmdbItem>? = null
+        select<Unit> {
+            imdbDef.onAwait { h ->
+                if (h.isNotEmpty()) imdbHits = h else tmdbHits = tmdbDef.await()
+            }
+            tmdbDef.onAwait { t ->
+                if (t.isNotEmpty()) tmdbHits = t else imdbHits = imdbDef.await()
+            }
         }
-        val imdbRatingsDef = async {
-            ImdbService.fetchRatings(imdbHits.take(12).map { it.imdbId to it.type })
+        imdbDef.cancel()
+        tmdbDef.cancel()
+        tmdbHits?.let { hits ->
+            return@coroutineScope hits.mapNotNull { it.toSearchResponse() }.take(12).takeIf { it.isNotEmpty() }
         }
-        // Each card shows its own source throughout: IMDB cards IMDB poster + rating, TMDB cards TMDB poster + rating.
-        val cards = buildSearchCards(query, imdbHits, tmdbHits, tmdbByImdbDef.await(), imdbRatingsDef.await())
-        if (cards.isEmpty()) return@coroutineScope null
-        cards.map { it.response }
+        val hits = imdbHits.orEmpty()
+        if (hits.isEmpty()) return@coroutineScope null
+        // IMDB cards need IMDB ratings: one bounded round, partial rows kept.
+        val ratings = ImdbService.fetchRatings(hits.take(12).map { it.imdbId to it.type })
+        return@coroutineScope hits.sortedWith(
+            compareByDescending<ImdbService.ImdbHit> { SearchRank.combined(query, it.title, it.rank, null) }
+                .thenByDescending { it.year ?: 0 },
+        ).take(12).mapNotNull { h ->
+            newCard(h.title, TmdbUrlParser.imdbUrl(h.imdbId, h.type, null), h.type, h.year, h.poster, ratings[h.imdbId])
+        }.takeIf { it.isNotEmpty() }
     }
 
     override suspend fun quickSearch(query: String): List<SearchResponse>? = search(query)
-
-    /** One ranked card before poster backfill. */
-    private data class RankedCard(
-        val response: SearchResponse,
-        val name: String,
-        val year: Int?,
-        val imdbRank: Int?,
-        val tmdbRating: Double?,
-    )
 
     /** Suggest across the query plus one typo respelling, merged by IMDB id. */
     private suspend fun imdbSearchFuzzy(query: String): List<ImdbService.ImdbHit> = coroutineScope {
@@ -184,59 +187,6 @@ class IndStreamProvider : MainAPI() {
         if (queries.size == 1) return@coroutineScope ImdbService.suggest(query)
         queries.map { q -> async { ImdbService.suggest(q) } }
             .awaitAll().flatten().distinctBy { it.imdbId }
-    }
-
-    /** Best-effort IMDB -> (tmdbId, type) map. Empty on TMDB outage. */
-    private suspend fun mapImdbToTmdb(hits: List<ImdbService.ImdbHit>): Map<String, Pair<Int, String>> =
-        coroutineScope {
-            hits.map { h ->
-                async<Pair<String, Pair<Int, String>>?> {
-                    val found: Pair<Int, String>? = runCatching {
-                        withTimeoutOrNull(4000L) { TmdbService.findByImdb(h.imdbId) }
-                    }.getOrNull()
-                    if (found != null) h.imdbId to found else null
-                }
-            }.awaitAll().filterNotNull().toMap()
-        }
-
-    /** Merge both sources, fuzzy-rank, dedupe by (title, year). TMDB ratings only order cards, never display on them. */
-    private fun buildSearchCards(
-        query: String,
-        imdbHits: List<ImdbService.ImdbHit>,
-        tmdbHits: List<TmdbService.TmdbItem>,
-        tmdbByImdb: Map<String, Pair<Int, String>>,
-        imdbRatings: Map<String, Double>,
-    ): List<RankedCard> {
-        val tmdbRatingByKey = tmdbHits.associateBy(
-            { SearchRank.dedupeKey(it.name, it.year?.toIntOrNull()) }, { it.rating })
-        val cards = ArrayList<RankedCard>()
-        for (h in imdbHits) {
-            val mapped = tmdbByImdb[h.imdbId]
-            val type = mapped?.second?.let { TmdbUrlParser.normType(it) } ?: h.type
-            val url = if (mapped != null) TmdbUrlParser.tmdbUrl(mapped.first, type, h.imdbId)
-            else TmdbUrlParser.imdbUrl(h.imdbId, type, null)
-            // IMDB card, IMDB metadata throughout.
-            val rating = imdbRatings[h.imdbId]
-            newCard(h.title, url, type, h.year, h.poster, rating)?.let {
-                cards += RankedCard(it, h.title, h.year, h.rank, tmdbRatingByKey[SearchRank.dedupeKey(h.title, h.year)])
-            }
-        }
-        val imdbKeys = imdbHits.map { SearchRank.dedupeKey(it.title, it.year) }.toSet()
-        for (t in tmdbHits) {
-            val id = t.tmdbId ?: continue
-            if (t.name.isBlank()) continue
-            // Skip TMDB rows already covered by an IMDB hit.
-            if (imdbKeys.contains(SearchRank.dedupeKey(t.name, t.year?.toIntOrNull()))) continue
-            val type = TmdbUrlParser.normType(t.type)
-            newCard(t.name, TmdbUrlParser.tmdbUrl(id, type, t.imdbId), type, t.year?.toIntOrNull(), t.poster, t.rating)?.let {
-                cards += RankedCard(it, t.name, t.year?.toIntOrNull(), null, t.rating)
-            }
-        }
-        val seen = HashSet<String>()
-        return cards.sortedWith(
-            compareByDescending<RankedCard> { SearchRank.combined(query, it.name, it.imdbRank, it.tmdbRating) }
-                .thenByDescending { it.year ?: 0 },
-        ).filter { seen.add(SearchRank.dedupeKey(it.name, it.year)) }.take(12)
     }
 
     /** One search card. Type follows the resolved media kind. */
@@ -300,15 +250,19 @@ class IndStreamProvider : MainAPI() {
         val ref = TmdbUrlParser.parseTitleUrl(url) ?: return@coroutineScope null
         val urlImdb = ref.imdbId
 
-        // Missing TMDB id resolves via IMDB when that endpoint is alive.
-        val foundTmdb = if (ref.tmdbId == null && urlImdb != null) {
-            withTimeoutOrNull(6000L) { TmdbService.findByImdb(urlImdb) }
+        // Bare pasted urls may lack the type; our own always carry it. Only that case
+        // pays a short pre-race lookup - everything else races immediately.
+        val quickTmdb = if (ref.tmdbId == null && urlImdb != null && ref.type == null) {
+            withTimeoutOrNull(1500L) { TmdbService.findByImdb(urlImdb) }
         } else null
-        val tmdbId: Int? = ref.tmdbId ?: foundTmdb?.first
-        val type: String = ref.type ?: foundTmdb?.second?.let { TmdbUrlParser.normType(it) } ?: "movie"
+        val tmdbId: Int? = ref.tmdbId ?: quickTmdb?.first
+        val type: String = ref.type ?: quickTmdb?.second?.let { TmdbUrlParser.normType(it) } ?: "movie"
 
         val tmdbMetaJob = async {
-            val id = tmdbId ?: return@async null
+            // TMDB id resolves inside the race arm, so an IMDB-URL load never waits on TMDB to start answering.
+            val id = tmdbId ?: urlImdb?.let { iid ->
+                runCatching { withTimeoutOrNull(6000L) { TmdbService.findByImdb(iid) } }.getOrNull()?.first
+            } ?: return@async null
             withTimeoutOrNull(12000L) {
                 TmdbService.fetchMeta(id, type)
                     ?: run { delay(1200L); TmdbService.fetchMeta(id, type) }
