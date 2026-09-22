@@ -614,22 +614,27 @@ class IndStreamProvider : MainAPI() {
             }
         }
 
+        // One emit path for every wave: url-dedupe, cache merge, live push while the window is open.
+        suspend fun emitBatch(sid: String, streams: List<StreamEngine.RawStream>) {
+            val fresh = streams.filter { it.url.isNotBlank() && pushedUrls.add(it.url) }
+            if (fresh.isEmpty()) return
+            StreamEngine.FastStartCache.put(cacheKey, fresh)
+            if (!windowOpen.get()) return
+            // LIVE push (the whole point of staying alive): each batch is emitted the instant it resolves, in arrival order - the.
+            android.util.Log.i("IndStream", "TAP#$tap +${fresh.size} from $sid at " +
+                "${System.currentTimeMillis() - loadStartMs}ms (window open)")
+            StreamEngine.emit(
+                fresh,
+                { emitted.incrementAndGet(); callback(it) },
+                originalLangNow(),
+            )
+        }
+
         val farmDone = fastStartScope.async {
             try {
                 StreamEngine.resolveRealtime(tmdbId, type, season, episode, urlImdb, imdbIdProvider = { imdbDeferred.await() }) { sid, streams ->
                     // Subtitle-only carriers are dead weight now (server subs are not used - fallback is the provider): links only.
-                    val fresh = streams.filter { it.url.isNotBlank() && pushedUrls.add(it.url) }
-                    if (fresh.isEmpty()) return@resolveRealtime
-                    StreamEngine.FastStartCache.put(cacheKey, fresh)
-                    if (!windowOpen.get()) return@resolveRealtime
-                    // LIVE push (the whole point of staying alive): each batch is emitted the instant it resolves, in arrival order - the.
-                    android.util.Log.i("IndStream", "TAP#$tap +${fresh.size} from $sid at " +
-                        "${System.currentTimeMillis() - loadStartMs}ms (window open)")
-                    StreamEngine.emit(
-                        fresh,
-                        { emitted.incrementAndGet(); callback(it) },
-                        originalLangNow(),
-                    )
+                    emitBatch(sid, streams)
                 }
             } catch (t: Throwable) {
                 android.util.Log.w("IndStream", "live resolve failed: ${t.message}")
@@ -642,6 +647,25 @@ class IndStreamProvider : MainAPI() {
             farmDone.invokeOnCompletion { inFlightFarm.compareAndSet(handle, null) }
         }
 
+        // Second wave: IMDB-url taps start with no TMDB id, so only IMDB servers run above.
+        // The TMDB id resolves in the background; when it lands, the TMDB-keyed servers join the same emit path.
+        val tmdbWave = if (tmdbId <= 0 && urlImdb != null) {
+            fastStartScope.async {
+                val id2 = runCatching { withTimeoutOrNull(6000L) { TmdbService.findByImdb(urlImdb) } }
+                    .getOrNull()?.first?.takeIf { it > 0 }
+                if (id2 == null) {
+                    android.util.Log.i("IndStream", "TAP#$tap no TMDB id for $urlImdb (TMDB wave skipped)")
+                    return@async
+                }
+                android.util.Log.i("IndStream", "TAP#$tap TMDB id $id2 resolved, launching TMDB wave")
+                runCatching {
+                    StreamEngine.resolveRealtime(id2, type, season, episode, urlImdb, tmdbOnly = true) { sid, streams ->
+                        emitBatch(sid, streams)
+                    }
+                }.onFailure { android.util.Log.w("IndStream", "TAP#$tap TMDB wave failed: ${it.message}") }
+            }
+        } else null
+
         // Subtitles start fetching THE MOMENT the user taps play - not after the first stream resolves - so tracks are
         // ready before/at playback start. Batch-priority order (English + original + all Indian langs first, then foreign).
         val subsJob = fastStartScope.async {
@@ -653,7 +677,7 @@ class IndStreamProvider : MainAPI() {
         // Keep loadLinks ALIVE (bounded): the change-server list only grows while this coroutine runs.
         val firstStreamArrived = CompletableDeferred<Unit>()
         val arrivalWatcher = fastStartScope.launch {
-            while (emitted.get() == 0 && !farmDone.isCompleted) delay(50)
+            while (emitted.get() == 0 && (!farmDone.isCompleted || tmdbWave?.isCompleted == false)) delay(50)
             firstStreamArrived.complete(Unit)
         }
 
@@ -667,8 +691,8 @@ class IndStreamProvider : MainAPI() {
             return false
         }
 
-        // LIVE_FILL window: hold until the farm resolves or the cap expires, whichever first - every server that answers.
-        withTimeoutOrNull(StreamEngine.LIVE_FILL_MS) { farmDone.await() }
+        // LIVE_FILL window: hold until both waves resolve or the cap expires, whichever first - every server that answers.
+        withTimeoutOrNull(StreamEngine.LIVE_FILL_MS) { farmDone.await(); tmdbWave?.await() }
         // Window closing: the app stops recording pushes the moment we return, so late farm arrivals now land in.
 // FastStartCache only.
         windowOpen.set(false)
@@ -692,6 +716,16 @@ class IndStreamProvider : MainAPI() {
                 // load() just warmed TmdbService's cache: the lazy lookup below is an instant cache hit for IMDB-keyed servers.
                 StreamEngine.resolveRealtime(tmdbId, type, -1, -1, imdbId, imdbIdProvider = { imdbId }) { _, streams ->
                     if (streams.isNotEmpty()) StreamEngine.FastStartCache.put(key, streams)
+                }
+                // Same staged treatment: resolve the TMDB id and run its servers into the shared key.
+                if (tmdbId <= 0 && imdbId != null) {
+                    val id2 = runCatching { withTimeoutOrNull(6000L) { TmdbService.findByImdb(imdbId) } }
+                        .getOrNull()?.first?.takeIf { it > 0 }
+                    if (id2 != null) {
+                        StreamEngine.resolveRealtime(id2, type, -1, -1, imdbId, tmdbOnly = true) { _, streams ->
+                            if (streams.isNotEmpty()) StreamEngine.FastStartCache.put(key, streams)
+                        }
+                    }
                 }
             }.onFailure { android.util.Log.w("IndStream", "prewarm failed: ${it.message}") }
         }

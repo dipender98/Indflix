@@ -121,6 +121,8 @@ object StreamEngine {
         imdbId: String? = null,
         /** Lazily resolves the IMDB id for IMDB-keyed servers. Called INSIDE each server's coroutine so the (up to 3s) TMDB. lookup runs concurrently with the. */
         imdbIdProvider: (suspend () -> String?)? = null,
+        /** Second-wave mode: only TMDB-keyed servers run (IMDB-keyed already ran in wave one). */
+        tmdbOnly: Boolean = false,
         onBatch: suspend (serverId: String, streams: List<RawStream>) -> Unit,
     ) {
         if (tmdbId <= 0 && (imdbId == null || !imdbId.startsWith("tt")) && imdbIdProvider == null) {
@@ -130,7 +132,8 @@ object StreamEngine {
         // Without a TMDB id only IMDB-keyed servers (plus dual-id racers) can run.
         val imdbOnly = tmdbId <= 0
         val servers = selectServers(tmdbId, type, season, episode).filter { spec ->
-            if (!imdbOnly) true
+            if (tmdbOnly) spec.idType != ServerIdType.IMDB
+            else if (!imdbOnly) true
             else spec.idType == ServerIdType.IMDB || spec.id == "vidup" || spec.id == "vidcore"
         }
         if (servers.isEmpty()) return
