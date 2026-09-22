@@ -2,14 +2,14 @@
     {
         "url": "https://raw.githubusercontent.com/dipender98/Indflix/builds/IndStream.cs3",
         "status": 1,
-        "version": 58,
+        "version": 59,
         "name": "IndStream",
         "internalName": "IndStream",
         "authors": [
             "Indflix"
         ],
         "description": "Federated embed-server resolver keyed by TMDB/IMDB id. Races dozens of independent HLS/DASH servers, picks the fastest CDN per title, and exposes multi-language audio + per-quality links.",
-        "fileSize": 209740,
+        "fileSize": 210126,
         "repositoryUrl": "https://github.com/dipender98/Indflix",
         "language": "hi",
         "tvTypes": [
@@ -18,12 +18,12 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/dipender98/Indflix/main/IndStream/icon.png",
         "apiVersion": 1,
-        "fileHash": "sha256-463530dc5f1d94d2a23876b876aa8646c4ca66d63f15b586f69889dfd20f3d8d"
+        "fileHash": "sha256-4e696e5f9f6c328ff18d541c1c998eae8aa0f0c0e6570e7b4ca86eaddc5d5503"
     },
     {
         "url": "https://raw.githubusercontent.com/dipender98/Indflix/builds/Multimovies.cs3",
         "status": 1,
-        "version": 40,
+        "version": 41,
         "name": "Multimovies",
         "internalName": "Multimovies",
         "authors": [
@@ -42,7 +42,7 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/dipender98/Indflix/main/Multimovies/icon.png",
         "apiVersion": 1,
-        "fileHash": "sha256-9b769a34530c6e7db688407c233f11b9e4569498bd3577fc23b0bbd6a1e05555"
+        "fileHash": "sha256-db7cf51790919b80a85c6fcd6ce84138cb910d12f1808f0024ad494908c6e3c6"
     },
     {
         "url": "https://raw.githubusercontent.com/dipender98/Indflix/builds/Vegamovies.cs3",
@@ -63,6 +63,6 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/dipender98/Indflix/main/Vegamovies/icon.png",
         "apiVersion": 1,
-        "fileHash": "sha256-2d0d19e1d71f868397071e9963f47b664d5a22e6b1552af7d10e8bc1afb5675d"
+        "fileHash": "sha256-227a5e3de5729de1a63efaa80ef348fd19378fc277e5a9e9681dc7d2b26b5f87"
     }
 ]
