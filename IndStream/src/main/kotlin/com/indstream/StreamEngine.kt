@@ -454,10 +454,10 @@ object StreamEngine {
             failServer(spec, "vaplayer returned no streams")
             return emptyList()
         }
-        if (spec.id == "vidrock") {
+        if (spec.id == "vidrock" || spec.id == "vidrock-net") {
             val result = resolveVidrock(spec, tmdbId, type, season, episode)
-            if (result.isNotEmpty()) { okServer(spec, start, "vidrock", result.size); return result }
-            failServer(spec, "vidrock returned no streams")
+            if (result.isNotEmpty()) { okServer(spec, start, spec.id, result.size); return result }
+            failServer(spec, "${spec.id} returned no streams")
             return emptyList()
         }
         if (spec.id == "videasy") {
@@ -2280,12 +2280,15 @@ object StreamEngine {
         episode: Int,
     ): List<RawStream> {
         val id = tmdbId ?: return emptyList()
-        val apiUrl = if (type == "movie") "https://vidrock.to/api/movie/$id/"
-        else "https://vidrock.to/api/tv/$id/$season/$episode/"
+        // Registry-driven: the failover mirror shares the payload shape and key, only the host differs.
+        val apiUrl = if (type == "movie") ServerFarm.buildMovieUrl(spec, id.toString())
+        else ServerFarm.buildTvUrl(spec, id.toString(), season, episode)
+        val origin = (spec.referer ?: apiUrl).trimEnd('/')
+        val apiReferer = spec.referer ?: "$origin/"
         val headers = mapOf(
             "User-Agent" to HttpKit.userAgent,
-            "Origin" to "https://vidrock.to",
-            "Referer" to "https://vidrock.to/",
+            "Origin" to origin,
+            "Referer" to apiReferer,
         )
         Log.d("VidRock", "GET $apiUrl")
 
@@ -2313,13 +2316,13 @@ object StreamEngine {
                 serverId = spec.id, serverName = "${spec.name} $serverName".trim(),
                 url = decrypted,
                 isM3u8 = decrypted.contains(".m3u8", true) || sd.optString("type") == "hls",
-                referer = "https://vidrock.to/",
+                referer = apiReferer,
                 qualityHint = 0,
                 audioPriority = if (isHindi) 4 else 1,
                 audioLabel = lang.ifBlank { "" },
                 extraHeaders = mapOf(
-                    "Referer" to "https://vidrock.to",
-                    "Origin" to "https://vidrock.to",
+                    "Referer" to origin,
+                    "Origin" to origin,
                 ),
             )
         }
@@ -2328,7 +2331,7 @@ object StreamEngine {
     }
 
     /** VidRock AES-GCM decrypt: 12-byte nonce prefix, static 32-byte hex key. */
-    private fun decryptVidrockUrl(payload: String): String? = runCatching {
+    internal fun decryptVidrockUrl(payload: String): String? = runCatching {
         val keyHex = "7f3e9c2a8b5d1f4e6a9c3b7d2e5f8a1c4b6d9e2f5a8c1b4d7e9f2a5c8b1d4e7f"
         val keyBytes = keyHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
         val std = payload.replace('-', '+').replace('_', '/')

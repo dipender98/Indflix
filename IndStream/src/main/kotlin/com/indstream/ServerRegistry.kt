@@ -57,6 +57,15 @@ object ServerFarm {
             isJsonApi = true, referer = "https://vidrock.to/",
             hasSubtitles = false, timeoutSec = 12,
         ),
+        // Failover mirror of the encrypted API above: identical payload shape and key on a separate host.
+        ServerSpec(
+            id = "vidrock-net", name = "VidRockNet",
+            idType = ServerIdType.TMDB,
+            movieUrl = "https://vidrock.net/api/movie/{id}/",
+            tvUrl = "https://vidrock.net/api/tv/{id}/{season}/{episode}/",
+            isJsonApi = true, referer = "https://vidrock.net/",
+            hasSubtitles = false, timeoutSec = 12,
+        ),
         // MovieBox app API: bearer token first, then a title-keyed POST search.
         ServerSpec(
             id = "moviebox", name = "MovieBox",

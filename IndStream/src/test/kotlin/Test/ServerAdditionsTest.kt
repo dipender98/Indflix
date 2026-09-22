@@ -140,6 +140,34 @@ class ServerAdditionsTest {
     }
 
     @Test
+    fun vidrockNet_presentAndTmdbKeyed() {
+        // Failover mirror: same encrypted payload shape as vidrock, separate host.
+        val s = ServerFarm.allServers.first { it.id == "vidrock-net" }
+        assertEquals("VidRockNet", s.name)
+        assertEquals(ServerIdType.TMDB, s.idType)
+        assertEquals("https://vidrock.net/", s.referer)
+        assertEquals(12, s.timeoutSec)
+        assertEquals(
+            "https://vidrock.net/api/movie/27205/",
+            ServerFarm.buildMovieUrl(s, "27205"),
+        )
+        assertEquals(
+            "https://vidrock.net/api/tv/1399/1/1/",
+            ServerFarm.buildTvUrl(s, "1399", 1, 1),
+        )
+    }
+
+    @Test
+    fun vidrockDecrypt_liveVector() {
+        // Captured against the live mirror API: shared static key must decrypt it.
+        assertEquals(
+            "https://cdn1.ngcorp.dad/e/DwYRNhFGRkRQWVI/master.m3u8",
+            StreamEngine.decryptVidrockUrl("NptMg-et1v491LT2L810aRv7mtf05YM_PryTgeKZUqIDduhaVZvxVto1blI84DKk2reyApYHzgHTJgUMcnLgm9AoEBQ8NW-qoqgYnOzE0VAO"),
+        )
+        assertNull(StreamEngine.decryptVidrockUrl("!!!not-base64!!!"))
+    }
+
+    @Test
     fun fastBatch2_presentAndTmdbKeyed() {
         // Fast global batch: TMDB-keyed embeds, generic pipeline, 30s kill.
         val expected = mapOf(

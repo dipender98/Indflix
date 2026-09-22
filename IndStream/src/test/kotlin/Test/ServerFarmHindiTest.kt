@@ -239,7 +239,7 @@ class ServerFarmHindiTest {
     fun bulletTrainServers_present() {
         // The fast direct-API servers (, no embed chain). mp4hydra, vidzee, vixsrc, streamprovider and 8stream are disabled ().
         // kept out of the farm so.
-        val ids = setOf("vidlink", "vaplayer", "vidrock", "moviebox", "vidnest",
+        val ids = setOf("vidlink", "vaplayer", "vidrock", "vidrock-net", "moviebox", "vidnest",
             "vidup", "vidcore-api", "allmovieland", "netmirror",
             "twoembed",
             "vidfast", "autoembed", "vidphantom", "vsembed", "twoembed-skin",
