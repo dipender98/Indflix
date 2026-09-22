@@ -295,6 +295,15 @@ class IndStreamProvider : MainAPI() {
         cineJob.cancel()
         val resolvedImdb: String? = tmdbMeta?.imdbId ?: cineIid ?: urlImdb
 
+        // Pre-resolve the TMDB id while the detail page is open: a later Play tap's
+        // TMDB wave then starts instantly off the shared find cache instead of paying a lookup.
+        val preIid = resolvedImdb
+        if (tmdbId == null && preIid != null) {
+            fastStartScope.launch {
+                runCatching { withTimeoutOrNull(6000L) { TmdbService.findByImdb(preIid) } }
+            }
+        }
+
         val title: String
         val poster: String?
         val backdrop: String?
