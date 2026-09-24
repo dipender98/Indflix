@@ -64,6 +64,22 @@ class ImdbSearchTest {
     }
 
     @Test
+    fun parseCinemetaEpisodes_readsLiveNameShape() {
+        val raw = """{"meta":{"videos":[
+            {"season":1,"episode":1,"name":"Winter Is Coming","overview":"O","released":"2011-04-17T05:00:00.000Z","thumbnail":"https://t.jpg"},
+            {"season":1,"number":2,"name":"Kingsroad","description":"D","firstAired":"2011-04-24T05:00:00.000Z","thumbnail":"https://t2.jpg"}
+        ]}}"""
+        val eps = ImdbService.parseCinemetaEpisodes(raw)
+        assertEquals(2, eps.size)
+        assertEquals("Winter Is Coming", eps[0].name)
+        assertEquals("2011-04-17", eps[0].released)
+        assertEquals(2, eps[1].episodeNumber)
+        assertEquals("Kingsroad", eps[1].name)
+        assertEquals("D", eps[1].overview)
+        assertEquals("2011-04-24", eps[1].released)
+    }
+
+    @Test
     fun parsePersonImage_prefersExactNameHit() {
         val raw = """{"d":[
             {"id":"nm0000001","l":"Wrong Person","i":{"imageUrl":"https://example.com/wrong.jpg"}},

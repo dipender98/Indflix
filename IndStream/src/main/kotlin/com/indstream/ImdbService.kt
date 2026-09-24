@@ -206,13 +206,19 @@ object ImdbService {
             (0 until videos.length()).mapNotNull { i ->
                 val v = videos.optJSONObject(i) ?: return@mapNotNull null
                 val season = v.optInt("season", -1).takeIf { it > 0 } ?: return@mapNotNull null
-                val ep = v.optInt("episode", -1).takeIf { it > 0 } ?: return@mapNotNull null
+                val ep = v.optInt("episode", -1).takeIf { it > 0 }
+                    ?: v.optInt("number", -1).takeIf { it > 0 } ?: return@mapNotNull null
+                // Live payloads carry `name` (not `title`), `description`/`firstAired` variants.
+                val released = v.optString("released").takeIf { it.isNotBlank() }
+                    ?: v.optString("firstAired").takeIf { it.isNotBlank() }
                 TmdbService.TmdbEpisode(
                     seasonNumber = season,
                     episodeNumber = ep,
-                    name = v.optString("title").takeIf { it.isNotBlank() },
-                    overview = v.optString("overview").takeIf { it.isNotBlank() },
-                    released = v.optString("released").takeIf { it.isNotBlank() },
+                    name = v.optString("name").takeIf { it.isNotBlank() }
+                        ?: v.optString("title").takeIf { it.isNotBlank() },
+                    overview = v.optString("overview").takeIf { it.isNotBlank() }
+                        ?: v.optString("description").takeIf { it.isNotBlank() },
+                    released = released?.take(10)?.takeIf { it.isNotBlank() },
                     thumbnail = v.optString("thumbnail").takeIf { it.isNotBlank() },
                     rating = null,
                 )

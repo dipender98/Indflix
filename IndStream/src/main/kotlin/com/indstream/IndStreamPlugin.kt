@@ -363,11 +363,12 @@ class IndStreamProvider : MainAPI() {
             val epUrl = if (tmdbId != null) TmdbUrlParser.tmdbEpisodeUrl(tmdbId, resolvedImdb, ep.seasonNumber, ep.episodeNumber)
             else TmdbUrlParser.imdbEpisodeUrl(resolvedImdb ?: "", ep.seasonNumber, ep.episodeNumber, null)
             newEpisode(epUrl) {
-                this.name = ep.name
+                // Null names render as blank rows, so fall back to a numbered label.
+                this.name = ep.name?.takeIf { it.isNotBlank() } ?: "Episode ${ep.episodeNumber}"
                 this.season = ep.seasonNumber
                 this.episode = ep.episodeNumber
                 this.description = ep.overview
-                ep.released?.let { this.addDate(it) }
+                ep.released?.take(10)?.takeIf { it.isNotBlank() }?.let { runCatching { addDate(it) } }
                 ep.thumbnail?.let { this.posterUrl = it }
                 ep.rating?.let { this.score = Score.from10(it) }
                 ep.runtime?.let { this.runTime = it * 60 }
