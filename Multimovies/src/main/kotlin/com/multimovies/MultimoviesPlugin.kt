@@ -98,13 +98,15 @@ internal fun parseRating(item: Element): Double? {
 /** Server names as they appear on the "Video Sources" list, used ONLY to pick the ORDER in which the movie. */
 internal val SOURCE_PRIORITY: List<String> = listOf(
     "Cineverse",
+    "GDMIRROR",
+    "GD mirror",
+    "VIDOUT",
+    "Vidsync",
+    "Bingr",
+    "Filmu",
+    "VidBolt",
     "nxsha",
     "nhdapi",
-    "GDMIRROR",
-    "screenscape",
-    "Peachify",
-    "Vidout",
-    "Server 01",
     "2embed",
     "VidSrc",
     "111Movies",
@@ -1526,7 +1528,7 @@ internal object MultimoviesDomainResolver {
     internal const val LANDING_URL = "https://multimovies.wtf/"
 
     /** Last-known-good domain; used only when the gateway itself is unreachable and no cached value exists. */
-    internal const val SEED_DOMAIN = "https://multimovies.casa"
+    internal const val SEED_DOMAIN = "https://multimovies.garden"
 
     private const val CACHE_TTL_MS = 6 * 60 * 60 * 1000L
     private const val GATEWAY_DEBOUNCE_MS = 60_000L
