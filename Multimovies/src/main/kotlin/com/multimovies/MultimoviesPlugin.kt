@@ -109,7 +109,6 @@ internal val SOURCE_PRIORITY: List<String> = listOf(
     "nhdapi",
     "2embed",
     "VidSrc",
-    "111Movies",
     // VidEm (videm. xyz): fast multi-server HLS player. xyz aggregator; resolved by VidemExtractor's signed-token API.
     "VidEm",
 )
@@ -852,7 +851,7 @@ class MultimoviesProvider : MainAPI() {
                 SourceMetaCache.put(realUrl, SourceMeta(imdbId ?: "", tmdbId?.toString(), null, null))
             }
 
-            // Global id-based sources (2embed / VidSrc / 111Movies / Nxsha / VidEm) need exactly the ids we now hold - pre-resolve.
+            // Global id-based sources (2embed / VidSrc / Nxsha / VidEm) need exactly the ids we now hold - pre-resolve.
             if (isMovie) prefetchGlobals(
                 SourceMeta(imdbId ?: "", tmdbId?.toString(), null, null), realUrl,
             )
@@ -2082,32 +2081,6 @@ object MultiSourcePuller {
             return out
         }
 
-        // 111Movies (api. shows. st): deterministic JSON API behind the vidlove player SPA. Emits source. url (adaptive HLS.
-// master playlist) + subs.
-        if (hostOf(src.url).contains("shows.st")) {
-            val subs = mutableListOf<SubtitleFile>()
-            val showLinks = ShowsExtractor.extract(src, onSubtitle = { subs.add(it) })
-            subs.forEach { onSubtitle(it) }
-            val out = mutableListOf<ExtractorLink>()
-            for (s in showLinks) {
-                // BASE label only - emitOne's enrichLabel appends the) + resolution for the final identity.
-                val label = "111Movies (${s.name})"
-                out += newExtractorLink(
-                    source = label,
-                    name = label,
-                    url = s.url,
-                    type = if (s.isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO,
-                ) {
-                    referer = s.headers["Referer"] ?: src.url
-                    quality = getQualityFromName(s.quality.ifEmpty { s.url })
-                    this.headers = s.headers + src.headers
-                    extractorData = null
-                    audioTracks = emptyList()
-                }
-            }
-            return out
-        }
-
         // If unwrapEmbed already surfaced a playable stream or proxy relay URL, emit it directly - no extra page fetch needed.
         directStreamLink(src)?.let { return listOf(it) }
 
@@ -2420,16 +2393,6 @@ object GlobalSources {
                 else "https://vsembed.ru/embed/$id"
             },
             headers = mapOf("Referer" to "https://vsembed.ru/"),
-        ),
-        GlobalSource(
-            // 111Movies backend - the player. vidlove. cc SPA is JS-only, but its data API at api. shows. st is fully.
-            name = "111Movies",
-            idType = SourceId.IMDB,
-            buildUrl = { id, s, e ->
-                if (s != null && e != null) "https://api.shows.st/tv?id=$id&season=$s&episode=$e&mode=json"
-                else "https://api.shows.st/movie?id=$id&mode=json"
-            },
-            headers = mapOf("Referer" to "https://player.vidlove.cc/"),
         ),
         GlobalSource(
             // Nxsha's own player API (nitro, MbPly, Citadel, StremFx, . . . ).

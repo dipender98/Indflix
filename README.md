@@ -5,6 +5,8 @@ provider plugin for movies, TV series, anime, and cartoons. It races
 multiple independent stream servers per title and exposes
 **multi-language audio** — Hindi, English, Tamil, Telugu, dubbed, dual-audio.
 
+New to CloudStream? Start with the [CloudStream Wiki](https://cloudstream.miraheze.org).
+
 ## Install
 
 CloudStream → **Settings** → **Extensions** → **Add repository**:

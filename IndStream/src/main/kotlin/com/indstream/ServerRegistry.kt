@@ -226,16 +226,6 @@ object ServerFarm {
             referer = "https://www.rivestream.app/",
             hasSubtitles = true, timeoutSec = 30,
         ),
-        // Videasy multi-route API with local mvm1 decrypt. CDN carries HLS up to 2160p.
-        // Chain entry is the per-title seed fetch; route queries need that seed plus title and media type.
-        ServerSpec(
-            id = "videasy", name = "Videasy",
-            idType = ServerIdType.TMDB,
-            movieUrl = "https://api.speedracelight.com/seed?mediaId={id}",
-            tvUrl = "https://api.speedracelight.com/seed?mediaId={id}",
-            referer = "https://player.videasy.to/",
-            hasSubtitles = false, timeoutSec = 30,
-        ),
         // OneTouchTV (api3.devcorp.me): title search, AES-256-CBC envelope, per-episode HLS.
         // Chain entry is a title search; detail + episode calls need the matched id.
         ServerSpec(
@@ -255,6 +245,37 @@ object ServerFarm {
             tvUrl = "https://vidrack.created.app/api/sources/movy?id={id}&season={season}&episode={episode}",
             isJsonApi = true, referer = "https://www.vidcore.org/",
             hasSubtitles = false, timeoutSec = 20,
+        ),
+        ServerSpec(
+            id = "vidsrcto", name = "VidsrcTo",
+            idType = ServerIdType.TMDB,
+            movieUrl = "https://vidsrc.to/embed/movie/{id}",
+            tvUrl = "https://vidsrc.to/embed/tv/{id}/{season}/{episode}",
+            referer = "https://vidsrc.to/",
+            hasSubtitles = true, timeoutSec = 30,
+            declaredLanguages = setOf("Hindi", "Tamil", "Telugu", "English"),
+        ),
+        // IMDB-keyed Hindi-dub source: status check, embed page, then ajax stream links.
+        // URLs are placeholders; the resolver builds its own chain entry points.
+        ServerSpec(
+            id = "myflixer-hindi", name = "MyFlixerHindi",
+            idType = ServerIdType.IMDB,
+            movieUrl = "https://hindi.myflixerapi.com/embed/{id}",
+            tvUrl = "https://hindi.myflixerapi.com/embed/series?imdb={id}&sea={season}&epi={episode}",
+            referer = "https://hindi.myflixerapi.com/",
+            hasSubtitles = true, timeoutSec = 30,
+            declaredLanguages = setOf("Hindi", "English"),
+        ),
+        // IMDB-keyed multi-server API with per-server audio language flags.
+        // URLs mirror the API shape; the resolver fans out per server key.
+        ServerSpec(
+            id = "primesrc", name = "PrimeSrc",
+            idType = ServerIdType.IMDB,
+            movieUrl = "https://primesrc.me/api/v1/s?imdb={id}&type=movie",
+            tvUrl = "https://primesrc.me/api/v1/s?imdb={id}&type=tv&season={season}&episode={episode}",
+            referer = "https://primesrc.me/",
+            hasSubtitles = true, timeoutSec = 45,
+            declaredLanguages = setOf("Hindi", "English"),
         ),
     )
 

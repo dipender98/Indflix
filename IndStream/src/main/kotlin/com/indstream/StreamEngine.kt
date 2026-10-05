@@ -409,7 +409,7 @@ object StreamEngine {
         else tmdbId.toString()
         val embedUrl = if (type == "movie") ServerFarm.buildMovieUrl(spec, id)
         else ServerFarm.buildTvUrl(spec, id, season, episode)
-        // Per-server referer (some APIs 403 without it, e. g. api. shows. st).
+        // Per-server referer (some hosts 403 without it).
         val referer = spec.referer ?: embedUrl.substringBefore("?")
 
         // VidLink: encrypted-token API. Token embeds the TMDB id + a +480s timestamp (VidlinkSource); the response carries.
@@ -458,12 +458,6 @@ object StreamEngine {
             val result = resolveVidrock(spec, tmdbId, type, season, episode)
             if (result.isNotEmpty()) { okServer(spec, start, spec.id, result.size); return result }
             failServer(spec, "${spec.id} returned no streams")
-            return emptyList()
-        }
-        if (spec.id == "videasy") {
-            val result = resolveVideasy(spec, tmdbId, imdbId, type, season, episode, imdbIdProvider)
-            if (result.isNotEmpty()) { okServer(spec, start, "videasy fan-out", result.size); return result }
-            failServer(spec, "videasy returned no streams")
             return emptyList()
         }
         if (spec.id == "onetouchtv") {
@@ -2153,45 +2147,6 @@ object StreamEngine {
         throw CleanMissException("no file links")
     }
 
-    /** Videasy resolver: multi-route API with local mvm1 decrypt. CDN carries HLS up to 2160p. */
-    private suspend fun resolveVideasy(
-        spec: ServerSpec,
-        tmdbId: Int?,
-        imdbId: String?,
-        type: String,
-        season: Int,
-        episode: Int,
-        imdbIdProvider: (suspend () -> String?)? = null,
-    ): List<RawStream> {
-        val id = tmdbId ?: return emptyList()
-        if (type != "movie" && (season <= 0 || episode <= 0)) return emptyList()
-        val meta = runCatching { TmdbService.fetchMeta(id, type) }.getOrNull()
-        val title = meta?.name ?: throw CleanMissException("no title for tmdb=$id (title-keyed API)")
-        val year = meta?.year?.take(4)?.toIntOrNull()
-        val imdb = imdbId ?: imdbIdProvider?.invoke()
-
-        val fetched = VideasySource.fetchAllSources(
-            tmdbId = id, imdbId = imdb, title = title, year = year,
-            mediaType = type, season = season, episode = episode,
-        )
-        if (!fetched.httpOk) return emptyList()
-        if (fetched.sources.isEmpty()) {
-            throw CleanMissException("upstream answered, no entry (flap or library miss)")
-        }
-        val referer: String? = null
-        return fetched.sources.map { s ->
-            val lang = VideasySource.languageOf(s.quality)
-            RawStream(
-                serverId = spec.id,
-                serverName = "${spec.name} ${s.route.replaceFirstChar { it.uppercase() }}".trim(),
-                url = s.url, isM3u8 = VideasySource.isHls(s.url),
-                referer = referer, qualityHint = VideasySource.heightOf(s.quality),
-                audioLabel = lang,
-                extraHeaders = VideasySource.playbackHeaders(),
-            )
-        }.distinctBy { it.url }
-    }
-
     /** OneTouchTV resolver: title search, AES envelope, per-episode HLS sources. */
     private suspend fun resolveOneTouchTv(
         spec: ServerSpec,
@@ -2264,7 +2219,7 @@ object StreamEngine {
                 serverId = spec.id, serverName = "${spec.name} $label".trim(),
                 url = streamUrl, isM3u8 = streamUrl.contains(".m3u8", true),
                 referer = streamHeaders["Referer"] ?: "https://www.movy.bz/",
-                qualityHint = VideasySource.heightOf(quality),
+                qualityHint = quality.filter { it.isDigit() }.takeLast(3).toIntOrNull() ?: 0,
                 extraHeaders = streamHeaders,
             )
         }
@@ -3249,7 +3204,7 @@ object StreamEngine {
         return out
     }
 
-    /** JSON API resolver (api. shows. st / 111Movies shape): `{"source": {"url": . . . , "qualities": }, "subtitles": }`. The signed stream URLs carry no. */
+    /** JSON API resolver: `{"source": {"url": . . . , "qualities": }, "subtitles": }`. The signed stream URLs carry no. */
     private suspend fun resolveJsonApi(
         spec: ServerSpec,
         apiUrl: String,
