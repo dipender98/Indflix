@@ -349,8 +349,8 @@ internal data class NxshaServer(
 /** Pure Nxsha wire-protocol logic: envelope crypto, id parsing, server rules. Kept free of CloudStream imports (and. isolated) so it runs on the plain. */
 internal object NxshaProtocol {
 
-    /** AES passphrase of the API envelopes. Extracted. js, module 41159, String. fromCharCode(83, 56, 120, 33, 74, 107, 52. 90, 80, 49, 117, 71, 56, 36. */
-    internal const val PASSPHRASE = "S8x!Jk4ZP1uG8\$my"
+    /** AES passphrase of the API envelopes. Extracted from the player bundle, module 41159 (rotated keys happen). */
+    internal const val PASSPHRASE = "f4488ab4da401203d23baa129fc546153898162524635d6776826d0c867ccaa3"
 
     /** Random ~10-char salt mimicking Math. random(). toString(36). substring(2, 12). */
     fun randomSalt(): String {
@@ -549,8 +549,13 @@ object VidemExtractor {
                             val playUrl = "$BASE_URL/api.php?a=play&ref=$ref&t=${
                                 URLEncoder.encode(token, "UTF-8")
                             }"
-                            val playJson = HttpKit.getJson(playUrl, headers = sharedHeaders, budgetMs = PLAY_TIMEOUT_MS)
+                            var playJson = HttpKit.getJson(playUrl, headers = sharedHeaders, budgetMs = PLAY_TIMEOUT_MS)
                                 ?: return@async
+                            // Stale mint: the player re-mints with fresh=1 when the first answer carries no url.
+                            if (playJson.optString("url", "").isBlank()) {
+                                playJson = HttpKit.getJson("$playUrl&fresh=1", headers = sharedHeaders, budgetMs = PLAY_TIMEOUT_MS)
+                                    ?: return@async
+                            }
                             val streamUrl = playJson.optString("url", "")
                             if (streamUrl.isBlank()) return@async
                             val resolved = MultiSourcePuller.resolveRelative(BASE_URL, streamUrl)
@@ -670,6 +675,9 @@ object GdMirrorExtractor {
 /** Pure GDMirror wire logic: embed/vars/api parsing, mirror mapping, packed-player unpack. */
 internal object GdMirrorProtocol {
 
+    /** Site-wide static key for keyless embeds (the player page ships an empty myKey when the parent omits one). */
+    internal const val FALLBACK_KEY = "e11a7debaaa4f5d25b671706ffe4d2acb56efbd4"
+
     internal data class Embed(val pageUrl: String, val kind: String, val id: String, val season: String?, val episode: String?, val key: String?)
     internal data class Vars(val api: String, val player: String, val playerHost: String, val idType: String, val id: String, val season: String?, val epname: String?, val key: String)
     internal data class GdFile(val slug: String, val fileName: String)
@@ -691,7 +699,7 @@ internal object GdMirrorProtocol {
         val id = jsVar(page, "FinalID")?.ifEmpty { null } ?: embed.id
         val idType = jsVar(page, "idType")?.ifEmpty { null }
             ?: if (id.startsWith("tt")) "imdbid" else "tmdbid"
-        val key = jsVar(page, "myKey")?.ifEmpty { null } ?: embed.key.orEmpty()
+        val key = jsVar(page, "myKey")?.ifEmpty { null } ?: embed.key?.ifEmpty { null } ?: FALLBACK_KEY
         val api = jsVar(page, "api_url")?.trimEnd('/')?.ifEmpty { null } ?: DEF_API
         val player = jsVar(page, "player_base")?.trimEnd('/')?.ifEmpty { null } ?: DEF_PLAYER
         val season = jsVar(page, "season")?.ifEmpty { null } ?: embed.season
@@ -841,8 +849,9 @@ internal object GdMirrorProtocol {
 /** True for a directly playable stream URL. */
 internal fun isMediaUrl(u: String): Boolean {
     val l = u.lowercase()
+    // `.urlset/master.txt` is standard HLS manifest naming on these CDNs; bare .txt is not a stream.
     return l.contains(".m3u8") || l.contains(".mp4") || l.contains(".mpd") ||
-        l.contains(".webm") || l.contains(".mkv")
+        l.contains(".webm") || l.contains(".mkv") || l.contains(".urlset/")
 }
 
 /** Modiplay (Cineverse backend) extractor. Embed/proxy pages carry a static tokenized HLS relay. */
@@ -858,17 +867,40 @@ object ModiplayExtractor {
                 mapOf("User-Agent" to UA, "Referer" to pageUrl),
                 6_000L,
             ) ?: return emptyList()
+            // The player iframe proxies the chosen platform; its page carries the real HLS master.
+            // The iframe src keeps HTML entities (&amp;) - a browser decodes them before requesting, so must we.
+            val frame = Regex(
+                """<iframe[^>]+src=["']([^"']*proxy\.php[^"']*)["']""",
+                RegexOption.IGNORE_CASE,
+            ).find(html)?.groupValues?.get(1)?.replace("&amp;", "&")
+            if (frame != null) {
+                val resolved = proxyStreams(MultiSourcePuller.resolveRelative(current, frame), current)
+                if (resolved.isNotEmpty()) {
+                    return resolved.map { VidemSource("Cineverse", it, "", true, mapOf("Referer" to current)) }
+                }
+            }
             val streams = parseModiplayStreams(html, current)
             if (streams.isNotEmpty()) {
                 return streams.map { VidemSource("Cineverse", it, "", true, mapOf("Referer" to current)) }
             }
-            val frame = Regex(
-                """<iframe[^>]+src=["']([^"']*proxy\.php[^"']*)["']""",
-                RegexOption.IGNORE_CASE,
-            ).find(html)?.groupValues?.get(1) ?: return emptyList()
-            current = MultiSourcePuller.resolveRelative(current, frame)
+            current = frame?.let { MultiSourcePuller.resolveRelative(current, it) } ?: return emptyList()
         }
         return emptyList()
+    }
+
+    /** Fetch a proxy player page and pull the HLS master it relays (encoded url= param or inline). */
+    private suspend fun proxyStreams(proxyUrl: String, referer: String): List<String> {
+        val html = HttpKit.get(proxyUrl, mapOf("User-Agent" to UA, "Referer" to referer), 6_000L)
+            ?: return emptyList()
+        val out = LinkedHashSet<String>()
+        Regex("""[?&]url=([^"'&\s]+)""").findAll(html).forEach { m ->
+            runCatching { java.net.URLDecoder.decode(m.groupValues[1], "UTF-8") }
+                .getOrNull()
+                ?.takeIf { it.startsWith("http") && it.contains(".m3u8", ignoreCase = true) }
+                ?.let { out.add(it) }
+        }
+        MultiSourcePuller.extractStreamUrl(html)?.let { out.add(it) }
+        return out.toList()
     }
 }
 
@@ -883,8 +915,14 @@ internal fun parseModiplayStreams(html: String, baseUrl: String): List<String> {
     Regex("""["']src["']\s*:\s*["']([^"']*stream_proxy\.php[^"']*)["']""").findAll(clean).forEach { m ->
         out.add(MultiSourcePuller.resolveRelative(baseUrl, m.groupValues[1].trim()))
     }
-    Regex("""EMBED_URL\s*=\s*['"]([^'"]+)['"]""").findAll(clean).forEach { m ->
+    // Relay relay shape: `var src="...stream_proxy.php?url=..."` (var form, not the JSON key above).
+    Regex("""(?:var|let|const)\s+src\s*=\s*["']([^"']*stream_proxy\.php[^"']*)["']""").findAll(clean).forEach { m ->
         out.add(MultiSourcePuller.resolveRelative(baseUrl, m.groupValues[1].trim()))
+    }
+    Regex("""EMBED_URL\s*=\s*['"]([^'"]+)['"]""").findAll(clean).forEach { m ->
+        // Skip bare embed prefixes ("https://host/e/") - the real id is concatenated at runtime.
+        val v = m.groupValues[1].trim()
+        if (!v.endsWith("/")) out.add(MultiSourcePuller.resolveRelative(baseUrl, v))
     }
     return out.filter { it.startsWith("http") }.distinct()
 }

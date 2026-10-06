@@ -40,9 +40,9 @@ class HostExtractorsMmTest {
 
     @Test
     fun vidoutParsesTextLines() {
-        val body = "https://a.com/x/master.m3u8\nhttps://b.com/y.urlset/master.txt\nnot a url"
+        val body = "https://a.com/x/master.m3u8\nhttps://b.com/y.urlset/master.txt\nhttps://c.com/master.txt\nnot a url"
         val out = parseVidoutBody(body)
-        assertEquals(listOf("https://a.com/x/master.m3u8"), out)
+        assertEquals(listOf("https://a.com/x/master.m3u8", "https://b.com/y.urlset/master.txt"), out)
     }
 
     @Test
