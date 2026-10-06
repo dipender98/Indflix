@@ -113,11 +113,11 @@ internal val SOURCE_PRIORITY: List<String> = listOf(
     "VidEm",
 )
 
-/** CSS selector for the item containers on a search-results page. */
-private val SEARCH_ITEMS_SELECTOR = "div#archive-content div.item, div.search-page div.result-item, article.item, div.ml-items div.item, div.results div.result, ul.ml-posts li, div#content div.post, div.items div.item"
+/** Item containers on search, catalog, genre and home shelves. */
+private val SEARCH_ITEMS_SELECTOR = "article.poster-card, article.cinema-slide, div.catalog-grid article.poster-card, a.cinejoy-rec-card, div#archive-content div.item, div.search-page div.result-item, article.item"
 
-/** Visible headings first: the meta title carries a site-name affix. */
-private const val TITLE_SELECTOR = "div.sheader h1, h1, meta[property=og:title]"
+/** Detail title, new theme first. */
+private const val TITLE_SELECTOR = "h1.cinejoy-detail-title, div.sheader h1, h1, meta[property=og:title]"
 
 /** Drop a leading/trailing site-name affix ("Site | Title", "Title - Site") from scraped titles. Pure. */
 internal fun stripSiteAffix(raw: String, siteName: String = "Multimovies"): String {
@@ -171,6 +171,102 @@ internal fun extractDooplayNonce(html: String): String? {
     if (html.isBlank()) return null
     val block = Regex("""dtGonza\s*=\s*\{[^}]*\}""").find(html)?.value ?: return null
     return Regex(""""nonce"\s*:\s*"([A-Za-z0-9]+)"""").find(block)?.groupValues?.get(1)
+}
+
+/** One hit from the 2.0 search API or search page. */
+internal data class V2Hit(
+    val title: String,
+    val url: String,
+    val poster: String?,
+    val year: String?,
+    val rating: Double?,
+    val type: String?,
+)
+
+/** Fix doubled poster prefixes the API sometimes emits. */
+internal fun sanitizeV2Poster(raw: String?): String? {
+    if (raw.isNullOrBlank()) return null
+    val t = raw.trim()
+    val idx = t.lastIndexOf("http", startIndex = maxOf(0, t.length - 8), ignoreCase = true)
+    val cut = if (idx > 0) t.substring(idx) else t
+    return upgradePosterUrl(if (cut.startsWith("//")) "https:$cut" else cut)
+}
+
+/** Map the 2.0 /api/search payload to hits. Pure. */
+internal fun parseV2SearchApi(raw: String?): List<V2Hit> {
+    if (raw.isNullOrBlank()) return emptyList()
+    return try {
+        val root = JSONObject(raw)
+        val arr = root.optJSONArray("results")
+        val out = ArrayList<V2Hit>()
+        fun push(o: JSONObject?) {
+            if (o == null) return
+            val kind = o.optString("type")
+            if (kind != "movie" && kind != "tv") return
+            val title = o.optString("title").ifBlank { o.optString("name") }.trim()
+            if (title.isEmpty()) return
+            val url = o.optString("url").trim()
+            if (url.isEmpty()) return
+            val poster = sanitizeV2Poster(o.optString("poster").ifBlank { o.optString("poster_path") })
+            val year = o.optInt("year", -1).takeIf { it > 0 }?.toString()
+                ?: Regex("""\d{4}""").find(o.optString("release_date") + o.optString("first_air_date"))?.value
+            val rating = o.optDouble("rating", -1.0).takeIf { it > 0 }
+                ?: o.optDouble("vote_average", -1.0).takeIf { it > 0 }
+            out.add(V2Hit(title, url, poster, year, rating, kind))
+        }
+        if (arr != null) {
+            for (i in 0 until arr.length()) push(arr.optJSONObject(i))
+        } else {
+            val movies = root.optJSONArray("movies")
+            val shows = root.optJSONArray("tv_shows") ?: root.optJSONArray("tv")
+            if (movies != null) for (i in 0 until movies.length()) push(movies.optJSONObject(i))
+            if (shows != null) for (i in 0 until shows.length()) push(shows.optJSONObject(i))
+        }
+        out
+    } catch (e: Exception) {
+        emptyList()
+    }
+}
+
+/** One inline player server from the detail page. */
+internal data class V2Server(val name: String, val url: String)
+
+/** Parse watchConfig.initialServers JSON from detail HTML. Pure. */
+internal fun parseV2WatchConfig(html: String): List<V2Server> {
+    if (html.isBlank()) return emptyList()
+    return try {
+        val m = Regex("""watchConfig\s*=\s*(\{.*?\})\s*;""", RegexOption.DOT_MATCHES_ALL).find(html)
+            ?: return emptyList()
+        val servers = JSONObject(m.groupValues[1]).optJSONArray("initialServers") ?: return emptyList()
+        (0 until servers.length()).mapNotNull { i ->
+            val o = servers.optJSONObject(i) ?: return@mapNotNull null
+            val url = o.optString("url").replace("\\/", "/").trim()
+            if (!url.startsWith("http")) return@mapNotNull null
+            val name = o.optString("name").trim().ifEmpty { "Server" }
+            V2Server(name, url)
+        }
+    } catch (e: Exception) {
+        emptyList()
+    }
+}
+
+/** TMDB numeric id carried inside a server URL. Pure. */
+internal fun extractTmdbIdFromServerUrl(url: String): String? {
+    val u = url.trim()
+    Regex("""[?&]id=(\d{2,10})""").find(u)?.groupValues?.get(1)?.let { return it }
+    Regex("""/(?:movie|tv)/(\d{2,10})""").find(u)?.groupValues?.get(1)?.let { return it }
+    Regex("""/embed/(?:movie|tv)/(\d{2,10})""").find(u)?.groupValues?.get(1)?.let { return it }
+    return null
+}
+
+/** IMDB id carried inside a server URL. Pure. */
+internal fun extractImdbIdFromServerUrl(url: String): String? =
+    Regex("""tt\d{7,8}""").find(url)?.value
+
+/** Fill the literal {tmdbId} placeholder some server rows ship with. Pure. */
+internal fun fixServerPlaceholder(url: String, tmdbId: String?): String {
+    if (tmdbId.isNullOrBlank() || !url.contains("{tmdbId}")) return url
+    return url.replace("{tmdbId}", tmdbId)
 }
 
 /** a CloudStream provider that scrapes the site. */
@@ -241,27 +337,27 @@ class MultimoviesProvider : MainAPI() {
     override val mainPage
         get() = mainPageOf(
         // Bollywood (5).
-        Pair("$mainUrl/genre/bollywood-movies/", "Bollywood Movies"),
-        Pair("$mainUrl/genre/netflix/", "Netflix"),
-        Pair("$mainUrl/genre/amazon-prime/", "Amazon Prime"),
-        Pair("$mainUrl/genre/disney-hotstar/", "Disney+ Hotstar"),
-        Pair("$mainUrl/genre/zee-5/", "Zee5"),
+        Pair("$mainUrl/genre/bollywood-movies", "Bollywood Movies"),
+        Pair("$mainUrl/genre/netflix", "Netflix"),
+        Pair("$mainUrl/genre/amazon-prime", "Amazon Prime"),
+        Pair("$mainUrl/genre/disney-hotstar", "Disney+ Hotstar"),
+        Pair("$mainUrl/genre/zee-5", "Zee5"),
         // Global Movies (5).
-        Pair("$mainUrl/genre/hollywood/", "Hollywood"),
-        Pair("$mainUrl/genre/action/", "Action"),
-        Pair("$mainUrl/genre/comedy/", "Comedy"),
-        Pair("$mainUrl/genre/horror/", "Horror"),
-        Pair("$mainUrl/genre/science-fiction/", "Sci-Fi"),
+        Pair("$mainUrl/genre/hollywood", "Hollywood"),
+        Pair("$mainUrl/genre/action", "Action"),
+        Pair("$mainUrl/genre/comedy", "Comedy"),
+        Pair("$mainUrl/genre/horror", "Horror"),
+        Pair("$mainUrl/genre/science-fiction", "Sci-Fi"),
         // Series (5).
-        Pair("$mainUrl/tvshows/", "Web Series"),
-        Pair("$mainUrl/genre/k-drama/", "K-Drama"),
-        Pair("$mainUrl/genre/crime/", "Crime Series"),
-        Pair("$mainUrl/genre/thriller/", "Thriller Series"),
-        Pair("$mainUrl/genre/south-indian/", "South Indian"),
+        Pair("$mainUrl/series", "Web Series"),
+        Pair("$mainUrl/genre/k-drama", "K-Drama"),
+        Pair("$mainUrl/genre/crime", "Crime Series"),
+        Pair("$mainUrl/genre/thriller", "Thriller Series"),
+        Pair("$mainUrl/genre/south-indian", "South Indian"),
         // Anime (3).
-        Pair("$mainUrl/genre/anime-hindi/", "Hindi Dub Anime"),
-        Pair("$mainUrl/genre/anime-series/", "Anime Series"),
-        Pair("$mainUrl/genre/anime-movies/", "Anime Movies"),
+        Pair("$mainUrl/genre/anime-hindi", "Hindi Dub Anime"),
+        Pair("$mainUrl/genre/anime-series", "Anime Series"),
+        Pair("$mainUrl/genre/anime-movies", "Anime Movies"),
     )
 
     // Source priority / timeout configuration. Per-source timeout in milliseconds.
@@ -313,10 +409,17 @@ class MultimoviesProvider : MainAPI() {
 
     /** * URL, so old-domain URLs (session. */
     private fun liveUrl(url: String): String {
+        if (url.startsWith("/")) return mainUrl.trimEnd('/') + url
         val m = URL_HOST_REGEX.find(url) ?: return url
         if (!m.groupValues[1].substringAfter("://").startsWith("multimovies.", ignoreCase = true)) return url
         val liveHost = URL_HOST_REGEX.find(mainUrl)?.value ?: return url
         return liveHost + url.substring(m.range.last + 1)
+    }
+
+    /** True for a 2.0 detail, watch or episode page. */
+    private fun isV2DetailUrl(url: String?): Boolean {
+        if (url.isNullOrBlank() || !isMultimoviesUrl(url)) return false
+        return url.contains("/movie/") || url.contains("/series/") || url.contains("/watch/")
     }
 
     /** Run block against the current mainUrl. */
@@ -403,12 +506,12 @@ class MultimoviesProvider : MainAPI() {
         return doc
     }
 
-    // Search (site JSON API first; TMDB fallback only when the site has no relevant hit).
+    // Search (site search page + API first; TMDB fallback only when the site has no relevant hit).
 
     override suspend fun search(query: String): List<SearchResponse>? = withDomainRetry(retryIf = { it == null }) {
         SearchCache.get(query)?.let { return@withDomainRetry it }
 
-        // Primary: the site's own live-search JSON API - results link straight to
+        // Primary: the site's own search - results link straight to
         // site pages and carry the site's own poster, year and rating inline.
         val site = withTimeoutOrNull(SITE_SEARCH_BUDGET_MS) { siteSearchDooplay(query) }.orEmpty()
         if (site.isNotEmpty()) {
@@ -497,17 +600,39 @@ class MultimoviesProvider : MainAPI() {
         } else dooplayNonce
     }
 
-    /** Site live-search via the theme JSON API: results + posters come from the site itself. */
+    /** Site search on the 2.0 theme: HTML page first, JSON API merged in. */
     private suspend fun siteSearchDooplay(query: String): List<SearchResponse> {
         if (query.isBlank()) return emptyList()
-        var nonce = dooplayNonce() ?: return emptyList()
-        var text = dooplaySearchJson(query, nonce)
-        if (text != null && text.contains("no_verify_nonce")) {
-            nonce = dooplayNonce(forceRefresh = true) ?: return emptyList()
-            text = dooplaySearchJson(query, nonce)
-        }
-        if (text == null || text.contains("no_verify_nonce") || text.contains("no_posts")) return emptyList()
-        val ranked = parseDooplaySearchHits(text).mapNotNull { hit ->
+        val q = URLEncoder.encode(query.trim(), "UTF-8")
+        val pageDoc = fetchDoc("$mainUrl/search?q=$q", timeoutSeconds = 8, required = false)
+        val pageHits = pageDoc?.select("article.poster-card")?.mapNotNull { el ->
+            val a = el.selectFirst("a.poster-art[href], div.poster-caption a[href]") ?: return@mapNotNull null
+            val href = liveUrl(a.attr("href").trim())
+            if (!isMultimoviesUrl(href)) return@mapNotNull null
+            val title = el.selectFirst("div.poster-caption a")?.text()?.trim()
+                ?: el.selectFirst("img[alt]")?.attr("alt")?.trim()
+                ?: return@mapNotNull null
+            if (title.isBlank()) return@mapNotNull null
+            val poster = sanitizeV2Poster(
+                el.selectFirst("a.poster-art img")?.attr("src")
+                    ?: el.selectFirst("img")?.attr("src")
+            )
+            val meta = el.selectFirst("p.poster-meta")?.text().orEmpty()
+            val year = Regex("""\d{4}""").find(meta)?.value
+            val rating = el.selectFirst("span.poster-rating")?.text()
+                ?.replace(Regex("[^\\d.]"), "")?.toDoubleOrNull()?.takeIf { it > 0 }
+            val type = if (href.contains("/series/") || meta.contains("Series", true)) "series" else "movie"
+            V2Hit(title, href, poster, year, rating, type)
+        }.orEmpty()
+        val apiText = runCatching {
+            app.get("$mainUrl/api/search?q=$q&limit=12", timeout = 6, headers = commonHeaders).text
+        }.getOrNull()
+        val apiHits = parseV2SearchApi(apiText).map {
+            it.copy(url = liveUrl(it.url))
+        }.filter { isMultimoviesUrl(it.url) }
+        val merged = (pageHits + apiHits).distinctBy { liveUrl(it.url).trimEnd('/') }.take(SEARCH_MAX_RESULTS * 2)
+        if (merged.isEmpty()) return emptyList()
+        val ranked = merged.mapNotNull { hit ->
             val rel = relevanceOf(query, hit.title, hit.year)
             if (!rel.allTokensMatched || rel.score < SEARCH_RELEVANCE_THRESHOLD) null
             else rel.score to hit
@@ -538,6 +663,28 @@ class MultimoviesProvider : MainAPI() {
         val poster = upgradePosterUrl(poster)
         val releaseYear = year?.take(4)?.toIntOrNull()
         val tvType = if (pageUrl.contains("/movies/")) TvType.Movie else TvType.TvSeries
+        return if (tvType == TvType.Movie) {
+            newMovieSearchResponse(title, pageUrl, tvType) {
+                this.posterUrl = poster
+                this.year = releaseYear
+                rating?.let { this.score = Score.from10(it) }
+            }
+        } else {
+            newTvSeriesSearchResponse(title, pageUrl, tvType) {
+                this.posterUrl = poster
+                this.year = releaseYear
+                rating?.let { this.score = Score.from10(it) }
+            }
+        }
+    }
+
+    /** Build a result from a 2.0 hit. */
+    private fun V2Hit.toSearchResponse(): SearchResponse? {
+        if (title.isBlank() || url.isBlank()) return null
+        val pageUrl = liveUrl(url)
+        if (!isMultimoviesUrl(pageUrl)) return null
+        val releaseYear = year?.take(4)?.toIntOrNull()
+        val tvType = if (type == "series" || pageUrl.contains("/series/")) TvType.TvSeries else TvType.Movie
         return if (tvType == TvType.Movie) {
             newMovieSearchResponse(title, pageUrl, tvType) {
                 this.posterUrl = poster
@@ -603,63 +750,52 @@ class MultimoviesProvider : MainAPI() {
         }
         if (title.isBlank()) return null
 
-        // Slug-guess first (/{movies|tvshows}/{slug}-{year}/), validated by title.
-        val base = if (type == "movie") "$mainUrl/movies/" else "$mainUrl/tvshows/"
-        // Emit slugs for every common spelling of the title ("&" vs "and", apostrophes dropped, punctuation stripped) so a.
-        val slugVariants = titleVariants(title)
-            .map { t -> t.lowercase().trim().replace(Regex("[^a-z0-9]+"), "-").trim('-') }
-            .distinct()
-        val variants = buildList {
-            for (slug in slugVariants) {
-                year?.take(4)?.let { y -> add("${slug}-$y") }
-                add(slug)
-            }
+        // 2.0: site search by title, pick the closest title match.
+        val searchTerms = titleVariants(title).take(3)
+        for (term in searchTerms) {
+            val q = URLEncoder.encode(term, "UTF-8")
+            val searchDoc = fetchDoc("$mainUrl/search?q=$q", timeoutSeconds = 8, required = false)
+                ?: continue
+            val candidate = searchDoc.select("article.poster-card").mapNotNull { it.candidateHref() }
+                .minByOrNull { titleDistance(it.second, title) }
+                ?.takeIf { titleDistance(it.second, title) <= 1 }
+                ?: continue
+            val detailUrl = liveUrl(candidate.first)
+            val detailDoc = mmDocCache[detailUrl]
+                ?: fetchDoc(detailUrl, timeoutSeconds = 8, required = false)
+                ?: continue
+            imdbUrlCache[key] = detailUrl
+            mmDocCache[detailUrl] = detailDoc
+            return detailDoc
         }
-        for (variant in variants) {
-            if (variant.isBlank()) continue
-            val guessUrl = "$base$variant/"
-            val guessed = fetchDoc(guessUrl, timeoutSeconds = 6, required = false) ?: continue
-            if (isChallenge(guessed)) continue
-            val guessedTitle = guessed.selectFirst(TITLE_SELECTOR)?.let {
+        // Legacy slug-guess kept for old cached URLs.
+        val legacyBase = if (type == "movie") "$mainUrl/movies/" else "$mainUrl/tvshows/"
+        val slug = title.lowercase().trim().replace(Regex("[^a-z0-9]+"), "-").trim('-')
+        if (slug.isNotBlank()) {
+            val guessUrl = "$legacyBase$slug/"
+            val guessed = fetchDoc(guessUrl, timeoutSeconds = 5, required = false)
+            val guessedTitle = guessed?.selectFirst(TITLE_SELECTOR)?.let {
                 if (it.tagName() == "meta") it.attr("content") else it.text()
             }?.trim()?.let(::stripSiteAffix)
-            if (guessedTitle != null && titleDistance(guessedTitle, title) <= 1) {
+            if (guessedTitle != null && titleDistance(guessedTitle, title) <= 1 && guessed != null) {
                 imdbUrlCache[key] = guessUrl
                 mmDocCache[guessUrl] = guessed
                 return guessed
             }
         }
-
-        // Fallback: site search by title, pick the closest title match.
-        val searchTerms = titleVariants(title)
-        var searchDoc: Document? = null
-        for (term in searchTerms) {
-            searchDoc = fetchDoc(
-                "$mainUrl/?s=${URLEncoder.encode(term, "UTF-8")}",
-                timeoutSeconds = 8,
-                required = false,
-            )
-            if (searchDoc != null && searchDoc.select(SEARCH_ITEMS_SELECTOR).isNotEmpty()) break
-        }
-        val candidate = searchDoc?.select(SEARCH_ITEMS_SELECTOR)?.mapNotNull { it.candidateHref() }
-            ?.minByOrNull { titleDistance(it.second, title) }
-            // Same bar as the slug-guess path: a non-match must stay "not found", never a wrong title.
-            ?.takeIf { titleDistance(it.second, title) <= 1 } ?: return null
-        val detailDoc = mmDocCache[candidate.first]
-            ?: fetchDoc(candidate.first, timeoutSeconds = 8, required = false)
-        if (detailDoc != null) {
-            imdbUrlCache[key] = candidate.first
-            mmDocCache[candidate.first] = detailDoc
-        }
-        return detailDoc
+        return null
     }
 
     /** Extract (href, item title). */
     private fun Element.candidateHref(): Pair<String, String>? {
-        val a = selectFirst("a[href], div.data a h2, div.poster a") ?: return null
-        val href = a.attr("href").takeIf { isMultimoviesUrl(it) } ?: return null
-        val itemTitle = selectFirst("img")?.attr("alt")
-            ?: a.selectFirst("h2, div.data h3 a, .title")?.text()
+        val a = selectFirst("a.poster-art[href], div.poster-caption a[href], a[href], div.data a h2, div.poster a")
+            ?: return null
+        val rawHref = a.attr("href").trim().takeIf { it.isNotBlank() } ?: return null
+        val href = liveUrl(rawHref)
+        if (!isMultimoviesUrl(href)) return null
+        val itemTitle = selectFirst("div.poster-caption a")?.text()?.trim()
+            ?: selectFirst("img")?.attr("alt")?.trim()
+            ?: a.selectFirst("h2, div.data h3 a, .title")?.text()?.trim()
             ?: a.text()?.trim()
         return if (itemTitle.isNullOrBlank()) null else href to itemTitle
     }
@@ -700,30 +836,46 @@ class MultimoviesProvider : MainAPI() {
     )
 
     private fun Element.toSearchResponse(): SearchResponse? {
-        val a = selectFirst("a[href], div.data a h2, div.poster a") ?: return null
-        val href = a.attr("href").takeIf { isMultimoviesUrl(it) } ?: return null
-        val title = selectFirst("img")?.attr("alt")
-            ?: a.selectFirst("h2, div.data h3 a, .title")?.text()
-            ?: a.text()
-            ?.trim()
+        val a = selectFirst("a.poster-art[href], div.poster-caption a[href], a[href], div.data a h2, div.poster a")
             ?: return null
-        val poster = upgradePosterUrl(posterUrl())
-        val isMovie = href.contains("/movies/")
-        val isSeries = href.contains("/tvshows/") || href.contains("/seasons/")
+        val rawHref = a.attr("href").trim().takeIf { it.isNotBlank() } ?: return null
+        val href = liveUrl(rawHref)
+        if (!isMultimoviesUrl(href)) return null
+        val title = selectFirst("div.poster-caption a")?.text()?.trim()
+            ?: selectFirst("img")?.attr("alt")?.trim()
+            ?: a.selectFirst("h2, div.data h3 a, .title")?.text()?.trim()
+            ?: a.text()?.trim()
+            ?: return null
+        if (title.isBlank()) return null
+        val poster = sanitizeV2Poster(
+            selectFirst("a.poster-art img")?.attr("src") ?: posterUrl()
+        )
+        val meta = selectFirst("p.poster-meta")?.text().orEmpty()
+        val isMovie = href.contains("/movie/") || href.contains("/movies/") || meta.contains("Movie", true)
+        val isSeries = href.contains("/series/") || href.contains("/tvshows/") || href.contains("/seasons/")
+            || meta.contains("Series", true)
         val tvType = when {
+            isMovie && !isSeries -> TvType.Movie
             isSeries -> TvType.TvSeries
-            isMovie -> TvType.Movie
+            href.contains("/movie/") -> TvType.Movie
             else -> TvType.TvSeries
         }
+        val year = Regex("""\d{4}""").find(meta)?.value?.toIntOrNull()
         return if (tvType == TvType.TvSeries) {
             newTvSeriesSearchResponse(title, href, tvType) {
                 this.posterUrl = poster
+                this.year = year
                 parseRating(this@toSearchResponse)?.let { Score.from10(it.toString()) }?.let { this.score = it }
+                    ?: selectFirst("span.poster-rating")?.text()?.replace(Regex("[^\\d.]"), "")
+                        ?.toDoubleOrNull()?.takeIf { it > 0 }?.let { Score.from10(it) }?.let { this.score = it }
             }
         } else {
             newMovieSearchResponse(title, href, tvType) {
                 this.posterUrl = poster
+                this.year = year
                 parseRating(this@toSearchResponse)?.let { Score.from10(it.toString()) }?.let { this.score = it }
+                    ?: selectFirst("span.poster-rating")?.text()?.replace(Regex("[^\\d.]"), "")
+                        ?.toDoubleOrNull()?.takeIf { it > 0 }?.let { Score.from10(it) }?.let { this.score = it }
             }
         }
     }
@@ -734,11 +886,29 @@ class MultimoviesProvider : MainAPI() {
         page: Int,
         request: MainPageRequest
     ): HomePageResponse? = withDomainRetry(retryIf = { it == null }) {
-        val url = if (page > 1) "${request.data}page/$page/" else request.data
-        val doc = fetchDoc(url, timeoutSeconds = 12, required = false) ?: return@withDomainRetry null
-        val items = doc.select("article.item, div#archive-content div.item, div.items div.item").mapNotNull {
-            it.toSearchResponse()
+        val base = request.data.trimEnd('/')
+        val url = when {
+            page <= 1 -> base
+            base.contains("?") -> "$base&page=$page"
+            else -> "$base?page=$page"
         }
+        val doc = fetchDoc(url, timeoutSeconds = 12, required = false) ?: return@withDomainRetry null
+        val items = doc.select("article.poster-card, article.cinema-slide a.button-glass, div.catalog-grid article, a.cinejoy-rec-card").mapNotNull { el ->
+            if (el.tagName() == "a" && el.hasClass("button-glass")) {
+                val href = liveUrl(el.attr("href").trim())
+                if (!isMultimoviesUrl(href)) return@mapNotNull null
+                val slide = el.closest("article.cinema-slide")
+                val title = slide?.selectFirst("h1")?.text()?.trim() ?: return@mapNotNull null
+                if (title.isBlank()) return@mapNotNull null
+                val poster = sanitizeV2Poster(slide.selectFirst("img.cinema-backdrop")?.attr("src"))
+                val tvType = if (href.contains("/series/")) TvType.TvSeries else TvType.Movie
+                if (tvType == TvType.Movie) newMovieSearchResponse(title, href, tvType) { this.posterUrl = poster }
+                else newTvSeriesSearchResponse(title, href, tvType) { this.posterUrl = poster }
+            } else {
+                el.toSearchResponse()
+            }
+        }.distinctBy { it.url.trimEnd('/') }
+        if (items.isEmpty()) return@withDomainRetry null
         backfillPosters(items)
         newHomePageResponse(request.name, items)
     }
@@ -779,17 +949,30 @@ class MultimoviesProvider : MainAPI() {
                 ?: (if (tmdb != null) imdbUrlCache["${tmdb.first}|${tmdb.second}"] else null)
                 ?: url
 
-            val isMovie = tmdb?.second == "movie" || realUrl.contains("/movies/")
+            val isMovie = tmdb?.second == "movie" || realUrl.contains("/movie/")
+                || realUrl.contains("/watch/movie")
+                || (!realUrl.contains("/series/") && !realUrl.contains("/watch/tv") && realUrl.contains("/movies/"))
             val pageType = if (isMovie) "movie" else "series"
 
-            // Fire-and-forget: pre-resolve the top-priority player servers while the user reads the detail page, so tapping Play.
-            if (isMovie) prefetchEmbeds(realUrl, doc)
+            // Inline servers ship in the page; cache them so loadLinks skips refetch.
+            val v2Servers = parseV2Servers(doc)
+            if (v2Servers.isNotEmpty()) {
+                val embeds = v2Servers.map { s ->
+                    ResolvedEmbed(s.name, s.url, embedUrl = s.url, key = s.name + "|" + s.url)
+                }
+                EmbedPrefetchCache.put(realUrl, embeds)
+            }
+            // Fire-and-forget: warm global id sources while the user reads the detail page.
+            val earlyMeta = earlyV2Meta(doc, v2Servers, realUrl)
+            if (isMovie) prefetchGlobals(earlyMeta ?: SourceMeta("", null, null, null), realUrl)
 
-            // Direct MM page (main-page card): ids come, then metadata is fetched; the dooplayer embed URL is a last resort.
+            // Direct MM page (main-page card): ids come, then metadata is fetched; server URLs are a last resort.
             var resolvedDetail = detail
             if (tmdb == null && resolvedDetail == null) {
-                val imdbFromPage = TmdbService.extractImdbId(doc)
-                val tmdbFromPage = TmdbService.extractTmdbId(doc)?.toIntOrNull()
+                val serverTmdb = v2Servers.firstNotNullOfOrNull { extractTmdbIdFromServerUrl(it.url) }?.toIntOrNull()
+                val serverImdb = v2Servers.firstNotNullOfOrNull { extractImdbIdFromServerUrl(it.url) }
+                val imdbFromPage = TmdbService.extractImdbId(doc) ?: serverImdb
+                val tmdbFromPage = TmdbService.extractTmdbId(doc)?.toIntOrNull() ?: serverTmdb
                 resolvedDetail = withTimeoutOrNull(4000L) {
                     tmdbFromPage?.let { TmdbService.fetchMeta(it, pageType) }
                         ?: imdbFromPage?.let { imdb ->
@@ -810,9 +993,13 @@ class MultimoviesProvider : MainAPI() {
                 }
             }
 
-            val tmdbId = resolvedDetail?.tmdbId ?: tmdb?.first
-            val imdbId = resolvedDetail?.imdbId
-                ?: if (tmdb == null) TmdbService.extractImdbId(doc) else null
+            val finalTmdbId = resolvedDetail?.tmdbId ?: tmdb?.first
+                ?: v2Servers.firstNotNullOfOrNull { extractTmdbIdFromServerUrl(it.url) }?.toIntOrNull()
+            val finalImdbId = resolvedDetail?.imdbId
+                ?: (if (tmdb == null) TmdbService.extractImdbId(doc) else null)
+                ?: v2Servers.firstNotNullOfOrNull { extractImdbIdFromServerUrl(it.url) }
+            val tmdbId = finalTmdbId
+            val imdbId = finalImdbId
 
             // Cinemeta rosters are short: extend the IMDB cast with TMDB-exclusive rows (bounded, silent on failure).
             if (tmdbId == null && imdbId != null && !resolvedDetail?.cast.isNullOrEmpty()) {
@@ -824,27 +1011,41 @@ class MultimoviesProvider : MainAPI() {
                 }
             }
 
-            // Page-scraped fallbacks (only when TMDB gave nothing). Visible
-            // headings first: the meta title carries a site-name affix.
+            // Page-scraped fallbacks (only when TMDB gave nothing).
             val pageTitle = doc.selectFirst(TITLE_SELECTOR)?.let {
                 if (it.tagName() == "meta") it.attr("content") else it.text()
-            }?.trim()?.let(::stripSiteAffix)
+            }?.trim()?.let { stripSiteAffix(it.replace(Regex("""\s*-\s*MultiMovies.*$""", RegexOption.IGNORE_CASE), "")) }
             val title = resolvedDetail?.name ?: pageTitle
                 ?: throw ErrorLoadingException("No title found on $realUrl")
-            val poster = resolvedDetail?.poster ?: upgradePosterUrl(
+            val poster = resolvedDetail?.poster ?: sanitizeV2Poster(
                 doc.selectFirst("meta[property=og:image]")?.attr("content")
+                    ?: doc.selectFirst("div.watch-bg img")?.attr("src")
                     ?: doc.selectFirst("div.poster img, img.wp-post-image")?.attr("src")
             )
+            val backdrop = resolvedDetail?.backdrop ?: doc.selectFirst("meta[property=og:image]")?.attr("content")
+                ?: doc.selectFirst("img.cinema-backdrop")?.attr("src")
             val year = resolvedDetail?.year?.toIntOrNull()
+                ?: doc.selectFirst(".cinejoy-meta-pill")?.parent()?.text()
+                    ?.let { Regex("""\d{4}""").find(it)?.value?.toIntOrNull() }
                 ?: doc.selectFirst("span.date, .year, .extra span")?.text()
                     ?.let { Regex("\\d{4}").find(it)?.value?.toIntOrNull() }
-            val plot = resolvedDetail?.overview ?: doc.selectFirst("div.wp-content, div.description, .wp-content p")?.text()
-                ?.replace("Overview:", "")?.trim()
-            val tags = resolvedDetail?.genres
-                ?: doc.select("div.sgeneros a, .genre a").mapNotNull { it.text() }
+            val plot = resolvedDetail?.overview
+                ?: doc.selectFirst("p.cinejoy-detail-overview")?.text()?.trim()
+                ?: doc.selectFirst("div.wp-content, div.description, .wp-content p")?.text()
+                    ?.replace("Overview:", "")?.trim()
+            val tags = resolvedDetail?.genres?.takeIf { it.isNotEmpty() }
+                ?: doc.selectFirst("div.cinejoy-detail-genres")?.text()
+                    ?.split("•", ",", "|")?.map { it.trim() }?.filter { it.isNotBlank() }
+                ?: doc.select("div.sgeneros a, .genre a").map { it.text().trim() }.filter { it.isNotBlank() }
+            val pageCast = parseV2Cast(doc)
+            val cast = resolvedDetail?.cast?.takeIf { it.isNotEmpty() } ?: pageCast
+            if (resolvedDetail != null && pageCast != null) {
+                resolvedDetail = resolvedDetail?.copy(cast = cast)
+            }
             val score = resolvedDetail?.rating
-            val pageScore = doc.selectFirst("span.dt_rating_vgs, .imdb, .rating span")?.text()
-                ?.removePrefix("IMDb:")?.trim()?.toDoubleOrNull()
+            val pageScore = doc.selectFirst(".cinejoy-score-pill")?.text()?.replace(Regex("[^\\d.]"), "")?.toDoubleOrNull()
+                ?: doc.selectFirst("span.dt_rating_vgs, .imdb, .rating span")?.text()
+                    ?.removePrefix("IMDb:")?.trim()?.toDoubleOrNull()
 
             // Stash ids for loadLinks() (movie page + every TV episode page).
             if (imdbId != null || tmdbId != null) {
@@ -859,62 +1060,106 @@ class MultimoviesProvider : MainAPI() {
             if (isMovie) {
                 newMovieLoadResponse(title, realUrl, TvType.Movie, realUrl) {
                     this.posterUrl = poster
-                    this.backgroundPosterUrl = resolvedDetail?.backdrop
+                    this.backgroundPosterUrl = backdrop
                     this.year = year
                     this.plot = plot
                     this.tags = tags
-                    this.actors = resolvedDetail?.cast
+                    this.actors = cast
                     // Watch time in seconds; only TMDB reports runtime, IMDB-mapped details leave it empty.
                     this.duration = resolvedDetail?.runtime?.let { it * 60 }
+                        ?: parseRuntimeToMinutes(doc)?.let { it * 60 }
                     imdbId?.let { addImdbId(it) }
                     (score ?: pageScore)?.let { addScore(it.toString(), 10) }
                 }
             } else {
-                // TV / Seasons: episode LINKS come); titles/descriptions/thumbnails/ratings come.
+                // 2.0 episodes ship in the same page.
                 val episodes = arrayListOf<Episode>()
-                val seasonLinks = doc.select("a[href*='/seasons/']")
-                    .mapNotNull { it.attr("href").takeIf { h -> isMultimoviesUrl(h) } }
-                    .distinct()
-                val pages = if (seasonLinks.isEmpty()) listOf(realUrl) else seasonLinks
-
-                val seasonDocs = coroutineScope {
-                    val sem = Semaphore(4)
-                    pages.map { seasonUrl ->
-                        async {
-                            sem.acquire()
-                            try {
-                                fetchDoc(seasonUrl, timeoutSeconds = 10, required = false)
-                            } finally {
-                                sem.release()
-                            }
-                        }
-                    }.awaitAll()
-                }
-
                 val seasonNums = mutableSetOf<Int>()
-                seasonDocs.forEachIndexed { pageIdx, sDoc ->
-                    if (sDoc == null) return@forEachIndexed
-                    // Season pages arrive in DOM order; the page index beats a forced guess.
-                    val pageSeason = pageIdx + 1
-                    sDoc.select("ul.episodios li, div.eps div.ep, .episodios li").forEachIndexed { i, ep ->
-                        val epLink = ep.selectFirst("a[href]")?.attr("href")?.takeIf { isMultimoviesUrl(it) }
-                            ?: return@forEachIndexed
-                        val nxm = Regex("(?i)(\\d+)x(\\d+)").find(epLink)
-                        // Bare digit runs are years/post-ids as often as episodes; implausible ones fall back to list position.
-                        val epNum = nxm?.groupValues?.getOrNull(2)?.toIntOrNull()
-                            ?: Regex("(\\d+)").find(epLink)?.value?.toIntOrNull()?.takeIf { it in 1..150 }
+                val epCards = doc.select("div.cinejoy-ep-card")
+                if (epCards.isNotEmpty()) {
+                    epCards.forEachIndexed { i, card ->
+                        val link = card.selectFirst("a.cinejoy-ep-thumb-link[href], a.cinejoy-ep-name[href]")
+                            ?.attr("href")?.trim()?.takeIf { it.isNotBlank() } ?: return@forEachIndexed
+                        val epUrl = liveUrl(link)
+                        if (!isMultimoviesUrl(epUrl)) return@forEachIndexed
+                        val seasonNum = Regex("""/season/(\d+)""").find(epUrl)?.groupValues?.get(1)?.toIntOrNull() ?: 1
+                        val epNum = Regex("""/episode/(\d+)""").find(epUrl)?.groupValues?.get(1)?.toIntOrNull()
+                            ?: card.selectFirst("span.cinejoy-ep-badge-num")?.text()
+                                ?.let { Regex("""\d+""").find(it)?.value?.toIntOrNull() }
                             ?: (i + 1)
-                        val seasonNum = nxm?.groupValues?.getOrNull(1)?.toIntOrNull() ?: pageSeason
-                        val epTitle = ep.selectFirst(".episodiotitle a, .title, a")?.text()?.trim()
-                        val ep = newEpisode(epLink) {
+                        val epTitle = card.selectFirst("a.cinejoy-ep-name")?.text()?.trim()
+                            ?.takeIf { it.isNotBlank() }
+                        val epDesc = card.selectFirst("p.cinejoy-ep-desc")?.text()?.trim()
+                        val epThumb = card.selectFirst("img.cinejoy-ep-img")?.attr("src")
+                            ?.takeIf { it.isNotBlank() && !it.contains("default-col") }
+                        val ep = newEpisode(epUrl) {
                             this.name = epTitle
                             this.episode = epNum
                             this.season = seasonNum
+                            this.description = epDesc
+                            this.posterUrl = epThumb
                         }
                         episodes.add(ep)
                         seasonNums.add(seasonNum)
                         if (imdbId != null || tmdbId != null) {
-                            SourceMetaCache.put(epLink, SourceMeta(imdbId ?: "", tmdbId?.toString(), seasonNum, epNum))
+                            SourceMetaCache.put(epUrl, SourceMeta(imdbId ?: "", tmdbId?.toString(), seasonNum, epNum))
+                        }
+                        // Episode watch pages carry per-episode servers; warm them.
+                        searchScope.launch {
+                            runCatching {
+                                val epDoc = cachedDocOrFetch(epUrl)
+                                if (epDoc != null) {
+                                    val servers = parseV2Servers(epDoc)
+                                    if (servers.isNotEmpty()) {
+                                        EmbedPrefetchCache.put(epUrl, servers.map { s ->
+                                            ResolvedEmbed(s.name, s.url, embedUrl = s.url, key = s.name + "|" + s.url)
+                                        })
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // Legacy season pages kept as fallback.
+                    val seasonLinks = doc.select("a[href*='/seasons/']")
+                        .mapNotNull { it.attr("href").takeIf { h -> isMultimoviesUrl(h) } }
+                        .distinct()
+                    val pages = if (seasonLinks.isEmpty()) listOf(realUrl) else seasonLinks
+                    val seasonDocs = coroutineScope {
+                        val sem = Semaphore(4)
+                        pages.map { seasonUrl ->
+                            async {
+                                sem.acquire()
+                                try {
+                                    fetchDoc(seasonUrl, timeoutSeconds = 10, required = false)
+                                } finally {
+                                    sem.release()
+                                }
+                            }
+                        }.awaitAll()
+                    }
+                    seasonDocs.forEachIndexed { pageIdx, sDoc ->
+                        if (sDoc == null) return@forEachIndexed
+                        val pageSeason = pageIdx + 1
+                        sDoc.select("ul.episodios li, div.eps div.ep, .episodios li").forEachIndexed { i, ep ->
+                            val epLink = ep.selectFirst("a[href]")?.attr("href")?.takeIf { isMultimoviesUrl(it) }
+                                ?: return@forEachIndexed
+                            val nxm = Regex("(?i)(\\d+)x(\\d+)").find(epLink)
+                            val epNum = nxm?.groupValues?.getOrNull(2)?.toIntOrNull()
+                                ?: Regex("(\\d+)").find(epLink)?.value?.toIntOrNull()?.takeIf { it in 1..150 }
+                                ?: (i + 1)
+                            val seasonNum = nxm?.groupValues?.getOrNull(1)?.toIntOrNull() ?: pageSeason
+                            val epTitle = ep.selectFirst(".episodiotitle a, .title, a")?.text()?.trim()
+                            val item = newEpisode(epLink) {
+                                this.name = epTitle
+                                this.episode = epNum
+                                this.season = seasonNum
+                            }
+                            episodes.add(item)
+                            seasonNums.add(seasonNum)
+                            if (imdbId != null || tmdbId != null) {
+                                SourceMetaCache.put(epLink, SourceMeta(imdbId ?: "", tmdbId?.toString(), seasonNum, epNum))
+                            }
                         }
                     }
                 }
@@ -949,17 +1194,81 @@ class MultimoviesProvider : MainAPI() {
 
                 newTvSeriesLoadResponse(title, realUrl, TvType.TvSeries, episodes) {
                     this.posterUrl = poster
-                    this.backgroundPosterUrl = resolvedDetail?.backdrop
+                    this.backgroundPosterUrl = backdrop
                     this.year = year
                     this.plot = plot
                     this.tags = tags
-                    this.actors = resolvedDetail?.cast
+                    this.actors = cast
                     this.duration = resolvedDetail?.runtime?.let { it * 60 }
+                        ?: parseRuntimeToMinutes(doc)?.let { it * 60 }
                     imdbId?.let { addImdbId(it) }
                     (score ?: pageScore)?.let { addScore(it.toString(), 10) }
                 }
             }
         }
+    }
+
+    /** Inline servers from watchConfig plus server chips. */
+    private fun parseV2Servers(doc: Document): List<V2Server> {
+        val fromConfig = parseV2WatchConfig(doc.html())
+        val chips = doc.select("button.server-chip[data-url]").mapNotNull { b ->
+            val raw = b.attr("data-url").trim().ifEmpty { return@mapNotNull null }
+            val url = raw.replace("&amp;", "&")
+            if (!url.startsWith("http")) return@mapNotNull null
+            val name = b.selectFirst(".server-name")?.text()?.trim()
+                ?: b.attr("data-id").trim().ifEmpty { "Server" }
+            V2Server(name, url)
+        }
+        val tmdb = (fromConfig + chips).firstNotNullOfOrNull { extractTmdbIdFromServerUrl(it.url) }
+        return (fromConfig + chips).distinctBy { it.url }.map { s ->
+            s.copy(url = fixServerPlaceholder(s.url, tmdb ?: extractTmdbIdFromServerUrl(s.url)))
+        }
+    }
+
+    /** Early ids from inline servers for prefetch. */
+    private fun earlyV2Meta(doc: Document, servers: List<V2Server>, pageUrl: String): SourceMeta? {
+        val tmdb = servers.firstNotNullOfOrNull { extractTmdbIdFromServerUrl(it.url) }
+        val imdb = servers.firstNotNullOfOrNull { extractImdbIdFromServerUrl(it.url) }
+            ?: TmdbService.extractImdbId(doc)
+        if (tmdb == null && imdb == null) return null
+        val season = Regex("""/season/(\d+)""").find(pageUrl)?.groupValues?.get(1)?.toIntOrNull()
+            ?: parseSeason(pageUrl)
+        val episode = Regex("""/episode/(\d+)""").find(pageUrl)?.groupValues?.get(1)?.toIntOrNull()
+            ?: parseEpisode(pageUrl)
+        return SourceMeta(imdb ?: "", tmdb, season, episode)
+    }
+
+    /** Cast rows from the 2.0 detail page. */
+    private fun parseV2Cast(doc: Document): List<com.lagradost.cloudstream3.ActorData>? {
+        val cards = doc.select("a.cinejoy-cast-card")
+        if (cards.isEmpty()) return null
+        return cards.mapNotNull { c ->
+            val name = c.selectFirst(".cinejoy-cast-name")?.text()?.trim()?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            val role = c.selectFirst(".cinejoy-cast-role")?.text()?.trim()
+            val img = c.selectFirst("img.cinejoy-cast-img")?.attr("src")?.takeIf { it.startsWith("http") }
+            com.lagradost.cloudstream3.ActorData(
+                com.lagradost.cloudstream3.Actor(name, img ?: ""),
+                roleString = role,
+            )
+        }.take(15).ifEmpty { null }
+    }
+
+    /** Minutes from "1h 39m", "54m", "PT1H39M". */
+    internal fun parseRuntimeToMinutes(doc: Document): Int? {
+        val texts = listOf(
+            doc.selectFirst(".cinejoy-spec-box")?.text().orEmpty(),
+            doc.selectFirst(".cinejoy-detail-meta")?.text().orEmpty(),
+            doc.selectFirst("script[type=application/ld+json]")?.html().orEmpty(),
+        ).joinToString(" ")
+        Regex("""PT(?:(\d+)H)?(?:(\d+)M)?""").find(texts)?.let { m ->
+            val h = m.groupValues[1].toIntOrNull() ?: 0
+            val min = m.groupValues[2].toIntOrNull() ?: 0
+            if (h > 0 || min > 0) return h * 60 + min
+        }
+        Regex("""(\d+)\s*h\s*(\d+)\s*m""", RegexOption.IGNORE_CASE).find(texts)?.let { m ->
+            return (m.groupValues[1].toIntOrNull() ?: 0) * 60 + (m.groupValues[2].toIntOrNull() ?: 0)
+        }
+        return null
     }
 
     /** Resolve the IMDB id) dooplayer embed URL. */
@@ -1010,7 +1319,7 @@ class MultimoviesProvider : MainAPI() {
             }
     }
 
-    /** Background movie-only prefetch: resolve EVERY dooplayer server through admin-ajax and unwrap it to its final. */
+    /** Background prefetch: inline 2.0 servers need no ajax, just cache them. */
     private fun prefetchEmbeds(pageUrl: String, doc: Document) {
         searchScope.launch {
             runCatching {
@@ -1044,8 +1353,19 @@ class MultimoviesProvider : MainAPI() {
         }
     }
 
-    /** Resolve EVERY player server for pageUrl to its final post-unwrap URL. */
+    /** Resolve EVERY player server for pageUrl. 2.0 servers are inline; legacy dooplay via ajax. */
     private suspend fun resolveAllEmbeds(pageUrl: String, doc: Document): List<ResolvedEmbed> {
+        val v2 = parseV2Servers(doc)
+        if (v2.isNotEmpty()) {
+            return v2.map { s ->
+                val resolved = ResolvedEmbed(
+                    s.name, s.url, embedUrl = s.url,
+                    unwrapped = false, key = s.name + "|" + s.url,
+                )
+                EmbedPrefetchCache.publish(pageUrl, resolved)
+                resolved
+            }
+        }
         val options = parsePlayerOptions(doc, pageUrl)
             .sortedBy { priorityOf(it.first) }
         if (options.isEmpty()) return emptyList()
@@ -1132,16 +1452,37 @@ class MultimoviesProvider : MainAPI() {
             val doc = cachedDocOrFetch(data)
             if (doc != null) {
                 val have = embeds.mapTo(HashSet()) { it.key }
-                val missing = parsePlayerOptions(doc, data)
-                    .distinctBy { dooplayOptionKey(it.second.first, it.second.second, it.second.third) }
-                    .filterNot { have.contains(dooplayOptionKey(it.second.first, it.second.second, it.second.third)) }
-                if (missing.isNotEmpty()) {
-                    embeds += coroutineScope {
-                        missing.map { (name, triple) ->
-                            async {
-                                runCatching { resolveEmbed(data, name, triple.first, triple.second, triple.third) }.getOrNull()
-                            }
-                        }.awaitAll().filterNotNull()
+                val v2 = parseV2Servers(doc)
+                    .map { s -> ResolvedEmbed(s.name, s.url, embedUrl = s.url, key = s.name + "|" + s.url) }
+                    .filterNot { have.contains(it.key) }
+                if (v2.isNotEmpty()) {
+                    embeds += v2
+                } else {
+                    val missing = parsePlayerOptions(doc, data)
+                        .distinctBy { dooplayOptionKey(it.second.first, it.second.second, it.second.third) }
+                        .filterNot { have.contains(dooplayOptionKey(it.second.first, it.second.second, it.second.third)) }
+                    if (missing.isNotEmpty()) {
+                        embeds += coroutineScope {
+                            missing.map { (name, triple) ->
+                                async {
+                                    runCatching { resolveEmbed(data, name, triple.first, triple.second, triple.third) }.getOrNull()
+                                }
+                            }.awaitAll().filterNotNull()
+                        }
+                    }
+                }
+                // Recover ids from inline server URLs when load() never resolved any.
+                if (meta == null) {
+                    val tmdb = v2.firstNotNullOfOrNull { extractTmdbIdFromServerUrl(it.url) }
+                    val imdb = v2.firstNotNullOfOrNull { extractImdbIdFromServerUrl(it.url) }
+                        ?: TmdbService.extractImdbId(doc)
+                    if (tmdb != null || imdb != null) {
+                        meta = SourceMeta(
+                            imdb ?: "", tmdb,
+                            Regex("""/season/(\d+)""").find(data)?.groupValues?.get(1)?.toIntOrNull() ?: parseSeason(data),
+                            Regex("""/episode/(\d+)""").find(data)?.groupValues?.get(1)?.toIntOrNull() ?: parseEpisode(data),
+                        )
+                        SourceMetaCache.put(data, meta)
                     }
                 }
             }
@@ -1155,7 +1496,14 @@ class MultimoviesProvider : MainAPI() {
             }
         }
 
-        // LIVE-FILL pipeline (): every source (global id-keyed + each dooplayer embed) is.
+        // LIVE-FILL pipeline (): every source (global id-keyed + each site embed) is.
+        // Fill literal placeholders from recovered ids before pulling.
+        val tmdbForFix = meta?.tmdbId
+        if (tmdbForFix != null) {
+            embeds = embeds.map { e ->
+                if (e.url.contains("{tmdbId}")) e.copy(url = fixServerPlaceholder(e.url, tmdbForFix)) else e
+            }
+        }
         val emitted = Collections.synchronizedSet(HashSet<String>())
         val emittedUrls = Collections.synchronizedSet(HashSet<String>())
         val found = Collections.synchronizedList(mutableListOf<ExtractorLink>())
@@ -1468,10 +1816,12 @@ class MultimoviesProvider : MainAPI() {
     }
 
     private fun parseSeason(url: String): Int? =
-        Regex("(?i)(\\d+)x\\d+").find(url)?.groupValues?.get(1)?.toIntOrNull()
+        Regex("""/season/(\d+)""", RegexOption.IGNORE_CASE).find(url)?.groupValues?.get(1)?.toIntOrNull()
+            ?: Regex("(?i)(\\d+)x\\d+").find(url)?.groupValues?.get(1)?.toIntOrNull()
 
     private fun parseEpisode(url: String): Int? =
-        Regex("(?i)\\d+x(\\d+)").find(url)?.groupValues?.get(1)?.toIntOrNull()
+        Regex("""/episode/(\d+)""", RegexOption.IGNORE_CASE).find(url)?.groupValues?.get(1)?.toIntOrNull()
+            ?: Regex("(?i)\\d+x(\\d+)").find(url)?.groupValues?.get(1)?.toIntOrNull()
 
     /** Build dooplayer-independent direct sources). */
     private fun buildGlobalSources(meta: SourceMeta?): List<MultiSourcePuller.Source> {
