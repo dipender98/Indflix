@@ -835,5 +835,333 @@ internal object GdMirrorProtocol {
         }
         return out.toString()
     }
+
+}
+
+/** True for a directly playable stream URL. */
+internal fun isMediaUrl(u: String): Boolean {
+    val l = u.lowercase()
+    return l.contains(".m3u8") || l.contains(".mp4") || l.contains(".mpd") ||
+        l.contains(".webm") || l.contains(".mkv")
+}
+
+/** Modiplay (Cineverse backend) extractor. Embed/proxy pages carry a static tokenized HLS relay. */
+object ModiplayExtractor {
+
+    private const val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
+
+    suspend fun extract(pageUrl: String): List<VidemSource> {
+        var current = pageUrl
+        repeat(2) {
+            val html = HttpKit.get(
+                current,
+                mapOf("User-Agent" to UA, "Referer" to pageUrl),
+                6_000L,
+            ) ?: return emptyList()
+            val streams = parseModiplayStreams(html, current)
+            if (streams.isNotEmpty()) {
+                return streams.map { VidemSource("Cineverse", it, "", true, mapOf("Referer" to current)) }
+            }
+            val frame = Regex(
+                """<iframe[^>]+src=["']([^"']*proxy\.php[^"']*)["']""",
+                RegexOption.IGNORE_CASE,
+            ).find(html)?.groupValues?.get(1) ?: return emptyList()
+            current = MultiSourcePuller.resolveRelative(current, frame)
+        }
+        return emptyList()
+    }
+}
+
+/** Stream URLs from a modiplay page: direct HLS first, relay second. Pure. */
+internal fun parseModiplayStreams(html: String, baseUrl: String): List<String> {
+    if (html.isBlank()) return emptyList()
+    val clean = html.replace("\\/", "/").replace("&amp;", "&")
+    val out = LinkedHashSet<String>()
+    Regex("""directSrc\s*[:=]\s*["']([^"']+)["']""").findAll(clean).forEach { m ->
+        out.add(MultiSourcePuller.resolveRelative(baseUrl, m.groupValues[1].trim()))
+    }
+    Regex("""["']src["']\s*:\s*["']([^"']*stream_proxy\.php[^"']*)["']""").findAll(clean).forEach { m ->
+        out.add(MultiSourcePuller.resolveRelative(baseUrl, m.groupValues[1].trim()))
+    }
+    Regex("""EMBED_URL\s*=\s*['"]([^'"]+)['"]""").findAll(clean).forEach { m ->
+        out.add(MultiSourcePuller.resolveRelative(baseUrl, m.groupValues[1].trim()))
+    }
+    return out.filter { it.startsWith("http") }.distinct()
+}
+
+/** VidSrc (vsembed) resolver. The embed shell exposes a JSON endpoint with the player URL. */
+object VsEmbedExtractor {
+
+    suspend fun resolve(pageUrl: String, type: String, season: Int?, episode: Int?): String? {
+        val id = Regex("""tt\d{6,10}""").find(pageUrl)?.value
+            ?: Regex("""(\d{2,10})""").findAll(pageUrl).map { it.groupValues[1] }.lastOrNull()
+            ?: return null
+        val base = Regex("""^https?://[^/]+""").find(pageUrl)?.value ?: return null
+        val kind = if (type == "tv") "tv" else "movie"
+        val candidates = listOf(
+            "$base/vs_src.php?type=$kind&id=$id&s=${season ?: 1}&e=${episode ?: 1}",
+            "$base/vs_src.php?type=$kind&id=$id&season=${season ?: 1}&episode=${episode ?: 1}",
+            "$base/vs_src.php?type=$kind&id=$id",
+        )
+        for (u in candidates.distinct()) {
+            val src = HttpKit.getJson(u, budgetMs = 5_000L)?.optString("src")
+                ?.takeIf { it.startsWith("http") } ?: continue
+            return src
+        }
+        return null
+    }
+}
+
+/** Vidout extractor. Streams come from a public endpoint keyed by TMDB id. */
+object VidoutExtractor {
+
+    private const val BASE_URL = "https://raw.githubusercontent.com/Watchout2025/api/refs/heads/main/hls"
+
+    suspend fun extract(tmdbId: String, type: String, season: Int?): List<String> {
+        if (!tmdbId.matches(Regex("""\d{2,10}"""))) return emptyList()
+        val path = if (type == "tv") "tv/$tmdbId/S${season ?: 1}.json" else "movie/$tmdbId"
+        val body = HttpKit.get("$BASE_URL/$path", budgetMs = 6_000L) ?: return emptyList()
+        return parseVidoutBody(body)
+    }
+}
+
+/** Stream URLs from a vidout endpoint body (JSON sources or plain URL lines). Pure. */
+internal fun parseVidoutBody(body: String): List<String> {
+    val t = body.trim()
+    if (t.isEmpty()) return emptyList()
+    if (t.startsWith("{") || t.startsWith("[")) {
+        val found = LinkedHashSet<String>()
+        fun grab(v: Any?) {
+            when (v) {
+                is JSONObject -> {
+                    val keys = v.keys()
+                    while (keys.hasNext()) {
+                        val k = keys.next()
+                        val item = v.opt(k)
+                        if (item is String && item.startsWith("http") &&
+                            (k.equals("url", true) || k.equals("file", true) || k.equals("src", true) ||
+                                k.equals("link", true) || k.equals("stream", true))
+                        ) found.add(item)
+                        grab(item)
+                    }
+                }
+                is JSONArray -> for (i in 0 until v.length()) grab(v.opt(i))
+                is String -> if (v.startsWith("http") && isMediaUrl(v)) found.add(v)
+            }
+        }
+        runCatching {
+            grab(if (t.startsWith("[")) JSONArray(t) else JSONObject(t))
+        }
+        val media = found.filter { isMediaUrl(it) }
+        if (media.isNotEmpty()) return media.distinct()
+    }
+    return t.lines().map { it.trim() }
+        .filter { it.startsWith("http") && isMediaUrl(it) }
+        .distinct()
+}
+
+/** Bingr extractor. The stream endpoint needs a server id; known ids are tried in order. */
+object BingrExtractor {
+
+    private const val API = "https://api.bingr.one/api/stream"
+    internal val SRVS = listOf("s40", "s70", "s62", "s63")
+
+    suspend fun extract(
+        tmdbId: String,
+        type: String,
+        title: String,
+        year: String,
+        season: Int?,
+        episode: Int?,
+        onSubtitle: (NxshaSubtitle) -> Unit,
+    ): List<VidemSource> {
+        if (!tmdbId.matches(Regex("""\d{2,10}"""))) return emptyList()
+        val out = ArrayList<VidemSource>()
+        for (srv in SRVS) {
+            val resp = HttpKit.postJson(
+                API,
+                bingrBody(srv, type, tmdbId, title, year, season, episode),
+                mapOf("Content-Type" to "application/json", "Origin" to "https://bingr.one"),
+                4_000L,
+            ) ?: continue
+            val root = runCatching { JSONObject(resp) }.getOrNull() ?: continue
+            root.optJSONArray("sources")?.let { arr ->
+                for (i in 0 until arr.length()) {
+                    val url = arr.optJSONObject(i)?.optString("url")?.takeIf { it.startsWith("http") } ?: continue
+                    out.add(VidemSource("Bingr", url, "", url.contains(".m3u8", true)))
+                }
+            }
+            root.optJSONArray("subtitles")?.let { arr ->
+                for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    val url = o.optString("url").ifBlank { o.optString("file") }
+                    if (url.startsWith("http")) {
+                        onSubtitle(NxshaSubtitle(o.optString("lang").ifBlank { o.optString("label").ifBlank { "sub" } }, url))
+                    }
+                }
+            }
+            if (out.size >= 4) break
+        }
+        return out.distinctBy { it.url }
+    }
+}
+
+/** Bingr stream request body. Pure. */
+internal fun bingrBody(
+    srv: String,
+    type: String,
+    id: String,
+    title: String,
+    year: String,
+    season: Int?,
+    episode: Int?,
+): String {
+    val o = JSONObject()
+    o.put("srv", srv)
+    o.put("t", if (type == "tv") "tv" else "movie")
+    o.put("id", id)
+    o.put("query", JSONObject().put("title", title).put("year", year))
+    if (type == "tv") {
+        o.put("season", season ?: 1)
+        o.put("episode", episode ?: 1)
+    }
+    return o.toString()
+}
+
+/** Filmu box extractor. Scrapers need the bundled API key. */
+object FilmuExtractor {
+
+    private const val BASE_URL = "https://box.filmu.in"
+    private const val API_KEY = "09eb429913afb6b1cc90f23746f41fb3279aed77726c625c40672b81444c0bac"
+    internal val PROVS = listOf("Vaplayer", "Ainary", "ShowBox", "MovieBoxV2", "NoTorrent")
+
+    suspend fun extract(
+        imdbId: String?,
+        tmdbId: String?,
+        type: String,
+        title: String,
+        year: String,
+        season: Int?,
+        episode: Int?,
+        onSubtitle: (NxshaSubtitle) -> Unit,
+    ): List<VidemSource> {
+        val id = imdbId?.takeIf { it.startsWith("tt") } ?: tmdbId ?: return emptyList()
+        val kind = if (type == "tv") "tv" else "movie"
+        val out = ArrayList<VidemSource>()
+        for (prov in PROVS) {
+            val url = buildString {
+                append("$BASE_URL/scrape/$prov/$kind/$id?title=${URLEncoder.encode(title, "UTF-8")}")
+                append("&tmdbId=${tmdbId.orEmpty()}&imdbId=${imdbId.orEmpty()}&year=$year")
+                if (type == "tv") append("&season=${season ?: 1}&episode=${episode ?: 1}")
+            }
+            val resp = HttpKit.get(url, mapOf("x-api-key" to API_KEY), 4_000L) ?: continue
+            val root = runCatching { JSONObject(resp) }.getOrNull() ?: continue
+            out.addAll(parseFilmuSources(root, prov))
+            root.optJSONArray("subtitles")?.let { arr ->
+                for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    val uri = o.optString("url").takeIf { it.startsWith("http") } ?: continue
+                    onSubtitle(NxshaSubtitle(o.optString("label").ifBlank { o.optString("lang").ifBlank { "sub" } }, uri))
+                }
+            }
+        }
+        return out.distinctBy { it.url }
+    }
+}
+
+/** Filmu scraper sources mapped to streams. Pure. */
+internal fun parseFilmuSources(root: JSONObject, prov: String): List<VidemSource> {
+    val arr = root.optJSONArray("sources") ?: return emptyList()
+    val out = ArrayList<VidemSource>()
+    for (i in 0 until arr.length()) {
+        val o = arr.optJSONObject(i) ?: continue
+        var url = o.optString("url").ifBlank { o.optString("file") }.trim()
+        if (url.startsWith("/")) url = "https://box.filmu.in$url"
+        if (!url.startsWith("http")) continue
+        val quality = o.optString("quality").ifBlank { o.optString("label") }
+        val label = if (quality.contains("hindi", true)) "Filmu ($prov Hindi)" else "Filmu ($prov)"
+        val headers = LinkedHashMap<String, String>()
+        val headerObj = o.optJSONObject("headers")
+        if (headerObj != null) {
+            val keys = headerObj.keys()
+            while (keys.hasNext()) {
+                val k = keys.next()
+                headers[k] = headerObj.optString(k)
+            }
+        }
+        if (!headers.containsKey("Referer")) headers["Referer"] = "https://box.filmu.in/"
+        out.add(VidemSource(label, url, quality, url.contains(".m3u8", true), headers))
+    }
+    return out
+}
+
+/** VidBolt scraper extractor. Endpoints need no auth. */
+object VidboltExtractor {
+
+    private const val BASE_URL = "https://scraper.vidbolt.xyz"
+    internal val SCRAPERS = listOf("Quasar", "Callisto", "Saffron", "Ninetta")
+
+    suspend fun extract(
+        imdbId: String?,
+        tmdbId: String?,
+        type: String,
+        title: String,
+        year: String,
+        season: Int?,
+        episode: Int?,
+        onSubtitle: (NxshaSubtitle) -> Unit,
+    ): List<VidemSource> {
+        val tmdb = tmdbId?.takeIf { it.matches(Regex("""\d{2,10}""")) } ?: return emptyList()
+        val id = imdbId?.takeIf { it.startsWith("tt") } ?: "tmdb$tmdb"
+        val kind = if (type == "tv") "tv" else "movie"
+        val out = ArrayList<VidemSource>()
+        for (s in SCRAPERS) {
+            val url = buildString {
+                append("$BASE_URL/scrape/$s/$kind/$id?tmdbId=$tmdb")
+                if (title.isNotBlank()) append("&title=${URLEncoder.encode(title, "UTF-8")}")
+                if (year.isNotBlank()) append("&year=$year")
+                if (type == "tv") append("&season=${season ?: 1}&episode=${episode ?: 1}")
+            }
+            val resp = HttpKit.get(url, budgetMs = 4_000L) ?: continue
+            val root = runCatching { JSONObject(resp) }.getOrNull() ?: continue
+            root.optJSONArray("sources")?.let { arr ->
+                for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    val stream = o.optString("url").takeIf { it.startsWith("http") } ?: continue
+                    val headers = LinkedHashMap<String, String>()
+                    val headerObj = o.optJSONObject("headers")
+                    if (headerObj != null) {
+                        val keys = headerObj.keys()
+                        while (keys.hasNext()) {
+                            val k = keys.next()
+                            headers[k] = headerObj.optString(k)
+                        }
+                    }
+                    out.add(VidemSource("VidBolt (${o.optString("name").ifBlank { s }})", stream,
+                        o.optString("quality"), stream.contains(".m3u8", true), headers))
+                }
+            }
+            root.optJSONArray("subtitles")?.let { arr ->
+                for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    val uri = o.optString("url").takeIf { it.startsWith("http") } ?: continue
+                    onSubtitle(NxshaSubtitle(o.optString("lang").ifBlank { o.optString("label").ifBlank { "sub" } }, uri))
+                }
+            }
+            if (out.size >= 4) break
+        }
+        return out.distinctBy { it.url }
+    }
+}
+
+/** 2embed page helper: the static iframe target lacks the title id; append the known one. Pure. */
+internal fun resolveTwoEmbedTarget(html: String, imdbId: String?): String? {
+    if (html.isBlank()) return null
+    val target = Regex("""data-src\s*=\s*["']([^"']+)["']""").find(html)?.groupValues?.get(1)
+        ?: Regex("""<iframe[^>]+src\s*=\s*["'](https?://[^"']+)["']""", RegexOption.IGNORE_CASE)
+            .find(html)?.groupValues?.get(1)
+        ?: return null
+    if (!imdbId.isNullOrBlank() && !target.contains(imdbId) && target.endsWith("/")) return target + imdbId
+    return target
 }
 

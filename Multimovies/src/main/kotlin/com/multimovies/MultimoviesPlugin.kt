@@ -2277,8 +2277,9 @@ object MultiSourcePuller {
             buildProxyStreamUrl(text, current)?.let { return it }
             extractStreamUrl(text)?.let { return it }
             extractVideoSourceUrl(text, current)?.let { return it }
-            val next = Jsoup.parse(text).selectFirst("iframe")?.attr("src")?.takeIf { it.isNotBlank() }
-                ?: return current
+            val next = Jsoup.parse(text).select("iframe").firstNotNullOfOrNull { frame ->
+                frame.attr("src").takeIf { it.isNotBlank() && !it.startsWith("about:") && !it.startsWith("javascript:") }
+            } ?: return current
             val resolved = resolveRelative(current, next)
             if (resolved == current) return current
             current = resolved
@@ -2431,6 +2432,78 @@ object MultiSourcePuller {
             return out
         }
 
+        // Dead hosts fail fast instead of burning the per-source timeout.
+        if (src.url.contains("vidsync.pro", ignoreCase = true)) return emptyList()
+
+        // Cineverse backend (modiplay): static tokenized HLS on the proxy page.
+        if (hostOf(src.url).contains("modiplay")) {
+            val out = mutableListOf<ExtractorLink>()
+            for (s in ModiplayExtractor.extract(src.url)) {
+                val refererHeader = s.headers["Referer"] ?: src.url
+                out += newExtractorLink(
+                    source = s.name,
+                    name = s.name,
+                    url = s.url,
+                    type = ExtractorLinkType.M3U8,
+                ) {
+                    referer = refererHeader
+                    quality = getQualityFromName(s.url)
+                    this.headers = s.headers + src.headers
+                    extractorData = null
+                    audioTracks = emptyList()
+                }
+            }
+            return out
+        }
+
+        // VsEmbed: one JSON call reveals the player URL, then generic handling.
+        if (hostOf(src.url).contains("vsembed.ru")) {
+            val resolved = VsEmbedExtractor.resolve(
+                src.url, if (src.season != null) "tv" else "movie", src.season, src.episode,
+            )?.takeIf { it != src.url } ?: return emptyList()
+            return extractSource(src.copy(url = resolved, referer = src.url), onSubtitle)
+        }
+
+        // Vidout: public endpoint keyed by TMDB id.
+        if (hostOf(src.url).contains("vidout.pages.dev")) {
+            val tv = src.season != null
+            val tmdb = src.tmdbId?.takeIf { it.matches(Regex("""\d{2,10}""")) }
+                ?: extractTmdbIdFromServerUrl(src.url)
+                ?: src.imdbId?.let { tmdbForImdb(it) }
+                ?: return emptyList()
+            val out = mutableListOf<ExtractorLink>()
+            for (u in VidoutExtractor.extract(tmdb, if (tv) "tv" else "movie", src.season)) {
+                val refererHeader = src.referer ?: src.url
+                out += newExtractorLink(
+                    source = src.name,
+                    name = src.name,
+                    url = u,
+                    type = linkTypeFor(u, m3u8Hint = true),
+                ) {
+                    referer = refererHeader
+                    quality = getQualityFromName(u)
+                    this.headers = src.headers + ("Referer" to refererHeader)
+                    extractorData = null
+                    audioTracks = emptyList()
+                }
+            }
+            return out
+        }
+
+        // Bingr/Filmu/VidBolt: id-keyed scraper APIs.
+        if (hostOf(src.url).contains("bingr.one") || hostOf(src.url).contains("filmu.in") || hostOf(src.url).contains("vidbolt.xyz")) {
+            return apiHostLinks(src, onSubtitle)
+        }
+
+        // 2embed: static iframe target lacks the id; append the known IMDB id.
+        if (hostOf(src.url).contains("2embed")) {
+            val html = HttpKit.get(src.url, mapOf("Referer" to (src.referer ?: src.url)), 6_000L)
+                ?: return emptyList()
+            val target = resolveTwoEmbedTarget(html, src.imdbId?.takeIf { it.startsWith("tt") })
+                ?.takeIf { it != src.url } ?: return emptyList()
+            return extractSource(src.copy(url = target, referer = src.url), onSubtitle)
+        }
+
         // If unwrapEmbed already surfaced a playable stream or proxy relay URL, emit it directly - no extra page fetch needed.
         directStreamLink(src)?.let { return listOf(it) }
 
@@ -2467,6 +2540,75 @@ object MultiSourcePuller {
 
         // Stage b: generic m3u8/mp4 sniff.
         return sniff(src)
+    }
+
+    /** TMDB id for an IMDB id via the find endpoint. */
+    private suspend fun tmdbForImdb(imdbId: String): String? = withTimeoutOrNull(4000L) {
+        TmdbService.findByImdb(imdbId)?.first?.toString()
+    }
+
+    /** Title/year for id-keyed APIs, from TMDB (cached after load()). */
+    private suspend fun apiTitleYear(tmdbId: String?, type: String): Pair<String, String> {
+        val id = tmdbId?.toIntOrNull() ?: return "" to ""
+        val d = withTimeoutOrNull(3000L) { TmdbService.fetchMeta(id, type) } ?: return "" to ""
+        return (d.name.orEmpty() to d.year.orEmpty())
+    }
+
+    /** Link type by stream extension. */
+    private fun linkTypeFor(url: String, m3u8Hint: Boolean = false): ExtractorLinkType = when {
+        m3u8Hint || url.contains(".m3u8", ignoreCase = true) -> ExtractorLinkType.M3U8
+        url.contains(".mpd", ignoreCase = true) -> ExtractorLinkType.DASH
+        else -> ExtractorLinkType.VIDEO
+    }
+
+    /** Map a host stream to an emitted link. */
+    private suspend fun hostLink(
+        label: String,
+        s: VidemSource,
+        fallbackReferer: String,
+        fallbackHeaders: Map<String, String>,
+    ): ExtractorLink {
+        val refererHeader = s.headers["Referer"] ?: fallbackReferer
+        return newExtractorLink(
+            source = label,
+            name = label,
+            url = s.url,
+            type = linkTypeFor(s.url, m3u8Hint = s.isM3u8),
+        ) {
+            referer = refererHeader
+            quality = getQualityFromName(s.quality.ifEmpty { s.url })
+            this.headers = s.headers + fallbackHeaders + ("Referer" to refererHeader)
+            extractorData = null
+            audioTracks = emptyList()
+        }
+    }
+
+    /** Pull Bingr/Filmu/VidBolt scraper APIs for one site server. */
+    private suspend fun apiHostLinks(src: Source, onSubtitle: (SubtitleFile) -> Unit): List<ExtractorLink> {
+        val host = hostOf(src.url)
+        val tv = src.season != null
+        val type = if (tv) "tv" else "movie"
+        val tmdb = src.tmdbId?.takeIf { it.matches(Regex("""\d{2,10}""")) }
+            ?: extractTmdbIdFromServerUrl(src.url)
+            ?: src.imdbId?.let { tmdbForImdb(it) }
+        val imdb = src.imdbId?.takeIf { it.startsWith("tt") }
+            ?: extractImdbIdFromServerUrl(src.url)
+        val (title, year) = apiTitleYear(tmdb, type)
+        val subs = mutableListOf<SubtitleFile>()
+        val emitSub: (NxshaSubtitle) -> Unit = { subs.add(SubtitleFile(it.lang, it.url)) }
+        val streams: List<VidemSource> = when {
+            host.contains("bingr.one") -> {
+                val id = tmdb ?: return emptyList()
+                BingrExtractor.extract(id, type, title, year, src.season, src.episode, emitSub)
+            }
+            host.contains("filmu.in") -> FilmuExtractor.extract(imdb, tmdb, type, title, year, src.season, src.episode, emitSub)
+            else -> VidboltExtractor.extract(imdb, tmdb, type, title, year, src.season, src.episode, emitSub)
+        }
+        subs.forEach { onSubtitle(it) }
+        val refererHeader = src.referer ?: src.url
+        return streams.map { s ->
+            hostLink(if (host.contains("bingr.one")) "Bingr" else s.name.ifBlank { src.name }, s, refererHeader, src.headers)
+        }
     }
 
     /** When src. url is itself a playable stream (serve_m3u8 proxy relay, m3u8 or mp4), build the ExtractorLink right away. */

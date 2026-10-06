@@ -98,6 +98,27 @@ internal object HttpKit {
                 }.getOrNull()
             }
         }
+
+    /** JSON POST, returning the response body text, or null on failure / timeout after. */
+    suspend fun postJson(
+        url: String,
+        json: String,
+        headers: Map<String, String> = emptyMap(),
+        budgetMs: Long = 8_000L,
+    ): String? =
+        withContext(Dispatchers.IO) {
+            withTimeoutOrNull(budgetMs) {
+                runCatching {
+                    val body = json.toRequestBody("application/json; charset=UTF-8".toMediaType())
+                    val req = Request.Builder().url(url).post(body)
+                    headers.forEach { (k, v) -> req.header(k, v) }
+                    client.newCall(req.build()).execute().use { resp ->
+                        if (!resp.isSuccessful) return@use null
+                        resp.body.string()
+                    }
+                }.getOrNull()
+            }
+        }
 }
 
 /** Shared CryptoJS-compatible AES helpers for the OpenSSL "Salted__" envelope format (`CryptoJS. AES. encrypt(data. passphrase)` / `. decrypt(. */
