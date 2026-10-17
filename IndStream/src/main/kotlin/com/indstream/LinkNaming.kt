@@ -35,6 +35,39 @@ object LinkNaming {
         return languageTag(s)
     }
 
+    /** Country-flag emoji for a canonical single-language tag; "" for Multi/Unknown/Original/unknown. Pure. */
+    fun languageFlag(tag: String?): String = when (tag) {
+        "Hindi", "Tamil", "Telugu", "Malayalam", "Kannada", "Marathi", "Punjabi", "Gujarati" -> flag("IN")
+        "English" -> flag("GB")
+        "Urdu" -> flag("PK")
+        "Bengali" -> flag("BD")
+        "Arabic" -> flag("SA")
+        "Russian" -> flag("RU")
+        "Chinese" -> flag("CN")
+        "Japanese" -> flag("JP")
+        "Korean" -> flag("KR")
+        "French" -> flag("FR")
+        "Spanish" -> flag("ES")
+        "Portuguese" -> flag("PT")
+        "Filipino" -> flag("PH")
+        "Indonesian" -> flag("ID")
+        "Malaysian" -> flag("MY")
+        "Vietnamese" -> flag("VN")
+        "Nepali" -> flag("NP")
+        "Sinhala" -> flag("LK")
+        "Thai" -> flag("TH")
+        "Turkish" -> flag("TR")
+        "German" -> flag("DE")
+        "Italian" -> flag("IT")
+        "Dutch" -> flag("NL")
+        "Polish" -> flag("PL")
+        else -> ""
+    }
+
+    /** Regional-indicator flag emoji from a 2-letter ISO country code. Pure. */
+    private fun flag(cc: String): String =
+        cc.uppercase().map { Character.toChars(0x1F1E6 + (it - 'A')).concatToString() }.joinToString("")
+
     /** True when (a sub-server label like "Server 1080p", "Fade 1080p", "Nova") carries a resolution token. Kept as a query. helper - strips these tokens). */
     fun hasResolution(indicator: String?): Boolean =
         !indicator.isNullOrBlank() &&
@@ -60,7 +93,10 @@ object LinkNaming {
         val tagPart = if (
             tag != "Multi" &&
             Regex("\\b${Regex.escape(tag)}\\b", RegexOption.IGNORE_CASE).containsMatchIn(nameWithSub)
-        ) "" else "($tag)"
+        ) "" else {
+            val f = languageFlag(tag)
+            if (f.isBlank()) "($tag)" else "($f $tag)"
+        }
 
         // ): the server name carries NO resolution token - CloudStream shows each link's quality badge itself (ExtractorLink.
 // quality), so printing it here.

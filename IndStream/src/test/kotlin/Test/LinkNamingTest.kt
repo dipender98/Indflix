@@ -8,6 +8,9 @@ import kotlin.test.assertEquals
 /** FILE: LinkNamingTest. kt - guards the server-name formatting rules defined in (). - Language tag mapping (raw. strings → canonical short tokens). */
 class LinkNamingTest {
 
+    private val IN = "\uD83C\uDDEE\uD83C\uDDF3"
+    private val GB = "\uD83C\uDDEC\uD83C\uDDE7"
+
     // ── languageTag ──────────────────────────────────────────────.
 
     @Test
@@ -66,7 +69,7 @@ class LinkNamingTest {
         val name = LinkNaming.displayName(
             serverName = "VidLink", audioLabel = "Hindi", qualityHint = 1080,
         )
-        assertEquals("VidLink (Hindi)", name)
+        assertEquals("VidLink ($IN Hindi)", name)
     }
 
     @Test
@@ -94,7 +97,7 @@ class LinkNamingTest {
         val name = LinkNaming.displayName(
             serverName = "VaPlayer", audioLabel = "English", qualityHint = 0,
         )
-        assertEquals("VaPlayer (English)", name)
+        assertEquals("VaPlayer ($GB English)", name)
     }
 
     @Test
@@ -112,7 +115,7 @@ class LinkNamingTest {
         val name = LinkNaming.displayName(
             serverName = "Server1080p", audioLabel = "Hindi", qualityHint = 1080,
         )
-        assertEquals("Server (Hindi)", name)
+        assertEquals("Server ($IN Hindi)", name)
     }
 
     @Test
@@ -121,7 +124,7 @@ class LinkNamingTest {
         val name = LinkNaming.displayName(
             serverName = "MovieBox 4K", audioLabel = "English", qualityHint = 2160,
         )
-        assertEquals("MovieBox (English)", name)
+        assertEquals("MovieBox ($GB English)", name)
     }
 
     @Test
@@ -130,7 +133,7 @@ class LinkNamingTest {
         val name = LinkNaming.displayName(
             serverName = "Movie 2160p", audioLabel = "English", qualityHint = 2160,
         )
-        assertEquals("Movie (English)", name)
+        assertEquals("Movie ($GB English)", name)
     }
 
     @Test
@@ -139,7 +142,7 @@ class LinkNamingTest {
         val name = LinkNaming.displayName(
             serverName = "Movie", audioLabel = "English", qualityHint = 2160,
         )
-        assertEquals("Movie (English)", name)
+        assertEquals("Movie ($GB English)", name)
     }
 
     @Test
@@ -148,7 +151,7 @@ class LinkNamingTest {
         val name = LinkNaming.displayName(
             serverName = "Movie 1080p", audioLabel = "English", qualityHint = 1080,
         )
-        assertEquals("Movie (English)", name)
+        assertEquals("Movie ($GB English)", name)
     }
 
     // ── NO resolution token in names () ──.
@@ -159,7 +162,7 @@ class LinkNamingTest {
         val name = LinkNaming.displayName(
             serverName = "Server 1080p", audioLabel = "English", qualityHint = 1080,
         )
-        assertEquals("Server (English)", name)
+        assertEquals("Server ($GB English)", name)
         assertEquals(0, countToken(name, """\d{3,4}p|4K"""))
     }
 
@@ -169,7 +172,7 @@ class LinkNamingTest {
         val name = LinkNaming.displayName(
             serverName = "Server1080p", audioLabel = "English", qualityHint = 1080,
         )
-        assertEquals("Server (English)", name)
+        assertEquals("Server ($GB English)", name)
         assertEquals(0, countToken(name, """\d{3,4}p|4K"""), "no resolution in name: $name")
     }
 
@@ -179,7 +182,7 @@ class LinkNamingTest {
         val name = LinkNaming.displayName(
             serverName = "MovieBox 4K", audioLabel = "English", qualityHint = 2160,
         )
-        assertEquals("MovieBox (English)", name)
+        assertEquals("MovieBox ($GB English)", name)
         assertEquals(0, countToken(name, """4K"""))
     }
 
@@ -190,7 +193,7 @@ class LinkNamingTest {
         val name = LinkNaming.displayName(
             serverName = "VidEm 1080p", audioLabel = "English", qualityHint = 720,
         )
-        assertEquals("VidEm (English)", name)
+        assertEquals("VidEm ($GB English)", name)
     }
 
     @Test
@@ -208,8 +211,8 @@ class LinkNamingTest {
                 qualityHint = s.qualityHint, duplicateIndex = nums[i],
             )
         }
-        assertEquals("VidLink-1 (English)", names[0])
-        assertEquals("VidLink-2 (English)", names[1])
+        assertEquals("VidLink-1 ($GB English)", names[0])
+        assertEquals("VidLink-2 ($GB English)", names[1])
     }
 
     // ── numbering: unique → no number ────────────────────────────.
@@ -282,8 +285,8 @@ class LinkNamingTest {
                 qualityHint = s.qualityHint, duplicateIndex = nums[i],
             )
         }
-        assertEquals("VidLink-1 (Hindi)", names[0])
-        assertEquals("VidLink-2 (Hindi)", names[1])
+        assertEquals("VidLink-1 ($IN Hindi)", names[0])
+        assertEquals("VidLink-2 ($IN Hindi)", names[1])
     }
 
     @Test
@@ -295,7 +298,7 @@ class LinkNamingTest {
                 serverName = s.serverName, audioLabel = s.audioLabel,
                 qualityHint = s.qualityHint, duplicateIndex = nums[i],
             )
-            assertEquals("PrimeSrc-${i + 1} (English)", name)
+            assertEquals("PrimeSrc-${i + 1} ($GB English)", name)
         }
     }
 
@@ -350,11 +353,21 @@ class LinkNamingTest {
         // Regression (revised spec): a measured-unknown direct file gets no guessed token - and with the new rule NO name.
 // carries resolution at all, so.
         val name = LinkNaming.displayName("VidRock", "Hindi", qualityHint = -1)
-        assertEquals("VidRock (Hindi)", name)
+        assertEquals("VidRock ($IN Hindi)", name)
+    }
+
+    @Test
+    fun languageFlag_mapsKnown_skipsMultiUnknownOriginal() {
+        assertEquals("\uD83C\uDDEE\uD83C\uDDF3", LinkNaming.languageFlag("Hindi"))
+        assertEquals("\uD83C\uDDEC\uD83C\uDDE7", LinkNaming.languageFlag("English"))
+        assertEquals("\uD83C\uDDEF\uD83C\uDDF5", LinkNaming.languageFlag("Japanese"))
+        assertEquals("", LinkNaming.languageFlag("Multi"))
+        assertEquals("", LinkNaming.languageFlag("Unknown"))
+        assertEquals("", LinkNaming.languageFlag("Original"))
+        assertEquals("", LinkNaming.languageFlag(null))
     }
 
     // ── taggedSubtitleName ───────────────────────────────────────.
-
     @Test
     fun taggedSubtitleName_tagsSource() {
         assertEquals("Hindi (VidLink)", LinkNaming.taggedSubtitleName("Hindi", "VidLink"))

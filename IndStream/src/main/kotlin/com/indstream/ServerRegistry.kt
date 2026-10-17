@@ -167,6 +167,33 @@ object ServerFarm {
         // database" for every title.
         // PrimeSrc removed (v63): host answers 200 but every entry is an external
         // file-host embed the pipeline cannot resolve (0 streams).
+        // SSR embed page bakes its direct HLS ladder (and per-dub variants) into the play config.
+        ServerSpec(
+            id = "vidrift", name = "Vidrift",
+            idType = ServerIdType.TMDB,
+            movieUrl = "https://embed.vidrift.net/embed/movie/{id}",
+            tvUrl = "https://embed.vidrift.net/embed/tv/{id}/{season}/{episode}",
+            referer = "https://embed.vidrift.net/",
+            hasSubtitles = true, timeoutSec = 25,
+        ),
+        // Browserless JSON API: a salted signature key authorizes a per-service source call.
+        ServerSpec(
+            id = "rivestream", name = "Rivestream",
+            idType = ServerIdType.TMDB,
+            movieUrl = "https://www.rivestream.app/api/backendfetch?requestID=movieVideoProvider&id={id}",
+            tvUrl = "https://www.rivestream.app/api/backendfetch?requestID=tvVideoProvider&id={id}&season={season}&episode={episode}",
+            referer = "https://www.rivestream.app/",
+            hasSubtitles = true, timeoutSec = 25,
+        ),
+        // Browserless JSON API: a short-lived seed keys an XOR-encrypted per-lane source payload.
+        ServerSpec(
+            id = "movy", name = "Movy",
+            idType = ServerIdType.TMDB,
+            movieUrl = "https://api.wecollege.net/seed?mediaId={id}",
+            tvUrl = "https://api.wecollege.net/seed?mediaId={id}",
+            referer = "https://www.movy.sx/",
+            hasSubtitles = true, timeoutSec = 25,
+        ),
     )
 
     fun buildMovieUrl(spec: ServerSpec, id: String): String =

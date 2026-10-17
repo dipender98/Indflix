@@ -497,6 +497,25 @@ object StreamEngine {
             return emptyList()
         }
 
+        if (spec.id == "vidrift") {
+            val result = resolveVidrift(spec, tmdbId, type, season, episode)
+            if (result.isNotEmpty()) { okServer(spec, start, "vidrift embed", result.size); return result }
+            failServer(spec, "vidrift returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
+            return emptyList()
+        }
+        if (spec.id == "rivestream") {
+            val result = resolveRivestream(spec, tmdbId, type, season, episode)
+            if (result.isNotEmpty()) { okServer(spec, start, "rivestream api", result.size); return result }
+            failServer(spec, "rivestream returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
+            return emptyList()
+        }
+        if (spec.id == "movy") {
+            val result = resolveMovy(spec, tmdbId, type, season, episode)
+            if (result.isNotEmpty()) { okServer(spec, start, "movy api", result.size); return result }
+            failServer(spec, "movy returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
+            return emptyList()
+        }
+
         // 0. JSON API branch (api. shows. st style): parse JSON, take source. url + source. qualities + subtitles.
         if (spec.isJsonApi) {
             val result = resolveJsonApi(spec, embedUrl, referer)
@@ -1876,7 +1895,7 @@ object StreamEngine {
                 serverId = spec.id, serverName = "${spec.name} $label".trim(),
                 url = streamUrl, isM3u8 = streamUrl.contains(".m3u8", true),
                 referer = streamHeaders["Referer"] ?: "https://www.movy.bz/",
-                qualityHint = quality.filter { it.isDigit() }.takeLast(3).toIntOrNull() ?: 0,
+                qualityHint = Regex("""(\d{3,4})""").find(quality)?.groupValues?.get(1)?.toIntOrNull() ?: 0,
                 extraHeaders = streamHeaders,
             )
         }
@@ -1977,6 +1996,416 @@ object StreamEngine {
             }
         }
         Log.d("Bingr", "cascade got ${out.size} sources for $type/$id")
+        return out.values.toList()
+    }
+
+    // ---- Vidrift: SSR embed page with the HLS ladder baked into its play config ----
+
+    private suspend fun resolveVidrift(
+        spec: ServerSpec, tmdbId: Int, type: String, season: Int, episode: Int,
+    ): List<RawStream> {
+        if (type != "movie" && (season <= 0 || episode <= 0)) return emptyList()
+        val base = "https://embed.vidrift.net"
+        val page = if (type == "movie") "$base/embed/movie/$tmdbId"
+        else "$base/embed/tv/$tmdbId/$season/$episode"
+        val html = withTimeoutOrNull(12_000L) {
+            runCatching { app.get(page, timeout = 12, headers = okHeaders("$base/")).text }.getOrNull()
+        } ?: run { Log.w("Vidrift", "embed no response"); return emptyList() }
+        val found = vidriftStreams(html)
+        val out = found.map { (rel, label) ->
+            val abs = if (rel.startsWith("http", true)) rel else base + rel
+            RawStream(
+                serverId = spec.id, serverName = spec.name,
+                url = abs, isM3u8 = abs.contains(".m3u8", true),
+                referer = "$base/", qualityHint = 0, audioLabel = label,
+                extraHeaders = mapOf("User-Agent" to HttpKit.userAgent, "Referer" to "$base/"),
+            )
+        }
+        Log.d("Vidrift", "parsed ${out.size} streams for $type/$tmdbId")
+        return out
+    }
+
+    /** (relativeUrl, audioLabel) pairs from an embed page's play config. Pure. */
+    internal fun vidriftStreams(html: String): List<Pair<String, String>> {
+        val mi = html.indexOf("var embedMeta")
+        val brace = if (mi >= 0) html.indexOf('{', mi) else -1
+        val json = if (brace >= 0) extractBalancedJson(html, brace) else null
+        val meta = json?.let { runCatching { org.json.JSONObject(it) }.getOrNull() } ?: return emptyList()
+        val out = ArrayList<Pair<String, String>>()
+        meta.optJSONArray("orionStreams")?.let { arr ->
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                val u = o.optString("url").takeIf { it.isNotBlank() } ?: continue
+                if (!u.contains(".m3u8", true) && !u.contains(".mp4", true)) continue
+                out += u to vidriftLabel(o.optString("name"))
+            }
+        }
+        if (out.isEmpty()) {
+            meta.optString("evionUrl").takeIf { it.isNotBlank() && it.contains(".m3u8", true) }?.let { out += it to "" }
+        }
+        return out
+    }
+
+    /** Audio label from a play-config stream name ("Provider • Hindi"); "" when not a known language. Pure. */
+    private fun vidriftLabel(name: String): String {
+        val tok = name.split(Regex("[^A-Za-z]+")).lastOrNull { it.isNotBlank() } ?: return ""
+        return when (tok.lowercase()) {
+            "hindi", "tamil", "telugu", "english", "kannada", "malayalam", "bengali", "marathi", "punjabi", "original" ->
+                tok.replaceFirstChar { it.uppercase() }
+            else -> ""
+        }
+    }
+
+    // ---- Rivestream: browserless JSON API authorized by a salted signature key ----
+
+    /** Salt table for the signature hash (fixed upstream order). */
+    private val RIVESTREAM_SALT = listOf(
+        "4Z7lUo", "gwIVSMD", "PLmz2elE2v", "Z4OFV0", "SZ6RZq6Zc", "zhJEFYxrz8", "FOm7b0", "axHS3q4KDq",
+        "o9zuXQ", "4Aebt", "wgjjWwKKx", "rY4VIxqSN", "kfjbnSo", "2DyrFA1M", "YUixDM9B", "JQvgEj0",
+        "mcuFx6JIek", "eoTKe26gL", "qaI9EVO1rB", "0xl33btZL", "1fszuAU", "a7jnHzst6P", "wQuJkX", "cBNhTJlEOf",
+        "KNcFWhDvgT", "XipDGjST", "PCZJlbHoyt", "2AYnMZkqd", "HIpJh", "KH0C3iztrG", "W81hjts92", "rJhAT",
+        "NON7LKoMQ", "NMdY3nsKzI", "t4En5v", "Qq5cOQ9H", "Y9nwrp", "VX5FYVfsf", "cE5SJG", "x1vj1",
+        "HegbLe", "zJ3nmt4OA", "gt7rxW57dq", "clIE9b", "jyJ9g", "B5jXjMCSx", "cOzZBZTV", "FTXGy",
+        "Dfh1q1", "ny9jqZ2POI", "X2NnMn", "MBtoyD", "qz4Ilys7wB", "68lbOMye", "3YUJnmxp", "1fv5Imona",
+        "PlfvvXD7mA", "ZarKfHCaPR", "owORnX", "dQP1YU", "dVdkx", "qgiK0E", "cx9wQ", "5F9bGa",
+        "7UjkKrp", "Yvhrj", "wYXez5Dg3", "pG4GMU", "MwMAu", "rFRD5wlM",
+    )
+
+    private val RIVESTREAM_SERVICES_FALLBACK = listOf(
+        "citadel", "apogee", "vanguard", "mirage", "velocity", "ignite", "tampa", "meridian", "apollo", "asiacloud",
+    )
+    @Volatile private var riveServices: List<String>? = null
+    @Volatile private var riveServicesAt = 0L
+    private const val RIVE_SERVICES_TTL_MS = 30 * 60 * 1000L
+
+    /** JS `Number.toString(16)` emulation: signed int32, leading '-' kept, zero-padded to 8. Pure. */
+    private fun riveHex(t: Int): String {
+        val s = if (t >= 0) t.toString(16) else "-" + (-t.toLong()).toString(16)
+        return s.padStart(8, '0')
+    }
+
+    /** First hash pass over a compound id string; 8-char hex. Pure. */
+    private fun riveHash2(s: String): String {
+        var t = 0
+        for (n in s.indices) {
+            val r = s[n].code
+            t = r + (t shl 6) + (t shl 16) - t
+            val sh = n % 5
+            val i = (t shl sh) or (t ushr (32 - sh))
+            t = t xor (i xor ((r shl (n % 7)) or (r ushr (8 - (n % 7)))))
+            t += (t ushr 11) xor (t shl 3)
+        }
+        t = t xor (t ushr 15)
+        t = (65535 and t) * 49842 + ((((t ushr 16) * 49842) and 65535) shl 16)
+        t = t xor (t ushr 13)
+        t = (65535 and t) * 40503 + ((((t ushr 16) * 40503) and 65535) shl 16)
+        t = t xor (t ushr 16)
+        return riveHex(t)
+    }
+
+    /** Second hash pass; 8-char hex. Pure. */
+    private fun riveHashO(s: String): String {
+        var n = 0xDEADBEEF.toInt() xor s.length
+        for (e in s.indices) {
+            val r = s[e].code
+            var rMod = r
+            rMod = rMod xor (((131 * e + 89) xor (rMod shl (e % 5))) and 255)
+            n = ((n shl 7) or (n ushr 25)) xor rMod
+            n = (65535 and n) * 60205 + (((n ushr 16) * 60205) shl 16)
+            n = n xor (n ushr 11)
+        }
+        n = n xor (n ushr 15)
+        n = (65535 and n) * 49842 + (((n ushr 16) * 49842) shl 16)
+        n = n xor (n ushr 13)
+        n = (65535 and n) * 40503 + (((n ushr 16) * 40503) shl 16)
+        n = n xor (n ushr 16)
+        n = (65535 and n) * 10196 + (((n ushr 16) * 10196) shl 16)
+        n = n xor (n ushr 15)
+        return riveHex(n)
+    }
+
+    /** Upstream signature key for an id: salt + two hash passes, base64. Pure. */
+    internal fun rivestreamSecretKey(id: String): String {
+        return try {
+            val num = id.toIntOrNull()
+            val salt: String
+            val n: Int
+            if (num == null) {
+                val sum = id.sumOf { it.code }
+                salt = RIVESTREAM_SALT[sum % RIVESTREAM_SALT.size]
+                n = (sum % id.length) / 2
+            } else {
+                salt = RIVESTREAM_SALT[((num % RIVESTREAM_SALT.size) + RIVESTREAM_SALT.size) % RIVESTREAM_SALT.size]
+                n = ((num % id.length) + id.length) % id.length / 2
+            }
+            val compound = id.substring(0, n) + salt + id.substring(n)
+            java.util.Base64.getEncoder().encodeToString(riveHashO(riveHash2(compound)).toByteArray(Charsets.US_ASCII))
+        } catch (e: Exception) { "topSecret" }
+    }
+
+    /** One source entry from the per-service response. */
+    internal data class RiveSource(val url: String, val quality: String, val label: String, val format: String)
+
+    /** Parse `{data:{sources:[{url,quality,source,format}]}}`. Pure. */
+    internal fun rivestreamSources(jsonText: String): List<RiveSource> {
+        val root = runCatching { org.json.JSONObject(jsonText) }.getOrNull() ?: return emptyList()
+        val arr = root.optJSONObject("data")?.optJSONArray("sources") ?: return emptyList()
+        val out = ArrayList<RiveSource>(arr.length())
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val url = o.optString("url").takeIf { it.startsWith("http") } ?: continue
+            out += RiveSource(url, o.optString("quality", ""), o.optString("source", ""), o.optString("format", ""))
+        }
+        return out
+    }
+
+    /** Live service list from the discovery body (`{data:[...]}`). Pure. */
+    internal fun rivestreamServicesFrom(jsonText: String?): List<String> {
+        val root = jsonText?.let { runCatching { org.json.JSONObject(it) }.getOrNull() } ?: return emptyList()
+        val arr = root.optJSONArray("data") ?: return emptyList()
+        return (0 until arr.length()).mapNotNull { i -> arr.optString(i).takeIf { it.isNotBlank() } }
+    }
+
+    /** Audio language from a "720p | Hindi" style quality string; "" when none. Pure. */
+    internal fun rivestreamAudio(quality: String): String {
+        val parts = quality.split('|').map { it.trim() }.filter { it.isNotEmpty() }
+        if (parts.size < 2) return ""
+        val tok = parts.last()
+        return if (tok.length in 3..12 && tok.all { it.isLetter() }) tok.replaceFirstChar { it.uppercase() } else ""
+    }
+
+    /** Header JSON embedded in a proxy-style source url (`...&headers={...}`); empty when absent. Pure. */
+    internal fun rivestreamProxyHeaders(url: String): Map<String, String> {
+        val out = LinkedHashMap<String, String>()
+        val raw = url.substringAfter('?', "").split('&')
+            .firstOrNull { it.startsWith("headers=") }?.substringAfter("headers=")
+            ?.takeIf { it.isNotBlank() } ?: return out
+        val json = runCatching { java.net.URLDecoder.decode(raw, "UTF-8") }.getOrNull() ?: return out
+        val obj = runCatching { org.json.JSONObject(json) }.getOrNull() ?: return out
+        obj.keys().forEach { k -> val v = obj.optString(k); if (v.isNotBlank()) out[k] = v }
+        return out
+    }
+
+    private suspend fun rivestreamServices(): List<String> {
+        val now = System.currentTimeMillis()
+        riveServices?.let { if (now - riveServicesAt < RIVE_SERVICES_TTL_MS) return it }
+        val url = "https://www.rivestream.app/api/backendfetch?requestID=VideoProviderServices&secretKey=rive&proxyMode=undefined"
+        val text = withTimeoutOrNull(6_000L) {
+            runCatching { app.get(url, timeout = 6, headers = okHeaders("https://www.rivestream.app/")).text }.getOrNull()
+        }
+        val list = rivestreamServicesFrom(text).ifEmpty { RIVESTREAM_SERVICES_FALLBACK }
+        riveServices = list; riveServicesAt = now
+        return list
+    }
+
+    /** Cascade the per-service source endpoints until enough ladders answer. */
+    private suspend fun resolveRivestream(
+        spec: ServerSpec, tmdbId: Int, type: String, season: Int, episode: Int,
+    ): List<RawStream> {
+        if (type != "movie" && (season <= 0 || episode <= 0)) return emptyList()
+        val id = tmdbId.toString()
+        val key = rivestreamSecretKey(id)
+        val api = "https://www.rivestream.app/api/backendfetch"
+        val ref = "https://www.rivestream.app/"
+        val rid = if (type == "movie") "movieVideoProvider" else "tvVideoProvider"
+        val out = LinkedHashMap<String, RawStream>()
+        val deadline = System.currentTimeMillis() + 18_000L
+        for (svc in rivestreamServices()) {
+            if (out.size >= 8 || System.currentTimeMillis() > deadline) break
+            var url = "$api?requestID=$rid&id=$id"
+            if (type != "movie") url += "&season=$season&episode=$episode"
+            url += "&service=$svc&secretKey=$key&proxyMode=noProxy"
+            val text = withTimeoutOrNull(7_000L) {
+                runCatching { app.get(url, timeout = 7, headers = okHeaders(ref)).text }.getOrNull()
+            } ?: continue
+            for (s in rivestreamSources(text)) {
+                if (out.containsKey(s.url)) continue
+                val extra = LinkedHashMap<String, String>()
+                extra["User-Agent"] = HttpKit.userAgent
+                extra.putAll(rivestreamProxyHeaders(s.url))
+                if (!extra.containsKey("Referer")) extra["Referer"] = ref
+                out[s.url] = RawStream(
+                    serverId = spec.id, serverName = spec.name,
+                    url = s.url,
+                    isM3u8 = s.url.contains(".m3u8", true) || s.format.equals("hls", true),
+                    referer = extra["Referer"], qualityHint = heightHintOf(s.quality),
+                    audioLabel = rivestreamAudio(s.quality), extraHeaders = extra,
+                )
+            }
+        }
+        Log.d("Rivestream", "cascade got ${out.size} sources for $type/$id")
+        return out.values.toList()
+    }
+
+    // ---- Movy: browserless JSON API with a seed-keyed XOR payload ----
+
+    private val MOVY_GOLDEN = 0x9e3779b9.toInt()
+    private val MOVY_MAGIC = byteArrayOf(109, 118, 109, 49)
+    private val MOVY_LANES = listOf(
+        "denver", "atlanta", "phoenix", "portland", "seattle", "miami", "boise", "paris",
+        "cancun", "austin", "dallas", "delhi", "munich", "orlando", "tampa", "berlin",
+    )
+    private val MOVY_LANGS = setOf(
+        "hindi", "tamil", "telugu", "english", "spanish", "french", "german",
+        "italian", "portuguese", "korean", "japanese", "malayalam", "kannada",
+    )
+
+    private fun u32(v: Int): Long = v.toLong() and 0xFFFFFFFFL
+
+    private fun movyFmix(h0: Int): Int {
+        var h = h0
+        h = h xor (h ushr 16)
+        h *= 0x85ebca6b.toInt()
+        h = h xor (h ushr 13)
+        h *= 0xc2b2ae35.toInt()
+        h = h xor (h ushr 16)
+        return h
+    }
+
+    private fun movyRotl(x: Int, amount0: Int): Int {
+        val amount = amount0 and 31
+        return if (amount == 0) x else (x shl amount) or (x ushr (32 - amount))
+    }
+
+    private fun movyKeyedFnV(value: String): Int {
+        var hash = 0x811c9dc5.toInt()
+        for (c in value) hash = (hash xor c.code) * 0x1000193
+        return movyFmix(hash)
+    }
+
+    private class MovyKeystream(val s: HashMap<Int, Int>, var acc: Int)
+
+    /** Even-parity KDF (the only live path) into a sparse 61-slot s-box. */
+    private fun movyInitKeystream(seed: String, mediaId: Int): MovyKeystream {
+        val s = HashMap<Int, Int>()
+        var n = movyFmix(movyKeyedFnV(seed) xor movyFmix(mediaId xor MOVY_GOLDEN))
+        for (i in 0 until 8) {
+            val slot = (u32(n) % 61).toInt()
+            n = movyRotl(n + MOVY_GOLDEN, 7 + (7 and i))
+            s[slot] = n xor movyFmix(n)
+            n = movyFmix(n + slot)
+        }
+        return MovyKeystream(s, movyFmix(0xa5a5a5a5.toInt() xor n))
+    }
+
+    private fun movyNextWord(ks: MovyKeystream, counter: Int): Int {
+        val s = ks.s
+        val acc = ks.acc
+        val slot = (u32(acc) % 61).toInt()
+        val inTable = if (s.containsKey(slot)) -1 else 0
+        val r = s[slot] ?: 0
+        val mixed = r xor (MOVY_GOLDEN * (counter + 1))
+        val b = (acc xor mixed) or (acc and mixed and inTable)
+        val next = movyFmix(
+            (movyRotl(b + acc, 31 and slot) xor movyRotl(acc, 31 and (slot * 7))) + MOVY_GOLDEN
+        )
+        s[slot] = next
+        ks.acc = next
+        return next
+    }
+
+    private fun movyBase64Url(payload: String): ByteArray {
+        val normalized = payload.replace('-', '+').replace('_', '/')
+        val pad = (4 - normalized.length % 4) % 4
+        return java.util.Base64.getDecoder().decode(normalized + "=".repeat(pad))
+    }
+
+    /** Decrypt a seed-keyed lane payload; null on a wrong seed or tampered body. Pure. */
+    internal fun movyDecrypt(payload: String, seed: String, mediaId: Int): String? {
+        return try {
+            val cipher = movyBase64Url(payload)
+            val ks = movyInitKeystream(seed, mediaId)
+            val keystream = ByteArray(cipher.size)
+            var counter = 0
+            var i = 0
+            while (i < cipher.size) {
+                val word = movyNextWord(ks, counter++)
+                if (i < cipher.size) keystream[i++] = (word and 0xFF).toByte()
+                if (i < cipher.size) keystream[i++] = ((word ushr 8) and 0xFF).toByte()
+                if (i < cipher.size) keystream[i++] = ((word ushr 16) and 0xFF).toByte()
+                if (i < cipher.size) keystream[i++] = ((word ushr 24) and 0xFF).toByte()
+            }
+            for (j in MOVY_MAGIC.indices) {
+                if (j >= cipher.size || (cipher[j].toInt() xor keystream[j].toInt()).toByte() != MOVY_MAGIC[j]) return null
+            }
+            val plain = ByteArray(cipher.size)
+            for (j in cipher.indices) plain[j] = (cipher[j].toInt() xor keystream[j].toInt()).toByte()
+            String(plain, MOVY_MAGIC.size, plain.size - MOVY_MAGIC.size, Charsets.UTF_8)
+        } catch (e: Exception) { null }
+    }
+
+    /** One source entry from a decrypted lane payload. */
+    internal data class MovySource(val url: String, val quality: String)
+
+    /** Parse `{sources:[{url,quality}]}`. Pure. */
+    internal fun movySources(plaintext: String): List<MovySource> {
+        val root = runCatching { org.json.JSONObject(plaintext) }.getOrNull() ?: return emptyList()
+        val arr = root.optJSONArray("sources") ?: return emptyList()
+        val out = ArrayList<MovySource>(arr.length())
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val url = o.optString("url").takeIf { it.startsWith("http") } ?: continue
+            out += MovySource(url, o.optString("quality", ""))
+        }
+        return out
+    }
+
+    private fun movyAudio(quality: String): String {
+        val q = quality.trim().lowercase()
+        return if (q in MOVY_LANGS) q.replaceFirstChar { it.uppercase() } else ""
+    }
+
+    /** Double-encode a query value the way the site's own bundle does. Pure. */
+    private fun movyEncode(s: String): String {
+        val once = java.net.URLEncoder.encode(s, "UTF-8").replace("+", "%20")
+        return java.net.URLEncoder.encode(once, "UTF-8").replace("+", "%20")
+    }
+
+    /** Get a seed, then walk the lanes collecting decrypted sources. */
+    private suspend fun resolveMovy(
+        spec: ServerSpec, tmdbId: Int, type: String, season: Int, episode: Int,
+    ): List<RawStream> {
+        if (type != "movie" && (season <= 0 || episode <= 0)) return emptyList()
+        val base = "https://api.wecollege.net"
+        val ref = "https://www.movy.sx/"
+        val h = mapOf("Referer" to ref, "Origin" to "https://www.movy.sx", "User-Agent" to HttpKit.userAgent)
+        val seedText = withTimeoutOrNull(6_000L) {
+            runCatching { app.get("$base/seed?mediaId=$tmdbId", timeout = 6, headers = h).text }.getOrNull()
+        } ?: run { Log.w("Movy", "seed no response"); return emptyList() }
+        val seed = runCatching { org.json.JSONObject(seedText).optString("seed") }.getOrNull()
+            ?.takeIf { it.isNotBlank() } ?: run { Log.w("Movy", "no seed in response"); return emptyList() }
+        val meta = runCatching { TmdbService.fetchMeta(tmdbId, type) }.getOrNull()
+        val params = listOf(
+            "title" to movyEncode(meta?.name.orEmpty()),
+            "mediaType" to (if (type == "movie") "movie" else "tv"),
+            "year" to meta?.year.orEmpty(),
+            "totalSeasons" to "1",
+            "seasonId" to (if (type == "movie") 1 else season).toString(),
+            "episodeId" to (if (type == "movie") 1 else episode).toString(),
+            "tmdbId" to tmdbId.toString(),
+            "imdbId" to meta?.imdbId.orEmpty(),
+        )
+        val out = LinkedHashMap<String, RawStream>()
+        val deadline = System.currentTimeMillis() + 18_000L
+        for (lane in MOVY_LANES) {
+            if (out.size >= 6 || System.currentTimeMillis() > deadline) break
+            val query = params.joinToString("&") { "${it.first}=${it.second}" } + "&enc=2&seed=$seed"
+            val cipher = withTimeoutOrNull(7_000L) {
+                runCatching { app.get("$base/$lane/sources?$query", timeout = 7, headers = h).text }.getOrNull()
+            } ?: continue
+            val plain = movyDecrypt(cipher, seed, tmdbId) ?: continue
+            for (s in movySources(plain)) {
+                if (out.containsKey(s.url)) continue
+                out[s.url] = RawStream(
+                    serverId = spec.id, serverName = spec.name,
+                    url = s.url, isM3u8 = s.url.contains(".m3u8", true),
+                    referer = ref, qualityHint = heightHintOf(s.quality),
+                    audioLabel = movyAudio(s.quality),
+                    extraHeaders = mapOf("User-Agent" to HttpKit.userAgent, "Referer" to ref, "Origin" to "https://www.movy.sx"),
+                )
+            }
+        }
+        Log.d("Movy", "cascade got ${out.size} sources for $type/$tmdbId")
         return out.values.toList()
     }
 

@@ -1,5 +1,6 @@
 package com.indstream
 
+import android.app.Activity
 import android.app.AlertDialog
 import android.content.Context
 import android.content.Intent
@@ -12,6 +13,9 @@ import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.webkit.CookieManager
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -27,6 +31,12 @@ object Settings {
 
     /** TMDB API settings page (opened by the TMDB Get API chip). */
     const val TMDB_LINK = "https://www.themoviedb.org/settings/api"
+
+    /** FebBox sign-in page loaded by the ShowBox Get Token chip. */
+    const val SHOWBOX_LINK = "https://www.febbox.com/login"
+
+    /** Host whose session cookie carries the ShowBox token. */
+    const val SHOWBOX_HOST = "https://www.febbox.com"
 
     private const val PREFS = "indstream_settings"
     private const val KEY = "wyzie_api_key"
@@ -155,6 +165,107 @@ object Settings {
             ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(SHOWBOX_KEY, "").orEmpty()
         }.getOrDefault("")
         showboxLoaded = true
+    }
+
+    /** Pull the `ui` cookie value out of a raw cookie string. Pure. */
+    internal fun uiTokenFromCookie(cookie: String?): String? =
+        cookie?.split(';')
+            ?.asSequence()
+            ?.map { it.trim() }
+            ?.firstOrNull { it.startsWith("ui=", ignoreCase = true) }
+            ?.substringAfter('=')
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+
+    private fun dp(context: Context, v: Int): Int = (v * context.resources.displayMetrics.density).toInt()
+
+    /** Opens the sign-in page in the browser when no activity is available to host a web view. */
+    private fun launchShowboxPage(context: Context) {
+        runCatching {
+            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(SHOWBOX_LINK)))
+        }.onFailure {
+            Toast.makeText(context, "No browser found", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    /**
+     * In-app sign-in sheet: loads the FebBox login page, then reads the session
+     * cookie once the user taps Use this login and hands the token to onToken.
+     */
+    private fun openShowboxLogin(context: Context, onToken: (String) -> Unit) {
+        if (context !is Activity) {
+            launchShowboxPage(context)
+            return
+        }
+        val sheetColor = Color.parseColor("#141416")
+        val textColor = Color.parseColor("#EDEDF2")
+        val hintColor = Color.parseColor("#A3A3AD")
+        val accentColor = Color.parseColor("#2F7CF6")
+
+        val web = WebView(context).apply {
+            settings.javaScriptEnabled = true
+            settings.domStorageEnabled = true
+            settings.loadWithOverviewMode = true
+            settings.useWideViewPort = true
+            webViewClient = WebViewClient()
+            setBackgroundColor(sheetColor)
+            loadUrl(SHOWBOX_LINK)
+        }
+        val statusText = TextView(context).apply {
+            text = "Sign in, then tap Use this login."
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            setTextColor(hintColor)
+            setPadding(dp(context, 4), dp(context, 4), dp(context, 4), dp(context, 10))
+        }
+        val useBtn = Button(context).apply {
+            text = "Use this login"
+            setTextColor(Color.WHITE)
+            setTypeface(null, Typeface.BOLD)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+        }
+        val cancelBtn = Button(context).apply {
+            text = "Cancel"
+            setTextColor(textColor)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+        }
+        val buttonRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.END
+            setPadding(0, dp(context, 10), 0, 0)
+            addView(cancelBtn)
+            addView(useBtn)
+        }
+        val root = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(sheetColor)
+            setPadding(dp(context, 14), dp(context, 14), dp(context, 14), dp(context, 14))
+            addView(statusText)
+            addView(web, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+            addView(buttonRow)
+        }
+        val dialog = AlertDialog.Builder(context, android.R.style.Theme_Material_Dialog)
+            .setView(root)
+            .create()
+        useBtn.setOnClickListener {
+            val cookie = runCatching { CookieManager.getInstance().getCookie(SHOWBOX_HOST) }.getOrNull()
+            val token = uiTokenFromCookie(cookie)
+            if (token == null) {
+                statusText.text = "Not signed in yet - finish signing in first."
+                return@setOnClickListener
+            }
+            onToken(token)
+            dialog.dismiss()
+        }
+        cancelBtn.setOnClickListener { dialog.dismiss() }
+        dialog.setOnDismissListener { runCatching { web.destroy() } }
+        dialog.window?.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Color.parseColor("#0F0F11")))
+        dialog.show()
+        dialog.window?.apply {
+            setLayout(
+                (context.resources.displayMetrics.widthPixels * 0.92).toInt(),
+                (context.resources.displayMetrics.heightPixels * 0.82).toInt(),
+            )
+        }
     }
 
     @Volatile
@@ -461,12 +572,22 @@ object Settings {
             "ShowBox Token (FebBox)", if (showboxSaved) "Saved" else "Not set", showboxSaved,
         )
         val showboxDesc = TextView(context).apply {
-            text = "Optional - enables the ShowBox server. Paste your febbox.com `ui` cookie value (or the whole cookie)."
+            text = "Optional - enables the ShowBox server. Tap Get Token to sign in, or paste the febbox.com `ui` cookie value yourself."
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             setTextColor(hintColor)
             setPadding(0, 0, 0, dp(6))
             showboxSection.addView(this)
         }
+        val showboxChipRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.END
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { bottomMargin = dp(6) }
+        }
+        val showboxGetChip = actionChip("Get Token", chipYellow, chipInk)
+        showboxChipRow.addView(showboxGetChip)
+        showboxSection.addView(showboxChipRow)
         val showboxKeyInput = EditText(context).apply {
             setText(showboxToken().orEmpty())
             setHint("ui token / cookie...")
@@ -608,6 +729,14 @@ object Settings {
                 dialog.dismiss()
             } else {
                 tmdbKeyInput.error = tmdbKeyProblem(typed) ?: "Key looks too short"
+            }
+        }
+        showboxGetChip.setOnClickListener {
+            openShowboxLogin(context) { token ->
+                showboxKeyInput.setText(token)
+                saveShowbox(context, token)
+                showboxStatusText.text = "Token captured - ShowBox active."
+                Toast.makeText(context, "Signed in - token saved", Toast.LENGTH_SHORT).show()
             }
         }
         showboxClearBtn.setOnClickListener {

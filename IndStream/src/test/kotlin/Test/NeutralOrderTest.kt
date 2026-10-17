@@ -241,7 +241,7 @@ class NeutralOrderTest {
 
     @Test
     fun emit_declaredHindiUrl_labelsHindi_unknownStaysUnknown() = runBlocking {
-        // Host-declared language (". . . hindi. . . " CDN path) → "(Hindi)" tag.
+        // Host-declared language (". . . hindi. . . " CDN path) → "(🇮🇳 Hindi)" tag.
         val declared = mutableListOf<com.lagradost.cloudstream3.utils.ExtractorLink>()
         StreamEngine.emit(
             listOf(stream("h1", url = "https://cdn.example/hindi/title/file.mp4", isM3u8 = false, qualityHint = 720)),
@@ -249,7 +249,7 @@ class NeutralOrderTest {
             probeManifests = false,
         )
         assertEquals(1, declared.size)
-        assertTrue(declared[0].name.contains("(Hindi)"))
+        assertTrue(declared[0].name.contains("(\uD83C\uDDEE\uD83C\uDDF3 Hindi)"))
         // No declaration anywhere → honest "Unknown", never a guess.
         val unknown = mutableListOf<com.lagradost.cloudstream3.utils.ExtractorLink>()
         StreamEngine.emit(

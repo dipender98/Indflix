@@ -2,6 +2,7 @@ package Test
 
 import com.indstream.ServerFarm
 import com.indstream.ServerIdType
+import com.indstream.Settings
 import com.indstream.StreamEngine
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -167,5 +168,23 @@ class ServerBingrShowboxTest {
         for (id in disabled) assertNull(ServerFarm.allServers.firstOrNull { it.id == id })
         assertNotNull(ServerFarm.allServers.firstOrNull { it.id == "bingr" })
         assertNotNull(ServerFarm.allServers.firstOrNull { it.id == "showbox" })
+    }
+
+    @Test
+    fun uiTokenFromCookie_pullsUiValue() {
+        assertEquals("abc123", Settings.uiTokenFromCookie("ci=x; ui=abc123; theme=dark"))
+        assertEquals("abc123", Settings.uiTokenFromCookie("ui=abc123"))
+        assertEquals("eyJx.y.z", Settings.uiTokenFromCookie("UI=eyJx.y.z"))
+        assertEquals("tok=late", Settings.uiTokenFromCookie("ui=tok=late"))
+        assertNull(Settings.uiTokenFromCookie("ci=x; theme=dark"))
+        assertNull(Settings.uiTokenFromCookie("ui="))
+        assertNull(Settings.uiTokenFromCookie(null))
+        assertNull(Settings.uiTokenFromCookie(""))
+    }
+
+    @Test
+    fun showboxLogin_targetsHost() {
+        assertTrue(Settings.SHOWBOX_LINK.startsWith("https://"))
+        assertEquals("https://www.febbox.com", Settings.SHOWBOX_HOST)
     }
 }
