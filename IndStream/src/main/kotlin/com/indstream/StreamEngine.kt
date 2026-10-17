@@ -18,13 +18,10 @@ import org.jsoup.Jsoup
 /** Federated resolution engine. 1. Fans out to healthy embed servers in parallel. 2. */
 object StreamEngine {
 
-    // One slot per host: the live farm is =16 servers, so a smaller cap only made fast resolvers QUEUE behind slow.
-// multi-chain hosts (MovieBox /.
+    // One slot per host: a small cap made fast resolvers QUEUE behind slow multi-chain hosts (MovieBox / CastleTv).
     // Socket guard only (the farm itself is uncapped); sub-fan-outs add up.
     private const val MAX_CONCURRENT = 32
     private const val MAX_UNWRAP = 4
-    // Delay before a failed VidNest sub-server gets its single retry.
-    private const val VIDNEST_SUB_RETRY_DELAY_MS = 1_500L
 
     /** MovieBox bearer token cache (): the x-user token lives for hours; caching it removes one serial round-trip. */
     @Volatile private var movieBoxToken: String? = null
@@ -92,28 +89,6 @@ object StreamEngine {
         return servers
     }
 
-    /** Dual-ID race helper (, ): run several id shapes for one host in parallel; the FIRST non-empty result wins and the. losing attempts are cancelled. */
-    private suspend fun raceFirst(vararg blocks: suspend () -> List<RawStream>): List<RawStream> {
-        if (blocks.isEmpty()) return emptyList()
-        if (blocks.size == 1) return runCatching { blocks[0]() }.onFailure { if (it is kotlinx.coroutines.CancellationException) throw it }.getOrDefault(emptyList())
-        return coroutineScope {
-            val winner = CompletableDeferred<List<RawStream>>()
-            val pending = java.util.concurrent.atomic.AtomicInteger(blocks.size)
-            val jobs = blocks.map { block ->
-                launch {
-                    val r = runCatching { block() }.onFailure { if (it is kotlinx.coroutines.CancellationException) throw it }.getOrDefault(emptyList())
-                    if (r.isNotEmpty()) winner.complete(r)
-                    else if (pending.decrementAndGet() == 0 && !winner.isCompleted) {
-                        winner.complete(emptyList())
-                    }
-                }
-            }
-            val result = winner.await()
-            jobs.forEach { it.cancel() }
-            result
-        }
-    }
-
     /** Resolve every server, invoking with a server's results the instant that server finishes. The whole farm launches in. parallel, so completion order. */
     suspend fun resolveRealtime(
         tmdbId: Int, type: String, season: Int = -1, episode: Int = -1,
@@ -134,7 +109,7 @@ object StreamEngine {
         val servers = selectServers(tmdbId, type, season, episode).filter { spec ->
             if (tmdbOnly) spec.idType != ServerIdType.IMDB
             else if (!imdbOnly) true
-            else spec.idType == ServerIdType.IMDB || spec.id == "vidup" || spec.id == "vidcore"
+            else spec.idType == ServerIdType.IMDB
         }
         if (servers.isEmpty()) return
         val sem = Semaphore(MAX_CONCURRENT)
@@ -154,7 +129,7 @@ object StreamEngine {
 // strike the breaker: a shape.
                         var crashed: Throwable? = null
                         val outcome = withTimeoutOrNull(spec.timeoutSec * 1000L) {
-                            runCatching { resolveOne(spec, tmdbId, serverImdb, type, season, episode, imdbIdProvider) }
+                            runCatching { resolveOne(spec, tmdbId, serverImdb, type, season, episode) }
                                 .onFailure { t -> if (t !is CleanMissException) crashed = t }
                                 .recover { t ->
                                     if (t is CleanMissException) {
@@ -204,8 +179,7 @@ object StreamEngine {
         val emitted = java.util.Collections.synchronizedSet(HashSet<String>())
         if (streams.isEmpty()) return emitted
 
-        // Replay liveness sweep (F9, ): background/replay mode feeds FastStartCache links that may have gone stale � aoneroom.
-// `?sign=` and vidnest tokens.
+        // Replay liveness sweep (F9): background/replay mode feeds FastStartCache links that may have gone stale (aoneroom ?sign=).
         var liveSet = streams
         if (!probeManifests) {
             val dead = withTimeoutOrNull(3000L) {
@@ -237,8 +211,7 @@ object StreamEngine {
             val tagLabel: String,
             val fetchMs: Long? = null,
         )
-        // Pre-resolve CONCURRENTLY: serial map added up to 4s PER unprobed HLS master (VaPlayer/VidUp/VidCore arrive without.
-// height) BEFORE the first link.
+        // Pre-resolve CONCURRENTLY: serial map added up to 4s per unprobed HLS master (VaPlayer/VidCore arrive without height) before the first link.
         val preResolved = coroutineScope {
             ranked.map { raw ->
                 async {
@@ -398,8 +371,6 @@ object StreamEngine {
         type: String,
         season: Int,
         episode: Int,
-        /** Lazy IMDB lookup for the dual-ID race (vidup/vidcore accept both id shapes). Null = no provider (prewarm path passes. a direct id). */
-        imdbIdProvider: (suspend () -> String?)? = null,
     ): List<RawStream> {
         val start = System.currentTimeMillis()
         // RC-H (): a MISSING IMDB id is a TMDB-lookup problem (cold cache + 3s cap, or the transient 429s the last commit.
@@ -424,12 +395,6 @@ object StreamEngine {
             failServer(spec, "vidlink returned no streams")
             return emptyList()
         }
-        if (spec.id == "myflixer-hindi") {
-            val result = resolveMyFlixerHindi(spec, tmdbId, imdbId, type, season, episode)
-            if (result.isNotEmpty()) { okServer(spec, start, "myflixer-hindi", result.size); return result }
-            failServer(spec, "myflixer-hindi returned no streams")
-            return emptyList()
-        }
         if (spec.id == "moviebox") {
             val result = resolveMovieBox(spec, tmdbId, imdbId, type, season, episode)
             if (result.isNotEmpty()) { okServer(spec, start, "moviebox", result.size); return result }
@@ -441,12 +406,6 @@ object StreamEngine {
             failServer(spec, "moviebox returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
             return emptyList()
         }
-        if (spec.id == "primesrc") {
-            val result = resolvePrimeSrc(spec, tmdbId, imdbId, type, season, episode)
-            if (result.isNotEmpty()) { okServer(spec, start, "primesrc", result.size); return result }
-            failServer(spec, "primesrc returned no streams")
-            return emptyList()
-        }
 
         if (spec.id == "vaplayer") {
             val result = resolveVaplayer(spec, tmdbId, imdbId, type, season, episode)
@@ -454,28 +413,10 @@ object StreamEngine {
             failServer(spec, "vaplayer returned no streams")
             return emptyList()
         }
-        if (spec.id == "vidrock" || spec.id == "vidrock-net") {
-            val result = resolveVidrock(spec, tmdbId, type, season, episode)
-            if (result.isNotEmpty()) { okServer(spec, start, spec.id, result.size); return result }
-            failServer(spec, "${spec.id} returned no streams")
-            return emptyList()
-        }
         if (spec.id == "onetouchtv") {
             val result = resolveOneTouchTv(spec, tmdbId, type, season, episode)
             if (result.isNotEmpty()) { okServer(spec, start, "onetouchtv api", result.size); return result }
             failServer(spec, "onetouchtv returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
-            return emptyList()
-        }
-        if (spec.id == "vidnest") {
-            val (result, answered) = resolveVidnest(spec, tmdbId, type, season, episode)
-            if (result.isNotEmpty()) { okServer(spec, start, "vidnest fan-out", result.size); return result }
-            if (answered == 0) {
-                failServer(spec, "vidnest: no sub-server answered (host down)")
-            } else {
-                // Soft-fail (, MovieBox): sub-servers answered but none carry this title � a title-level miss, not a host failure.
-// VidNest flaps 502s per.
-                failServer(spec, "vidnest returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
-            }
             return emptyList()
         }
         if (spec.id == "videm") {
@@ -494,28 +435,6 @@ object StreamEngine {
             val result = resolve8Stream(spec, imdbId, type)
             if (result.isNotEmpty()) { okServer(spec, start, "8stream api", result.size); return result }
             failServer(spec, "8stream returned no streams")
-            return emptyList()
-        }
-        if (spec.id == "vidup" || spec.id == "vidcore") {
-            val variant = spec.id
-            // Dual-ID race (): both hosts accept TMDB AND IMDB ids in the URL path. The TMDB arm starts at t=0; the IMDB arm joins.
-// the race as soon as the id.
-            val arms = mutableListOf<suspend () -> List<RawStream>>()
-            if (tmdbId > 0) arms.add { resolveEncDecPlayer(spec, tmdbId.toString(), type, season, episode, variant) }
-            if (!imdbId.isNullOrBlank()) {
-                val fixed = imdbId
-                arms.add { resolveEncDecPlayer(spec, fixed, type, season, episode, variant) }
-            } else if (imdbIdProvider != null) {
-                val provider = imdbIdProvider
-                arms.add {
-                    val iid = provider.invoke()
-                    if (iid.isNullOrBlank()) emptyList<RawStream>()
-                    else resolveEncDecPlayer(spec, iid, type, season, episode, variant)
-                }
-            }
-            val result = raceFirst(*arms.toTypedArray())
-            if (result.isNotEmpty()) { okServer(spec, start, "$variant enc-dec", result.size); return result }
-            failServer(spec, "$variant returned no streams (tmdb${if (arms.size > 1) "+imdb" else ""} raced)")
             return emptyList()
         }
         if (spec.id == "allmovieland") {
@@ -563,6 +482,20 @@ object StreamEngine {
             failServer(spec, "vidcore api returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
             return emptyList()
         }
+        if (spec.id == "bingr") {
+            val result = resolveBingr(spec, tmdbId, type, season, episode)
+            if (result.isNotEmpty()) { okServer(spec, start, "bingr cascade", result.size); return result }
+            failServer(spec, "bingr returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
+            return emptyList()
+        }
+        if (spec.id == "showbox") {
+            val result = resolveShowBox(spec, imdbId, type, season, episode)
+            if (result.isNotEmpty()) { okServer(spec, start, "showbox share chain", result.size); return result }
+            // Dormant without a saved token and title-level misses alike: a clean
+            // miss, never a breaker trip.
+            failServer(spec, "showbox returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
+            return emptyList()
+        }
 
         // 0. JSON API branch (api. shows. st style): parse JSON, take source. url + source. qualities + subtitles.
         if (spec.isJsonApi) {
@@ -602,7 +535,7 @@ object StreamEngine {
             Log.d("IndStream", "${spec.id}: no direct urls in page")
         }
 
-        // 4. CloudStream extractor registry (VidSrc, 2embed, embed. su, MyFlixer, etc. ).
+        // 4. CloudStream extractor registry (farm-specific extractors and generic embed resolvers).
         val regLinks = mutableListOf<ExtractorLink>()
         val regOk = runCatching {
             loadExtractor(url = embedUrl, referer = referer, subtitleCallback = { }, callback = { regLinks.add(it) })
@@ -684,7 +617,7 @@ object StreamEngine {
         HealthMonitor.recordSuccess(spec.id)
     }
 
-    /** DECLARED-language hint (, NEVER guess): a language counts only when the host itself declares it � a server brand. that names it ("MyFlixer Hindi". */
+    /** DECLARED-language hint (never guess): a language counts only when the host itself declares it - e.g. a server brand that names it. */
     private fun declaredLanguageHint(raw: RawStream): String? =
         ManifestKit.languageFromName(raw.serverName, raw.url)
 
@@ -850,170 +783,6 @@ object StreamEngine {
             )
         )
     }
-
-
-    /** MyFlixer Hindi resolver (hindi. myflixerapi. com). state: the HTML embed pages sit behind an anti-bot wall and the. old /ajax/get_stream_link. */
-    private suspend fun resolveMyFlixerHindi(
-        spec: ServerSpec,
-        tmdbId: Int?,
-        imdbId: String?,
-
-        type: String,
-        season: Int,
-        episode: Int,
-    ): List<RawStream> {
-        val id = imdbId ?: run {
-            Log.w("MyFlixerHindi", "IMDB id required (host is IMDB-keyed), got none")
-            return emptyList()
-        }
-        val referer = "https://hindi.myflixerapi.com/"
-        val isMovie = type == "movie"
-
-        // 1. Status API hit/miss (no captcha) ----------------------------- Movies: one call.
-        val statusUrls = if (isMovie) {
-            listOf("https://hindi.myflixerapi.com/api/status?imdb=$id&type=movie")
-        } else {
-            listOf(
-                "https://hindi.myflixerapi.com/api/status?imdb=$id&type=tv&sea=$season&epi=$episode",
-                "https://hindi.myflixerapi.com/api/status?imdb=$id&type=tv",
-                "https://hindi.myflixerapi.com/api/status?imdb=$id&type=movie",
-            )
-        }
-        var inLibrary = false
-        for (statusUrl in statusUrls) {
-            val statusText = withTimeoutOrNull(6_000L) {
-                runCatching { app.get(statusUrl, timeout = 6, headers = okHeaders(referer)).text }.getOrNull()
-            }
-            if (statusText == null) {
-                // Network-level failure on the status API = host problem.
-                failServer(spec, "status api unreachable: $statusUrl")
-                return emptyList()
-            }
-            val status = runCatching { org.json.JSONObject(statusText).optString("status", "") }.getOrNull()
-            when (status) {
-                "success" -> { inLibrary = true; break }
-                "failed" -> { /* try next fallback (series) or clean miss. */ }
-                else -> failServer(spec, "status api unexpected body: ${statusText.take(120)}")
-            }
-        }
-        if (!inLibrary) {
-            Log.d("MyFlixerHindi", "$id not in library (clean miss, no breaker trip)")
-            return emptyList()
-        }
-        Log.d("MyFlixerHindi", "$id in library � attempting embed chain")
-
-        // 2. Embed page, both domains ------------------------------------ The hindi. subdomain is robot-walled for plain.
-// clients () but the MAIN.
-        val mobileHeaders = mapOf(
-            "User-Agent" to "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
-            "Referer" to "https://myflixerapi.com/",
-        )
-        val domains = listOf("hindi.myflixerapi.com", "myflixerapi.com")
-        val embedPaths = if (isMovie || season <= 0)
-            listOf("/embed/$id")
-        else listOf("/embed/series?imdb=$id&sea=$season&epi=$episode", "/embed/$id/$season/$episode")
-        runCatching {
-            withTimeoutOrNull(5_000L) { app.get("https://myflixerapi.com/", timeout = 5, headers = okHeaders()) }
-        }
-
-        var embedDomain: String? = null
-        var embedText: String? = null
-        outer@ for (domain in domains) {
-            for (path in embedPaths) {
-                val url = "https://$domain$path"
-                Log.d("MyFlixerHindi", "Fetching $url")
-                val text = withTimeoutOrNull(8_000L) {
-                    runCatching { app.get(url, timeout = 8, headers = mobileHeaders).text }.getOrNull()
-                } ?: continue
-                // Genuine library miss page (checked BEFORE the wall � the miss page also carries the robot banner in its footer).
-                if (text.contains("movie-not-found") || text.contains("Movie or Episode Not Found", ignoreCase = true)) {
-                    Log.d("MyFlixerHindi", "$id not in library (embed page miss)")
-                    return emptyList()
-                }
-                if (text.contains("not a robot", ignoreCase = true)) {
-                    Log.d("MyFlixerHindi", "$domain walled � trying next domain/path")
-                    continue
-                }
-                if (Regex("""data-movie-id="([^"]+)"""").containsMatchIn(text)) {
-                    embedDomain = domain
-                    embedText = text
-                    break@outer
-                }
-                Log.d("MyFlixerHindi", "$domain$path: no data-movie-id (${text.length}B)")
-            }
-        }
-        val rawText = embedText ?: run {
-            failServer(spec, "embed blocked on all domains (wall) or no data-movie-id")
-            return emptyList()
-        }
-        val embedBase = "https://$embedDomain"
-
-        val movieId = Regex("""data-movie-id="([^"]+)"""").find(rawText)?.groupValues?.get(1)
-        if (movieId.isNullOrBlank()) {
-            failServer(spec, "no data-movie-id in embed page (${rawText.length}B)")
-            return emptyList()
-        }
-        // Server list: <a class="server" data-id="8zj">Server-Videasy</a> �
-        // capture the friendly label for "MyFlixer Hindi {Name}" link naming;
-        // fall back to bare data-ids when labels are absent.
-        val labeledServers = Regex("""data-id="([^"]+)"[^>]*>\s*Server-([^<]+)""").findAll(rawText)
-            .mapNotNull { m ->
-                val sid = m.groupValues[1]
-                val label = m.groupValues[2].trim().takeIf { it.isNotBlank() } ?: return@mapNotNull null
-                sid to label
-            }
-            .toMap()
-        val serverIds = if (labeledServers.isNotEmpty()) labeledServers.keys.toList()
-        else Regex("""class="server dropdown-item" data-id="([^"]+)"""").findAll(rawText)
-            .mapNotNull { it.groupValues.getOrNull(1) }
-            .toList()
-        if (serverIds.isEmpty()) {
-            failServer(spec, "no server data-ids in embed page")
-            return emptyList()
-        }
-        Log.d("MyFlixerHindi", "movieId=$movieId servers=$serverIds labels=$labeledServers")
-
-        // -- 3. AJAX chain on the domain that rendered the embed page ------
-        val ajaxHeaders = mobileHeaders.toMutableMap().apply {
-            put("X-Requested-With", "XMLHttpRequest")
-        }
-        data class FlixerLink(val url: String, val label: String?)
-        val links = mutableListOf<FlixerLink>()
-        for (sid in serverIds) {
-            val ajaxUrl = "$embedBase/ajax/get_stream_link?id=$sid&movie=$movieId&is_init=false&captcha="
-            val jsonText = withTimeoutOrNull(6_000L) {
-                runCatching { app.get(ajaxUrl, timeout = 6, headers = ajaxHeaders).text }.getOrNull()
-            } ?: continue
-            val json = runCatching { org.json.JSONObject(jsonText) }.getOrNull() ?: continue
-            if (!json.optBoolean("success", false)) continue
-            val link = json.optJSONObject("data")?.optString("link")?.takeIf { it.isNotBlank() } ?: continue
-            Log.d("MyFlixerHindi", "server=$sid link=$link")
-            links.add(FlixerLink(link, labeledServers[sid]))
-        }
-        if (links.isEmpty()) {
-            failServer(spec, "no stream links from any server (ajax may be retired)")
-            return emptyList()
-        }
-
-        // Resolve each link through the standard pipeline (unwrap iframes,
-        // extractor registry, harvest). The host is Hindi-flagged so results
-        // rank as Hindi audio; sub-server label names the link.
-        val out = mutableListOf<RawStream>()
-        for (fl in links) {
-            val resolved = resolveEmbedLink(spec, fl.url, referer) ?: continue
-            out += resolved.map {
-                if (fl.label.isNullOrBlank()) it
-                else it.copy(serverName = "${spec.name} ${fl.label}".trim())
-            }
-        }
-        if (out.isNotEmpty()) {
-            okServer(spec, System.currentTimeMillis(), "myflixer-hindi ajax", out.size)
-        } else {
-            failServer(spec, "links resolved but produced no streams")
-        }
-        return out
-    }
-
 
     /** Fetch (and cache) the MovieBox bearer token. The token lives for hours (MOVIEBOX_TOKEN_TTL_MS). */
     private suspend fun fetchMovieBoxBearer(forceRefresh: Boolean): String? {
@@ -1425,111 +1194,6 @@ object StreamEngine {
         return out
     }
 
-    /** PrimeSrc resolver (primesrc. me, ). IMDB-keyed, 2-step: /api/v1/s?imdb={id}&type=movie|tv returns info + servers. ({name, key, file_name. */
-    private suspend fun resolvePrimeSrc(
-        spec: ServerSpec,
-        tmdbId: Int?,
-        imdbId: String?,
-        type: String,
-        season: Int,
-        episode: Int,
-    ): List<RawStream> {
-        val imdb = imdbId ?: run { Log.w("PrimeSrc", "IMDB id required"); return emptyList() }
-        val referer = "https://primesrc.me/"
-        val apiUrl = if (type == "movie") "https://primesrc.me/api/v1/s?imdb=$imdb&type=movie"
-        else "https://primesrc.me/api/v1/s?imdb=$imdb&type=tv&season=$season&episode=$episode"
-        Log.d("PrimeSrc", "GET $apiUrl")
-
-        val jsonText = withTimeoutOrNull((spec.timeoutSec - 2).coerceAtLeast(4) * 1000L) {
-            runCatching { app.get(apiUrl, timeout = spec.timeoutSec.toLong(), headers = okHeaders(referer)).text }.getOrNull()
-        } ?: run { Log.w("PrimeSrc", "api fetch failed"); return emptyList() }
-        val root = runCatching { org.json.JSONObject(jsonText) }.getOrElse {
-            Log.w("PrimeSrc", "not JSON"); return emptyList()
-        }
-        val servers = root.optJSONArray("servers")
-            ?: run { Log.w("PrimeSrc", "no servers array"); return emptyList() }
-
-        val out = mutableListOf<RawStream>()
-        for (i in 0 until servers.length()) {
-            val sv = servers.optJSONObject(i) ?: continue
-            val key = sv.optString("key").takeIf { it.isNotBlank() } ?: continue
-            val name = sv.optString("name").ifBlank { "PrimeSrc" }
-            val fileName = sv.optString("file_name", "")
-            val lang = sv.optString("audio_language", "")
-            val isHindi = lang.equals("hi", ignoreCase = true)
-            val resolved = withTimeoutOrNull(6_000L) {
-                runCatching {
-                    app.get("https://primesrc.me/api/v1/l?key=$key",
-                        timeout = 6, headers = okHeaders(referer)).text
-                }.getOrNull()
-            } ?: continue
-            val link = runCatching { org.json.JSONObject(resolved).optString("link", "") }
-                .getOrNull()?.takeIf { it.isNotBlank() } ?: continue
-            Log.d("PrimeSrc", "server=$name lang=$lang link=$link")
-            val streams = resolveEmbedLink(spec, link, referer,
-                audioPriority = if (isHindi) 4 else 2,
-                audioLabel = if (isHindi) "Hindi" else "Original",
-            ) ?: continue
-            // Sub-server name distinguishes same-host duplicates; the file name carries the real resolution ("� 1080p �") when the.
-// player link itself reports none.
-            val height = Regex("""(\d{3,4})p""", RegexOption.IGNORE_CASE).find(fileName)
-                ?.groupValues?.get(1)?.toIntOrNull() ?: 0
-            out += streams.map {
-                it.copy(
-                    serverName = "${spec.name} $name".trim(),
-                    qualityHint = maxOf(it.qualityHint, height),
-                )
-            }
-        }
-        Log.d("PrimeSrc", "got ${out.size} streams")
-        return out
-    }
-
-    /** Resolve one player/stream link through the multi-strategy pipeline (unwrap? harvest? extractor registry). Returns. null on failure. */
-    private suspend fun resolveEmbedLink(
-        spec: ServerSpec, link: String, referer: String,
-        audioPriority: Int = 4, audioLabel: String = "Hindi",
-    ): List<RawStream>? {
-        val rawText = withTimeoutOrNull(8_000L) {
-            runCatching { app.get(link, timeout = 8, headers = okHeaders(referer)).text }.getOrNull()
-        } ?: return null
-        val (unwrapped, unwrappedUrl) = unwrapPages(rawText, link, spec.timeoutSec)
-
-        // Direct stream URLs in the page/JS config.
-        val direct = harvestUrls(unwrapped) + harvestJsUrls(unwrapped)
-        if (direct.isNotEmpty()) {
-            return direct.map { url ->
-                val dash = url.contains(".mpd", ignoreCase = true)
-                RawStream(
-                    serverId = spec.id, serverName = spec.name,
-                    url = url, isM3u8 = url.contains(".m3u8", ignoreCase = true) || dash,
-                    referer = referer, audioPriority = audioPriority, audioLabel = audioLabel,
-                    isDash = dash,
-                )
-            }
-        }
-
-        // CloudStream extractor registry on the inner player host.
-        val regLinks = mutableListOf<ExtractorLink>()
-        runCatching {
-            loadExtractor(url = unwrappedUrl, referer = link,
-                subtitleCallback = { }, callback = { regLinks.add(it) })
-        }
-        if (regLinks.isNotEmpty()) {
-            return regLinks.map { l ->
-                val dash = l.type == ExtractorLinkType.DASH || l.url.contains(".mpd", ignoreCase = true)
-                RawStream(
-                    serverId = spec.id, serverName = spec.name,
-                    url = l.url, isM3u8 = l.type == ExtractorLinkType.M3U8 || dash,
-                    referer = l.referer, qualityHint = l.quality,
-                    audioPriority = audioPriority, audioLabel = audioLabel,
-                    isDash = dash,
-                )
-            }
-        }
-        return null
-    }
-
         /**
      * VaPlayer resolver: IMDB-keyed JSON
      * API → `data.stream_urls[]` are DIRECT HLS master playlists (up to
@@ -1781,13 +1445,6 @@ object StreamEngine {
         }?.canonical
     }
 
-    /**
-     * VidRock resolver: TMDB-keyed JSON
-     * API → `{serverName: {url (AES-GCM b64url), language, type}}`. URLs are
-     * decrypted locally (static key):
-     * 12-byte nonce prefix + ciphertext+tag, AES/GCM/NoPadding.
-     * `language` field marks "Hindi" when the server carries a Hindi dub.
-     */
     /**
      * VixSrc resolver: TMDB-keyed JSON hands an embed
      * path; the embed page carries token/expires/playlist, master is HLS.
@@ -2227,347 +1884,230 @@ object StreamEngine {
         return out
     }
 
-    private suspend fun resolveVidrock(
-        spec: ServerSpec,
-        tmdbId: Int?,
-        type: String,
-        season: Int,
-        episode: Int,
-    ): List<RawStream> {
-        val id = tmdbId ?: return emptyList()
-        // Registry-driven: the failover mirror shares the payload shape and key, only the host differs.
-        val apiUrl = if (type == "movie") ServerFarm.buildMovieUrl(spec, id.toString())
-        else ServerFarm.buildTvUrl(spec, id.toString(), season, episode)
-        val origin = (spec.referer ?: apiUrl).trimEnd('/')
-        val apiReferer = spec.referer ?: "$origin/"
-        val headers = mapOf(
-            "User-Agent" to HttpKit.userAgent,
-            "Origin" to origin,
-            "Referer" to apiReferer,
-        )
-        Log.d("VidRock", "GET $apiUrl")
+    /** Bingr live srv ids in the site's cascade order; each is an independent
+     *  ladder, so the resolver tries them until enough sources answer. */
+    internal val BINGR_SRVS = listOf("s40", "s70", "s80", "s81", "s62", "s63", "s30", "s60", "s61", "s31", "s3")
 
-        val jsonText = withTimeoutOrNull(10_000L) {
-            runCatching { app.get(apiUrl, timeout = 10, headers = headers).text }.getOrNull()
-        } ?: run { Log.w("VidRock", "no API response"); return emptyList() }
-        val root = runCatching { org.json.JSONObject(jsonText) }.getOrElse {
-            Log.w("VidRock", "non-JSON response: ${safeSnippet(jsonText)}")
-            return emptyList()
-        }
+    /** One Bingr source entry (url + host-declared quality/label/audio). */
+    internal data class BingrSource(val url: String, val quality: String, val label: String, val language: String)
 
-        val out = mutableListOf<RawStream>()
-        val names = root.names() ?: return emptyList()
-        for (i in 0 until names.length()) {
-            val serverName = names.optString(i)
-            val sd = root.optJSONObject(serverName) ?: continue
-            val enc = sd.optString("url").takeIf { it.isNotBlank() && it != "error" && it != "null" } ?: continue
-            val decrypted = decryptVidrockUrl(enc) ?: run {
-                Log.w("VidRock", "decrypt failed for $serverName"); continue
-            }
-            val lang = sd.optString("language").ifBlank { "" }
-            val isHindi = lang.contains("hindi", ignoreCase = true)
-            // Keep the host sub-server in the name (Nova/Atlas/Luna/...).
-            out += RawStream(
-                serverId = spec.id, serverName = "${spec.name} $serverName".trim(),
-                url = decrypted,
-                isM3u8 = decrypted.contains(".m3u8", true) || sd.optString("type") == "hls",
-                referer = apiReferer,
-                qualityHint = 0,
-                audioPriority = if (isHindi) 4 else 1,
-                audioLabel = lang.ifBlank { "" },
-                extraHeaders = mapOf(
-                    "Referer" to origin,
-                    "Origin" to origin,
-                ),
+    /** Bingr stream request body: season/episode live INSIDE query. Pure. */
+    internal fun bingrBody(
+        srv: String, type: String, id: String, title: String, year: String, season: Int, episode: Int,
+    ): Map<String, Any?> {
+        val query = LinkedHashMap<String, Any?>()
+        query["title"] = title
+        query["year"] = year
+        if (type == "tv") { query["season"] = season; query["episode"] = episode }
+        return mapOf("srv" to srv, "t" to (if (type == "tv") "tv" else "movie"), "id" to id, "query" to query)
+    }
+
+    /** Parse the sources[] array of a Bingr /stream response. Pure. */
+    internal fun bingrSources(jsonText: String): List<BingrSource> {
+        val root = runCatching { org.json.JSONObject(jsonText) }.getOrNull() ?: return emptyList()
+        val arr = root.optJSONArray("sources") ?: return emptyList()
+        val out = ArrayList<BingrSource>(arr.length())
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val url = o.optString("url").takeIf { it.startsWith("http") } ?: continue
+            out += BingrSource(
+                url = url,
+                quality = o.optString("quality", ""),
+                label = o.optString("label", ""),
+                language = o.optString("language", ""),
             )
         }
-        Log.d("VidRock", "got ${out.size} servers (${out.map { it.audioLabel }.distinct()})")
         return out
     }
 
-    /** VidRock AES-GCM decrypt: 12-byte nonce prefix, static 32-byte hex key. */
-    internal fun decryptVidrockUrl(payload: String): String? = runCatching {
-        val keyHex = "7f3e9c2a8b5d1f4e6a9c3b7d2e5f8a1c4b6d9e2f5a8c1b4d7e9f2a5c8b1d4e7f"
-        val keyBytes = keyHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
-        val std = payload.replace('-', '+').replace('_', '/')
-        val padded = std + "=".repeat((4 - std.length % 4) % 4)
-        // java.util (not android.util): unit-test safe, identical on device.
-        val data = java.util.Base64.getDecoder().decode(padded)
-        require(data.size > 12 + 16) { "payload too short" }
-        val nonce = data.copyOfRange(0, 12)
-        val cipherText = data.copyOfRange(12, data.size)
-
-        val cipher = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(
-            javax.crypto.Cipher.DECRYPT_MODE,
-            javax.crypto.spec.SecretKeySpec(keyBytes, "AES"),
-            javax.crypto.spec.GCMParameterSpec(128, nonce),
-        )
-        String(cipher.doFinal(cipherText), Charsets.UTF_8)
-    }.getOrNull()
+    /** Height from a host quality/label string ("1080p", "4K"); 0 when unknown. Pure. */
+    internal fun heightHintOf(text: String): Int {
+        Regex("""(\d{3,4})[pP]""").find(text)?.groupValues?.get(1)?.toIntOrNull()?.let { return it }
+        return when {
+            text.contains("4k", true) || text.contains("2160", true) -> 2160
+            text.contains("1440", true) -> 1440
+            else -> 0
+        }
+    }
 
     /**
-     * VidNest resolver (sub-server aggregator):
-     * TMDB-keyed fan-out across the host's sub-servers � moviebox/allmovies/
-     * klikxxi/onehd/vidlink/hollymoviehd/purstream. Movie + tv per sub-server:
-     *   GET {server}/movie/{tmdb} | {server}/tv/{tmdb}/{s}/{e}
-     *   -> {"encrypted":true,"data":"<custom-b64>"} | plain JSON
-     * The custom base64 uses a NON-standard alphabet (see VIDNEST_ALPHABET);
-     * decoded payloads are per-server JSON with DIFFERENT shapes:
-     *   moviebox    {url:[{lang,link,resolution,type}]}
-     *   allmovies   {streams:[{url,language,type}]}
-     *   klikxxi     {sources:[{url,quality,type}]}
-     *   onehd       {url,headers?,subtitles?}
-     *   hollymoviehd{sources:[{file,label,type}]}
-     *   purstream   {sources:[{url,format,name}]}
-     *   vidlink     {data:{stream:{playlist,captions}}}
-     * Sub-servers flap (502) independently: per-sub failures are skipped and
-     * only the ANSWER COUNT is reported so the dispatch can distinguish
-     * "host down" (breaker trip) from "title miss" (clean miss).
-     * All sub-servers launch in parallel; per-sub timeout is half the spec
-     * budget so the fan-out always fits inside the per-server kill.
+     * Bingr resolver: POST {srv,t,id,query} to /stream, cascading the live srv
+     * ids (s40 TV uses the dedicated aphelion-tv GET). Every srv that answers
+     * is merged; a 429/500/empty srv is skipped, never fatal.
      */
-    /** True when a VidNest sub-server body is an ERROR PAGE, not content - the
-     *  host answers 502s with a JSON/HTML body ("Error 502: Bad gateway",
-     *  `error_name`) which earlier code mis-read as "answered" (host up, title
-     *  miss) - the health signal was inverted exactly when users saw VidNest
-     *  present with wrong/dead streams. Pure: string
-     *  only, JVM-testable without org.json. */
-    internal fun vidnestIsErrorPage(text: String?): Boolean {
-        val t = text?.trimStart() ?: return true
-        if (t.isEmpty()) return false
-        if (t.startsWith("<")) return true
-        return t.contains("\"error_name\"", ignoreCase = true) ||
-            t.contains("bad gateway", ignoreCase = true) ||
-            t.contains("\"cloudflare\"", ignoreCase = true) ||
-            t.contains("error 50", ignoreCase = true)
-    }
-
-    /** Retry-worthy sub answers: blank or error pages only. A parsed-but-empty answer is a title miss. Pure. */
-    internal fun vidnestShouldRetry(text: String?): Boolean =
-        text.isNullOrBlank() || vidnestIsErrorPage(text)
-
-    /** Url -> "season|episode" of the request that FIRST surfaced it. The
-     *  VidNest moviebox sub-server answers different (se,ep) paths with the
-     *  IDENTICAL generic file (same file for different episodes) - a stream
-     *  already pinned to another episode is confidently WRONG, so drop it and
-     *  log (never silently play a mismatched episode). Bounded; not persisted. */
-    private val vidnestUrlEpisodes = java.util.concurrent.ConcurrentHashMap<String, String>()
-
-    private suspend fun resolveVidnest(
-        spec: ServerSpec,
-        tmdbId: Int?,
-        type: String,
-        season: Int,
-        episode: Int,
-    ): Pair<List<RawStream>, Int> {
-        val id = tmdbId ?: return emptyList<RawStream>() to 0
-        val subServers = listOf(
-            "moviebox", "allmovies", "klikxxi", "onehd",
-            "hollymoviehd", "purstream", "vidlink",
-        )
-        val subTimeout = ((spec.timeoutSec - 2).coerceAtLeast(6) * 1000L / 2).toLong()
-        val headers = mapOf(
+    private suspend fun resolveBingr(
+        spec: ServerSpec, tmdbId: Int, type: String, season: Int, episode: Int,
+    ): List<RawStream> {
+        val id = tmdbId.toString()
+        val meta = runCatching { TmdbService.fetchMeta(tmdbId, type) }.getOrNull()
+        val title = meta?.name.orEmpty()
+        val year = meta?.year.orEmpty()
+        val api = "https://api.bingr.one/api/stream"
+        val postHeaders = mapOf(
+            "Content-Type" to "application/json",
+            "Origin" to "https://bingr.one",
+            "Referer" to "https://bingr.one/",
             "User-Agent" to HttpKit.userAgent,
-            "Referer" to "https://vidnest.fun/",
-            "Origin" to "https://vidnest.fun",
-            "Accept" to "application/json, text/javascript, */*; q=0.01",
         )
-
-        data class SubResult(val server: String, val answered: Boolean, val streams: List<RawStream>)
-
-        val results = coroutineScope {
-            subServers.map { sub ->
-                async {
-                    val url = if (type == "movie")
-                        "https://new.vidnest.fun/$sub/movie/$id"
-                    else "https://new.vidnest.fun/$sub/tv/$id/$season/$episode"
-                    suspend fun fetchOnce(budgetMs: Long): String? = withTimeoutOrNull(budgetMs) {
-                        runCatching { app.get(url, timeout = budgetMs / 1000, headers = headers).text }
-                            .getOrNull()
+        val out = LinkedHashMap<String, RawStream>()
+        val deadline = System.currentTimeMillis() + 22_000L
+        for (srv in BINGR_SRVS) {
+            if (out.size >= 6 || System.currentTimeMillis() > deadline) break
+            val text = withTimeoutOrNull(6_000L) {
+                runCatching {
+                    if (srv == "s40" && type == "tv") {
+                        app.get("$api/aphelion-tv/$id/$season/$episode", timeout = 6,
+                            headers = okHeaders("https://bingr.one/")).text
+                    } else {
+                        app.post(api, timeout = 6, headers = postHeaders,
+                            json = bingrBody(srv, type, id, title, year, season, episode)).text
                     }
-                    var raw = fetchOnce(subTimeout)
-                    if (vidnestShouldRetry(raw)) {
-                        // Subs 502 transiently on cold starts: one delayed retry before counting it down.
-                        delay(VIDNEST_SUB_RETRY_DELAY_MS)
-                        raw = fetchOnce((subTimeout / 2).coerceAtLeast(2_000L))
-                        if (!vidnestShouldRetry(raw)) Log.d("VidNest", "$sub: retry answered")
-                    }
-                    if (raw.isNullOrBlank()) return@async SubResult(sub, answered = false, streams = emptyList())
-                    if (vidnestIsErrorPage(raw)) {
-                        // 502 "Bad gateway" pages (JSON or HTML) are a host-DOWN
-                        // answer, not a title miss: keep the answered=false health
-                        // semantics (breaker sees the flap, aggregate can still
-                        // trip when the WHOLE host is down).
-                        Log.w("VidNest", "$sub: error page, counted as down: ${safeSnippet(raw)}")
-                        return@async SubResult(sub, answered = false, streams = emptyList())
-                    }
-                    val decoded = runCatching {
-                        val root = org.json.JSONObject(raw)
-                        if (root.optBoolean("encrypted") && !root.isNull("data")) {
-                            val payload = root.optString("data")
-                            if (payload.isBlank()) {
-                                Log.w("VidNest", "$sub: encrypted but empty data payload")
-                                return@runCatching null
-                            }
-                            val json = decodeVidnestPayload(payload)
-                            if (json == null) {
-                                Log.w("VidNest", "$sub: base64 decode failed (${payload.length} chars, preview=${safeSnippet(payload)})")
-                                return@runCatching null
-                            }
-                            org.json.JSONObject(json)
-                        } else {
-                            root
-                        }
-                    }.getOrNull() ?: return@async SubResult(sub, answered = true, streams = emptyList())
-                    SubResult(sub, answered = true, streams = parseVidnestSub(sub, decoded, spec))
-                }
-            }.map { it.await() }
-        }
-
-        val answered = results.count { it.answered }
-        var streams = results.flatMap { it.streams }
-            // URL dedupe: vidlink sub-server can mirror what the dedicated
-            // VidLink spec already emits � the farm dedupes later anyway, but
-            // an in-resolver dedupe keeps the log honest.
-            .distinctBy { it.url }
-        // Episode-collapse guard (TV only): drop any sub-server url already
-        // pinned to a DIFFERENT (season, episode) by an earlier request - the
-        // same signed file cannot be two episodes - serving it here plays
-        // the wrong episode.
-        if (type != "movie") {
-            if (vidnestUrlEpisodes.size > 400) vidnestUrlEpisodes.clear()
-            val reqKey = "$season|$episode"
-            streams = streams.filter { s ->
-                val prior = vidnestUrlEpisodes.putIfAbsent(s.url, reqKey)
-                if (prior != null && prior != reqKey) {
-                    Log.w("VidNest", "drop ${s.serverName}: url already served S${prior} (requested S$reqKey) � episode collapse")
-                    false
-                } else true
+                }.getOrNull()
+            } ?: continue
+            for (s in bingrSources(text)) {
+                if (out.containsKey(s.url)) continue
+                val adaptive = s.url.contains(".m3u8", true) || s.url.contains(".mpd", true)
+                out[s.url] = RawStream(
+                    serverId = spec.id, serverName = spec.name,
+                    url = s.url, isM3u8 = adaptive,
+                    referer = "https://bingr.one/",
+                    qualityHint = heightHintOf(if (s.quality.isNotBlank()) s.quality else s.label),
+                    audioLabel = s.language,
+                )
             }
         }
-        Log.d("VidNest", "fan-out: $answered/${subServers.size} answered, ${streams.size} streams " +
-            "(${results.filter { it.streams.isNotEmpty() }.joinToString { it.server }})")
-        return streams to answered
+        Log.d("Bingr", "cascade got ${out.size} sources for $type/$id")
+        return out.values.toList()
     }
 
-    /** Parse one decoded VidNest sub-server payload into streams. The shapes
-     *  differ per sub-server (documented on [resolveVidnest]); unknown shapes
-     *  return empty and are logged with their keys for future additions. */
-    private fun parseVidnestSub(sub: String, root: org.json.JSONObject, spec: ServerSpec): List<RawStream> {
-        val out = mutableListOf<RawStream>()
-        // Sub-server stays in the name so rows read VidNest Moviebox, ....
-        val subName = "${spec.name} ${sub.replaceFirstChar { it.uppercase() }}".trim()
-        fun add(url: String, lang: String, qualityLabel: String, isFile: Boolean) {
-            if (!url.startsWith("http")) return
-            val pri = when {
-                lang.contains("hindi", true) -> 4
-                lang.isBlank() -> 0
-                else -> 2 // labelled non-Hindi audio (Tamil/Telugu/Japanese/...) � "Original" tier
-            }
-            out += RawStream(
-                serverId = spec.id, serverName = subName,
-                url = url, isM3u8 = !isFile || url.contains(".m3u8", true),
-                referer = "https://vidnest.fun/",
-                qualityHint = Regex("(\\d{3,4})").find(qualityLabel)?.groupValues?.get(1)?.toIntOrNull() ?: 0,
-                audioPriority = pri,
-                audioLabel = lang,
-            )
+    /** Normalize a pasted FebBox item to the `ui=<token>` cookie the console wants. Pure. */
+    internal fun normalizeShowboxToken(raw: String?): String? {
+        val t = raw?.trim().orEmpty()
+        if (t.isBlank()) return null
+        return if (t.startsWith("ui=", true)) t else "ui=$t"
+    }
+
+    /** ShowBox search page -> the first film result's detail path. Pure. */
+    internal fun showboxSearchHref(html: String): String? =
+        (Regex("""class="film-name[^"]*"[^>]*>\s*<a[^>]+href="([^"]+)"""", RegexOption.IGNORE_CASE).find(html)
+            ?: Regex("""<a[^>]+href="([^"]+)"[^>]*class="[^"]*film-name""", RegexOption.IGNORE_CASE).find(html))
+            ?.groupValues?.get(1)
+
+    /** Detail page -> numeric media id (last path segment of the heading link). Pure. */
+    internal fun showboxHeadingId(html: String): Int? =
+        Regex("""class="heading-name[^"]*"[^>]*>[\s\S]*?<a[^>]+href="([^"]+)"""", RegexOption.IGNORE_CASE)
+            .find(html)?.groupValues?.get(1)?.trimEnd('/')?.substringAfterLast('/')?.toIntOrNull()
+
+    /** share_link body -> the share key (last path segment of data.link). Pure. */
+    internal fun showboxShareKey(jsonText: String): String? {
+        val root = runCatching { org.json.JSONObject(jsonText) }.getOrNull() ?: return null
+        val link = root.optJSONObject("data")?.optString("link").orEmpty()
+        return link.trimEnd('/').substringAfterLast('/').takeIf { it.isNotBlank() }
+    }
+
+    /** One FebBox share entry. */
+    internal data class ShowboxFile(val fid: Long, val name: String, val isDir: Boolean)
+
+    /** file_share_list body -> entries. Pure. */
+    internal fun showboxFiles(jsonText: String): List<ShowboxFile> {
+        val root = runCatching { org.json.JSONObject(jsonText) }.getOrNull() ?: return emptyList()
+        val arr = root.optJSONObject("data")?.optJSONArray("file_list") ?: return emptyList()
+        val out = ArrayList<ShowboxFile>(arr.length())
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val fid = o.optLong("fid", -1L)
+            if (fid <= 0) continue
+            out += ShowboxFile(fid, o.optString("file_name", ""), o.optInt("is_dir", 0) != 0)
         }
-        // First usable value across candidate keys. Guards the JSON-null trap:
-        // optString renders a null field as the literal "null", which is non-blank
-        // and would shadow the real fallback key on a drifted shape.
-        fun pick(o: org.json.JSONObject, vararg keys: String): String {
-            for (k in keys) {
-                if (o.isNull(k)) continue
-                val v = o.optString(k).trim()
-                if (v.isNotEmpty() && v != "null") return v
-            }
-            return ""
-        }
-        when (sub) {
-            "moviebox" -> root.optJSONArray("url")?.let { arr ->
-                // Ad guard: proxy serves one static promo file under every resolution label.
-                val links = (0 until arr.length()).mapNotNull { i ->
-                    arr.optJSONObject(i)?.optString("link")?.takeIf { it.isNotBlank() }
-                }.toSet()
-                if (arr.length() > 1 && links.size == 1) {
-                    Log.w("VidNest", "moviebox: single file for ${arr.length()} labels, ad drop")
-                    return@let
-                }
-                for (i in 0 until arr.length()) {
-                    val o = arr.optJSONObject(i) ?: continue
-                    add(o.optString("link"), o.optString("lang"), o.optString("resolution"), o.optString("type") == "mp4")
-                }
-            }
-            "allmovies" -> root.optJSONArray("streams")?.let { arr ->
-                for (i in 0 until arr.length()) {
-                    val o = arr.optJSONObject(i) ?: continue
-                    add(o.optString("url"), o.optString("language"), "", o.optString("type") == "mp4")
-                }
-            }
-            "klikxxi" -> {
-                // Shape drift: entries carry the file under url|file and the
-                // rendition label under quality|label.
-                val arr = root.optJSONArray("sources")
-                if (arr == null) {
-                    Log.d("VidNest", "klikxxi: no 'sources' array; keys=${namesOf(root)}")
-                } else {
-                    for (i in 0 until arr.length()) {
-                        val o = arr.optJSONObject(i) ?: continue
-                        add(pick(o, "url", "file"), "", pick(o, "quality", "label"),
-                            o.optString("type") == "mp4")
-                    }
-                }
-            }
-            "hollymoviehd" -> root.optJSONArray("sources")?.let { arr ->
-                for (i in 0 until arr.length()) {
-                    val o = arr.optJSONObject(i) ?: continue
-                    add(o.optString("file"), "", o.optString("label"), o.optString("type") == "mp4")
-                }
-            }
-            "purstream" -> root.optJSONArray("sources")?.let { arr ->
-                for (i in 0 until arr.length()) {
-                    val o = arr.optJSONObject(i) ?: continue
-                    add(o.optString("url"), "", o.optString("name"), o.optString("format") == "mp4")
-                }
-            }
-            "onehd" -> add(root.optString("url"), "", "", true)
-            "vidlink" -> root.optJSONObject("data")?.optJSONObject("stream")?.optString("playlist")?.let {
-                add(it, "", "", true)
-            }
-        }
-        if (out.isEmpty()) Log.d("VidNest", "$sub: no recognizable stream shape; keys=${namesOf(root)}")
         return out
     }
 
-    /** VidNest custom-base64 decode - the host encodes payloads with its own
-     *  alphabet (RB0fpH8ZEyVLkv7c2i6MAJ5u3IKFDxlS1NTsnGaqmXYdUrtzjwObCgQP94hoeW+/=).
-     *  Map each char back to its 6-bit value, re-pack into bytes, strip
-     *  '=' placeholders (64 sentinel). */
-    private val vidnestAlphabet = "RB0fpH8ZEyVLkv7c2i6MAJ5u3IKFDxlS1NTsnGaqmXYdUrtzjwObCgQP94hoeW+/="
+    /** The season folder for an episode (falls back to the first folder). Pure. */
+    internal fun showboxSeasonFolder(files: List<ShowboxFile>, season: Int): ShowboxFile? {
+        val s2 = season.toString().padStart(2, '0')
+        return files.firstOrNull { it.isDir && (it.name.contains("season $season", true) || it.name.contains("s$s2", true)) }
+            ?: files.firstOrNull { it.isDir }
+    }
 
-    private fun decodeVidnestPayload(input: String): String? = runCatching {
-        val rev = HashMap<Char, Int>(vidnestAlphabet.length)
-        vidnestAlphabet.forEachIndexed { idx, c -> rev[c] = idx }
-        val pad = (4 - input.length % 4) % 4
-        val padded = input + "=".repeat(pad)
-        val bytes = ByteArray(padded.length / 4 * 3)
-        var w = 0
-        var i = 0
-        while (i < padded.length) {
-            val c0 = rev[padded[i]] ?: 64
-            val c1 = rev[padded[i + 1]] ?: 64
-            val c2 = if (padded[i + 2] == '=') 64 else rev[padded[i + 2]] ?: 64
-            val c3 = if (padded[i + 3] == '=') 64 else rev[padded[i + 3]] ?: 64
-            if (c0 == 64 || c1 == 64) throw IllegalArgumentException("bad vidnest b64 at $i")
-            bytes[w++] = ((c0 shl 2) or (c1 shr 4)).toByte()
-            if (c2 != 64) bytes[w++] = (((c1 and 0x0F) shl 4) or (c2 shr 2)).toByte()
-            if (c3 != 64) bytes[w++] = (((c2 and 0x03) shl 6) or c3).toByte()
-            i += 4
+    /** The episode file inside a season folder (falls back to the first file). Pure. */
+    internal fun showboxEpisodeFile(files: List<ShowboxFile>, episode: Int): ShowboxFile? {
+        val e2 = episode.toString().padStart(2, '0')
+        return files.firstOrNull {
+            !it.isDir && (it.name.contains("e$e2", true) || it.name.contains("ep$e2", true) || it.name.contains("episode $episode", true))
+        } ?: files.firstOrNull { !it.isDir }
+    }
+
+    /** video_quality_list html -> (url, height) rows. Pure. */
+    internal fun showboxQualities(html: String): List<Pair<String, Int>> {
+        val out = ArrayList<Pair<String, Int>>()
+        for (m in Regex("""<div[^>]*class="[^"]*file_quality[^"]*"[^>]*>""", RegexOption.IGNORE_CASE).findAll(html)) {
+            val tag = m.value
+            val url = Regex("""data-url="([^"]+)"""").find(tag)?.groupValues?.get(1)?.replace("\\/", "/") ?: continue
+            if (!url.startsWith("http")) continue
+            val quality = Regex("""data-quality="([^"]+)"""").find(tag)?.groupValues?.get(1).orEmpty()
+            out += url to heightHintOf(quality)
         }
-        String(bytes, 0, w, Charsets.UTF_8)
-    }.getOrNull()
+        return out
+    }
+
+    /**
+     * ShowBox resolver (showbox.media -> febbox): IMDB search, share key, file
+     * list, then the token-gated quality list. Dormant (clean miss) when no
+     * FebBox token is saved; token/session failures inside are title-level.
+     */
+    private suspend fun resolveShowBox(
+        spec: ServerSpec, imdbId: String?, type: String, season: Int, episode: Int,
+    ): List<RawStream> {
+        val token = normalizeShowboxToken(Settings.showboxToken()) ?: return emptyList()
+        val imdb = imdbId?.takeIf { it.startsWith("tt") } ?: return emptyList()
+        val sb = "https://showbox.media"
+        val fb = "https://www.febbox.com"
+
+        suspend fun get(url: String, extra: Map<String, String> = emptyMap()): String? =
+            withTimeoutOrNull(8_000L) {
+                runCatching { app.get(url, timeout = 8, headers = okHeaders("$sb/") + extra).text }.getOrNull()
+            }
+
+        val searchHtml = get("$sb/search?keyword=$imdb") ?: return emptyList()
+        val detailPath = showboxSearchHref(searchHtml)
+            ?: run { Log.w("ShowBox", "no search hit for $imdb"); return emptyList() }
+        val detailUrl = if (detailPath.startsWith("http")) detailPath else "$sb$detailPath"
+        val detailHtml = get(detailUrl) ?: return emptyList()
+        val mediaId = showboxHeadingId(detailHtml)
+            ?: run { Log.w("ShowBox", "no media id for $imdb"); return emptyList() }
+
+        val kind = if (type == "tv") 2 else 1
+        val shareJson = get("$sb/index/share_link?id=$mediaId&type=$kind") ?: return emptyList()
+        val shareKey = showboxShareKey(shareJson)
+            ?: run { Log.w("ShowBox", "no share key for media=$mediaId"); return emptyList() }
+
+        val rootFiles = showboxFiles(get("$fb/file/file_share_list?share_key=$shareKey") ?: return emptyList())
+        val fid = if (type == "tv" && season > 0 && episode > 0) {
+            val folder = showboxSeasonFolder(rootFiles, season) ?: return emptyList()
+            val epFiles = showboxFiles(
+                get("$fb/file/file_share_list?share_key=$shareKey&parent_id=${folder.fid}&page=1") ?: return emptyList(),
+            )
+            showboxEpisodeFile(epFiles, episode)?.fid
+        } else {
+            rootFiles.firstOrNull { !it.isDir }?.fid
+        } ?: run { Log.w("ShowBox", "no playable file in share $shareKey"); return emptyList() }
+
+        val qHtml = get(
+            "$fb/console/video_quality_list?fid=$fid&share_key=$shareKey",
+            mapOf("Cookie" to token),
+        ) ?: run { Log.w("ShowBox", "quality list failed (token?)"); return emptyList() }
+        val qualities = showboxQualities(qHtml)
+        if (qualities.isEmpty()) { Log.w("ShowBox", "no qualities (token rejected?)"); return emptyList() }
+        Log.d("ShowBox", "got ${qualities.size} qualities for $type/$imdb")
+        return qualities.map { (url, height) ->
+            RawStream(
+                serverId = spec.id, serverName = spec.name,
+                url = url, isM3u8 = url.contains(".m3u8", true),
+                referer = "$fb/", qualityHint = height,
+                extraHeaders = mapOf("Referer" to "$fb/", "Range" to "bytes=0-"),
+            )
+        }
+    }
 
     /**
      * VidEm resolver (2embed.cc embed player):
@@ -2770,113 +2310,6 @@ object StreamEngine {
             }.awaitAll()
         }
         Log.d("8Stream", "got ${out.size} language streams")
-        return out
-    }
-
-    /**
-     * Vidup/Vidcore resolver - encode/decode pipeline.
-     * Both players share the same HLS backend; the only
-     * difference is the domain prefix and encode/decode endpoint suffix.
-     *
-     * Pipeline (4 chained HTTP calls, ~1.5s total):
-     * 1. GET page ? regex "en":"token" from inline script
-     * 2. GET enc-dec.app/api/enc-{variant}?text={token} ? {servers, stream, token}
-     * 3. POST servers (X-CSRF-Token) ? encrypted sub-server JSON
-     * 4. POST enc-dec.app/api/dec-{variant} ? [{name:"Euro"|"CineX"|"Zenith"|"Premier", ...}]
-     * 5. For each sub-server: POST {stream}/{data} ? dec ? {url, tracks, 4kAvailable}
-     *
-     * Sub-server names carry quality hints: "Premier" = 4K.
-     * For Hindi titles, "Original audio" means Hindi.
-     */
-    private suspend fun resolveEncDecPlayer(
-        spec: ServerSpec,
-        keyId: String?, // TMDB or IMDB id � both hosts accept either in the URL path
-        type: String,
-        season: Int,
-        episode: Int,
-        variant: String, // "vidup" or "vidcore"
-    ): List<RawStream> {
-        val id = keyId?.takeIf { it.isNotBlank() } ?: return emptyList()
-        val pageUrl = if (type == "movie") "${spec.referer!!.trimEnd('/')}/movie/$id"
-            else "${spec.referer!!.trimEnd('/')}/tv/$id/$season/$episode"
-        val referer = spec.referer!!
-
-        // 1. Page ? token
-        val pageText = withTimeoutOrNull(10_000L) {
-            runCatching { app.get(pageUrl, timeout = 10, headers = okHeaders(referer)).text }.getOrNull()
-        } ?: run { Log.w(variant, "page timeout"); return emptyList() }
-        val token = Regex("""\\"(?:en|token)\\":\\"([^\\]+)\\"""")
-            .find(pageText)?.groupValues?.get(1)
-            ?.takeIf { it.isNotBlank() }
-            ?: run { Log.w(variant, "no token in page"); return emptyList() }
-        val encToken = java.net.URLEncoder.encode(token, "UTF-8")
-
-        // 2. enc-dec encrypt
-        val encText = withTimeoutOrNull(8_000L) {
-            runCatching { app.get("https://enc-dec.app/api/enc-$variant?text=$encToken", timeout = 8).text }.getOrNull()
-        } ?: return emptyList()
-        val encRoot = runCatching { org.json.JSONObject(encText) }.getOrNull() ?: return emptyList()
-        val encResult = encRoot.optJSONObject("result") ?: return emptyList()
-        val serversUrl = encResult.optString("servers").takeIf { it.isNotBlank() } ?: return emptyList()
-        val streamBase = encResult.optString("stream").takeIf { it.isNotBlank() } ?: return emptyList()
-        // enc-dec.app: the `token`/CSRF field is now
-        // often EMPTY and the servers endpoint no longer validates it �
-        // requiring a non-blank token here killed VidUp/VidCore for every
-        // title. Send the header only when present.
-        val csrfToken = encResult.optString("token", "")
-
-        // 3. POST servers ? encrypted sub-server list
-        val srvHeaders = okHeaders(referer).toMutableMap()
-        if (csrfToken.isNotBlank()) srvHeaders["X-CSRF-Token"] = csrfToken
-        val srvEnc = withTimeoutOrNull(8_000L) {
-            runCatching { app.post(serversUrl, timeout = 8, headers = srvHeaders).text }.getOrNull()
-        } ?: return emptyList()
-
-        // 4. decrypt sub-server list
-        val srvDec = withTimeoutOrNull(8_000L) {
-            runCatching {
-                app.post("https://enc-dec.app/api/dec-$variant",
-                    timeout = 8, headers = mapOf("Content-Type" to "application/json"),
-                    json = mapOf("text" to srvEnc.trim())).text
-            }.getOrNull()
-        } ?: return emptyList()
-        val srvArr = runCatching { org.json.JSONObject(srvDec).optJSONArray("result") }.getOrNull()
-            ?: run { Log.w(variant, "dec returned no result array"); return emptyList() }
-
-        val out = mutableListOf<RawStream>()
-        for (i in 0 until srvArr.length()) {
-            val srv = srvArr.optJSONObject(i) ?: continue
-            val srvName = srv.optString("name").ifBlank { "Server${i + 1}" }
-            val srvData = srv.optString("data").takeIf { it.isNotBlank() } ?: continue
-            val desc = srv.optString("description", "")
-            val is4k = desc.contains("4K", ignoreCase = true) || srvName.contains("Premier", ignoreCase = true)
-
-            // 5. POST stream/{data} ? final URL
-            val streamUrl = "$streamBase/$srvData"
-            val streamEnc = withTimeoutOrNull(8_000L) {
-                runCatching { app.post(streamUrl, timeout = 8, headers = srvHeaders).text }.getOrNull()
-            } ?: continue
-            val decText = withTimeoutOrNull(8_000L) {
-                runCatching {
-                    app.post("https://enc-dec.app/api/dec-$variant",
-                        timeout = 8, headers = mapOf("Content-Type" to "application/json"),
-                        json = mapOf("text" to streamEnc.trim())).text
-                }.getOrNull()
-            } ?: continue
-            val decResult = runCatching { org.json.JSONObject(decText) }.getOrNull()
-                ?.optJSONObject("result") ?: continue
-            val m3u8 = decResult.optString("url").takeIf { it.startsWith("http") } ?: continue
-
-            out += RawStream(
-                serverId = spec.id,
-                serverName = "${spec.name} $srvName",
-                url = m3u8, isM3u8 = true, referer = referer,
-                qualityHint = 0, // adaptive: emit() measures the real master height
-                audioPriority = 0, // muxed audio � no EXT-X-MEDIA tracks to probe
-                audioLabel = "",
-            )
-        }
-        Log.d(variant, "got ${out.size} streams from ${srvArr.length()} sub-servers")
         return out
     }
 
@@ -3284,8 +2717,7 @@ object StreamEngine {
     private suspend fun unwrapPages(html: String, baseUrl: String, timeoutSec: Int): Pair<String, String> {
         var curHtml = html; var curUrl = baseUrl
         repeat(MAX_UNWRAP) {
-            val iframe = Jsoup.parse(curHtml).selectFirst("iframe[src]") ?: return curHtml to curUrl
-            val src = iframe.attr("src").takeIf { it.isNotBlank() } ?: return curHtml to curUrl
+            val src = firstIframeUrl(curHtml) ?: return curHtml to curUrl
             val resolved = relUrl(curUrl, src)
             if (resolved == curUrl) return curHtml to curUrl
             curUrl = resolved
@@ -3296,6 +2728,23 @@ object StreamEngine {
             curHtml = next
         }
         return curHtml to curUrl
+    }
+
+    /** First usable iframe target. JS-written players park the real URL in a lazy
+     *  attribute (data-src / data-lazy-src / data-litespeed-src) and leave src as
+     *  "about:blank", so check those before giving up. */
+    private fun firstIframeUrl(html: String): String? {
+        val attrs = listOf("src", "data-src", "data-lazy-src", "data-litespeed-src", "data-iframe-src", "data-url", "data-video")
+        for (frame in Jsoup.parse(html).select("iframe")) {
+            for (attr in attrs) {
+                val v = frame.attr(attr).trim()
+                if (v.isEmpty()) continue
+                if (v.equals("about:blank", ignoreCase = true) || v.startsWith("javascript:", ignoreCase = true)) continue
+                if (!v.startsWith("http", ignoreCase = true) && !v.startsWith("//") && !v.startsWith("/")) continue
+                return v
+            }
+        }
+        return null
     }
 
     /** Harvest bare m3u8/mp4/webm URLs. */

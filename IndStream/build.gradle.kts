@@ -3,7 +3,7 @@ import java.util.Properties
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
-version = 62
+version = 63
 
 plugins {
     id("com.lagradost.cloudstream3.gradle")
@@ -56,6 +56,13 @@ dependencies {
     if (cryptoJars.isNotEmpty()) {
         testImplementation(files(cryptoJars))
     }
+    // On a clean checkout the modules-2 cache has no dev.whyoleg.cryptography
+    // artifacts, so the glob above is empty and ExtractorApiKt's class-init
+    // (Rabbitstream) throws NoClassDefFoundError on any test that calls emit().
+    // Pin the version CloudStream ships so the extractor registry loads in tests.
+    testImplementation("dev.whyoleg.cryptography:cryptography-core:0.6.0")
+    testImplementation("dev.whyoleg.cryptography:cryptography-random:0.6.0")
+    testImplementation("dev.whyoleg.cryptography:cryptography-provider-jdk:0.6.0")
     // NiceHttp serializes POST bodies with kotlinx-serialization; same guarded pattern.
     val serialJars = fileTree(
         mapOf(
@@ -82,6 +89,11 @@ dependencies {
     if (jacksonJars.isNotEmpty()) {
         testImplementation(files(jacksonJars))
     }
+    // Same clean-checkout gap as crypto above: MainAPIKt's class-init (toJson ->
+    // Jackson) fails without these, so pin them for the unit-test runtime.
+    testImplementation("com.fasterxml.jackson.core:jackson-databind:2.17.1")
+    testImplementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.17.1")
+    testImplementation(kotlin("reflect"))
     // Jackson-kotlin needs kotlin-reflect at runtime; same guarded pattern.
     val reflectJars = fileTree(
         mapOf(

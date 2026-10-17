@@ -2,11 +2,9 @@ package Test
 
 import com.indstream.ServerFarm
 import com.indstream.ServerIdType
-import com.indstream.StreamEngine
 import java.net.HttpURLConnection
 import java.net.URL
 import kotlin.test.Test
-import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /** Live network probe: exercises every farm server's real chain entry and reports health. Manual run only (needs network). */
@@ -73,9 +71,7 @@ class ServerProbeTest {
         // Chain-entry checks for servers whose registry URL is not a plain GET target.
         val special = mapOf(
             "moviebox" to ::checkMovieBox,
-            "vidnest" to ::checkVidNest,
             "castletv" to ::checkCastleTv,
-            "videasy" to ::checkVideasy,
         )
         for (spec in ServerFarm.allServers) {
             val check = special[spec.id]
@@ -131,33 +127,6 @@ class ServerProbeTest {
             "HTTP ${f.code} x-user=${if (token) "present" else "MISSING"} ${f.error ?: ""}".trim()))
     }
 
-    @Test
-    fun vidnestShouldRetry_blankAndErrorPagesOnly() {
-        // Blank answers and 502/error pages deserve the single delayed retry.
-        assertTrue(StreamEngine.vidnestShouldRetry(null))
-        assertTrue(StreamEngine.vidnestShouldRetry("  "))
-        assertTrue(StreamEngine.vidnestShouldRetry("""{"error_name":"x","message":"Error 502: Bad gateway"}"""))
-        assertTrue(StreamEngine.vidnestShouldRetry("<html>origin error</html>"))
-        // Answered payloads never retry, even when they carry no streams.
-        assertFalse(StreamEngine.vidnestShouldRetry("""{"sources":[]}"""))
-        assertFalse(StreamEngine.vidnestShouldRetry("""{"encrypted":true,"data":"e30="}"""))
-    }
-
-    // Fan-out host: probe every sub-server's movie URL, mirroring the resolver's fan-out.
-    private fun checkVidNest(id: String): List<ProbeResult> {
-        val subs = listOf("moviebox", "allmovies", "klikxxi", "onehd", "hollymoviehd", "purstream", "vidlink")
-        val headers = mapOf(
-            "Referer" to "https://vidnest.fun/",
-            "Origin" to "https://vidnest.fun",
-            "Accept" to "application/json, text/javascript, */*; q=0.01",
-        )
-        return subs.map { sub ->
-            val f = fetch("https://new.vidnest.fun/$sub/movie/$tmdbMovieId", headers, 10000)
-            ProbeResult(id, "sub:$sub", alive(f.code) && f.body.length > 20,
-                "HTTP ${f.code} len=${f.body.length} ${f.error ?: ""}".trim())
-        }
-    }
-
     // Chain entry is the security-key fetch; search/detail/video are POSTs needing that key.
     private fun checkCastleTv(id: String): List<ProbeResult> {
         val url = ServerFarm.buildMovieUrl(ServerFarm.allServers.first { it.id == id }, tmdbMovieId)
@@ -165,29 +134,4 @@ class ServerProbeTest {
         return listOf(ProbeResult(id, "seckey", f.code == 200 && f.body.contains("\"data\""),
             "HTTP ${f.code} ${f.body.take(80)} ${f.error ?: ""}".trim()))
     }
-
-    // Two-step chain: per-title seed fetch, then a seeded route query returning an encrypted payload.
-    private fun checkVideasy(id: String): List<ProbeResult> {
-        val out = mutableListOf<ProbeResult>()
-        val seedUrl = ServerFarm.buildMovieUrl(ServerFarm.allServers.first { it.id == id }, tmdbMovieId)
-        val s = fetch(seedUrl, videasyHeaders())
-        val seed = Regex(""""seed"\s*:\s*"([^"]+)"""").find(s.body)?.groupValues?.get(1)
-        out += ProbeResult(id, "seed", s.code == 200 && !seed.isNullOrBlank(),
-            "HTTP ${s.code} seed=${seed?.take(20) ?: "MISSING"} ${s.error ?: ""}".trim())
-        if (!seed.isNullOrBlank()) {
-            val q = "https://api.speedracelight.com/cdn/sources-with-title?title=Inception" +
-                "&mediaType=Movie&tmdbId=$tmdbMovieId&year=2010&enc=2&seed=" +
-                java.net.URLEncoder.encode(seed, "UTF-8")
-            val r = fetch(q, videasyHeaders())
-            out += ProbeResult(id, "route:cdn", r.code == 200 && r.body.length > 100,
-                "HTTP ${r.code} len=${r.body.length} ${r.error ?: ""}".trim())
-        }
-        return out
-    }
-
-    private fun videasyHeaders(): Map<String, String> = mapOf(
-        "Accept" to "*/*",
-        "Origin" to "https://player.videasy.to",
-        "Referer" to "https://player.videasy.to/",
-    )
 }

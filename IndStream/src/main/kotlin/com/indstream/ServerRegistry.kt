@@ -47,25 +47,8 @@ object ServerFarm {
             isJsonApi = true, referer = "https://nextgencloudfabric.com/",
             hasSubtitles = true, timeoutSec = 12,
         ),
-        // VidRock (registry, ): TMDB-keyed JSON API with per-server map (Nova/Atlas/Luna/Orion/Astra). URLs are AES-GCM.
-// encrypted - decrypted locally in.
-        ServerSpec(
-            id = "vidrock", name = "VidRock",
-            idType = ServerIdType.TMDB,
-            movieUrl = "https://vidrock.to/api/movie/{id}/",
-            tvUrl = "https://vidrock.to/api/tv/{id}/{season}/{episode}/",
-            isJsonApi = true, referer = "https://vidrock.to/",
-            hasSubtitles = false, timeoutSec = 12,
-        ),
-        // Failover mirror of the encrypted API above: identical payload shape and key on a separate host.
-        ServerSpec(
-            id = "vidrock-net", name = "VidRockNet",
-            idType = ServerIdType.TMDB,
-            movieUrl = "https://vidrock.net/api/movie/{id}/",
-            tvUrl = "https://vidrock.net/api/tv/{id}/{season}/{episode}/",
-            isJsonApi = true, referer = "https://vidrock.net/",
-            hasSubtitles = false, timeoutSec = 12,
-        ),
+        // VidRock (+ .net mirror) removed (v63): /api/movie/{id}/ now returns the
+        // SPA index.html, not JSON — endpoint gone on both hosts.
         // MovieBox app API: bearer token first, then a title-keyed POST search.
         ServerSpec(
             id = "moviebox", name = "MovieBox",
@@ -77,28 +60,9 @@ object ServerFarm {
             // with 8s sub-timeouts needs headroom; 55 was cutting off slow upstreams.
             hasSubtitles = true, timeoutSec = 65,
         ),
-        // PrimeSrc (primesrc. me, ): IMDB-keyed JSON API. GET /api/v1/s?imdb={id}&type=movie|tv returns servers ({name, key.
-// file_name, audio_language.
-        ServerSpec(
-            id = "vidnest", name = "VidNest",
-            idType = ServerIdType.TMDB,
-            movieUrl = "https://new.vidnest.fun/{server}/movie/{id}",
-            tvUrl = "https://new.vidnest.fun/{server}/tv/{id}/{season}/{episode}",
-            isJsonApi = true, referer = "https://vidnest.fun/",
-            // timeoutSec raised to 28: 7 sub-servers need per-sub headroom
-            // to avoid false 502s from slow cold-starts.
-            hasSubtitles = false, timeoutSec = 28,
-        ),
-        // Vidup (vidup. to, ): TMDB-keyed (accepts IMDB too via the URL path). 4-step enc-dec. app pipeline: 1) page → "en".
-// "token" → enc-dec.
-        ServerSpec(
-            id = "vidup", name = "VidUp",
-            idType = ServerIdType.TMDB,
-            movieUrl = "https://vidup.to/movie/{id}",
-            tvUrl = "https://vidup.to/tv/{id}/{season}/{episode}",
-            referer = "https://vidup.to/",
-            hasSubtitles = true, timeoutSec = 30,
-        ),
+        // VidNest removed (v63): every one of its 7 sub-servers returns HTTP 403.
+        // VidUp removed (v63): its enc-dec.app/api/enc-vidup helper returns HTTP
+        // 400 — the 4-step chain is structurally broken.
         // Vidcore (vidcore. io, ) removed (v48): upstream servers endpoint 404s on every play; the working VidCore is
         // vidcore-api (vidrack) below.
         // Allmovieland (allmovieland. art, ): DLE CMS with per-language HLS playlists - Hindi, Bengali, Tamil, Telugu.
@@ -128,67 +92,14 @@ object ServerFarm {
         ),
         // ZXCStreams removed (v46): sub-server hosts NXDOMAIN, portal chain dead.
         // VidAPI removed (v46): vaplayer.ru DNS dead.
-        // 2Embed (embed page, servers Vsrc/Videm/Vcr): IMDB-keyed.
-        // Generic pipeline handles the iframe chain.
-        ServerSpec(
-            id = "twoembed", name = "2Embed",
-            idType = ServerIdType.IMDB,
-            movieUrl = "https://2embed.cc/embed/{id}",
-            tvUrl = "https://2embed.cc/embedtv/{id}&s={season}&e={episode}",
-            referer = "https://2embed.cc/",
-            hasSubtitles = true, timeoutSec = 30,
-        ),
-        // Fast TMDB-keyed embed batch: direct iframe chains, no crypto.
-        // Survivors run through the generic pipeline (fetch, unwrap, harvest, extractor registry).
-        ServerSpec(
-            id = "vidfast", name = "VidFast",
-            idType = ServerIdType.TMDB,
-            movieUrl = "https://vidfast.pro/movie/{id}?autoPlay=true",
-            tvUrl = "https://vidfast.pro/tv/{id}/{season}/{episode}?autoPlay=true",
-            referer = "https://vidfast.pro/",
-            hasSubtitles = true, timeoutSec = 30,
-        ),
-        ServerSpec(
-            id = "autoembed", name = "AutoEmbed",
-            idType = ServerIdType.TMDB,
-            movieUrl = "https://autoembed.co/movie/tmdb/{id}",
-            tvUrl = "https://autoembed.co/tv/tmdb/{id}-{season}-{episode}",
-            referer = "https://autoembed.co/",
-            hasSubtitles = true, timeoutSec = 30,
-        ),
-        ServerSpec(
-            id = "vidphantom", name = "VidPhantom",
-            idType = ServerIdType.TMDB,
-            movieUrl = "https://vidphantom.com/movie/{id}",
-            tvUrl = "https://vidphantom.com/tv/{id}/{season}/{episode}",
-            referer = "https://vidphantom.com/",
-            hasSubtitles = true, timeoutSec = 30,
-        ),
-        ServerSpec(
-            id = "vsembed", name = "VsEmbed",
-            idType = ServerIdType.TMDB,
-            movieUrl = "https://vsembed.su/embed/movie/{id}",
-            tvUrl = "https://vsembed.su/embed/tv/{id}/{season}/{episode}",
-            referer = "https://vsembed.su/",
-            hasSubtitles = false, timeoutSec = 30,
-        ),
-        ServerSpec(
-            id = "twoembed-skin", name = "2EmbedSkin",
-            idType = ServerIdType.TMDB,
-            movieUrl = "https://www.2embed.skin/embed/{id}",
-            tvUrl = "https://www.2embed.skin/embedtv/{id}&s={season}&e={episode}",
-            referer = "https://www.2embed.skin/",
-            hasSubtitles = true, timeoutSec = 30,
-        ),
+        // 2Embed removed (v63): player iframes are lazy data-src (src is
+        // "about:blank"), so the generic pipeline lands 0 streams.
+        // Fast TMDB-keyed embed batch removed (v63): VidFast, AutoEmbed,
+        // VidPhantom, VsEmbed, 2EmbedSkin — all land 0 streams (players load
+        // via JS; the generic pipeline cannot follow them).
         // VidsrcTo removed (v46): Cloudflare bot challenge on embed pages.
-        ServerSpec(
-            id = "vidsrcme", name = "VidsrcMe",
-            idType = ServerIdType.TMDB,
-            movieUrl = "https://vidsrcme.su/embed/movie/{id}",
-            tvUrl = "https://vidsrcme.su/embed/tv/{id}/{season}/{episode}",
-            referer = "https://vidsrcme.su/",
-            hasSubtitles = false, timeoutSec = 30,
-        ),
+        // VidsrcMe removed (v63): host unreachable — 15s connect timeout on
+        // both the movie and TV endpoints.
         // Nontongo removed (v46): Cloudflare bot challenge on embed pages.
         // Hindi/Indian-language expansion: per-language audio tracks (TMDB title-keyed API).
         // Chain entry is the security-key fetch; search/detail/video are POSTs needing that key.
@@ -209,23 +120,7 @@ object ServerFarm {
             tvUrl = "https://api.streamflix.app/data.json",
             hasSubtitles = false, timeoutSec = 25,
         ),
-        // Fast global batch: TMDB-keyed embeds, generic pipeline, 30s kill.
-        ServerSpec(
-            id = "vidsrc-pm", name = "VidsrcPm",
-            idType = ServerIdType.TMDB,
-            movieUrl = "https://vidsrc.pm/embed/movie/{id}",
-            tvUrl = "https://vidsrc.pm/embed/tv/{id}/{season}/{episode}",
-            referer = "https://vidsrc.pm/",
-            hasSubtitles = true, timeoutSec = 30,
-        ),
-        ServerSpec(
-            id = "rive", name = "Rive",
-            idType = ServerIdType.TMDB,
-            movieUrl = "https://www.rivestream.app/embed?type=movie&id={id}",
-            tvUrl = "https://www.rivestream.app/embed?type=tv&id={id}&season={season}&episode={episode}",
-            referer = "https://www.rivestream.app/",
-            hasSubtitles = true, timeoutSec = 30,
-        ),
+        // VidsrcPm + Rive removed (v63): generic-pipeline embeds, 0 streams.
         // OneTouchTV (api3.devcorp.me): title search, AES-256-CBC envelope, per-episode HLS.
         // Chain entry is a title search; detail + episode calls need the matched id.
         ServerSpec(
@@ -246,37 +141,32 @@ object ServerFarm {
             isJsonApi = true, referer = "https://www.vidcore.org/",
             hasSubtitles = false, timeoutSec = 20,
         ),
+        // Bingr (bingr.one): TMDB-keyed multi-CDN API. Each srv id is an
+        // independent HLS/DASH ladder; the resolver cascades the live set and
+        // merges whatever answers, so one dead srv never sinks the row.
         ServerSpec(
-            id = "vidsrcto", name = "VidsrcTo",
+            id = "bingr", name = "Bingr",
             idType = ServerIdType.TMDB,
-            movieUrl = "https://vidsrc.to/embed/movie/{id}",
-            tvUrl = "https://vidsrc.to/embed/tv/{id}/{season}/{episode}",
-            referer = "https://vidsrc.to/",
-            hasSubtitles = true, timeoutSec = 30,
-            declaredLanguages = setOf("Hindi", "Tamil", "Telugu", "English"),
+            movieUrl = "https://api.bingr.one/api/stream",
+            tvUrl = "https://api.bingr.one/api/stream",
+            referer = "https://bingr.one/",
+            hasSubtitles = false, timeoutSec = 30,
         ),
-        // IMDB-keyed Hindi-dub source: status check, embed page, then ajax stream links.
-        // URLs are placeholders; the resolver builds its own chain entry points.
+        // ShowBox (showbox.media -> febbox): IMDB-keyed search then a token-gated
+        // quality list. Stays dormant (clean miss) until a FebBox token is saved.
         ServerSpec(
-            id = "myflixer-hindi", name = "MyFlixerHindi",
+            id = "showbox", name = "ShowBox",
             idType = ServerIdType.IMDB,
-            movieUrl = "https://hindi.myflixerapi.com/embed/{id}",
-            tvUrl = "https://hindi.myflixerapi.com/embed/series?imdb={id}&sea={season}&epi={episode}",
-            referer = "https://hindi.myflixerapi.com/",
-            hasSubtitles = true, timeoutSec = 30,
-            declaredLanguages = setOf("Hindi", "English"),
+            movieUrl = "https://showbox.media/search?keyword={id}",
+            tvUrl = "https://showbox.media/search?keyword={id}",
+            referer = "https://showbox.media/",
+            hasSubtitles = false, timeoutSec = 40,
         ),
-        // IMDB-keyed multi-server API with per-server audio language flags.
-        // URLs mirror the API shape; the resolver fans out per server key.
-        ServerSpec(
-            id = "primesrc", name = "PrimeSrc",
-            idType = ServerIdType.IMDB,
-            movieUrl = "https://primesrc.me/api/v1/s?imdb={id}&type=movie",
-            tvUrl = "https://primesrc.me/api/v1/s?imdb={id}&type=tv&season={season}&episode={episode}",
-            referer = "https://primesrc.me/",
-            hasSubtitles = true, timeoutSec = 45,
-            declaredLanguages = setOf("Hindi", "English"),
-        ),
+        // VidsrcTo removed (v63): generic-pipeline embed, 0 streams on every title.
+        // MyFlixerHindi removed (v63): status API answers "This movie hasn't in our
+        // database" for every title.
+        // PrimeSrc removed (v63): host answers 200 but every entry is an external
+        // file-host embed the pipeline cannot resolve (0 streams).
     )
 
     fun buildMovieUrl(spec: ServerSpec, id: String): String =

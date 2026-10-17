@@ -1,15 +1,13 @@
-package Test
+﻿package Test
 
 import com.indstream.CastleTvSource
 import com.indstream.HttpKit
 import com.indstream.StreamEngine
 import com.indstream.TitleMatch
 import com.indstream.TmdbService
-import com.indstream.VideasySource
 import com.lagradost.cloudstream3.app
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
-import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
@@ -18,7 +16,7 @@ class PracticalResolveTest {
 
     @Test
     fun tmdb_fetchMetaReliable() = runBlocking {
-        // Title-keyed servers (moviebox/castletv/videasy) all depend on this lookup.
+        // Title-keyed servers (moviebox/castletv) all depend on this lookup.
         repeat(3) { i ->
             val t = System.currentTimeMillis()
             val meta = TmdbService.fetchMeta(27205, "movie")
@@ -62,21 +60,6 @@ class PracticalResolveTest {
     }
 
     @Test
-    fun videasy_fullChain() = runBlocking {
-        val r = VideasySource.fetchAllSources(
-            tmdbId = 27205, imdbId = "tt1375666", title = "Inception", year = 2010,
-            mediaType = "movie", season = -1, episode = -1,
-        )
-        println("Videasy routes: ${r.sources.groupBy { it.route }.mapValues { it.value.size }}")
-        assertTrue(r.httpOk, "routes must answer")
-        assertTrue(r.sources.isNotEmpty(), "sources must decrypt")
-        // Playback carries no Origin/Referer (CDN 403s the player Origin, mirror 403s the player Referer).
-        val live = r.sources.map { it to (HttpKit.aliveCheck(it.url, null) != false) }
-        live.forEach { (s, ok) -> println("  ${s.route} ${s.quality} alive=$ok ${s.url.take(70)}") }
-        assertTrue(live.any { it.second }, "at least one source must be playable")
-    }
-
-    @Test
     fun moviebox_tokenAndSearch() = runBlocking {
         val token = StreamEngine.prewarmMovieBoxToken()
         assertNotNull(token, "bearer must issue")
@@ -107,7 +90,7 @@ class PracticalResolveTest {
     fun moviebox_fullChain() = runBlocking {
         // Real single-server resolve: token + search + detail + play/download.
         val spec = com.indstream.ServerFarm.allServers.first { it.id == "moviebox" }
-        val out = StreamEngine.resolveOne(spec, 27205, "tt1375666", "movie", 1, 1, null)
+        val out = StreamEngine.resolveOne(spec, 27205, "tt1375666", "movie", 1, 1)
         println("MovieBox streams: ${out.size} ${out.map { it.qualityHint to it.url.take(70) }}")
         assertTrue(out.isNotEmpty(), "moviebox must resolve streams")
         assertTrue(out.all { it.url.startsWith("http") && it.qualityHint > 0 }, "streams carry urls + heights")
@@ -119,15 +102,13 @@ class PracticalResolveTest {
     @Test
     fun farmDiagnose_missingServers() = runBlocking {
         // Per-server resolve with exception capture: WHY do servers land empty?
-        val ids = listOf("vidrock", "vidnest",
-            "twoembed", "autoembed", "vidphantom", "vsembed", "twoembed-skin",
-            "vidsrcme", "vidsrc-pm", "rive", "onetouchtv")
+        val ids = com.indstream.ServerFarm.allServers.map { it.id }
         for (id in ids) {
             val spec = com.indstream.ServerFarm.allServers.first { it.id == id }
             val t0 = System.currentTimeMillis()
             try {
                 val out = kotlinx.coroutines.withTimeoutOrNull(spec.timeoutSec * 1000L) {
-                    StreamEngine.resolveOne(spec, 27205, "tt1375666", "movie", 1, 1, null)
+                    StreamEngine.resolveOne(spec, 27205, "tt1375666", "movie", 1, 1)
                 }
                 println("DIAG $id: ${out?.size ?: "TIMEOUT"} streams in ${System.currentTimeMillis() - t0}ms")
             } catch (e: Exception) {
@@ -156,88 +137,11 @@ class PracticalResolveTest {
     fun onetouchtv_fullChain() = runBlocking {
         // Dune Part Two (TMDB 693134) carries OneTouchTV; Inception does not (library gap, not a bug).
         val spec = com.indstream.ServerFarm.allServers.first { it.id == "onetouchtv" }
-        val out = StreamEngine.resolveOne(spec, 693134, "tt15239678", "movie", 1, 1, null)
+        val out = StreamEngine.resolveOne(spec, 693134, "tt15239678", "movie", 1, 1)
         println("OneTouchTV streams: ${out.size} ${out.map { it.qualityHint to it.url.take(70) }}")
         assertTrue(out.isNotEmpty(), "onetouchtv must resolve streams")
         val live = out.map { it to (HttpKit.aliveCheck(it.url, it.referer, it.extraHeaders) != false) }
         live.forEach { (s, ok) -> println("  ${s.qualityHint}p alive=$ok ${s.url.take(70)}") }
         assertTrue(live.any { it.second }, "at least one onetouchtv stream must be playable")
-    }
-
-    @Test
-    fun vidnest_movieboxAdDropped() {
-        // Synthetic ad payload (one static file under every label) must parse to zero streams.
-        val spec = com.indstream.ServerFarm.allServers.first { it.id == "vidnest" }
-        val m = StreamEngine::class.java.getDeclaredMethod(
-            "parseVidnestSub", String::class.java, org.json.JSONObject::class.java,
-            com.indstream.ServerSpec::class.java,
-        )
-        m.isAccessible = true
-        @Suppress("UNCHECKED_CAST")
-        fun parse(sub: String, json: String) =
-            m.invoke(StreamEngine, sub, org.json.JSONObject(json), spec) as List<com.indstream.StreamEngine.RawStream>
-        val ad = """{"url":[
-            {"lang":"English","link":"https://x.example/ad.mp4","resolution":"360p","type":"mp4"},
-            {"lang":"English","link":"https://x.example/ad.mp4","resolution":"480p","type":"mp4"},
-            {"lang":"English","link":"https://x.example/ad.mp4","resolution":"1080p","type":"mp4"}]}"""
-        assertTrue(parse("moviebox", ad).isEmpty(), "single-file ad must drop")
-        val real = """{"url":[
-            {"lang":"English","link":"https://x.example/a360.mp4","resolution":"360p","type":"mp4"},
-            {"lang":"English","link":"https://x.example/a480.mp4","resolution":"480p","type":"mp4"}]}"""
-        assertEquals(2, parse("moviebox", real).size, "distinct files must pass")
-    }
-
-    @Test
-    fun vidnest_klikxxiShapeDrift() {
-        // The host answers two entry shapes; both must yield streams.
-        val spec = com.indstream.ServerFarm.allServers.first { it.id == "vidnest" }
-        val m = StreamEngine::class.java.getDeclaredMethod(
-            "parseVidnestSub", String::class.java, org.json.JSONObject::class.java,
-            com.indstream.ServerSpec::class.java,
-        )
-        m.isAccessible = true
-        @Suppress("UNCHECKED_CAST")
-        fun parse(sub: String, json: String) =
-            m.invoke(StreamEngine, sub, org.json.JSONObject(json), spec) as List<com.indstream.StreamEngine.RawStream>
-
-        val legacy = """{"sources":[
-            {"url":"https://x.example/a1080.mp4","quality":"1080p","type":"mp4"},
-            {"url":"https://x.example/a720.mp4","quality":"720p","type":"mp4"}]}"""
-        assertEquals(2, parse("klikxxi", legacy).size, "url/quality shape must parse")
-
-        val drifted = """{"sources":[
-            {"file":"https://x.example/b1080.mp4","label":"1080p","type":"mp4"},
-            {"file":"https://x.example/b720.mp4","label":"720p","type":"mp4"}]}"""
-        assertEquals(2, parse("klikxxi", drifted).size, "file/label shape must parse")
-
-        // JSON-null url must not shadow the file fallback (optString renders null as "null").
-        val nullUrl = """{"sources":[{"url":null,"file":"https://x.example/c1080.mp4","label":"1080p","type":"mp4"}]}"""
-        val got = parse("klikxxi", nullUrl)
-        assertEquals(1, got.size, "null url must fall through to file")
-        assertEquals("https://x.example/c1080.mp4", got.first().url)
-
-        assertEquals(0, parse("klikxxi", """{"nope":1}""").size, "unrecognized shape yields nothing")
-    }
-
-    @Test
-    fun vidnest_livePayloadDecodes() = runBlocking {
-        val headers = mapOf(
-            "Referer" to "https://vidnest.fun/",
-            "Origin" to "https://vidnest.fun",
-            "Accept" to "application/json, text/javascript, */*; q=0.01",
-        )
-        val raw = HttpKit.get("https://new.vidnest.fun/moviebox/movie/27205", timeout = 12)
-            ?: throw AssertionError("sub-server must answer")
-        assertTrue(raw.contains("\"data\""), "encrypted envelope")
-        // Real decode path via reflection (kept private in main); catches upstream alphabet changes against a live payload.
-        val m = StreamEngine::class.java.getDeclaredMethod("decodeVidnestPayload", String::class.java)
-        m.isAccessible = true
-        val payload = org.json.JSONObject(raw).optString("data")
-        val json = m.invoke(StreamEngine, payload) as String?
-        assertNotNull(json, "payload must decode")
-        val urls = org.json.JSONObject(json).optJSONArray("url")
-        assertNotNull(urls, "moviebox url array")
-        println("VidNest moviebox entries: ${urls.length()} first=${urls.optJSONObject(0)?.optString("link")?.take(80)}")
-        assertTrue(urls.length() > 0, "entries present")
     }
 }

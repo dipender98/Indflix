@@ -31,6 +31,7 @@ object Settings {
     private const val PREFS = "indstream_settings"
     private const val KEY = "wyzie_api_key"
     private const val TMDB_KEY = "tmdb_api_key"
+    private const val SHOWBOX_KEY = "showbox_token"
 
     @Volatile
     private var appContext: Context? = null
@@ -117,6 +118,43 @@ object Settings {
     /** Drop the saved TMDB key; the built-in keys take over again. */
     fun clearTmdb(context: Context) {
         saveTmdb(context, "")
+    }
+
+    /** Saved FebBox token, or null when never set (the ShowBox server stays off). */
+    fun showboxToken(): String? {
+        if (!showboxLoaded) loadShowbox()
+        return showboxCached?.takeIf { it.isNotBlank() }
+    }
+
+    /** Persist the FebBox token (blank clears it). */
+    fun saveShowbox(context: Context, raw: String) {
+        val token = raw.trim()
+        runCatching {
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit().putString(SHOWBOX_KEY, token).apply()
+        }
+        showboxCached = token
+        showboxLoaded = true
+        appContext = context.applicationContext
+    }
+
+    /** Drop the saved token; the ShowBox server goes dormant again. */
+    fun clearShowbox(context: Context) {
+        saveShowbox(context, "")
+    }
+
+    @Volatile
+    private var showboxCached: String? = null
+
+    @Volatile
+    private var showboxLoaded = false
+
+    private fun loadShowbox() {
+        val ctx = appContext ?: return
+        showboxCached = runCatching {
+            ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(SHOWBOX_KEY, "").orEmpty()
+        }.getOrDefault("")
+        showboxLoaded = true
     }
 
     @Volatile
@@ -418,6 +456,68 @@ object Settings {
         tmdbButtonRow.addView(tmdbSaveBtn)
         tmdbSection.addView(tmdbButtonRow)
 
+        val showboxSaved = showboxToken() != null
+        val showboxSection = settingsSection(
+            "ShowBox Token (FebBox)", if (showboxSaved) "Saved" else "Not set", showboxSaved,
+        )
+        val showboxDesc = TextView(context).apply {
+            text = "Optional - enables the ShowBox server. Paste your febbox.com `ui` cookie value (or the whole cookie)."
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            setTextColor(hintColor)
+            setPadding(0, 0, 0, dp(6))
+            showboxSection.addView(this)
+        }
+        val showboxKeyInput = EditText(context).apply {
+            setText(showboxToken().orEmpty())
+            setHint("ui token / cookie...")
+            setHintTextColor(hintColor)
+            setTextColor(textColor)
+            setSingleLine(true)
+            inputType = InputType.TYPE_CLASS_TEXT
+            typeface = Typeface.MONOSPACE
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            background = rounded(fieldColor, 10, 1)
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            )
+            showboxSection.addView(this)
+        }
+        val showboxStatusText = TextView(context).apply {
+            text = if (showboxSaved) "ShowBox active - the server will use your token."
+            else "No token saved - the ShowBox server stays off."
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            setTextColor(hintColor)
+            setPadding(0, dp(10), 0, dp(12))
+            showboxSection.addView(this)
+        }
+        val showboxButtonRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.END
+        }
+        val showboxClearBtn = Button(context).apply {
+            text = "Clear"
+            setTextColor(textColor)
+            background = rounded(Color.TRANSPARENT, 10)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            minWidth = 0
+            minHeight = 0
+            setPadding(dp(16), dp(8), dp(16), dp(8))
+        }
+        val showboxSaveBtn = Button(context).apply {
+            text = "Save"
+            setTextColor(Color.WHITE)
+            setTypeface(null, Typeface.BOLD)
+            background = rounded(accentColor, 10)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            minWidth = 0
+            minHeight = 0
+            setPadding(dp(16), dp(8), dp(16), dp(8))
+        }
+        showboxButtonRow.addView(showboxClearBtn)
+        showboxButtonRow.addView(showboxSaveBtn)
+        showboxSection.addView(showboxButtonRow)
+
         val scroll = ScrollView(context).apply {
             setBackgroundColor(bgColor)
             setPadding(dp(4), dp(4), dp(4), dp(4))
@@ -509,6 +609,16 @@ object Settings {
             } else {
                 tmdbKeyInput.error = tmdbKeyProblem(typed) ?: "Key looks too short"
             }
+        }
+        showboxClearBtn.setOnClickListener {
+            clearShowbox(context)
+            Toast.makeText(context, "Cleared - ShowBox stays off", Toast.LENGTH_SHORT).show()
+            dialog.dismiss()
+        }
+        showboxSaveBtn.setOnClickListener {
+            saveShowbox(context, showboxKeyInput.text.toString())
+            Toast.makeText(context, "Saved", Toast.LENGTH_SHORT).show()
+            dialog.dismiss()
         }
         dialog.window?.setBackgroundDrawable(rounded(bgColor, 20))
         dialog.show()

@@ -23,21 +23,6 @@ class EpisodePickerTest {
         assertNull(StreamEngine.movieboxSeasonEnd("Reacher"))
     }
 
-    // ── VidNest error-page classifier (F5 / RC-D) ──────────────────────────.
-
-    @Test
-    fun vidnestErrorPage_cloudflare502JsonCountsAsDown() {
-        assertTrue(StreamEngine.vidnestIsErrorPage(
-            """{"title":"Error 502: Bad gateway","error_name":"origin_bad_gateway"}""",
-        ))
-        assertTrue(StreamEngine.vidnestIsErrorPage("<html><head><title>502 Bad Gateway</title>"))
-        assertTrue(StreamEngine.vidnestIsErrorPage("""{"detail":"error 502"}"""))
-        assertFalse(StreamEngine.vidnestIsErrorPage("""{"encrypted":true,"data":"RB0fpH8"}"""))
-        assertFalse(StreamEngine.vidnestIsErrorPage("""{"url":[{"lang":"Hindi","link":"https://x/a.mp4"}]}"""))
-        assertFalse(StreamEngine.vidnestIsErrorPage("""{"streams":[{"url":"https://x/a.m3u8"}]}"""))
-        assertFalse(StreamEngine.vidnestIsErrorPage(""))
-    }
-
     // ── Allmovieland card finder (F1/F2 / RC-A/RC-C) ───────────────────────.
 
     private val liveCardHtml = """

@@ -29,21 +29,9 @@ class ServerAdditionsTest {
     }
 
     @Test
-    fun videasy_presentAndTmdbKeyed() {
-        val s = ServerFarm.allServers.first { it.id == "videasy" }
-        assertEquals("Videasy", s.name)
-        assertEquals(ServerIdType.TMDB, s.idType)
-        assertEquals("https://player.videasy.to/", s.referer)
-        assertTrue(s.declaredLanguages.isEmpty(), "multi-route host: per-source labels win")
-        assertEquals(30, s.timeoutSec, "seed 6s + parallel routes 10s + one fresh-seed retry must fit")
-        assertEquals(
-            "https://api.speedracelight.com/seed?mediaId=27205",
-            ServerFarm.buildMovieUrl(s, "27205"),
-        )
-        assertEquals(
-            "https://api.speedracelight.com/seed?mediaId=1399",
-            ServerFarm.buildTvUrl(s, "1399", 1, 1),
-        )
+    fun videasy_removed_v63() {
+        // Dropped in v62; assert it stays out of the farm.
+        assertNull(ServerFarm.allServers.firstOrNull { it.id == "videasy" })
     }
 
     @Test
@@ -56,32 +44,13 @@ class ServerAdditionsTest {
     }
 
     @Test
-    fun twoembed_presentAndImdbKeyed() {
-        val s = ServerFarm.allServers.first { it.id == "twoembed" }
-        assertEquals("2Embed", s.name)
-        assertEquals(ServerIdType.IMDB, s.idType)
-        assertEquals("https://2embed.cc/embed/tt1375666", ServerFarm.buildMovieUrl(s, "tt1375666"))
-        assertEquals("https://2embed.cc/embedtv/tt0944947&s=1&e=1", ServerFarm.buildTvUrl(s, "tt0944947", 1, 1))
-    }
-
-    @Test
-    fun fastBatch_presentAndTmdbKeyed() {
-        // Fast embed batch: all TMDB-keyed (no id lookup wait), generic pipeline, 30s kill.
-        val expected = mapOf(
-            "vidfast" to Pair("https://vidfast.pro/movie/27205?autoPlay=true", "https://vidfast.pro/tv/1399/1/1?autoPlay=true"),
-            "autoembed" to Pair("https://autoembed.co/movie/tmdb/27205", "https://autoembed.co/tv/tmdb/1399-1-1"),
-            "vidphantom" to Pair("https://vidphantom.com/movie/27205", "https://vidphantom.com/tv/1399/1/1"),
-            "vsembed" to Pair("https://vsembed.su/embed/movie/27205", "https://vsembed.su/embed/tv/1399/1/1"),
-            "twoembed-skin" to Pair("https://www.2embed.skin/embed/27205", "https://www.2embed.skin/embedtv/1399&s=1&e=1"),
-            "vidsrcme" to Pair("https://vidsrcme.su/embed/movie/27205", "https://vidsrcme.su/embed/tv/1399/1/1"),
-        )
-        for ((id, urls) in expected) {
-            val s = ServerFarm.allServers.firstOrNull { it.id == id }
-            assertNotNull(s, "$id must be in the farm")
-            assertEquals(ServerIdType.TMDB, s.idType, "$id must be TMDB-keyed")
-            assertEquals(30, s.timeoutSec, "$id farm kill fits the background fill")
-            assertEquals(urls.first, ServerFarm.buildMovieUrl(s, "27205"), "$id movie url")
-            assertEquals(urls.second, ServerFarm.buildTvUrl(s, "1399", 1, 1), "$id tv url")
+    fun embedBatch_removed_v63() {
+        // Generic-pipeline embeds: 0 streams (players load via JS / lazy data-src).
+        for (id in setOf(
+            "twoembed", "vidfast", "autoembed", "vidphantom", "vsembed",
+            "twoembed-skin", "vidsrcme", "vidsrc-pm", "rive", "vidsrcto",
+        )) {
+            assertNull(ServerFarm.allServers.firstOrNull { it.id == id }, "$id must stay out")
         }
     }
 
@@ -140,49 +109,10 @@ class ServerAdditionsTest {
     }
 
     @Test
-    fun vidrockNet_presentAndTmdbKeyed() {
-        // Failover mirror: same encrypted payload shape as vidrock, separate host.
-        val s = ServerFarm.allServers.first { it.id == "vidrock-net" }
-        assertEquals("VidRockNet", s.name)
-        assertEquals(ServerIdType.TMDB, s.idType)
-        assertEquals("https://vidrock.net/", s.referer)
-        assertEquals(12, s.timeoutSec)
-        assertEquals(
-            "https://vidrock.net/api/movie/27205/",
-            ServerFarm.buildMovieUrl(s, "27205"),
-        )
-        assertEquals(
-            "https://vidrock.net/api/tv/1399/1/1/",
-            ServerFarm.buildTvUrl(s, "1399", 1, 1),
-        )
-    }
-
-    @Test
-    fun vidrockDecrypt_liveVector() {
-        // Captured against the live mirror API: shared static key must decrypt it.
-        assertEquals(
-            "https://cdn1.ngcorp.dad/e/DwYRNhFGRkRQWVI/master.m3u8",
-            StreamEngine.decryptVidrockUrl("NptMg-et1v491LT2L810aRv7mtf05YM_PryTgeKZUqIDduhaVZvxVto1blI84DKk2reyApYHzgHTJgUMcnLgm9AoEBQ8NW-qoqgYnOzE0VAO"),
-        )
-        assertNull(StreamEngine.decryptVidrockUrl("!!!not-base64!!!"))
-    }
-
-    @Test
-    fun fastBatch2_presentAndTmdbKeyed() {
-        // Fast global batch: TMDB-keyed embeds, generic pipeline, 30s kill.
-        val expected = mapOf(
-            "vidsrc-pm" to Pair("https://vidsrc.pm/embed/movie/27205", "https://vidsrc.pm/embed/tv/1399/1/1"),
-            "rive" to Pair("https://www.rivestream.app/embed?type=movie&id=27205",
-                "https://www.rivestream.app/embed?type=tv&id=1399&season=1&episode=1"),
-        )
-        for ((id, urls) in expected) {
-            val s = ServerFarm.allServers.firstOrNull { it.id == id }
-            assertNotNull(s, "$id must be in the farm")
-            assertEquals(ServerIdType.TMDB, s.idType, "$id must be TMDB-keyed")
-            assertEquals(30, s.timeoutSec, "$id farm kill fits the background fill")
-            assertEquals(urls.first, ServerFarm.buildMovieUrl(s, "27205"), "$id movie url")
-            assertEquals(urls.second, ServerFarm.buildTvUrl(s, "1399", 1, 1), "$id tv url")
-        }
+    fun vidrock_removed_v63() {
+        // vidrock + mirror: /api/movie/{id}/ now returns SPA HTML, not JSON.
+        assertNull(ServerFarm.allServers.firstOrNull { it.id == "vidrock" })
+        assertNull(ServerFarm.allServers.firstOrNull { it.id == "vidrock-net" })
     }
 
     @Test

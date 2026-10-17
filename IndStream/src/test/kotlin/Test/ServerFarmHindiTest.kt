@@ -57,14 +57,10 @@ class ServerFarmHindiTest {
     }
 
     @Test
-    fun vidrock_presentAndTmdbKeyed() {
-        val s = ServerFarm.allServers.first { it.id == "vidrock" }
-        assertEquals("VidRock", s.name)
-        assertEquals(ServerIdType.TMDB, s.idType)
-        val m = ServerFarm.buildMovieUrl(s, "550")
-        assertEquals("https://vidrock.to/api/movie/550/", m)
-        val tv = ServerFarm.buildTvUrl(s, "1399", 1, 1)
-        assertEquals("https://vidrock.to/api/tv/1399/1/1/", tv)
+    fun vidrock_removed_v63() {
+        // Endpoint now serves SPA HTML instead of JSON on both hosts.
+        assertNull(ServerFarm.allServers.firstOrNull { it.id == "vidrock" })
+        assertNull(ServerFarm.allServers.firstOrNull { it.id == "vidrock-net" })
     }
 
     @Test
@@ -172,24 +168,15 @@ class ServerFarmHindiTest {
     @Test
     fun farm_withinServerCap() {
         // No registry cap: the farm grows freely, ranked fastest-first at emit.
-        assertTrue(ServerFarm.allServers.size >= 22, "farm keeps every live server")
+        assertTrue(ServerFarm.allServers.size >= 9, "farm keeps every live server")
         assertTrue(ServerFarm.allServers.isNotEmpty())
         assertNotNull(ServerFarm.allServers.firstOrNull { it.id == "vidlink" })
     }
 
     @Test
-    fun vidup_presentAndTmdbKeyed() {
-        val s = ServerFarm.allServers.first { it.id == "vidup" }
-        assertEquals("VidUp", s.name)
-        assertEquals(ServerIdType.TMDB, s.idType)
-        assertEquals("https://vidup.to/", s.referer)
-        assertTrue(s.hasSubtitles)
-        // Budget: page 10 + enc 8 + servers 8 + dec 8 + per-sub (8+8) - a measured happy path already hit ~15s.
-        assertEquals(30, s.timeoutSec, "enc-dec chain needs headroom above the measured ~15s resolve")
-        val m = ServerFarm.buildMovieUrl(s, "27205")
-        assertTrue(m.contains("vidup.to/movie/27205"))
-        val tv = ServerFarm.buildTvUrl(s, "1399", 1, 1)
-        assertTrue(tv.contains("vidup.to/tv/1399/1/1"))
+    fun vidup_removed_v63() {
+        // enc-dec.app/api/enc-vidup helper returns HTTP 400 — chain broken.
+        assertNull(ServerFarm.allServers.firstOrNull { it.id == "vidup" })
     }
 
     @Test
@@ -237,24 +224,22 @@ class ServerFarmHindiTest {
 
     @Test
     fun bulletTrainServers_present() {
-        // The fast direct-API servers (, no embed chain). mp4hydra, vidzee, vixsrc, streamprovider and 8stream are disabled ().
-        // kept out of the farm so.
-        val ids = setOf("vidlink", "vaplayer", "vidrock", "vidrock-net", "moviebox", "vidnest",
-            "vidup", "vidcore-api", "allmovieland", "netmirror",
-            "twoembed",
-            "vidfast", "autoembed", "vidphantom", "vsembed", "twoembed-skin",
-            "vidsrcme",
-            "castletv", "streamflix",
-            "vidsrc-pm", "rive", "videasy", "onetouchtv")
+        // The fast direct-API servers (no embed chain) that survived the v63 cull.
+        val ids = setOf("vidlink", "vaplayer", "moviebox", "allmovieland", "netmirror",
+            "castletv", "streamflix", "onetouchtv", "vidcore-api")
         for (id in ids) {
             assertNotNull(
                 ServerFarm.allServers.firstOrNull { it.id == id },
                 "$id must be in the farm",
             )
         }
-        // Disabled/dead servers must NOT be in the live farm (vixsrc dropped: bot challenge on the whole domain).
-        val disabled = setOf("mp4hydra", "vidzee", "streamprovider", "primesrc",
-            "myflixer-hindi", "videm", "8stream", "dahmermovies", "vidzy", "vixsrc", "4khdhub",
+        // Removed/dead servers must NOT be in the live farm.
+        val disabled = setOf("vidrock", "vidrock-net", "vidnest", "vidup",
+            "twoembed", "vidfast", "autoembed", "vidphantom", "vsembed", "twoembed-skin",
+            "vidsrcme", "vidsrc-pm", "rive", "vidsrcto", "videasy",
+            "primesrc", "myflixer-hindi",
+            "mp4hydra", "vidzee", "streamprovider",
+            "videm", "8stream", "dahmermovies", "vidzy", "vixsrc", "4khdhub",
             "nhd", "vidapi", "zxcstreams", "vidsrc-to", "nontongo", "vidcore")
         for (id in disabled) {
             assertNull(
@@ -267,6 +252,6 @@ class ServerFarmHindiTest {
     @Test
     fun farm_withinExpandedCap() {
         // Uncapped farm: size only grows, never trimmed to fit.
-        assertTrue(ServerFarm.allServers.size >= 22, "farm keeps every live server")
+        assertTrue(ServerFarm.allServers.size >= 9, "farm keeps every live server")
     }
 }
