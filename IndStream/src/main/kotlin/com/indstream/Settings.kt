@@ -8,12 +8,18 @@ import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
+import android.os.Message
 import android.text.InputType
 import android.util.TypedValue
+import android.widget.FrameLayout
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.CookieManager
+import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
+import android.webkit.WebResourceRequest
+import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Button
@@ -33,10 +39,21 @@ object Settings {
     const val TMDB_LINK = "https://www.themoviedb.org/settings/api"
 
     /** FebBox sign-in page loaded by the ShowBox Get Token chip. */
-    const val SHOWBOX_LINK = "https://www.febbox.com/login"
+    const val SHOWBOX_LINK = "https://www.febbox.com/"
 
     /** Host whose session cookie carries the ShowBox token. */
     const val SHOWBOX_HOST = "https://www.febbox.com"
+
+    /** Chrome UA that passes the site's bot check and lets OAuth consent render. */
+    private const val SHOWBOX_UA =
+        "Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.82 Mobile Safari/537.36"
+
+    /** Rewrites navigator.userAgent so the page matches the header UA the request used. */
+    private const val UA_SPOOF_JS =
+        "if(!window.__indSpoofed){window.__indSpoofed=!0;let ua='$SHOWBOX_UA';" +
+            "try{Object.defineProperty(navigator,'userAgent',{get:()=>ua});" +
+            "Object.defineProperty(navigator,'appVersion',{get:()=>ua.replace('Mozilla/','')})}catch(e){}" +
+            "if(!window.chrome)window.chrome={runtime:{},loadTimes:()=>{},csi:()=>{}}}"
 
     private const val PREFS = "indstream_settings"
     private const val KEY = "wyzie_api_key"
@@ -202,21 +219,67 @@ object Settings {
         val hintColor = Color.parseColor("#A3A3AD")
         val accentColor = Color.parseColor("#2F7CF6")
 
+        val webContainer = FrameLayout(context)
         val web = WebView(context).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT,
+            )
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
+            settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
             settings.loadWithOverviewMode = true
             settings.useWideViewPort = true
-            webViewClient = WebViewClient()
+            settings.setSupportMultipleWindows(true)
+            settings.javaScriptCanOpenWindowsAutomatically = true
+            settings.userAgentString = SHOWBOX_UA
+            CookieManager.getInstance().setAcceptCookie(true)
+            CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+            // OAuth opens the consent screen in a popup; host it over the main view.
+            webChromeClient = object : WebChromeClient() {
+                override fun onCreateWindow(view: WebView, isDialog: Boolean, isUserGesture: Boolean, resultMsg: Message?): Boolean {
+                    val popup = WebView(context).apply {
+                        layoutParams = FrameLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT,
+                        )
+                        settings.javaScriptEnabled = true
+                        settings.domStorageEnabled = true
+                        settings.userAgentString = SHOWBOX_UA
+                        CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+                        webChromeClient = object : WebChromeClient() {
+                            override fun onCloseWindow(window: WebView) {
+                                webContainer.removeView(window)
+                                window.destroy()
+                            }
+                        }
+                    }
+                    webContainer.addView(popup)
+                    (resultMsg?.obj as? WebView.WebViewTransport)?.webView = popup
+                    resultMsg?.sendToTarget()
+                    return true
+                }
+            }
             setBackgroundColor(sheetColor)
-            loadUrl(SHOWBOX_LINK)
         }
         val statusText = TextView(context).apply {
-            text = "Sign in, then tap Use this login."
+            text = "Loading sign-in page..."
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             setTextColor(hintColor)
             setPadding(dp(context, 4), dp(context, 4), dp(context, 4), dp(context, 10))
         }
+        web.webViewClient = object : WebViewClient() {
+            override fun onPageFinished(view: WebView?, url: String?) {
+                view?.evaluateJavascript(UA_SPOOF_JS, null)
+                statusText.text = "Sign in, then tap Use this login."
+            }
+
+            override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
+                if (request?.isForMainFrame == true) {
+                    statusText.text = "Couldn't load sign-in. Check your connection and retry."
+                }
+            }
+        }
+        webContainer.addView(web)
+        web.loadUrl(SHOWBOX_LINK)
         val useBtn = Button(context).apply {
             text = "Use this login"
             setTextColor(Color.WHITE)
@@ -228,11 +291,17 @@ object Settings {
             setTextColor(textColor)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
         }
+        val browserBtn = Button(context).apply {
+            text = "Open in browser"
+            setTextColor(textColor)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+        }
         val buttonRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.END
             setPadding(0, dp(context, 10), 0, 0)
             addView(cancelBtn)
+            addView(browserBtn)
             addView(useBtn)
         }
         val root = LinearLayout(context).apply {
@@ -240,23 +309,28 @@ object Settings {
             setBackgroundColor(sheetColor)
             setPadding(dp(context, 14), dp(context, 14), dp(context, 14), dp(context, 14))
             addView(statusText)
-            addView(web, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+            addView(webContainer, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
             addView(buttonRow)
         }
         val dialog = AlertDialog.Builder(context, android.R.style.Theme_Material_Dialog)
             .setView(root)
             .create()
         useBtn.setOnClickListener {
-            val cookie = runCatching { CookieManager.getInstance().getCookie(SHOWBOX_HOST) }.getOrNull()
+            val cm = CookieManager.getInstance()
+            val cookie = runCatching { cm.getCookie(SHOWBOX_HOST) ?: cm.getCookie("https://febbox.com") }.getOrNull()
             val token = uiTokenFromCookie(cookie)
             if (token == null) {
-                statusText.text = "Not signed in yet - finish signing in first."
+                statusText.text = "No session yet - finish signing in, or paste the cookie below."
                 return@setOnClickListener
             }
             onToken(token)
             dialog.dismiss()
         }
         cancelBtn.setOnClickListener { dialog.dismiss() }
+        browserBtn.setOnClickListener {
+            launchShowboxPage(context)
+            statusText.text = "Sign in in the browser, then paste the cookie below."
+        }
         dialog.setOnDismissListener { runCatching { web.destroy() } }
         dialog.window?.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Color.parseColor("#0F0F11")))
         dialog.show()
