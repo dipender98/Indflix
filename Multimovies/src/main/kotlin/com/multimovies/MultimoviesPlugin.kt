@@ -70,9 +70,9 @@ internal object SearchCache {
     private fun key(query: String) = query.trim().lowercase()
 }
 
-/** Matches any. * host (the site rotates its TLD, so URL checks must never pin the hostname - old. */
-private val MULTIMOVIES_HOST_REGEX =
-    Regex("""^https?://(?:www\.)?multimovies\.[a-z]{2,10}(?:/|$)""", RegexOption.IGNORE_CASE)
+/** Matches the site on any subdomain and TLD (both rotate, so URL checks must stay loose). */
+internal val MULTIMOVIES_HOST_REGEX =
+    Regex("""^https?://(?:[a-z0-9-]+\.)?multimovies\.[a-z]{2,10}(?:/|$)""", RegexOption.IGNORE_CASE)
 
 /** Matches the scheme+host prefix of a URL (for host rewriting in). */
 private val URL_HOST_REGEX = Regex("""^(https?://[^/]+)""")
@@ -411,7 +411,7 @@ class MultimoviesProvider : MainAPI() {
     private fun liveUrl(url: String): String {
         if (url.startsWith("/")) return mainUrl.trimEnd('/') + url
         val m = URL_HOST_REGEX.find(url) ?: return url
-        if (!m.groupValues[1].substringAfter("://").startsWith("multimovies.", ignoreCase = true)) return url
+        if (!isMultimoviesUrl(m.groupValues[1])) return url
         val liveHost = URL_HOST_REGEX.find(mainUrl)?.value ?: return url
         return liveHost + url.substring(m.range.last + 1)
     }
@@ -1870,21 +1870,21 @@ class MultimoviesProvider : MainAPI() {
     }
 }
 
-/** Self-healing live-domain resolver for the Dooplay site. `. wtf` is a static gateway page that. */
+/** Self-healing live-domain resolver; the static gateway page announces the current domain. */
 internal object MultimoviesDomainResolver {
 
     /** Stable gateway URL that always announces the current live domain. */
     internal const val LANDING_URL = "https://multimovies.wtf/"
 
     /** Last-known-good domain; used only when the gateway itself is unreachable and no cached value exists. */
-    internal const val SEED_DOMAIN = "https://multimovies.garden"
+    internal const val SEED_DOMAIN = "https://m1.multimovies.courses"
 
     private const val CACHE_TTL_MS = 6 * 60 * 60 * 1000L
     private const val GATEWAY_DEBOUNCE_MS = 60_000L
     private const val FETCH_TIMEOUT_S = 8L
 
     private val LIVE_DOMAIN_REGEX =
-        Regex("""^https://(?:www\.)?multimovies\.[a-z]{2,10}$""")
+        Regex("""^https://(?:[a-z0-9-]+\.)?multimovies\.[a-z]{2,10}$""")
 
     @Volatile
     private var cached: String? = null
