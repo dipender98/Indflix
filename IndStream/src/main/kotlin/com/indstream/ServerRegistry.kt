@@ -194,6 +194,24 @@ object ServerFarm {
             referer = "https://www.movy.sx/",
             hasSubtitles = true, timeoutSec = 25,
         ),
+        // Browserless JSON API: a static player key authorizes the direct HLS ladder.
+        ServerSpec(
+            id = "vidspark", name = "VidSpark",
+            idType = ServerIdType.TMDB,
+            movieUrl = "https://vidspark.to/api/vidora/v1/movie/{id}",
+            tvUrl = "https://vidspark.to/api/vidora/v1/tv/{id}/{season}/{episode}",
+            referer = "https://vidspark.to/",
+            hasSubtitles = true, timeoutSec = 20,
+        ),
+        // Browserless JSON API: answers with a proxied DASH manifest URL.
+        ServerSpec(
+            id = "braflix", name = "Braflix",
+            idType = ServerIdType.TMDB,
+            movieUrl = "https://braflix.dev/api/play/movie/{id}",
+            tvUrl = "https://braflix.dev/api/play/tv/{id}/{season}/{episode}",
+            referer = "https://braflix.dev/",
+            hasSubtitles = false, timeoutSec = 20,
+        ),
     )
 
     fun buildMovieUrl(spec: ServerSpec, id: String): String =

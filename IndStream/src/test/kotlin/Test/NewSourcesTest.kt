@@ -8,12 +8,12 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-/** Guards the video-lane expansion: Vidrift, Rivestream, Movy. */
+/** Guards the video-lane expansion: Vidrift, Rivestream, Movy, VidSpark, Braflix. */
 class NewSourcesTest {
 
     @Test
     fun farm_presentAndTmdbKeyed() {
-        for (id in listOf("vidrift", "rivestream", "movy")) {
+        for (id in listOf("vidrift", "rivestream", "movy", "vidspark", "braflix")) {
             val s = ServerFarm.allServers.firstOrNull { it.id == id }
             assertTrue(s != null, "$id must be in the farm")
             assertEquals(ServerIdType.TMDB, s!!.idType)
@@ -90,5 +90,36 @@ class NewSourcesTest {
         assertEquals("/api/orion/abc/master.m3u8" to "Original", out[0])
         assertEquals("/api/orion/def/master.m3u8" to "Hindi", out[1])
         assertTrue(StreamEngine.vidriftStreams("<html>no config</html>").isEmpty())
+    }
+
+    @Test
+    fun vidspark_parseSources() {
+        val json = """
+            {"result":true,"type":"movie","sources":[
+              {"file_code":"abc","url":"https://bx.netrocdn.site/hls2/1/master.m3u8?t=x","source":"vidora","quality":"1080p","tracks":[]},
+              {"file_code":"def","url":"https://bx.netrocdn.site/hls2/2/master.m3u8?t=y","source":"vidora","quality":"720p","tracks":[]}
+            ]}
+        """.trimIndent()
+        val out = StreamEngine.vidsparkSources(json)
+        assertEquals(2, out.size)
+        assertTrue(out[0].url.startsWith("https://bx.netrocdn.site/"))
+        assertEquals("1080p", out[0].quality)
+        assertTrue(StreamEngine.vidsparkSources("""{"result":true}""").isEmpty())
+        assertTrue(StreamEngine.vidsparkSources("not json").isEmpty())
+    }
+
+    @Test
+    fun braflix_parseSource() {
+        val json = """
+            {"status":"ready","result":{"token":"d0",
+            "source":{"kind":"dash","quality":"720,480"},
+            "file":{"playback":"dash","stream":"/dash-proxy?url=x&cookie=y"}}}
+        """.trimIndent()
+        val src = StreamEngine.braflixSource(json)
+        assertTrue(src != null)
+        assertEquals("/dash-proxy?url=x&cookie=y", src!!.stream)
+        assertEquals("720,480", src.quality)
+        assertNull(StreamEngine.braflixSource("""{"status":"pending"}"""))
+        assertNull(StreamEngine.braflixSource("nope"))
     }
 }

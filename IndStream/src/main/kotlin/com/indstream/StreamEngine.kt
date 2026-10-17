@@ -515,6 +515,18 @@ object StreamEngine {
             failServer(spec, "movy returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
             return emptyList()
         }
+        if (spec.id == "vidspark") {
+            val result = resolveVidSpark(spec, tmdbId, type, season, episode)
+            if (result.isNotEmpty()) { okServer(spec, start, "vidspark api", result.size); return result }
+            failServer(spec, "vidspark returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
+            return emptyList()
+        }
+        if (spec.id == "braflix") {
+            val result = resolveBraflix(spec, tmdbId, type, season, episode)
+            if (result.isNotEmpty()) { okServer(spec, start, "braflix api", result.size); return result }
+            failServer(spec, "braflix returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
+            return emptyList()
+        }
 
         // 0. JSON API branch (api. shows. st style): parse JSON, take source. url + source. qualities + subtitles.
         if (spec.isJsonApi) {
@@ -2407,6 +2419,95 @@ object StreamEngine {
         }
         Log.d("Movy", "cascade got ${out.size} sources for $type/$tmdbId")
         return out.values.toList()
+    }
+
+    // ---- VidSpark: browserless JSON API gated by a static player key ----
+
+    /** Pinned player key the host rejects requests without; rotates rarely, so hard-coded. */
+    private const val VIDSPARK_KEY = "3a67e8866ae1d2bb9e81fe7f73315a56eb3bdf5e3e755c7554c8be6910aa6b13"
+
+    private suspend fun resolveVidSpark(
+        spec: ServerSpec, tmdbId: Int, type: String, season: Int, episode: Int,
+    ): List<RawStream> {
+        if (type != "movie" && (season <= 0 || episode <= 0)) return emptyList()
+        val base = "https://vidspark.to"
+        val path = if (type == "movie") "/api/vidora/v1/movie/$tmdbId"
+        else "/api/vidora/v1/tv/$tmdbId/$season/$episode"
+        val headers = mapOf(
+            "User-Agent" to HttpKit.userAgent,
+            "Referer" to "$base/",
+            "Origin" to base,
+            "x-player-key" to VIDSPARK_KEY,
+        )
+        val text = withTimeoutOrNull(12_000L) {
+            runCatching { app.get("$base$path", timeout = 12, headers = headers).text }.getOrNull()
+        } ?: run { Log.w("VidSpark", "api no response"); return emptyList() }
+        val out = vidsparkSources(text).map { s ->
+            RawStream(
+                serverId = spec.id, serverName = spec.name,
+                url = s.url, isM3u8 = s.url.contains(".m3u8", true),
+                referer = "$base/", qualityHint = heightHintOf(s.quality),
+                extraHeaders = mapOf("User-Agent" to HttpKit.userAgent, "Referer" to "$base/"),
+            )
+        }
+        Log.d("VidSpark", "got ${out.size} streams for $type/$tmdbId")
+        return out
+    }
+
+    /** One VidSpark source entry. */
+    internal data class VidSparkSource(val url: String, val quality: String)
+
+    /** Parse `{sources:[{url,quality}]}` from the player API. Pure. */
+    internal fun vidsparkSources(jsonText: String): List<VidSparkSource> {
+        val root = runCatching { org.json.JSONObject(jsonText) }.getOrNull() ?: return emptyList()
+        val arr = root.optJSONArray("sources") ?: return emptyList()
+        val out = ArrayList<VidSparkSource>(arr.length())
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val url = o.optString("url").takeIf { it.startsWith("http") } ?: continue
+            out += VidSparkSource(url, o.optString("quality", ""))
+        }
+        return out
+    }
+
+    // ---- Braflix: browserless JSON API answering with a proxied DASH manifest ----
+
+    private suspend fun resolveBraflix(
+        spec: ServerSpec, tmdbId: Int, type: String, season: Int, episode: Int,
+    ): List<RawStream> {
+        if (type != "movie" && (season <= 0 || episode <= 0)) return emptyList()
+        val base = "https://braflix.dev"
+        val path = if (type == "movie") "/api/play/movie/$tmdbId"
+        else "/api/play/tv/$tmdbId/$season/$episode"
+        val ref = "$base/"
+        val headers = mapOf("User-Agent" to HttpKit.userAgent, "Referer" to ref, "Origin" to base)
+        val text = withTimeoutOrNull(12_000L) {
+            runCatching { app.get("$base$path", timeout = 12, headers = headers).text }.getOrNull()
+        } ?: run { Log.w("Braflix", "api no response"); return emptyList() }
+        val src = braflixSource(text) ?: run { Log.w("Braflix", "no stream in response"); return emptyList() }
+        val abs = if (src.stream.startsWith("http")) src.stream else base + src.stream
+        Log.d("Braflix", "got 1 stream for $type/$tmdbId")
+        return listOf(
+            RawStream(
+                serverId = spec.id, serverName = spec.name,
+                url = abs, isM3u8 = true, isDash = true,
+                referer = ref, qualityHint = heightHintOf(src.quality),
+                extraHeaders = mapOf("User-Agent" to HttpKit.userAgent, "Referer" to ref),
+            )
+        )
+    }
+
+    /** One Braflix play entry: proxied manifest URL + available-quality hint. */
+    internal data class BraflixSource(val stream: String, val quality: String)
+
+    /** Parse `{result:{source:{quality},file:{stream}}}` from the play API. Pure. */
+    internal fun braflixSource(jsonText: String): BraflixSource? {
+        val root = runCatching { org.json.JSONObject(jsonText) }.getOrNull() ?: return null
+        val result = root.optJSONObject("result") ?: return null
+        val stream = result.optJSONObject("file")?.optString("stream")
+            ?.takeIf { it.isNotBlank() } ?: return null
+        val quality = result.optJSONObject("source")?.optString("quality").orEmpty()
+        return BraflixSource(stream, quality)
     }
 
     /** Normalize a pasted FebBox item to the `ui=<token>` cookie the console wants. Pure. */
