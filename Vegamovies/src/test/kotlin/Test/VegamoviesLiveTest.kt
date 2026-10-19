@@ -127,4 +127,35 @@ class VegamoviesLiveTest {
             println("LIVE MOVIE CHECK ISSUE (non-fatal): ${e.message?.take(200)}")
         }
     }
+
+    @Test
+    fun live_search_works_from_a_parked_host() = runBlocking {
+        try {
+            // A mirror without the index endpoint: rotation must still reach hits.
+            p.mainUrl = "https://1vegamovies.pics"
+            p.bollywoodUrl = "https://new2.rogmovies.click"
+            val res = p.search("avengers endgame")
+            println("PARKED-HOST SEARCH -> ${res?.size ?: -1} hits")
+            if (res.isNullOrEmpty()) return@runBlocking
+            res.take(3).forEach { println("    ${it.name}  ${it.url.take(80)}") }
+        } catch (e: Throwable) {
+            println("PARKED-HOST SEARCH ISSUE (non-fatal): ${e.message?.take(200)}")
+        }
+    }
+
+    @Test
+    fun live_refreshDomains_reaches_a_host_that_serves_the_index() = runBlocking {
+        try {
+            p.mainUrl = "https://dead.vegamovies.invalid"
+            p.bollywoodUrl = "https://dead.rogmovies.invalid"
+            p.refreshDomains()
+            println("HEALED mainUrl=${p.mainUrl} bollywoodUrl=${p.bollywoodUrl}")
+            val res = p.search("kgf")
+            println("HEALED SEARCH -> ${res?.size ?: -1} hits")
+            if (res.isNullOrEmpty()) return@runBlocking
+            res.take(3).forEach { println("    ${it.name}  ${it.url.take(80)}") }
+        } catch (e: Throwable) {
+            println("HEAL SEARCH ISSUE (non-fatal): ${e.message?.take(200)}")
+        }
+    }
 }

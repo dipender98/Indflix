@@ -48,6 +48,32 @@ class VegamoviesPluginTest {
         assertTrue(!p.isLanding(Jsoup.parse("""<html><body><div class="poster-card"></div></body></html>""")))
     }
 
+    @Test
+    fun candidates_rankByLinkCount() {
+        val html = """
+        <html><body>
+          <a href="https://img.new1.vegamovies.lease/x.jpg">img</a>
+          <a href="https://new1.vegamovies.lease/">a</a>
+          <a href="https://new1.vegamovies.lease/page/2/">b</a>
+        </body></html>"""
+        val c = VegamoviesProvider.DomainResolver.candidates(Jsoup.parse(html), "vegamovies")
+        assertEquals("https://new1.vegamovies.lease", c.first())
+        assertTrue(c.contains("https://img.new1.vegamovies.lease"))
+    }
+
+    @Test
+    fun challengeBody_isDetected() {
+        assertTrue(p.isChallengeBody("<html><head><title>Just a moment...</title></head></html>"))
+        assertTrue(p.isChallengeBody("<div id='cf-chl-widget'>checking your browser</div>"))
+        assertTrue(!p.isChallengeBody("""{"hits":[]}"""))
+    }
+
+    @Test
+    fun searchJson_nonJsonBodyIsNotAnIndexAnswer() {
+        // A landing mirror answers HTML: the index must not be mistaken for a hit list.
+        assertTrue(p.parseSearchHits("<html><body>parking</body></html>", "https://x").isEmpty())
+    }
+
     // ───────────────────── search JSON mapping ─────────────────────.
 
     private val searchJson = """

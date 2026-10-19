@@ -2,6 +2,7 @@ package com.vegamovies
 /** CloudStream provider and link resolver. */
 
 import android.content.Context
+import android.util.Log
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addImdbId
 import com.lagradost.cloudstream3.LoadResponse.Companion.addScore
@@ -86,12 +87,16 @@ class VegamoviesProvider : MainAPI() {
         const val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
             "(KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
 
+        /** Log tag for the provider diagnostics. */
+        const val TAG = "Vegamovies"
+
         /** Seed domains - self-healed at runtime by refreshDomains(). */
         const val SEED_VEGA = "https://new1.vegamovies.lease"
         const val SEED_ROG = "https://rogmovies.one"
 
         /** Legacy alias that redirects to the parking page announcing the live domain. */
         const val BOOTSTRAP_VEGA = "https://new2.vegamovies.futbol"
+        const val BOOTSTRAP_ROG = "https://new2.rogmovies.click"
 
         /** Parking page forwards to the live site on this path. */
         const val LANDING_PROBE = "/?re=vg&t=2"
@@ -100,6 +105,19 @@ class VegamoviesProvider : MainAPI() {
         const val LIVE_FILL_MS = 180_000L
 
         const val SEARCH_MAX_RESULTS = 10
+
+        /** Entry points per family, tried in order until one serves the index. */
+        val VEGA_SEEDS = listOf(SEED_VEGA, BOOTSTRAP_VEGA)
+        val ROG_SEEDS = listOf(SEED_ROG, BOOTSTRAP_ROG)
+
+        /** Per-request budget for one index call (mobile links need headroom). */
+        const val SEARCH_TIMEOUT_SEC = 12L
+
+        /** Cheap query used to prove that a host really serves the index. */
+        const val INDEX_PROBE = "film"
+
+        /** Minimum gap between two host heals. */
+        const val HEAL_COOLDOWN_MS = 60_000L
 
         /** Matches a nexdrive-gateway download link anywhere in a page. */
         val GENXFM_REGEX = Regex(
@@ -130,6 +148,9 @@ class VegamoviesProvider : MainAPI() {
 
     private val commonHeaders = mapOf("User-Agent" to UA, "Accept-Language" to "en-US,en;q=0.9")
     private var cfKiller: CloudflareKiller? = null
+
+    /** Timestamp of the last host heal, so an empty search does not re-probe every time. */
+    private val lastHeal = java.util.concurrent.atomic.AtomicLong(0L)
 
     // Getter (not one-shot val): category URLs follow the live domains.
     override val mainPage
@@ -186,29 +207,78 @@ class VegamoviesProvider : MainAPI() {
     internal fun isLanding(doc: Document): Boolean =
         doc.selectFirst("#stx") != null || doc.body().html().contains("qikly.pro/host")
 
+    /** True when a body is an interstitial instead of the JSON index. */
+    internal fun isChallengeBody(text: String): Boolean {
+        val head = text.take(2500).lowercase()
+        return head.contains("just a moment") || head.contains("checking your browser") ||
+            head.contains("cf-chl-") || head.contains("challenge-platform")
+    }
+
     /** Follows a dead seed through the parking page to the current live host. */
-    private suspend fun liveDoc(seed: String, bootstrap: String?): Document? {
-        val first = fetchDocWithUrl(seed, 10) ?: bootstrap?.let { fetchDocWithUrl(it, 10) } ?: return null
-        if (!isLanding(first.first)) return first.first
+    private suspend fun liveDoc(seed: String): Pair<Document, String>? {
+        val first = fetchDocWithUrl(seed, 10) ?: return null
+        if (!isLanding(first.first)) return first
         val origin = DomainResolver.originOf(first.second) ?: return null
-        return fetchDocWithUrl(origin + LANDING_PROBE, 12)?.first?.takeUnless { isLanding(it) }
+        return fetchDocWithUrl(origin + LANDING_PROBE, 12)?.takeUnless { isLanding(it.first) }
+    }
+
+    /** The index JSON for one host; null when the host cannot serve it. */
+    internal suspend fun searchIndexJson(base: String, query: String): String? {
+        val url = "$base/ts-search.php?q=${URLEncoder.encode(query.trim(), "UTF-8")}&page=1"
+        val headers = commonHeaders + mapOf("Referer" to "$base/")
+        val direct = runCatching {
+            app.get(url, timeout = SEARCH_TIMEOUT_SEC, headers = headers).text
+        }.getOrNull()
+        if (direct != null && direct.trimStart().startsWith("{")) return direct
+        if (direct != null && !isChallengeBody(direct)) {
+            Log.w(TAG, "index: $base answered non-JSON (${direct.take(60).replace("\n", " ")})")
+            return null
+        }
+        // Interstitial or transport failure: solve it once and retry.
+        val solved = runCatching {
+            val killer = cfKiller ?: CloudflareKiller().also { cfKiller = it }
+            app.get(url, timeout = SEARCH_TIMEOUT_SEC + 8, headers = headers, interceptor = killer).text
+        }.getOrNull()
+        return solved?.takeIf { it.trimStart().startsWith("{") }
+    }
+
+    /** A host of this family that answers the index, healed through the parking page. */
+    private suspend fun verifiedBase(family: String, seeds: List<String>): String? {
+        for (seed in seeds) {
+            val live = liveDoc(seed) ?: continue
+            val origin = DomainResolver.originOf(live.second) ?: continue
+            for (candidate in listOf(origin) + DomainResolver.candidates(live.first, family)) {
+                if (searchIndexJson(candidate, INDEX_PROBE) != null) return candidate
+            }
+        }
+        return null
     }
 
     // Domain self-healing. Live Hollywood + Bollywood domains via the posts' own cross-links.
     suspend fun refreshDomains() = coroutineScope {
-        val a = async { liveDoc(SEED_VEGA, BOOTSTRAP_VEGA) }
-        val b = async { liveDoc(SEED_ROG, null) }
-        val vegaDoc = a.await()
-        val rogDoc = b.await()
-        vegaDoc?.let { mainUrl = DomainResolver.pick(it, "vegamovies") ?: mainUrl }
-        for (doc in listOfNotNull(vegaDoc, rogDoc)) {
-            bollywoodUrl = DomainResolver.pick(doc, "rogmovies") ?: bollywoodUrl
+        val a = async { verifiedBase("vegamovies", VEGA_SEEDS) }
+        val b = async { verifiedBase("rogmovies", ROG_SEEDS) }
+        val vega = a.await()
+        val rog = b.await()
+        vega?.let {
+            if (it != mainUrl) Log.i(TAG, "heal: hollywood host $it (was $mainUrl)")
+            mainUrl = it
         }
+        rog?.let {
+            if (it != bollywoodUrl) Log.i(TAG, "heal: bollywood host $it (was $bollywoodUrl)")
+            bollywoodUrl = it
+        }
+        if (vega == null) Log.w(TAG, "heal: no hollywood host served the index")
+        if (rog == null) Log.w(TAG, "heal: no bollywood host served the index")
+        lastHeal.set(System.currentTimeMillis())
     }
 
     internal object DomainResolver {
         /** The most common / rogmovies family href on the page (the live; each site always announces the other). */
-        fun pick(doc: Document, family: String): String? =
+        fun pick(doc: Document, family: String): String? = candidates(doc, family).firstOrNull()
+
+        /** Family hosts on the page, most-linked first. */
+        fun candidates(doc: Document, family: String): List<String> =
             doc.select("a[href]")
                 .mapNotNull {
                     Regex("""https?://[a-z0-9.\-]*$family\.[a-z]{2,10}""", RegexOption.IGNORE_CASE)
@@ -216,8 +286,8 @@ class VegamoviesProvider : MainAPI() {
                 }
                 .filterNot { it.contains("apk") || it.endsWith(".cfd") }
                 .groupingBy { it }.eachCount()
-                .maxByOrNull { it.value }
-                ?.key
+                .entries.sortedByDescending { it.value }
+                .map { it.key }
 
         /** Scheme + host of a URL. */
         fun originOf(url: String): String? =
@@ -227,19 +297,23 @@ class VegamoviesProvider : MainAPI() {
     // Search - Meilisearch JSON proxy with typo respellings, TMDB popularity ranking, oracle fill.
 
     override suspend fun search(query: String): List<SearchResponse>? = coroutineScope {
-        if (query.isBlank()) return@coroutineScope null
-        val vega = async { siteSearchFuzzy(mainUrl, query) }
-        val rog = async { siteSearchFuzzy(bollywoodUrl, query) }
+        if (query.isBlank()) return@coroutineScope emptyList()
+        val vega = async { siteSearchFuzzy(candidateBases("vegamovies"), query) }
+        val rog = async { siteSearchFuzzy(candidateBases("rogmovies"), query) }
         val tmdb = async { MetadataService.search(query, 8) }
 
         var hits = (vega.await() + rog.await()).distinctBy { it.url }
         val tmdbItems = tmdb.await()
-        if (hits.isEmpty()) {
+        if (hits.isEmpty() && System.currentTimeMillis() - lastHeal.get() > HEAL_COOLDOWN_MS) {
             refreshDomains()
-            hits = listOf(mainUrl, bollywoodUrl)
-                .flatMap { siteSearchFuzzy(it, query) }.distinctBy { it.url }
+            hits = (siteSearchFuzzy(candidateBases("vegamovies"), query) +
+                siteSearchFuzzy(candidateBases("rogmovies"), query)).distinctBy { it.url }
         }
-        if (hits.isEmpty()) return@coroutineScope null
+        if (hits.isEmpty()) {
+            Log.w(TAG, "search: no hits for '$query' (hosts=$mainUrl,$bollywoodUrl)")
+            return@coroutineScope emptyList()
+        }
+        Log.i(TAG, "search: '$query' -> ${hits.size} hits")
 
         // TMDB-driven fill: popular titles that the site's exact-match index skipped.
         val extra = withTimeoutOrNull(6000L) { expansionHits(tmdbItems, hits) }.orEmpty()
@@ -252,6 +326,22 @@ class VegamoviesProvider : MainAPI() {
 
     /** Search-as-you-type runs the same ranked pipeline so typing previews match submit results. */
     override suspend fun quickSearch(query: String): List<SearchResponse>? = search(query)
+
+    /** Hosts to try for a family: the current one first, then the known entry points. */
+    private fun candidateBases(family: String): List<String> {
+        val primary = if (family == "vegamovies") mainUrl else bollywoodUrl
+        val seeds = if (family == "vegamovies") VEGA_SEEDS else ROG_SEEDS
+        return (listOf(primary) + seeds).distinct()
+    }
+
+    /** Search several hosts: the first one with hits wins. */
+    internal suspend fun siteSearchFuzzy(bases: List<String>, query: String): List<SearchResponse> {
+        for (base in bases) {
+            val hits = siteSearchFuzzy(base, query)
+            if (hits.isNotEmpty()) return hits
+        }
+        return emptyList()
+    }
 
     /** Search ts-search.php for [query] and its typo respelling, merged by URL. */
     internal suspend fun siteSearchFuzzy(baseUrl: String, query: String): List<SearchResponse> {
@@ -268,11 +358,8 @@ class VegamoviesProvider : MainAPI() {
 
     /** Calls {site}/ts-search.php; pure JSON mapping in parseSearchHits. */
     internal suspend fun siteSearch(baseUrl: String, query: String): List<SearchResponse> {
-        val url = "$baseUrl/ts-search.php?q=${URLEncoder.encode(query.trim(), "UTF-8")}&page=1"
-        val text = runCatching {
-            app.get(url, timeout = 7, headers = commonHeaders + mapOf("Referer" to "$baseUrl/")).text
-        }.getOrNull() ?: return emptyList()
-        return parseSearchHits(text, baseUrl)
+        val json = searchIndexJson(baseUrl, query) ?: return emptyList()
+        return parseSearchHits(json, baseUrl)
     }
 
     /** Probe the site for TMDB titles the index missed (bounded, best-effort). */
@@ -296,7 +383,8 @@ class VegamoviesProvider : MainAPI() {
                     sem.acquire()
                     try {
                         withTimeoutOrNull(4500L) {
-                            siteSearchFuzzy(mainUrl, probe) + siteSearchFuzzy(bollywoodUrl, probe)
+                            siteSearchFuzzy(candidateBases("vegamovies"), probe) +
+                                siteSearchFuzzy(candidateBases("rogmovies"), probe)
                         }.orEmpty()
                     } finally {
                         sem.release()
@@ -405,17 +493,30 @@ class VegamoviesProvider : MainAPI() {
     // Main page - server-rendered poster-card grids.
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
-        val base = request.data
-        val target = if (page > 1) "${base.trimEnd('/')}/page/$page/" else base
+        val target = pageUrl(mainUrl, request.data, page)
         var doc = fetchDoc(target, timeoutSeconds = 14)
         if (doc == null) {
             refreshDomains()
-            val healed = if (page > 1) "${base.trimEnd('/')}/page/$page/" else base
-            doc = fetchDoc(healed, timeoutSeconds = 14) ?: fetchDoc(target, timeoutSeconds = 14)
+            // The host may have rotated: rebuild the category path on the healed host.
+            doc = fetchDoc(pageUrl(mainUrl, request.data, page), timeoutSeconds = 14)
+                ?: fetchDoc(target, timeoutSeconds = 14)
         }
         val items = doc?.let { parseListing(it) } ?: emptyList()
         backfillPosters(items)
         return newHomePageResponse(request.name, items)
+    }
+
+    /** Category URL on the given host, keeping the path of the configured one. */
+    private fun pageUrl(base: String, data: String, page: Int): String {
+        val path = Regex("""^https?://[^/]+(/.*)?$""").find(data)?.groupValues?.get(1).orEmpty()
+        val full = base.trimEnd('/') + path
+        return if (page > 1) "${full.trimEnd('/')}/page/$page/" else full
+    }
+
+    /** Same path on another host. */
+    private fun rebase(url: String, base: String): String {
+        val path = Regex("""^https?://[^/]+(/.*)?$""").find(url)?.groupValues?.get(1) ?: return url
+        return base.trimEnd('/') + path
     }
 
     /** Pure: scrape poster-cards. */
@@ -458,7 +559,9 @@ class VegamoviesProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse? {
         val doc = fetchDoc(url) ?: run {
             refreshDomains()
-            fetchDoc(url) ?: throw ErrorLoadingException("Could not load $url")
+            // The host may have rotated: retry the same path on the healed host.
+            fetchDoc(url) ?: fetchDoc(rebase(url, mainUrl))
+                ?: throw ErrorLoadingException("Could not load $url")
         }
         val h1 = doc.selectFirst("h1, .entry-title, .post-title")?.text()?.trim()
             ?: doc.selectFirst("meta[property=og:title]")?.attr("content")?.trim()
