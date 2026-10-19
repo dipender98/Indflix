@@ -1,8 +1,8 @@
 package com.vegamovies
 
 import com.lagradost.cloudstream3.app
-import java.util.Base64
 import java.util.concurrent.ConcurrentHashMap
+import kotlin.io.encoding.Base64
 
 /** Resolves V-Cloud shortlinks to seekable R2 stream URLs. */
 internal data class VcloudStream(val url: String, val tag: String)
@@ -87,6 +87,6 @@ internal object VcloudResolver {
             }
         }
         val padded = normalized + "=".repeat((4 - normalized.length % 4) % 4)
-        return Base64.getDecoder().decode(padded)
+        return Base64.decode(padded)
     }
 }

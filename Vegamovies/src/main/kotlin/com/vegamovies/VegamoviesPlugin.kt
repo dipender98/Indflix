@@ -86,9 +86,15 @@ class VegamoviesProvider : MainAPI() {
         const val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
             "(KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
 
-        /** Seed domains - self-healed at runtime by. */
-        const val SEED_VEGA = "https://new2.vegamovies.futbol"
-        const val SEED_ROG = "https://new2.rogmovies.click"
+        /** Seed domains - self-healed at runtime by refreshDomains(). */
+        const val SEED_VEGA = "https://new1.vegamovies.lease"
+        const val SEED_ROG = "https://rogmovies.one"
+
+        /** Legacy alias that redirects to the parking page announcing the live domain. */
+        const val BOOTSTRAP_VEGA = "https://new2.vegamovies.futbol"
+
+        /** Parking page forwards to the live site on this path. */
+        const val LANDING_PROBE = "/?re=vg&t=2"
 
         /** Maximum time for background link resolution. */
         const val LIVE_FILL_MS = 180_000L
@@ -153,28 +159,49 @@ class VegamoviesProvider : MainAPI() {
         url: String,
         timeoutSeconds: Long = 12,
         headers: Map<String, String> = commonHeaders,
-    ): Document? {
+    ): Document? = fetchDocWithUrl(url, timeoutSeconds, headers)?.first
+
+    /** Same as fetchDoc but keeps the final URL after redirects (needed to escape parking pages). */
+    internal suspend fun fetchDocWithUrl(
+        url: String,
+        timeoutSeconds: Long = 12,
+        headers: Map<String, String> = commonHeaders,
+    ): Pair<Document, String>? {
         try {
-            val doc = app.get(url, timeout = timeoutSeconds, headers = headers).document
-            if (!isChallenge(doc)) return doc
+            val res = app.get(url, timeout = timeoutSeconds, headers = headers)
+            if (!isChallenge(res.document)) return res.document to res.url
         } catch (e: Exception) {
             // fall through to the challenge-solve path.
         }
         return try {
             val killer = cfKiller ?: CloudflareKiller().also { cfKiller = it }
-            val solved = app.get(url, timeout = 20, headers = headers, interceptor = killer).document
-            if (isChallenge(solved)) { cfKiller = null; null } else solved
+            val res = app.get(url, timeout = 20, headers = headers, interceptor = killer)
+            if (isChallenge(res.document)) { cfKiller = null; null } else res.document to res.url
         } catch (e: Exception) {
             null
         }
     }
 
+    /** Parking/interstitial page that only announces the live host. */
+    internal fun isLanding(doc: Document): Boolean =
+        doc.selectFirst("#stx") != null || doc.body().html().contains("qikly.pro/host")
+
+    /** Follows a dead seed through the parking page to the current live host. */
+    private suspend fun liveDoc(seed: String, bootstrap: String?): Document? {
+        val first = fetchDocWithUrl(seed, 10) ?: bootstrap?.let { fetchDocWithUrl(it, 10) } ?: return null
+        if (!isLanding(first.first)) return first.first
+        val origin = DomainResolver.originOf(first.second) ?: return null
+        return fetchDocWithUrl(origin + LANDING_PROBE, 12)?.first?.takeUnless { isLanding(it) }
+    }
+
     // Domain self-healing. Live Hollywood + Bollywood domains via the posts' own cross-links.
     suspend fun refreshDomains() = coroutineScope {
-        val a = async { fetchDoc(SEED_VEGA, timeoutSeconds = 8) }
-        val b = async { fetchDoc(SEED_ROG, timeoutSeconds = 8) }
-        for (doc in listOf(a.await(), b.await()).filterNotNull()) {
-            mainUrl = DomainResolver.pick(doc, "vegamovies") ?: mainUrl
+        val a = async { liveDoc(SEED_VEGA, BOOTSTRAP_VEGA) }
+        val b = async { liveDoc(SEED_ROG, null) }
+        val vegaDoc = a.await()
+        val rogDoc = b.await()
+        vegaDoc?.let { mainUrl = DomainResolver.pick(it, "vegamovies") ?: mainUrl }
+        for (doc in listOfNotNull(vegaDoc, rogDoc)) {
             bollywoodUrl = DomainResolver.pick(doc, "rogmovies") ?: bollywoodUrl
         }
     }
@@ -188,10 +215,13 @@ class VegamoviesProvider : MainAPI() {
                         .find(it.attr("abs:href"))?.value?.lowercase()
                 }
                 .filterNot { it.contains("apk") || it.endsWith(".cfd") }
-                .map { it.substringBefore('/', it) }
                 .groupingBy { it }.eachCount()
                 .maxByOrNull { it.value }
                 ?.key
+
+        /** Scheme + host of a URL. */
+        fun originOf(url: String): String? =
+            Regex("""^https?://[^/]+""").find(url)?.value
     }
 
     // Search - Meilisearch JSON proxy with typo respellings, TMDB popularity ranking, oracle fill.
@@ -847,7 +877,7 @@ class VegamoviesProvider : MainAPI() {
             referer = if (kind == Servers.GDRIVE && !browserOnly) "https://fastdl.zip/" else pl.pageReferer(),
             // Real resolution). Download-only rows stay 0 so auto-play never picks them.
             quality = if (browserOnly) 0 else LinkNaming.qualityInt(pl.heading),
-            headers = commonHeaders + mapOf("Referer" to (if (kind == Servers.GDRIVE && !browserOnly) "https://fastdl.zip/" else "https://new2.vegamovies.futbol/")),
+            headers = commonHeaders + mapOf("Referer" to (if (kind == Servers.GDRIVE && !browserOnly) "https://fastdl.zip/" else "$mainUrl/")),
             extractorData = null,
             // Browser-only gate pages keep VIDEO type + UNKNOWN quality so the player's auto-selection never picks them; tapping.
             type = ExtractorLinkType.VIDEO,
@@ -856,7 +886,7 @@ class VegamoviesProvider : MainAPI() {
     }
 
     private fun PayloadLink.pageReferer(): String =
-        Regex("""^https?://[^/]+""").find(url)?.value ?: "https://new2.vegamovies.futbol/"
+        Regex("""^https?://[^/]+""").find(url)?.value ?: "$mainUrl/"
 }
 
 /** Normalize a genxfm URL to its cache key form. */

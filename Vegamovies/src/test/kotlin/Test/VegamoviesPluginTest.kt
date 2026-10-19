@@ -19,6 +19,35 @@ class VegamoviesPluginTest {
 
     private val p = VegamoviesProvider()
 
+    // ───────────────────── live domain discovery ─────────────────────.
+
+    @Test
+    fun domainPick_keepsFullOrigin() {
+        val html = """
+        <html><body>
+          <a href="https://dead.vegamovies.gallery/">x</a>
+          <a href="https://new1.vegamovies.lease/">a</a>
+          <a href="https://new1.vegamovies.lease/page/2/">b</a>
+          <a href="https://rogmovies.one/">rog</a>
+        </body></html>"""
+        val doc = Jsoup.parse(html)
+        assertEquals(
+            "https://new1.vegamovies.lease",
+            VegamoviesProvider.DomainResolver.pick(doc, "vegamovies"),
+        )
+        assertEquals(
+            "https://rogmovies.one",
+            VegamoviesProvider.DomainResolver.pick(doc, "rogmovies"),
+        )
+        assertEquals("https://new1.vegamovies.lease", VegamoviesProvider.DomainResolver.originOf("https://new1.vegamovies.lease/x/y"))
+    }
+
+    @Test
+    fun landingPage_isDetected() {
+        assertTrue(p.isLanding(Jsoup.parse("""<html><body><span id="stx"></span></body></html>""")))
+        assertTrue(!p.isLanding(Jsoup.parse("""<html><body><div class="poster-card"></div></body></html>""")))
+    }
+
     // ───────────────────── search JSON mapping ─────────────────────.
 
     private val searchJson = """

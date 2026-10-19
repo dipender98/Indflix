@@ -1,4 +1,4 @@
-package Test
+﻿package Test
 
 import com.lagradost.cloudstream3.TvSeriesLoadResponse
 import com.lagradost.cloudstream3.utils.ExtractorLink
@@ -36,7 +36,7 @@ class VegamoviesLiveTest {
     fun live_movie_metadata_check() = runBlocking {
         try {
             // IMDb-less movie post: metadata must come from the TMDB title search.
-            val url = "https://new2.vegamovies.futbol/jack-reacher-2012-dual-audio-hindi-english-movie-480p-720p-1080p/"
+            val url = "${p.mainUrl}/jack-reacher-2012-dual-audio-hindi-english-movie-480p-720p-1080p/"
             val r = runCatching { p.load(url) }.getOrNull()
             println("META name=${r?.name} year=${r?.year} poster=${r?.posterUrl?.take(40)} " +
                 "plot=${r?.plot?.take(50)} tags=${r?.tags?.take(4)} actors=${r?.actors?.size}")
@@ -48,7 +48,7 @@ class VegamoviesLiveTest {
     @Test
     fun live_reacher_season_rows() = runBlocking {
         try {
-            val url = "https://new2.vegamovies.futbol/download-reacher-season-1-3-amazon-original-complete-org-5-1-hindi-480p-720p-1080p-web-dl/"
+            val url = "${p.mainUrl}/download-reacher-season-1-3-amazon-original-complete-org-5-1-hindi-480p-720p-1080p-web-dl/"
             val resp = runCatching { p.load(url) }.getOrNull()
             val ser = resp as? TvSeriesLoadResponse ?: return@runBlocking println("REACHER not series: ${resp?.javaClass?.simpleName}")
             println("REACHER episodes=${ser.episodes.size}")
@@ -64,7 +64,7 @@ class VegamoviesLiveTest {
     @Test
     fun live_series_loadAndEpisodeLinks() = runBlocking {
         try {
-            val url = "https://new2.vegamovies.futbol/download-squid-game-the-challenge-hindi-english-series-480p-720p-1080p-web-dl/"
+            val url = "${p.mainUrl}/download-squid-game-the-challenge-hindi-english-series-480p-720p-1080p-web-dl/"
             val resp = runCatching { p.load(url) }.getOrNull()
             println("LOAD type=${resp?.javaClass?.simpleName} name=${resp?.name?.take(60)}")
             val ser = resp as? TvSeriesLoadResponse ?: return@runBlocking println("  (not series?)")
@@ -102,7 +102,7 @@ class VegamoviesLiveTest {
     @Test
     fun live_movie_loadAndLinks() = runBlocking {
         try {
-            val url = "https://new2.vegamovies.futbol/download-avengers-endgame-2019-hindi-dubbed-480p-720p-1080p-2160p-4k/"
+            val url = "${p.mainUrl}/download-avengers-endgame-2019-hindi-dubbed-480p-720p-1080p-2160p-4k/"
             val resp = runCatching { p.load(url) }.getOrNull()
             val payload = (resp as? com.lagradost.cloudstream3.MovieLoadResponse)?.dataUrl
             println("MOVIE name=${resp?.name} data=${payload?.let { "${it.length}B" } ?: "NONE"}")
