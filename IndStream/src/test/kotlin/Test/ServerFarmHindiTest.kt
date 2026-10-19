@@ -239,7 +239,7 @@ class ServerFarmHindiTest {
             "vidsrcme", "vidsrc-pm", "rive", "vidsrcto", "videasy",
             "primesrc", "myflixer-hindi",
             "mp4hydra", "vidzee", "streamprovider",
-            "videm", "8stream", "dahmermovies", "vidzy", "vixsrc", "4khdhub",
+            "videm", "8stream", "dahmermovies", "vidzy", "vixsrc",
             "nhd", "vidapi", "zxcstreams", "vidsrc-to", "nontongo", "vidcore")
         for (id in disabled) {
             assertNull(

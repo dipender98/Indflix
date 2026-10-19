@@ -28,6 +28,8 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import com.indstream.foryou.AiService
+import com.indstream.foryou.SimklHistory
 
 /** FILE: Settings.kt - plugin settings store + settings dialog (Wyzie Subs API key today). */
 object Settings {
@@ -59,6 +61,10 @@ object Settings {
     private const val KEY = "wyzie_api_key"
     private const val TMDB_KEY = "tmdb_api_key"
     private const val SHOWBOX_KEY = "showbox_token"
+    private const val AI_KEY = "ai_api_key"
+    private const val AI_MODEL = "ai_model"
+    private const val AI_BASE = "ai_base_url"
+    private const val AI_PROVIDER = "ai_provider"
 
     @Volatile
     private var appContext: Context? = null
@@ -74,6 +80,9 @@ object Settings {
         appContext = context.applicationContext
         load()
     }
+
+    /** App context, when the plugin has been loaded. */
+    fun appContextOrNull(): Context? = appContext
 
     /** Saved key, or null when the user never set one (built-in subtitles stay in use). */
     fun apiKey(): String? {
@@ -168,6 +177,86 @@ object Settings {
     /** Drop the saved token; the ShowBox server goes dormant again. */
     fun clearShowbox(context: Context) {
         saveShowbox(context, "")
+    }
+
+    // AI provider settings, used by the recommendation reranker.
+
+    @Volatile
+    private var aiCached: String? = null
+
+    @Volatile
+    private var aiModelCached: String? = null
+
+    @Volatile
+    private var aiBaseCached: String? = null
+
+    @Volatile
+    private var aiProviderCached: String? = null
+
+    @Volatile
+    private var aiLoaded = false
+
+    /** Saved AI key, or null when the user never set one. */
+    fun aiApiKey(): String? {
+        if (!aiLoaded) loadAi()
+        return aiCached?.takeIf { it.isNotBlank() }
+    }
+
+    /** Selected provider id; empty when nothing was chosen. */
+    fun aiProviderId(): String {
+        if (!aiLoaded) loadAi()
+        return aiProviderCached?.takeIf { it.isNotBlank() } ?: "openrouter"
+    }
+
+    /** Model id for the selected provider. */
+    fun aiModel(): String {
+        if (!aiLoaded) loadAi()
+        return aiModelCached.orEmpty()
+    }
+
+    /** Base url override; empty means the provider preset is used. */
+    fun aiBaseUrl(): String {
+        if (!aiLoaded) loadAi()
+        return aiBaseCached.orEmpty()
+    }
+
+    /** Persist the AI settings. A blank key clears it. */
+    fun saveAi(context: Context, provider: String, rawKey: String, model: String, baseUrl: String) {
+        val key = normalizeKey(rawKey)
+        val cleanModel = model.trim()
+        val cleanBase = baseUrl.trim().trimEnd('/')
+        runCatching {
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit()
+                .putString(AI_KEY, key)
+                .putString(AI_MODEL, cleanModel)
+                .putString(AI_BASE, cleanBase)
+                .putString(AI_PROVIDER, provider.trim())
+                .apply()
+        }
+        aiCached = key
+        aiModelCached = cleanModel
+        aiBaseCached = cleanBase
+        aiProviderCached = provider.trim()
+        aiLoaded = true
+        appContext = context.applicationContext
+    }
+
+    /** Drop the saved AI settings. */
+    fun clearAi(context: Context) {
+        saveAi(context, "", "", "", "")
+    }
+
+    private fun loadAi() {
+        val ctx = appContext ?: return
+        runCatching {
+            val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            aiCached = prefs.getString(AI_KEY, "").orEmpty()
+            aiModelCached = prefs.getString(AI_MODEL, "").orEmpty()
+            aiBaseCached = prefs.getString(AI_BASE, "").orEmpty()
+            aiProviderCached = prefs.getString(AI_PROVIDER, "").orEmpty()
+        }
+        aiLoaded = true
     }
 
     @Volatile
@@ -713,6 +802,142 @@ object Settings {
         showboxButtonRow.addView(showboxSaveBtn)
         showboxSection.addView(showboxButtonRow)
 
+        // Text field with the shared style, used by the section below.
+        fun field(value: String, hint: String): EditText = EditText(context).apply {
+            setText(value)
+            setHint(hint)
+            setHintTextColor(hintColor)
+            setTextColor(textColor)
+            setSingleLine(true)
+            inputType = InputType.TYPE_CLASS_TEXT
+            typeface = Typeface.MONOSPACE
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            background = rounded(fieldColor, 10, 1)
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            )
+        }
+
+        val aiSaved = aiApiKey() != null
+        val aiSection = settingsSection(
+            "Made for You AI", if (aiSaved) "Saved" else "Not set", aiSaved,
+        )
+        val aiDesc = TextView(context).apply {
+            text = "Optional - the model only reorders candidates that already match your history. " +
+                "The titles you watched are sent to the provider you pick."
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            setTextColor(hintColor)
+            setPadding(0, 0, 0, dp(6))
+            aiSection.addView(this)
+        }
+        var selectedProvider = aiProviderId()
+        val aiChipRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { bottomMargin = dp(6) }
+        }
+        val aiChips = LinkedHashMap<String, TextView>()
+        val aiScroll = android.widget.HorizontalScrollView(context).apply {
+            isHorizontalFadingEdgeEnabled = false
+            isVerticalFadingEdgeEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
+            addView(aiChipRow)
+        }
+        AiService.Provider.entries.forEach { provider ->
+            val chip = actionChip(provider.label, Color.TRANSPARENT, textColor, borderColor).apply {
+                setPadding(dp(10), dp(6), dp(10), dp(6))
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                ).apply { rightMargin = dp(6) }
+            }
+            aiChips[provider.id] = chip
+            aiChipRow.addView(chip)
+        }
+        aiSection.addView(aiScroll)
+        val aiKeyInput = field(aiApiKey().orEmpty(), "provider API key...")
+        aiSection.addView(aiKeyInput)
+        val aiModelInput = field(aiModel(), "model id...")
+        aiSection.addView(aiModelInput)
+        val aiBaseInput = field(aiBaseUrl(), "https://host/v1")
+        aiBaseInput.visibility = if (selectedProvider == "other") View.VISIBLE else View.GONE
+        aiSection.addView(aiBaseInput)
+        val aiChipActionRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.END
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(8) }
+        }
+        val aiVerifyChip = actionChip("Verify", chipYellow, chipInk)
+        aiChipActionRow.addView(aiVerifyChip)
+        val aiModelsChip = actionChip("Models", chipYellow, chipInk).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { leftMargin = dp(6) }
+        }
+        aiChipActionRow.addView(aiModelsChip)
+        aiSection.addView(aiChipActionRow)
+        val aiStatusText = TextView(context).apply {
+            text = if (aiSaved) "Key active - the model reorders your row." else "No key - rows use the local score only."
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            setTextColor(hintColor)
+            setPadding(0, dp(10), 0, dp(6))
+            aiSection.addView(this)
+        }
+        val aiAccountText = TextView(context).apply {
+            text = "Account: checking..."
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            setTextColor(hintColor)
+            setPadding(0, 0, 0, dp(10))
+            aiSection.addView(this)
+        }
+        val aiButtonRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.END
+        }
+        val aiClearBtn = Button(context).apply {
+            text = "Clear"
+            setTextColor(textColor)
+            background = rounded(Color.TRANSPARENT, 10)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            minWidth = 0
+            minHeight = 0
+            setPadding(dp(16), dp(8), dp(16), dp(8))
+        }
+        val aiSaveBtn = Button(context).apply {
+            text = "Save"
+            setTextColor(Color.WHITE)
+            setTypeface(null, Typeface.BOLD)
+            background = rounded(accentColor, 10)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            minWidth = 0
+            minHeight = 0
+            setPadding(dp(16), dp(8), dp(16), dp(8))
+        }
+        aiButtonRow.addView(aiClearBtn)
+        aiButtonRow.addView(aiSaveBtn)
+        aiSection.addView(aiButtonRow)
+
+        fun refreshAiChips() {
+            aiChips.forEach { (id, chip) ->
+                val on = id == selectedProvider
+                chip.background = if (on) rounded(accentColor, 14) else rounded(Color.TRANSPARENT, 14, 1, borderColor)
+                chip.setTextColor(if (on) Color.WHITE else textColor)
+            }
+        }
+        refreshAiChips()
+        aiChips.forEach { (id, chip) ->
+            chip.setOnClickListener {
+                selectedProvider = id
+                val preset = AiService.Provider.from(id)
+                aiModelInput.setText(preset.defaultModel)
+                aiBaseInput.visibility = if (id == "other") View.VISIBLE else View.GONE
+                refreshAiChips()
+            }
+        }
+
         val scroll = ScrollView(context).apply {
             setBackgroundColor(bgColor)
             setPadding(dp(4), dp(4), dp(4), dp(4))
@@ -823,6 +1048,56 @@ object Settings {
             Toast.makeText(context, "Saved", Toast.LENGTH_SHORT).show()
             dialog.dismiss()
         }
+        aiVerifyChip.setOnClickListener {
+            val provider = AiService.Provider.from(selectedProvider)
+            val key = aiKeyInput.text.toString().trim()
+            val model = aiModelInput.text.toString().trim()
+            val base = aiBaseInput.text.toString().trim()
+            aiStatusText.text = "Verifying key..."
+            Thread {
+                val msg = runCatching {
+                    kotlinx.coroutines.runBlocking { AiService.testKey(provider, base, model, key) }
+                }.getOrDefault("Verify failed - no network?")
+                aiKeyInput.post { aiStatusText.text = msg }
+            }.start()
+        }
+        aiModelsChip.setOnClickListener {
+            val provider = AiService.Provider.from(selectedProvider)
+            val key = aiKeyInput.text.toString().trim()
+            val model = aiModelInput.text.toString().trim()
+            val base = aiBaseInput.text.toString().trim()
+            aiStatusText.text = "Fetching model list..."
+            Thread {
+                val msg = runCatching {
+                    kotlinx.coroutines.runBlocking { AiService.testModels(provider, base, model, key) }
+                }.getOrDefault("List failed - no network?")
+                aiKeyInput.post { aiStatusText.text = msg }
+            }.start()
+        }
+        aiClearBtn.setOnClickListener {
+            clearAi(context)
+            Toast.makeText(context, "Cleared - rows use the local score", Toast.LENGTH_SHORT).show()
+            dialog.dismiss()
+        }
+        aiSaveBtn.setOnClickListener {
+            saveAi(
+                context, selectedProvider,
+                aiKeyInput.text.toString(), aiModelInput.text.toString(), aiBaseInput.text.toString(),
+            )
+            Toast.makeText(context, "Saved", Toast.LENGTH_SHORT).show()
+            dialog.dismiss()
+        }
+        // Account state lives in the host app, so the check runs off the main thread.
+        Thread {
+            val linked = SimklHistory.refresh()
+            aiAccountText.post {
+                aiAccountText.text = if (linked) {
+                    "Account: linked - the rows follow your history."
+                } else {
+                    "Account: not linked - rows stay hidden until an account is linked in the app."
+                }
+            }
+        }.start()
         dialog.window?.setBackgroundDrawable(rounded(bgColor, 20))
         dialog.show()
         dialog.window?.apply {

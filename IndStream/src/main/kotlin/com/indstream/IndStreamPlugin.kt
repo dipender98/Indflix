@@ -10,6 +10,8 @@ import com.lagradost.cloudstream3.LoadResponse.Companion.addScore
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
 import com.lagradost.cloudstream3.utils.*
+import com.indstream.foryou.ForYouEngine
+import com.indstream.foryou.SimklHistory
 import java.util.Collections
 import java.util.HashSet
 import java.util.concurrent.ConcurrentHashMap
@@ -37,6 +39,10 @@ class IndStream : Plugin() {
         // MovieBox bearer pre-warm: the x-user token lives for hours, so one background GET now removes a serial round-trip.
         CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
             runCatching { StreamEngine.prewarmMovieBoxToken() }
+        }
+        // Account state decides whether the personalised rows exist, so check it off the main thread.
+        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+            runCatching { SimklHistory.refresh() }
         }
     }
 }
@@ -136,13 +142,20 @@ class IndStreamProvider : MainAPI() {
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
 
     // Home rows are TMDB-powered (the farm has no catalog of its own).
-    override val mainPage
-        get() = mainPageOf(
-            Pair("trending|movie", "Trending Movies"),
-            Pair("trending|tv", "Trending Series"),
-            Pair("popular|movie", "Popular Movies"),
-            Pair("popular|tv", "Popular Series"),
-        )
+    override val mainPage: List<MainPageData>
+        get() {
+            val rows = ArrayList<Pair<String, String>>()
+            // Personalised rows exist only when an account is linked in the host app.
+            if (SimklHistory.isSignedIn()) {
+                rows += Pair("foryou|movie", "Made for You: Movies")
+                rows += Pair("foryou|tv", "Made for You: Series")
+            }
+            rows += Pair("trending|movie", "Trending Movies")
+            rows += Pair("trending|tv", "Trending Series")
+            rows += Pair("popular|movie", "Popular Movies")
+            rows += Pair("popular|tv", "Popular Series")
+            return mainPageOf(*rows.toTypedArray())
+        }
 
     // Search: open race, first source back with hits wins outright.
 
@@ -230,11 +243,12 @@ class IndStreamProvider : MainAPI() {
     ): HomePageResponse? {
         // Catalog keys are "<category>|<media>" (see mainPage): category FIRST.
         val parts = request.data.split("|")
-        val kind = parts[0].trim()                                       // "trending" | "popular".
+        val kind = parts[0].trim()                                       // "trending" | "popular" | "foryou".
         val tmdbType = if (parts.getOrNull(1)?.trim() == "tv") "tv" else "movie"
-        val items = withTimeoutOrNull(12000L) {
+        val items = withTimeoutOrNull(if (kind == "foryou") 25_000L else 12_000L) {
             when (kind) {
                 "popular" -> TmdbService.popular(tmdbType, page)
+                "foryou" -> ForYouEngine.row(tmdbType, page)
                 else -> TmdbService.trending(tmdbType, page)
             }
         }.orEmpty()
@@ -263,10 +277,7 @@ class IndStreamProvider : MainAPI() {
             val id = tmdbId ?: urlImdb?.let { iid ->
                 runCatching { withTimeoutOrNull(6000L) { TmdbService.findByImdb(iid) } }.getOrNull()?.first
             } ?: return@async null
-            withTimeoutOrNull(12000L) {
-                TmdbService.fetchMeta(id, type)
-                    ?: run { delay(1200L); TmdbService.fetchMeta(id, type) }
-            }
+            withTimeoutOrNull(12000L) { TmdbService.fetchMeta(id, type) }
         }
         val cineJob = async {
             val iid = urlImdb ?: tmdbId?.let { id ->
@@ -409,14 +420,10 @@ class IndStreamProvider : MainAPI() {
     ): List<TmdbService.TmdbEpisode> = coroutineScope {
         val tmdbJob = async {
             if (tmdbId == null || tmdbId <= 0) return@async emptyList()
-            val seasons = withTimeoutOrNull(15000L) {
-                TmdbService.fetchTvSeasons(tmdbId)
-                    .ifEmpty { delay(1200L); TmdbService.fetchTvSeasons(tmdbId) }
-            }.orEmpty()
+            val seasons = withTimeoutOrNull(15000L) { TmdbService.fetchTvSeasons(tmdbId) }.orEmpty()
             if (seasons.isEmpty()) return@async emptyList()
-            seasons.map { season ->
-                async { withTimeoutOrNull(10000L) { TmdbService.fetchSeasonPublic(tmdbId, season) } }
-            }.awaitAll().filterNotNull().flatten()
+            // The season fetch is bounded internally, so a long show cannot flood the API.
+            withTimeoutOrNull(30000L) { TmdbService.fetchSeasons(tmdbId, seasons) }.orEmpty()
         }
         val cineJob = async {
             if (imdbId == null) return@async emptyList()
@@ -439,7 +446,8 @@ class IndStreamProvider : MainAPI() {
 
     /** A farm resolution already running for a cacheKey. */
     private class FarmHandle(val key: String, val job: kotlinx.coroutines.Job)
-    private val inFlightFarm = java.util.concurrent.atomic.AtomicReference<FarmHandle?>(null)
+    /** One running farm per title, so concurrent taps do not overwrite each other. */
+    private val inFlightFarms = java.util.concurrent.ConcurrentHashMap<String, FarmHandle>()
 
     /** Live-window. */
     override suspend fun loadLinks(
@@ -471,10 +479,13 @@ class IndStreamProvider : MainAPI() {
         urlImdb: String?,
     ): String? {
         urlImdb?.takeIf { it.startsWith("tt") }?.let { return it }
-        runCatching { withTimeoutOrNull(8000L) { first() } }.getOrNull()
+        runCatching { withTimeoutOrNull(8000L) { first() } }
+            .onFailure { if (it is kotlinx.coroutines.CancellationException) throw it }
+            .getOrNull()
             ?.takeIf { it.startsWith("tt") }?.let { return it }
         if (tmdbId <= 0) return null
         return runCatching { withTimeoutOrNull(8000L) { TmdbService.fetchMeta(tmdbId, type)?.imdbId } }
+            .onFailure { if (it is kotlinx.coroutines.CancellationException) throw it }
             .getOrNull()?.takeIf { it.startsWith("tt") }
     }
 
@@ -515,8 +526,14 @@ class IndStreamProvider : MainAPI() {
         }
         val emitted = java.util.concurrent.atomic.AtomicInteger(0)
 
+        // The metadata lookups live in a long-lived scope, so release them once the tap is done.
+        fun releaseMeta() {
+            metaDeferred.cancel()
+            imdbDeferred.cancel()
+        }
+
         // Instant replay: this title's farm already resolved (a prior play, or a background pull.
-        val liveFarm = inFlightFarm.get()?.takeIf { it.key == cacheKey && it.job.isActive }?.job
+        val liveFarm = inFlightFarms[cacheKey]?.takeIf { it.job.isActive }?.job
         val warm = liveFarm ?: warmFarms[cacheKey]
         val cached = StreamEngine.FastStartCache.get(cacheKey)
         if (cached != null && cached.isNotEmpty()) {
@@ -566,6 +583,7 @@ class IndStreamProvider : MainAPI() {
                 "${emitted.get()} streams for tmdb=$tmdbId/$type s=$season e=$episode")
             // Let subtitle tracks land before returning — the push IS the delivery; after return the app drops it.
             subsJob.await()
+            releaseMeta()
             return emitted.get() > 0
         }
 
@@ -578,7 +596,7 @@ class IndStreamProvider : MainAPI() {
         // A farm for this EXACT key already in flight (this provider's live path, or a movie pre-warm)?
         run {
             val running: kotlinx.coroutines.Job? =
-                inFlightFarm.get()?.takeIf { it.key == cacheKey && it.job.isActive }?.job
+                inFlightFarms[cacheKey]?.takeIf { it.job.isActive }?.job
                     ?: warmFarms[cacheKey]?.takeIf { it.isActive }
             if (running != null) {
                 android.util.Log.i("IndStream", "TAP#$tap joining in-flight farm for $cacheKey (no second launch)")
@@ -611,6 +629,7 @@ class IndStreamProvider : MainAPI() {
                         android.util.Log.w("IndStream", "TAP#$tap joined farm produced nothing in " +
                             "${StreamEngine.FAST_START_MAX_MS}ms")
                         subsJob.await()
+                        releaseMeta()
                         return false
                     }
                 }
@@ -620,6 +639,7 @@ class IndStreamProvider : MainAPI() {
                 subsJob.await()
                 android.util.Log.i("IndStream", "TAP#$tap joined farm -> ${emitted.get()} live links " +
                     "in ${System.currentTimeMillis() - loadStartMs}ms")
+                releaseMeta()
                 return emitted.get() > 0
             }
         }
@@ -646,6 +666,8 @@ class IndStreamProvider : MainAPI() {
                     // Subtitle-only carriers are dead weight now (server subs are not used - fallback is the provider): links only.
                     emitBatch(sid, streams)
                 }
+            } catch (c: kotlinx.coroutines.CancellationException) {
+                throw c
             } catch (t: Throwable) {
                 android.util.Log.w("IndStream", "live resolve failed: ${t.message}")
             }
@@ -653,8 +675,8 @@ class IndStreamProvider : MainAPI() {
         // F6: OWNERSHIP of this title's farm is published so a re-tap that catches a PARTIAL cache can still tail the running.
         run {
             val handle = FarmHandle(cacheKey, farmDone)
-            inFlightFarm.set(handle)
-            farmDone.invokeOnCompletion { inFlightFarm.compareAndSet(handle, null) }
+            inFlightFarms[cacheKey] = handle
+            farmDone.invokeOnCompletion { inFlightFarms.remove(cacheKey, handle) }
         }
 
         // Second wave: IMDB-url taps start with no TMDB id, so only IMDB servers run above.
@@ -698,6 +720,7 @@ class IndStreamProvider : MainAPI() {
             windowOpen.set(false)
             // Subs still get a chance to land even if no stream arrived.
             subsJob.await()
+            releaseMeta()
             return false
         }
 
@@ -712,6 +735,7 @@ class IndStreamProvider : MainAPI() {
         // Return → the app auto-starts on whichever link its own quality profile ranks first.
         android.util.Log.i("IndStream", "TAP#$tap live window: tmdb=$tmdbId/$type s=$season e=$episode -> " +
             "${emitted.get()} links live in ${System.currentTimeMillis() - loadStartMs}ms (farm=${if (farmDone.isCompleted) "done" else "capped at LIVE_FILL"})")
+        releaseMeta()
         return emitted.get() > 0
     }
 

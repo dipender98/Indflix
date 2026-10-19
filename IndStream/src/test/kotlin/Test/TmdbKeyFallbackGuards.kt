@@ -11,11 +11,16 @@ import kotlin.test.assertTrue
 class TmdbKeyFallbackGuards {
 
     @Test
-    fun auth_and_rate_limit_http_trigger_fallback() {
+    fun auth_and_server_error_http_trigger_fallback() {
         assertTrue(TmdbService.shouldTryNextKey(401, null))
         assertTrue(TmdbService.shouldTryNextKey(403, null))
-        assertTrue(TmdbService.shouldTryNextKey(429, null)) // rate limit
         assertTrue(TmdbService.shouldTryNextKey(500, null))
+    }
+
+    @Test
+    fun rate_limit_does_not_rotate_keys() {
+        // The 429 limit is per IP, so another key cannot help - rotating only multiplies the request storm.
+        assertFalse(TmdbService.shouldTryNextKey(429, null))
     }
 
     @Test

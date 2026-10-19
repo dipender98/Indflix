@@ -22,9 +22,8 @@ object OneTouchTvSource {
 
     /** Custom-base64 AES-256-CBC envelope to JSON. Null on any failure. Pure except Base64. */
     fun decryptToJson(text: String): JSONObject? = runCatching {
-        var s = text.replace("-_.", "/").replace("@", "+").replace(Regex("\\s+"), "")
-        s += "=".repeat((4 - s.length % 4) % 4)
-        val raw = java.util.Base64.getDecoder().decode(s)
+        val s = Base64Kit.fromCustom(text.replace(Regex("\\s+"), ""))
+        val raw = Base64Kit.decode(s)
         val c = Cipher.getInstance("AES/CBC/PKCS5Padding")
         c.init(Cipher.DECRYPT_MODE, SecretKeySpec(KEY, "AES"), IvParameterSpec(IV))
         JSONObject(String(c.doFinal(raw), Charsets.UTF_8))
@@ -115,7 +114,9 @@ object OneTouchTvSource {
         }
         return hits.filter { typeOk(it) && yearOk(it) }.firstOrNull { norm(it.title) == tn }
             ?: hits.filter { typeOk(it) && yearOk(it) }.firstOrNull {
-                norm(it.title).startsWith(tn) || tn.startsWith(norm(it.title))
+                val candidate = norm(it.title)
+                // A title that normalises to nothing must not match everything.
+                candidate.length >= 3 && (candidate.startsWith(tn) || tn.startsWith(candidate))
             }
     }
 

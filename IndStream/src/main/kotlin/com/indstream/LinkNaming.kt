@@ -73,7 +73,7 @@ object LinkNaming {
         !indicator.isNullOrBlank() &&
             Regex("""\b(\d{3,4})p\b""", RegexOption.IGNORE_CASE).containsMatchIn(indicator)
 
-    /** Build the final display name: `{Server } ({Language})`. No resolution token is printed - CloudStream renders the. link's quality badge itself (. */
+    /** Build the final display name: `{Server } ({Language}) [size]`. No resolution token is printed - CloudStream renders the. link's quality badge itself (. */
     fun displayName(
         serverName: String,
         audioLabel: String? = "",
@@ -81,6 +81,7 @@ object LinkNaming {
         subIndicator: String? = null,
         duplicateIndex: Int = 0,
         originalLang: String? = null,
+        sizeLabel: String? = null,
     ): String {
         val base = serverName.trim().ifBlank { "Server" }
         val tag = languageTagFor(audioLabel, originalLang)
@@ -102,7 +103,9 @@ object LinkNaming {
 // quality), so printing it here.
         val serverDisplay = RESOLUTION_TOKEN.replace(serverPart, "").trim()
         val tagDisplay = if (tagPart.isBlank()) "" else RESOLUTION_TOKEN.replace(tagPart, "").trim()
-        val parts = listOf(serverDisplay, tagDisplay).filter { it.isNotBlank() }
+        // Host-declared size rides LAST ("4KHDHub 1080p (Hindi) 1.4GB"); blank when the host gives none.
+        val sizePart = sizeLabel?.trim().orEmpty()
+        val parts = listOf(serverDisplay, tagDisplay, sizePart).filter { it.isNotBlank() }
         return parts.joinToString(" ")
     }
 

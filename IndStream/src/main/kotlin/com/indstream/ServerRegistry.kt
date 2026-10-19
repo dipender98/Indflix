@@ -10,6 +10,11 @@ data class ServerSpec(
     val id: String,
     val name: String,
     val idType: ServerIdType = ServerIdType.TMDB,
+    /** Whether this server also accepts an IMDB id, by media type. */
+    val supportsImdbMovie: Boolean = false,
+    val supportsImdbTv: Boolean = false,
+    /** Whether resolver outcomes update the health breaker. */
+    val recordHealth: Boolean = true,
     val movieUrl: String,
     val tvUrl: String,
     val isJsonApi: Boolean = false,
@@ -20,7 +25,10 @@ data class ServerSpec(
     val timeoutSec: Int = 10,
     /** Languages this host itself declares (canonical names. INDIAN_DUB_LANGUAGES]: "Hindi", "Tamil", "Telugu", …). */
     val declaredLanguages: Set<String> = emptySet(),
-)
+) {
+    fun supportsImdb(type: String): Boolean =
+        if (type == "movie") supportsImdbMovie else supportsImdbTv
+}
 
 /** Federated server registry - seeded with). */
 object ServerFarm {
@@ -31,6 +39,7 @@ object ServerFarm {
         ServerSpec(
             id = "vidlink", name = "VidLink",
             idType = ServerIdType.TMDB,
+            supportsImdbMovie = true,
             movieUrl = "https://vidlink.pro/api/b/movie/{id}?multiLang=1",
             tvUrl = "https://vidlink.pro/api/b/tv/{id}/{season}/{episode}?multiLang=1",
             isJsonApi = true, referer = "https://vidlink.pro/",
@@ -116,6 +125,7 @@ object ServerFarm {
         ServerSpec(
             id = "streamflix", name = "StreamFlix",
             idType = ServerIdType.TMDB,
+            supportsImdbMovie = true, supportsImdbTv = true,
             movieUrl = "https://api.streamflix.app/data.json",
             tvUrl = "https://api.streamflix.app/data.json",
             hasSubtitles = false, timeoutSec = 25,
@@ -207,10 +217,54 @@ object ServerFarm {
         ServerSpec(
             id = "braflix", name = "Braflix",
             idType = ServerIdType.TMDB,
+            supportsImdbMovie = true, supportsImdbTv = true,
             movieUrl = "https://braflix.dev/api/play/movie/{id}",
             tvUrl = "https://braflix.dev/api/play/tv/{id}/{season}/{episode}",
             referer = "https://braflix.dev/",
             hasSubtitles = false, timeoutSec = 20,
+        ),
+        // Hub-family file index (downloadable direct files): title-keyed search,
+        // post pages carry per-file size/language badges; downloads ride a
+        // rotator gateway to hubcloud/hubdrive token pages (decoded client-side).
+        ServerSpec(
+            id = "4khdhub", name = "4KHDHub",
+            idType = ServerIdType.TMDB,
+            movieUrl = "https://4khdhub.one/?s={id}",
+            tvUrl = "https://4khdhub.one/?s={id}",
+            referer = "https://4khdhub.one/",
+            hasSubtitles = false, timeoutSec = 40,
+        ),
+        // VegaMovies-family fast R2/FSL server: title-keyed search, gateway
+        // expansion, R2 direct links ("FSL" host tags). Rogmovies rides along.
+        ServerSpec(
+            id = "fsl", name = "FSL",
+            idType = ServerIdType.TMDB,
+            movieUrl = "https://new1.vegamovies.lease/",
+            tvUrl = "https://new1.vegamovies.lease/",
+            referer = "https://new1.vegamovies.lease/",
+            hasSubtitles = false, timeoutSec = 60,
+            declaredLanguages = setOf("Hindi", "Tamil", "Telugu"),
+        ),
+        // Id-keyed index: /search/{tmdb|imdb-id}/ answers directly, so the
+        // resolver needs no title lookup. Domains churn - the resolver self-heals.
+        ServerSpec(
+            id = "hdmovie2", name = "HDMovie2",
+            idType = ServerIdType.TMDB,
+            supportsImdbMovie = true, supportsImdbTv = true,
+            movieUrl = "https://hdmovie2a.live/search/{id}/",
+            tvUrl = "https://hdmovie2a.live/search/{id}",
+            referer = "https://hdmovie2a.live/",
+            hasSubtitles = false, timeoutSec = 35,
+        ),
+        // OlaMovies file index: parking-page domain self-heal, then title search
+        // and download-box harvest. Stays dormant (clean miss) when parked.
+        ServerSpec(
+            id = "olamovies", name = "OlaMovies",
+            idType = ServerIdType.TMDB,
+            movieUrl = "https://olamovies.rent/",
+            tvUrl = "https://olamovies.rent/",
+            referer = "https://olamovies.rent/",
+            hasSubtitles = false, timeoutSec = 35,
         ),
     )
 
@@ -265,16 +319,16 @@ object HealthMonitor {
 
     /** Whether a server is currently healthy (not tripped and not failed too often). */
     fun isHealthy(serverId: String): Boolean {
-        val h = healthMap[serverId] ?: return true // unknown = healthy (first probe).
-        if (h.failCount >= MAX_CONSECUTIVE_FAILURES) {
-            if (System.currentTimeMillis() < h.trippedUntil) return false
-            // Trip expired - allow re-probe, reset fail count.
-            synchronized(lock) {
+        // Read and write under the same lock, so a concurrent failure is not overwritten by a stale copy.
+        synchronized(lock) {
+            val h = healthMap[serverId] ?: return true // unknown = healthy (first probe).
+            if (h.failCount >= MAX_CONSECUTIVE_FAILURES) {
+                if (System.currentTimeMillis() < h.trippedUntil) return false
+                // Trip expired - allow re-probe, reset fail count.
                 healthMap[serverId] = h.copy(failCount = 0)
             }
             return true
         }
-        return true
     }
 
     /** Clear only circuit-breaker trip state. A farm-wide trip must never lock the plugin out for the full trip window. (StreamEngine re-probes once per. */

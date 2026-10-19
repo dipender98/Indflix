@@ -60,6 +60,10 @@ object ImdbService {
     private val photoCache = ConcurrentHashMap<String, String>()
     /** IMDB id to (rating, expiresAt). */
     private val ratingCache = ConcurrentHashMap<String, Pair<Double, Long>>()
+    /** Queries that recently returned nothing, so a dead upstream is not asked again on every keystroke. */
+    private val negative = ConcurrentHashMap<String, Long>()
+    /** How long an empty suggest answer is remembered. */
+    private const val NEGATIVE_TTL_MS = 60_000L
 
     /** Suggest lookup with in-memory cache. Never throws. */
     suspend fun suggest(query: String): List<ImdbHit> {
@@ -69,19 +73,39 @@ object ImdbService {
             if (System.currentTimeMillis() <= it.expiresAt) return it.hits
             cache.remove(key)
         }
-        val mine = scope.async {
+        if (negative.contains(key) && System.currentTimeMillis() <= negative.getValue(key)) return emptyList()
+        val mine = scope.async(start = kotlinx.coroutines.CoroutineStart.LAZY) {
             val found = suggestRemote(query)
             if (found.isNotEmpty()) {
                 if (cache.size >= CACHE_MAX) {
                     cache.entries.minByOrNull { e -> e.value.expiresAt }?.let { e -> cache.remove(e.key) }
                 }
                 cache[key] = Entry(found, System.currentTimeMillis() + CACHE_TTL_MS)
+            } else {
+                if (negative.size >= CACHE_MAX) {
+                    negative.entries.minByOrNull { it.value }?.let { negative.remove(it.key) }
+                }
+                negative[key] = System.currentTimeMillis() + NEGATIVE_TTL_MS
             }
             found
         }
         val existing = inFlight.putIfAbsent(key, mine)
-        if (existing == null) mine.invokeOnCompletion { inFlight.remove(key, mine) } else mine.cancel()
-        return withTimeoutOrNull(WAIT_MS) { runCatching { (existing ?: mine).await() }.getOrNull() }.orEmpty()
+        if (existing == null) {
+            mine.invokeOnCompletion { inFlight.remove(key, mine) }
+            mine.start()
+        } else {
+            mine.cancel()
+        }
+        val job = existing ?: mine
+        return withTimeoutOrNull(WAIT_MS) {
+            try {
+                job.await()
+            } catch (c: kotlinx.coroutines.CancellationException) {
+                throw c
+            } catch (t: Throwable) {
+                emptyList()
+            }
+        }.orEmpty()
     }
 
     private suspend fun suggestRemote(query: String): List<ImdbHit> =
@@ -92,9 +116,16 @@ object ImdbService {
         // Suggest keys collapse whitespace to underscores.
         val slug = query.trim().lowercase().replace(Regex("""\s+"""), "_")
         val encoded = URLEncoder.encode(slug, "UTF-8")
-        return withTimeoutOrNull(6000L) {
-            runCatching { app.get("$SUGGEST_API/$encoded.json", timeout = 6).text }.getOrNull()
-        }
+        return withTimeoutOrNull(6000L) { getText("$SUGGEST_API/$encoded.json", 6) }
+    }
+
+    /** GET a body; a cancellation propagates, any other failure yields null. */
+    private suspend fun getText(url: String, timeoutSec: Long): String? = try {
+        app.get(url, timeout = timeoutSec).text
+    } catch (c: kotlinx.coroutines.CancellationException) {
+        throw c
+    } catch (t: Throwable) {
+        null
     }
 
     /** Map a suggest payload to hits. Name-kind entries are dropped. Pure. */
@@ -108,7 +139,7 @@ object ImdbService {
                 val title = o.optString("l").takeIf { it.isNotBlank() } ?: return@mapNotNull null
                 val qid = o.optString("qid")
                 if (qid == "videoGame") return@mapNotNull null
-                val type = if (qid == "tvSeries" || qid == "tvMiniSeries") "tv" else "movie"
+                val type = if (qid == "tvSeries" || qid == "tvMiniSeries" || qid == "tvEpisode") "tv" else "movie"
                 ImdbHit(
                     imdbId = id,
                     title = title,
@@ -144,9 +175,7 @@ object ImdbService {
         val kind = if (type == "movie") "movie" else "series"
         val key = "$kind|$imdbId"
         metaCache[key]?.let { return it }
-        val text = withTimeoutOrNull(7000L) {
-            runCatching { app.get("$CINEMETA_API/$kind/$imdbId.json", timeout = 7).text }.getOrNull()
-        } ?: return null
+        val text = withTimeoutOrNull(7000L) { getText("$CINEMETA_API/$kind/$imdbId.json", 7) } ?: return null
         val detail = parseCinemeta(text, imdbId)?.withCastPhotos() ?: return null
         if (metaCache.size < CACHE_MAX) metaCache[key] = detail
         return detail
@@ -180,7 +209,7 @@ object ImdbService {
                 name = m.optString("name").takeIf { it.isNotBlank() },
                 poster = m.optString("poster").takeIf { it.isNotBlank() },
                 backdrop = m.optString("background").takeIf { it.isNotBlank() },
-                year = m.optString("releaseInfo")?.take(4)?.takeIf { it[0].isDigit() },
+                year = m.optString("releaseInfo")?.take(4)?.takeIf { it.isNotEmpty() && it[0].isDigit() },
                 rating = m.optString("imdbRating").toDoubleOrNull()?.takeIf { it > 0 },
                 overview = m.optString("description").takeIf { it.isNotBlank() },
                 genres = m.optJSONArray("genres")?.let { arr ->
@@ -275,6 +304,7 @@ object ImdbService {
             }
         }
         if (missing.isEmpty()) return out.toMap()
+        val fetched = Collections.synchronizedMap(HashMap<String, Double>())
         withTimeoutOrNull(6000L) {
             coroutineScope {
                 val sem = Semaphore(6)
@@ -283,10 +313,8 @@ object ImdbService {
                         sem.acquire()
                         try {
                             val kind = if (type == "movie") "movie" else "series"
-                            val text = runCatching {
-                                app.get("$CINEMETA_API/$kind/$id.json", timeout = 5).text
-                            }.getOrNull()
-                            parseCinemeta(text, id)?.rating?.let { out[id] = it }
+                            val text = getText("$CINEMETA_API/$kind/$id.json", 5)
+                            parseCinemeta(text, id)?.rating?.let { fetched[id] = it }
                         } finally {
                             sem.release()
                         }
@@ -295,10 +323,10 @@ object ImdbService {
             }
         }
         val done = out.toMap()
-        for ((id, r) in done) {
+        for ((id, r) in fetched) {
             if (ratingCache.size < CACHE_MAX * 4) ratingCache[id] = r to (System.currentTimeMillis() + CACHE_TTL_MS)
         }
-        return done
+        return done + fetched
     }
 
     /** Extend IMDB names with TMDB-exclusive cast rows. IMDB order and photos win. Pure. */
@@ -316,8 +344,6 @@ object ImdbService {
     /** Raw series payload for episode listing. Never throws. */
     suspend fun fetchSeriesRaw(imdbId: String): String? {
         if (!imdbId.startsWith("tt")) return null
-        return withTimeoutOrNull(7000L) {
-            runCatching { app.get("$CINEMETA_API/series/$imdbId.json", timeout = 7).text }.getOrNull()
-        }
+        return withTimeoutOrNull(7000L) { getText("$CINEMETA_API/series/$imdbId.json", 7) }
     }
 }

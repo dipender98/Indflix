@@ -29,6 +29,8 @@ object SubtilesProvider {
     /** Re-watching the same episode within the TTL reuses the parsed list. */
     private const val CACHE_TTL_MS = 15 * 60 * 1000L
     private const val CACHE_MAX = 64
+    /** How long an empty result is remembered, so a dead addon is not asked again on every play. */
+    private const val EMPTY_TTL_MS = 90_000L
 
     /** How many codes one addon request carries; the addon slows down on big multi-language requests, so the rest is fetched in parallel chunks. */
     internal const val GROUP_SIZE = 6
@@ -56,6 +58,8 @@ object SubtilesProvider {
     )
 
     private val cache = ConcurrentHashMap<String, Pair<Long, List<SubtitleFile>>>()
+    /** Fetches that returned nothing, so a repeat play does not hit the addons again straight away. */
+    private val empty = ConcurrentHashMap<String, Long>()
 
     /** English + Indian block, plus the title's own original language (a 2-letter TMDB code) when present. */
     fun desiredLanguages(originalLang: String?): Set<String> {
@@ -250,6 +254,7 @@ object SubtilesProvider {
             }
             cache.remove(key)
         }
+        empty[key]?.let { if (System.currentTimeMillis() < it) return 0 }
 
         val deadline = System.currentTimeMillis() + FETCH_BUDGET_MS
         val groups = groupRequests(codes, originalCode)
@@ -286,6 +291,12 @@ object SubtilesProvider {
             }
         }
         if (collected.isNotEmpty()) put(key, collected.map { SubtitleFile(it.menu, it.url) })
+        else {
+            if (empty.size >= CACHE_MAX) {
+                empty.entries.minByOrNull { it.value }?.let { empty.remove(it.key) }
+            }
+            empty[key] = System.currentTimeMillis() + EMPTY_TTL_MS
+        }
         Log.d("SubtilesProvider", "$delivered fallback subs for $imdb (codes=$codes)")
         return delivered
     }

@@ -1,4 +1,4 @@
-package Test
+﻿package Test
 
 import com.indstream.CastleTvSource
 import com.indstream.ServerFarm
@@ -7,6 +7,7 @@ import com.indstream.StreamEngine
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -103,9 +104,33 @@ class ServerAdditionsTest {
     }
 
     @Test
+    fun dualIdServers_declareSupport() {
+        val vidlink = ServerFarm.allServers.first { it.id == "vidlink" }
+        assertTrue(vidlink.supportsImdb("movie"))
+        assertFalse(vidlink.supportsImdb("tv"))
+
+        val braflix = ServerFarm.allServers.first { it.id == "braflix" }
+        assertTrue(braflix.supportsImdb("movie"))
+        assertTrue(braflix.supportsImdb("tv"))
+
+        val streamflix = ServerFarm.allServers.first { it.id == "streamflix" }
+        assertTrue(streamflix.supportsImdb("movie"))
+        assertTrue(streamflix.supportsImdb("tv"))
+
+        val netmirror = ServerFarm.allServers.first { it.id == "netmirror" }
+        assertFalse(netmirror.supportsImdb("movie"))
+        assertFalse(netmirror.supportsImdb("tv"))
+    }
+
+    @Test
     fun hubDisabledJsGateway() {
-        // Disabled (post pages moved download buttons behind a JS gateway; no direct drive links) - assert the DISABLED state so a re-enable is a conscious act.
-        assertNull(ServerFarm.allServers.firstOrNull { it.id == "4khdhub" })
+        // Re-enabled: the rotator gateway is decoded client-side (v68), so the
+        // hub-family resolver works again. A later removal must be conscious.
+        assertNotNull(ServerFarm.allServers.firstOrNull { it.id == "4khdhub" })
+        // New downloadable fast-file hosts land with the same expansion.
+        for (id in setOf("fsl", "hdmovie2", "olamovies")) {
+            assertNotNull(ServerFarm.allServers.firstOrNull { it.id == id }, "$id must be present")
+        }
     }
 
     @Test
@@ -182,11 +207,124 @@ class ServerAdditionsTest {
     }
 
     @Test
-    fun hubDriveLinks_extracts() {
-        val html = "<a href=\"https://hubcloud.ist/drive/abc123\">HubCloud</a>" +
-            "<a href=\"https://hubcloud.ist/drive/abc123\">dup</a>" +
-            "<a href=\"https://example.com/x\">other</a>"
-        assertEquals(listOf("https://hubcloud.ist/drive/abc123"), StreamEngine.hubDriveLinks(html))
+    fun hub4kItems_parsesPostBlocks() {
+        val html = "<div class=\"download-item\"><div class=\"download-header\">" +
+            "<div class=\"flex-1\">Show S01E02 (2024) 1080p BluRay</div>" +
+            "<code><span class=\"badge\">1.4GB</span><span class=\"badge\">Hindi, English</span></code></div>" +
+            "<div class=\"file-title\"><a class=\"btn\" href=\"https://greenmotors.example/?id=abc\" />" +
+            "<a class=\"btn\" href=\"/relative\">rel</a></div></div>"
+        val items = StreamEngine.hub4kItems(html)
+        assertEquals(1, items.size)
+        assertEquals("Show S01E02 (2024) 1080p BluRay", items[0].title)
+        assertEquals("1.4GB", items[0].size)
+        assertEquals("Hindi, English", items[0].languages)
+        assertEquals(listOf("https://greenmotors.example/?id=abc"), items[0].gatewayUrls)
+        assertTrue(StreamEngine.hub4kItems("<html>none</html>").isEmpty())
+    }
+
+    @Test
+    fun normalizeSizeToken_compact() {
+        assertEquals("73.73GB", StreamEngine.normalizeSizeToken("73.73 GB"))
+        assertEquals("1.7MB", StreamEngine.normalizeSizeToken("size: 1.7 mb (size)"))
+        assertEquals("", StreamEngine.normalizeSizeToken("BluRay"))
+    }
+
+    @Test
+    fun hubLangOf_dualAudio() {
+        assertEquals("Multi", StreamEngine.hubLangOf("Hindi, English"))
+        assertEquals("Hindi", StreamEngine.hubLangOf("Hindi"))
+        assertEquals("", StreamEngine.hubLangOf("BluRay exclusive"))
+    }
+
+    @Test
+    fun rotatorTarget_liveVector() {
+        // Captured gateway blob (with trailing junk chars) -> drive url.
+        val blob = "Y214WE0xWjNZbXRhVUdwMmIxQldObFo2ZFRCeFZVOXRRbmxxYVV0UU9XRndla2w1YjNveGFYRlVPV3h3YkRWM1RERnFhVzVVT1dkTlNtdDFiM3BGZVhCNWFtbFdkbXAyYjJ4V05sWjZVMVpJZDA5M1JsSXdNa2RWZURWdk1rVkxSbnBqZGtWdGVHdEtlRm94Y0ZSYWJVaExUVzVHVW1OcVRWUXhTWEY1ZUd4S1lXTk5XbmxqWkV4M1YwWmFTV05rUjNveGRVbFVhekpXWVQ5QQ=="
+        val page = "<script>s('o','$blob?@',180*1000)</script>"
+        assertEquals("https://hubcloud.ist/drive/cfscfcoduf3fi9o", StreamEngine.rotatorTarget(page))
+        assertNull(StreamEngine.rotatorTarget("<html>no blob</html>"))
+    }
+
+    @Test
+    fun displayName_sizeLast() {
+        assertEquals(
+            "4KHDHub (\uD83C\uDDEE\uD83C\uDDF3 Hindi) 1.4GB",
+            com.indstream.LinkNaming.displayName("4KHDHub", "Hindi", sizeLabel = "1.4GB"),
+        )
+        // Blank size: name unchanged.
+        assertEquals(
+            "VidLink (Multi)",
+            com.indstream.LinkNaming.displayName("VidLink", "Multi"),
+        )
+    }
+
+    @Test
+    fun fslSearchHits_parsesTypoProxyJson() {
+        val json = """{"hits":[{"document":{"permalink":"https://site.example/p/m/","post_title":"Film (2024)"}}]}"""
+        val hits = StreamEngine.fslSearchHits(json)
+        assertEquals(1, hits.size)
+        assertEquals("https://site.example/p/m/", hits[0].first)
+        assertEquals("Film (2024)", hits[0].second)
+        assertTrue(StreamEngine.fslSearchHits("<html>not json</html>").isEmpty())
+    }
+
+    @Test
+    fun fslGroups_headingOwnedGateways() {
+        val html = "<div class=\"entry-content\">" +
+            "<h5>Film (2024) 1080p [1.7GB]</h5>" +
+            "<a href=\"https://nexdrive.site/genxfm/film.zip/\">G</a>" +
+            "<h5>Other (2023) 480p</h5>" +
+            "<a href=\"https://nexdrive.site/genxfm/other.zip/\">G2</a></div>"
+        val groups = StreamEngine.fslGroups(html)
+        assertEquals(2, groups.size)
+        assertEquals("Film (2024) 1080p [1.7GB]", groups[0].heading)
+        assertEquals(1, groups[0].gateways.size)
+        assertTrue(groups[0].gateways[0].endsWith("/"))
+        assertEquals("1.7GB", StreamEngine.headingSizeOf(groups[0].heading))
+    }
+
+    @Test
+    fun gatewayLinksOf_split() {
+        val links = StreamEngine.gatewayLinksOf(
+            """{\"o\":\"https:\\/\\/fastdl.site\\/embed?download=film_1080p\",\"l\":\"https://vcloud.site/AbCd1234\"}""",
+        )
+        assertEquals(1, links.cloud.size)
+        assertEquals("https://vcloud.site/AbCd1234", links.cloud[0])
+        assertTrue(links.fastdl.isEmpty())
+    }
+
+    @Test
+    fun vcloudDoubleAtob_decode() {
+        val inner = java.util.Base64.getEncoder().encodeToString("https://drive.example/f/x1".toByteArray())
+        val blob = java.util.Base64.getEncoder().encodeToString(inner.toByteArray())
+        assertEquals("https://drive.example/f/x1", StreamEngine.vcloudDoubleAtob(blob))
+        assertNull(StreamEngine.vcloudDoubleAtob("!!!not-base64!!!"))
+    }
+
+    @Test
+    fun hd2Anchors_downloadPaths() {
+        val html = "<a href=\"/download/tt1-film-480p/\">480p</a>" +
+            "<a href=\"/movies/tt1-film/\">post</a>" +
+            "<a href=\"/episode/s01e03-x/\">E</a>"
+        val anchors = StreamEngine.hd2Anchors(html, "https://idhost.example")
+        assertEquals(2, anchors.size)
+        assertTrue(anchors[0].first.contains("/download/"))
+    }
+
+    @Test
+    fun olaDirectOf_pixeldrainApi() {
+        assertEquals(
+            "https://pixeldrain.com/api/file/AbC123",
+            StreamEngine.olaDirectOf("https://pixeldrain.com/u/AbC123"),
+        )
+        assertNull(StreamEngine.olaDirectOf("https://gofile.io/d/AbC123"))
+    }
+
+    @Test
+    fun fslIsLanding_parkingMarker() {
+        assertTrue(StreamEngine.fslIsLanding("<a href=\"https://qikly.pro/host\">follow</a>"))
+        assertTrue(StreamEngine.fslIsLanding("<div id=\"stx\">wait</div>"))
+        assertFalse(StreamEngine.fslIsLanding("<div>posts live here</div>"))
     }
 
     @Test

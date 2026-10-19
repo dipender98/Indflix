@@ -2,6 +2,7 @@ package com.indstream
 
 import android.util.Log
 import com.lagradost.cloudstream3.app
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 import java.net.URLEncoder
@@ -28,45 +29,32 @@ object CastleTvSource {
 
     @Volatile private var secKey: String? = null
     @Volatile private var secKeyAt: Long = 0L
+    private val secKeyLock = kotlinx.coroutines.sync.Mutex()
 
     data class Track(val languageId: String, val languageName: String, val existVideo: Boolean)
     data class Video(val url: String, val quality: String)
 
-    /** Cached security key (hour TTL). Null on failure. */
+    /** Cached security key (hour TTL). Null when the key could not be fetched - a stale key is never handed out. */
     suspend fun securityKey(): String? {
         val k = secKey
         if (k != null && System.currentTimeMillis() - secKeyAt < SECKEY_TTL_MS) return k
-        val fresh = withTimeoutOrNull(8_000L) {
-            runCatching {
-                app.get("$BASE/v0.1/system/getSecurityKey/1?channel=$CHANNEL&clientType=$CLIENT&lang=$LANG",
-                    timeout = 8, headers = apiHeaders).text
-            }.getOrNull()?.let { JSONObject(it).optString("data").takeIf { s -> s.isNotBlank() } }
+        return secKeyLock.withLock {
+            val cached = secKey
+            if (cached != null && System.currentTimeMillis() - secKeyAt < SECKEY_TTL_MS) return@withLock cached
+            val fresh = withTimeoutOrNull(8_000L) {
+                runCatching {
+                    app.get("$BASE/v0.1/system/getSecurityKey/1?channel=$CHANNEL&clientType=$CLIENT&lang=$LANG",
+                        timeout = 8, headers = apiHeaders).text
+                }.getOrNull()?.let { JSONObject(it).optString("data").takeIf { s -> s.isNotBlank() } }
+            }
+            if (fresh != null) { secKey = fresh; secKeyAt = System.currentTimeMillis() }
+            else Log.w("CastleTV", "security key fetch failed")
+            fresh
         }
-        if (fresh != null) { secKey = fresh; secKeyAt = System.currentTimeMillis() }
-        else Log.w("CastleTV", "security key fetch failed")
-        return fresh ?: k
     }
 
     /** Standard base64 decode (no Android APIs: unit-test safe, minSdk 21 safe). Pure. */
-    internal fun b64decode(input: String): ByteArray {
-        val alpha = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-        val clean = input.trim().replace(Regex("\\s+"), "").trimEnd('=')
-        val out = ByteArray((clean.length * 6) / 8)
-        var bits = 0
-        var acc = 0
-        var pos = 0
-        for (ch in clean) {
-            val v = alpha.indexOf(ch)
-            if (v < 0) throw IllegalArgumentException("bad base64 char")
-            acc = (acc shl 6) or v
-            bits += 6
-            if (bits >= 8) {
-                bits -= 8
-                out[pos++] = ((acc shr bits) and 0xFF).toByte()
-            }
-        }
-        return out.copyOf(pos)
-    }
+    internal fun b64decode(input: String): ByteArray = Base64Kit.decode(input)
 
     /** AES-128-CBC decrypt (key = base64 secret + suffix, first 16 bytes; IV = key). Null on failure. */
     fun decrypt(cipherB64: String, secKeyB64: String): String? = runCatching {
@@ -78,7 +66,7 @@ object CastleTvSource {
         if (n < 16) System.arraycopy(suf, 0, key, n, minOf(suf.size, 16 - n))
         val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
         cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(key))
-        val ct = b64decode(cipherB64.trim().replace("-_.", "/").replace("@", "+"))
+        val ct = b64decode(Base64Kit.fromCustom(cipherB64.trim()))
         String(cipher.doFinal(ct), Charsets.UTF_8)
     }.getOrNull()
 

@@ -1,4 +1,4 @@
-﻿package com.indstream
+package com.indstream
 /** FILE: CoreServices. kt â€” shared primitives. - shared HTTP helpers (speed probing, common headers). - TMDB search /. metadata / season data. - HLS. */
 
 import com.lagradost.cloudstream3.Actor
@@ -11,7 +11,9 @@ import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.SupervisorJob
@@ -88,7 +90,8 @@ object HttpKit {
                 val resp = app.get(url, timeout = 5, headers = headers)
                 val elapsed = System.currentTimeMillis() - start
                 if (elapsed < 1) return@runCatching null
-                val bytes = resp.text.length.coerceAtLeast(1)
+                // Count bytes, not decoded characters.
+                val bytes = resp.body.contentLength().takeIf { it > 0 } ?: resp.body.bytes().size.toLong()
                 // throughput in KB/s.
                 (bytes * 1000L) / (elapsed * 1024L)
             }.getOrNull()
@@ -212,6 +215,66 @@ object HttpKit {
             ((b[off + 2].toInt() and 0xFF) shl 8) or (b[off + 3].toInt() and 0xFF)
 }
 
+/** Base64 codec that does not rely on the java.util API, so it also works on old Android runtimes. Pure. */
+object Base64Kit {
+
+    private const val ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+
+    /** Rewrites the custom alphabet to the standard one: the '-_.' sequence stands for '/', '@' for '+'. */
+    fun fromCustom(input: String): String =
+        input.replace("-_.", "/").replace("@", "+")
+
+    /** Decodes standard base64 (padding optional). Throws on a character outside the alphabet. */
+    fun decode(input: String): ByteArray {
+        val clean = input.trim().replace(Regex("\\s+"), "").trimEnd('=')
+        val out = ByteArray((clean.length * 6) / 8)
+        var bits = 0
+        var acc = 0
+        var pos = 0
+        for (ch in clean) {
+            val v = ALPHABET.indexOf(ch)
+            if (v < 0) throw IllegalArgumentException("bad base64 char")
+            acc = (acc shl 6) or v
+            bits += 6
+            if (bits >= 8) {
+                bits -= 8
+                out[pos++] = ((acc shr bits) and 0xFF).toByte()
+            }
+        }
+        return out.copyOf(pos)
+    }
+
+    /** Encodes bytes as standard base64 with padding. */
+    fun encode(data: ByteArray): String {
+        if (data.isEmpty()) return ""
+        val out = StringBuilder((data.size + 2) / 3 * 4)
+        var i = 0
+        while (i + 2 < data.size) {
+            val n = ((data[i].toInt() and 0xFF) shl 16) or
+                ((data[i + 1].toInt() and 0xFF) shl 8) or (data[i + 2].toInt() and 0xFF)
+            out.append(ALPHABET[(n shr 18) and 0x3F])
+            out.append(ALPHABET[(n shr 12) and 0x3F])
+            out.append(ALPHABET[(n shr 6) and 0x3F])
+            out.append(ALPHABET[n and 0x3F])
+            i += 3
+        }
+        val rest = data.size - i
+        if (rest == 1) {
+            val n = (data[i].toInt() and 0xFF) shl 16
+            out.append(ALPHABET[(n shr 18) and 0x3F])
+            out.append(ALPHABET[(n shr 12) and 0x3F])
+            out.append("==")
+        } else if (rest == 2) {
+            val n = ((data[i].toInt() and 0xFF) shl 16) or ((data[i + 1].toInt() and 0xFF) shl 8)
+            out.append(ALPHABET[(n shr 18) and 0x3F])
+            out.append(ALPHABET[(n shr 12) and 0x3F])
+            out.append(ALPHABET[(n shr 6) and 0x3F])
+            out.append('=')
+        }
+        return out.toString()
+    }
+}
+
 /** TMDB metadata engine for. Search, detail, episodes, IMDB→TMDB lookup. */
 object TmdbService {
 
@@ -227,10 +290,35 @@ object TmdbService {
     private const val SEARCH_CACHE_MAX = 64
     /** Cap on riding someone else's in-flight search before giving up. Sized for a primary→fallback key retry. */
     private const val SEARCH_INFLIGHT_WAIT_MS = 11_000L
+    /** How long a failed lookup stays known-bad, so an outage is not re-fetched on every tap. */
+    private const val NEGATIVE_TTL_MS = 60_000L
+    /** TTL for the catalog rows behind the home page. */
+    private const val CATALOG_TTL_MS = 10 * 60 * 1000L
+    /** Caps for the in-memory maps, so a long session cannot grow them without bound. */
+    private const val DETAIL_CACHE_MAX = 128
+    private const val SEASON_CACHE_MAX = 256
+    private const val FIND_CACHE_MAX = 128
+    private const val NEGATIVE_CACHE_MAX = 256
+    /** Consecutive transport failures after which the API is skipped for a while. */
+    private const val BREAKER_THRESHOLD = 3
+    private const val BREAKER_COOLDOWN_MS = 60_000L
+    /** Only failures this close together count as a run; scattered ones never trip the breaker. */
+    private const val BREAKER_WINDOW_MS = 30_000L
+    /** How many seasons are fetched at once (each one is a request). */
+    private const val SEASON_CONCURRENCY = 3
+    /** Per-request timeout in seconds. */
+    private const val REQUEST_TIMEOUT_SEC = 8L
 
     private val detailCache = ConcurrentHashMap<String, TmdbDetail>()
     private val imdbFindCache = ConcurrentHashMap<String, Pair<Int, String>>()
     private val seasonCache = ConcurrentHashMap<String, List<TmdbEpisode>>()
+    private val seasonListCache = ConcurrentHashMap<String, List<Int>>()
+    private val catalogCache = ConcurrentHashMap<String, Pair<List<TmdbItem>, Long>>()
+    private val genreNameCache = ConcurrentHashMap<String, Map<Int, String>>()
+    /** Lookups that recently failed, so an outage is not re-fetched on every tap. */
+    private val negativeCache = ConcurrentHashMap<String, Long>()
+    /** True when the last call failed because the API did not answer, so a retry may still work. */
+    @Volatile private var lastCallUnreachable = false
 
     /** One search hit (movie or series). */
     data class TmdbItem(
@@ -241,6 +329,10 @@ object TmdbService {
         val year: String?,
         val poster: String?,
         val rating: Double?,
+        /** Genre ids, when the payload carried them. */
+        val genreIds: List<Int> = emptyList(),
+        /** Popularity score, when the payload carried it. */
+        val popularity: Double = 0.0,
     )
 
     /** Full metadata for a detail page. */
@@ -256,6 +348,8 @@ object TmdbService {
         val rating: Double? = null,
         val overview: String? = null,
         val genres: List<String>? = null,
+        /** Genre ids, for genre-filtered catalog queries. */
+        val genreIds: List<Int> = emptyList(),
         val cast: List<ActorData>? = null,
         /** Runtime in minutes (movie `runtime`, series first `episode_run_time`). */
         val runtime: Int? = null,
@@ -282,51 +376,46 @@ object TmdbService {
             if (System.currentTimeMillis() <= it.expiresAt) return it.items
             searchCache.remove(key)
         }
-        // putIfAbsent: first caller LEADS, everyone else rides its request. The leader runs on, so it still completes (and.
-// fills the cache) even if the app.
-        val mine = searchScope.async {
-            val found = searchRemote(query)
-            if (found.isNotEmpty()) {
-                if (searchCache.size >= SEARCH_CACHE_MAX) {
-                    val oldest = searchCache.entries.minByOrNull { e -> e.value.expiresAt }
-                    oldest?.let { e -> searchCache.remove(e.key) }
+        if (recentlyFailed("search:$key")) return emptyList()
+        val hits = withTimeoutOrNull(SEARCH_INFLIGHT_WAIT_MS) {
+            lead(key, searchInFlight) {
+                val found = searchRemote(query)
+                if (found == null) {
+                    // The API did not answer; remember it so the same query is not retried right away.
+                    markFailedLookup("search:$key")
+                    emptyList()
+                } else {
+                    if (found.isNotEmpty()) {
+                        if (searchCache.size >= SEARCH_CACHE_MAX) {
+                            val oldest = searchCache.entries.minByOrNull { e -> e.value.expiresAt }
+                            oldest?.let { e -> searchCache.remove(e.key) }
+                        }
+                        searchCache[key] = SearchEntry(found, System.currentTimeMillis() + SEARCH_CACHE_TTL_MS)
+                    }
+                    found
                 }
-                searchCache[key] = SearchEntry(found, System.currentTimeMillis() + SEARCH_CACHE_TTL_MS)
             }
-            found
         }
-        val existing = searchInFlight.putIfAbsent(key, mine)
-        if (existing == null) {
-            mine.invokeOnCompletion { searchInFlight.remove(key, mine) }
-        } else {
-            mine.cancel()
-        }
-        val job = existing ?: mine
-        return withTimeoutOrNull(SEARCH_INFLIGHT_WAIT_MS) { runCatching { job.await() }.getOrNull() }
-            ?: emptyList()
+        return hits ?: emptyList()
     }
 
-    /** The /search/multi round-trip; never throws — key trips/rate-limits are logged inside tmdbGet and arrive as an empty list. */
-    private suspend fun searchRemote(query: String): List<TmdbItem> {
+    /** The /search/multi round-trip; null when the API did not answer, an empty list when it had no hits. */
+    private suspend fun searchRemote(query: String): List<TmdbItem>? {
         val encoded = URLEncoder.encode(query.trim(), "UTF-8")
         val json = tmdbGet(
             "search q='$query'",
             "/search/multi",
             "query=$encoded&language=en-US&include_adult=false&page=1",
-        ) ?: return emptyList()
+        ) ?: return null
         return parseTmdbMultiSearch(json)
     }
 
-    /** Decide whether to fall through to the next key. Network failure (handled separately as responded==null),
-     * HTTP 401/403/429/5xx, or a 2xx body whose JSON reports a *key* failure (`success=false` with one of the
-     * TMDB invalid/suspended/`rate-limit exceeded` status codes — see [tmdbKeyTripCode]). A 400/404 or a 200
-     * that isn't a key trip is NOT retried with a second key — those are resource-level answers callers already
-     * treat as empty/no-hit. */
+    /** Whether to fall through to the next key: a rejected key (401/403), a server error (5xx) or a 2xx body whose
+     * JSON reports a key failure. A 429 is NOT here - the limit is per IP, so another key cannot help. */
     internal fun shouldTryNextKey(httpCode: Int, tmdbTripStatus: Int?): Boolean =
         tmdbTripStatus != null ||
             httpCode == 401 ||
             httpCode == 403 ||
-            httpCode == 429 ||
             httpCode >= 500
 
     /** Pause before retrying an IP rate limit on the same key. */
@@ -336,11 +425,15 @@ object TmdbService {
     internal fun rateLimitRetryDelayMs(httpCode: Int, attempt: Int): Long? =
         if (httpCode == 429 && attempt == 0) TMDB_429_RETRY_DELAY_MS else null
 
-    /** GET a TMDB endpoint, falling back primary→second key on a tripped/rate-limited/broken key.
-     * Logs the reason for every rejected key, and never logs the keys themselves.
-     * Returns the 2xx body on success, a genuine non-key error body untouched (so callers keep their
-     * prior empty-parse behavior for e.g. 404), or null once both keys are exhausted. */
-    private suspend fun tmdbGet(op: String, path: String, query: String, timeout: Long = 5): String? {
+    /** GET a TMDB endpoint, falling back primary→second key on a rejected key.
+     * Returns the 2xx body on success, a genuine non-key error body untouched, or null when the API is unreachable. */
+    private suspend fun tmdbGet(op: String, path: String, query: String, timeout: Long = REQUEST_TIMEOUT_SEC): String? {
+        lastCallUnreachable = false
+        if (breakerOpen()) {
+            lastCallUnreachable = true
+            android.util.Log.w(LOG_TAG, "TMDB $op SKIPPED (breaker open)")
+            return null
+        }
         // Personal key first when the user saved one in Settings.
         val keys = buildList {
             Settings.tmdbApiKey()?.let { add("personal" to it) }
@@ -353,18 +446,21 @@ object TmdbService {
             val url = "$API$path?api_key=$key&$query"
             var attempt = 0
             while (true) {
-                val responded: Pair<Int, String>? = runCatching {
-                    val r = app.get(url, timeout = timeout)
+                val responded: Pair<Int, String> = try {
+                    val r = app.get(url, timeout = timeout, headers = HttpKit.commonHeaders)
                     r.code to r.text
-                }.getOrElse { t ->
+                } catch (c: CancellationException) {
+                    throw c
+                } catch (t: Throwable) {
+                    // Transport failure: the key is not implicated, so stop instead of burning the next one.
+                    lastCallUnreachable = true
                     lastReason = "$label NET-FAIL(${t.javaClass.simpleName}: ${(t.message ?: "").take(120)})"
-                    android.util.Log.w(LOG_TAG, "TMDB $op $lastReason${fallingBack(index, keys)}")
-                    null
+                    android.util.Log.w(LOG_TAG, "TMDB $op $lastReason (transport failure: no key rotation)")
+                    recordTransportFailure()
+                    return null
                 }
-                if (responded == null) break
                 val (code, body) = responded
-                // IP rate limits ignore key rotation: pause once and retry
-                // the same key before burning the next key.
+                // IP rate limits ignore key rotation: pause once and retry the same key before giving up.
                 val retryMs = rateLimitRetryDelayMs(code, attempt)
                 if (retryMs != null) {
                     attempt++
@@ -372,19 +468,31 @@ object TmdbService {
                     delay(retryMs)
                     continue
                 }
+                if (code == 429) {
+                    lastReason = "$label HTTP 429 (rate limited)"
+                    android.util.Log.w(LOG_TAG, "TMDB $op $lastReason: ${safeSnippet(body)}")
+                    recordTransportFailure()
+                    return null
+                }
                 val trip = if (code in 200..299) tmdbKeyTripCode(body) else null
                 if (shouldTryNextKey(code, trip)) {
                     lastReason = "$label HTTP $code${trip?.let { " tmdb_status=$it" } ?: ""}: ${safeSnippet(body)}"
                     android.util.Log.w(LOG_TAG, "TMDB $op API-KEY-LIMITED $lastReason${fallingBack(index, keys)}")
                     break
                 }
-                if (code in 200..299) return body
+                if (code in 200..299) {
+                    recordTransportSuccess()
+                    return body
+                }
                 // Resource-level HTTP error (400/404/…): not a key issue, so don't burn the second key. Surface the
                 // reason and hand the body to the caller, which parses it to an empty result just as before.
+                // A resource-level answer still means the API is reachable.
+                recordTransportSuccess()
                 android.util.Log.w(LOG_TAG, "TMDB $op $label HTTP $code (not a key issue: no fallback): ${safeSnippet(body)}")
                 return body
             }
         }
+        recordTransportFailure()
         android.util.Log.e(LOG_TAG, "TMDB $op ABANDONED after ${keys.size} keys: $lastReason")
         return null
     }
@@ -398,7 +506,7 @@ object TmdbService {
         if (key.isEmpty()) return "Enter a key first"
         if (key.startsWith("eyJ")) return "That's the Read Access Token - paste the API Key (v3)"
         return runCatching {
-            val r = app.get("$API/configuration?api_key=$key", timeout = 8)
+            val r = app.get("$API/configuration?api_key=$key", timeout = 8, headers = HttpKit.commonHeaders)
             when (r.code) {
                 in 200..299 -> "Key works - TMDB connected"
                 401 -> "Key rejected (401) - check the API Key (v3)"
@@ -430,89 +538,264 @@ object TmdbService {
     private data class SearchEntry(val items: List<TmdbItem>, val expiresAt: Long)
 
     private val searchCache = ConcurrentHashMap<String, SearchEntry>()
-    private val searchInFlight = ConcurrentHashMap<String, kotlinx.coroutines.Deferred<List<TmdbItem>>>()
     private val searchScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    /** Trending this week - powers the home page. is "movie" or "tv". */
-    suspend fun trending(type: String, page: Int = 1): List<TmdbItem> {
-        val json = tmdbGet("trending $type", "/trending/$type/week", "language=en-US&page=$page")
-            ?: return emptyList()
-        return parseResults(json, type)
+    /** One shared request per key, so N callers make a single network call. */
+    private val searchInFlight = ConcurrentHashMap<String, Deferred<List<TmdbItem>>>()
+    private val metaInFlight = ConcurrentHashMap<String, Deferred<TmdbDetail?>>()
+    private val findInFlight = ConcurrentHashMap<String, Deferred<Pair<Int, String>?>>()
+    private val seasonInFlight = ConcurrentHashMap<String, Deferred<List<TmdbEpisode>?>>()
+    private val seasonListInFlight = ConcurrentHashMap<String, Deferred<List<Int>>>()
+
+    private val breakerLock = Any()
+    private var breakerFailures = 0
+    private var breakerOpenUntil = 0L
+    private var breakerLastFailureAt = 0L
+
+    /** Runs a load once per key: the first caller leads, the rest await the same result. */
+    private suspend fun <T> lead(
+        key: String,
+        inflight: ConcurrentHashMap<String, Deferred<T>>,
+        block: suspend () -> T,
+    ): T {
+        val mine = searchScope.async(start = CoroutineStart.LAZY) { block() }
+        val existing = inflight.putIfAbsent(key, mine)
+        if (existing != null) {
+            mine.cancel()
+            return existing.await()
+        }
+        mine.invokeOnCompletion { inflight.remove(key, mine) }
+        mine.start()
+        return mine.await()
     }
 
+    /** True while recent transport failures mean the API is not answering. */
+    private fun breakerOpen(): Boolean = synchronized(breakerLock) {
+        System.currentTimeMillis() < breakerOpenUntil
+    }
+
+    /** Counts a transport failure; a run of them opens the breaker. */
+    private fun recordTransportFailure() = synchronized(breakerLock) {
+        val now = System.currentTimeMillis()
+        // Failures far apart are not a run, so the streak starts over.
+        if (now - breakerLastFailureAt > BREAKER_WINDOW_MS) breakerFailures = 0
+        breakerLastFailureAt = now
+        breakerFailures++
+        if (breakerFailures >= BREAKER_THRESHOLD) {
+            breakerOpenUntil = now + BREAKER_COOLDOWN_MS
+            breakerFailures = 0
+            android.util.Log.w(LOG_TAG, "TMDB breaker OPEN for ${BREAKER_COOLDOWN_MS / 1000}s")
+        }
+    }
+
+    /** A successful call clears the failure streak. */
+    private fun recordTransportSuccess() = synchronized(breakerLock) { breakerFailures = 0 }
+
+    /** True when this lookup already failed recently. */
+    private fun recentlyFailed(key: String): Boolean {
+        val exp = negativeCache[key] ?: return false
+        if (System.currentTimeMillis() > exp) {
+            negativeCache.remove(key)
+            return false
+        }
+        return true
+    }
+
+    /** Remembers a failed lookup for a short while, so an outage is not re-fetched. */
+    private fun markFailed(key: String) {
+        if (negativeCache.size >= NEGATIVE_CACHE_MAX) {
+            negativeCache.entries.minByOrNull { it.value }?.let { negativeCache.remove(it.key) }
+        }
+        negativeCache[key] = System.currentTimeMillis() + NEGATIVE_TTL_MS
+    }
+
+    /** Remembers a failed lookup unless the API simply did not answer - a retry may still work then. */
+    private fun markFailedLookup(key: String) {
+        if (!lastCallUnreachable) markFailed(key)
+    }
+
+    /** Trending this week - powers the home page. is "movie" or "tv". */
+    suspend fun trending(type: String, page: Int = 1): List<TmdbItem> =
+        catalog("trending:$type:$page", type) { tmdbGet("trending $type", "/trending/$type/week", "language=en-US&page=$page") }
+
     /** Popular titles - extra home page row. is "movie" or "tv". */
-    suspend fun popular(type: String, page: Int = 1): List<TmdbItem> {
-        val json = tmdbGet("popular $type", "/$type/popular", "language=en-US&page=$page")
-            ?: return emptyList()
-        return parseResults(json, type)
+    suspend fun popular(type: String, page: Int = 1): List<TmdbItem> =
+        catalog("popular:$type:$page", type) { tmdbGet("popular $type", "/$type/popular", "language=en-US&page=$page") }
+
+    /** Titles recommended for a title the user already saw. is "movie" or "tv". */
+    suspend fun recommendations(tmdbId: Int, type: String): List<TmdbItem> {
+        if (tmdbId <= 0) return emptyList()
+        val kind = if (type == "movie") "movie" else "tv"
+        return catalog("recs:$kind:$tmdbId", kind) {
+            tmdbGet("recs $kind=$tmdbId", "/$kind/$tmdbId/recommendations", "language=en-US&page=1")
+        }
+    }
+
+    /** Titles matching the given genre ids. is "movie" or "tv". */
+    suspend fun discover(type: String, genreIds: List<Int>, page: Int = 1): List<TmdbItem> {
+        val kind = if (type == "movie") "movie" else "tv"
+        val genres = genreIds.take(3).joinToString("|")
+        if (genres.isBlank()) return emptyList()
+        return catalog("discover:$kind:$genres:$page", kind) {
+            tmdbGet(
+                "discover $kind", "/discover/$kind",
+                "language=en-US&page=$page&sort_by=popularity.desc&include_adult=false&with_genres=$genres",
+            )
+        }
+    }
+
+    /** Genre id to name map for a type. Cached for the session. */
+    suspend fun genreNames(type: String): Map<Int, String> {
+        val kind = if (type == "movie") "movie" else "tv"
+        genreNameCache[kind]?.let { return it }
+        if (recentlyFailed("genres:$kind")) return emptyMap()
+        val json = tmdbGet("genres $kind", "/genre/$kind/list", "language=en-US")
+        if (json == null) {
+            markFailedLookup("genres:$kind")
+            return emptyMap()
+        }
+        val map = parseGenreNames(json)
+        if (map.isNotEmpty()) genreNameCache[kind] = map
+        return map
+    }
+
+    /** Parse a genre list payload. Pure. */
+    internal fun parseGenreNames(json: String): Map<Int, String> = try {
+        val root = JSONObject(json)
+        val arr = root.optJSONArray("genres") ?: return emptyMap()
+        (0 until arr.length()).mapNotNull { i ->
+            val g = arr.optJSONObject(i) ?: return@mapNotNull null
+            val id = g.optInt("id", -1).takeIf { it > 0 } ?: return@mapNotNull null
+            val name = g.optString("name").takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            id to name
+        }.toMap()
+    } catch (e: Exception) {
+        emptyMap()
+    }
+
+    /** Cached catalog row, so the home page does not refetch on every open. */
+    private suspend fun catalog(key: String, type: String, fetch: suspend () -> String?): List<TmdbItem> {
+        catalogCache[key]?.let { (items, expiresAt) ->
+            if (System.currentTimeMillis() <= expiresAt) return items
+            catalogCache.remove(key)
+        }
+        if (recentlyFailed("cat:$key")) return emptyList()
+        val json = fetch()
+        if (json == null) {
+            markFailedLookup("cat:$key")
+            return emptyList()
+        }
+        val items = parseResults(json, type)
+        catalogCache[key] = items to (System.currentTimeMillis() + CATALOG_TTL_MS)
+        return items
     }
 
     /** Season numbers for a TV show (excludes specials/season 0). */
     suspend fun fetchTvSeasons(tmdbId: Int): List<Int> {
         if (tmdbId <= 0) return emptyList()
-        val json = tmdbGet("seasons tv=$tmdbId", "/tv/$tmdbId", "language=en-US") ?: return emptyList()
-        return try {
-            val root = JSONObject(json)
-            root.optJSONArray("seasons")?.let { arr ->
-                (0 until arr.length()).mapNotNull { i ->
-                    val s = arr.optJSONObject(i) ?: return@mapNotNull null
-                    val num = s.optInt("season_number", -1)
-                    num.takeIf { it > 0 }
-                }
-            } ?: emptyList()
-        } catch (e: Exception) { emptyList() }
+        val cacheKey = "seasons:$tmdbId"
+        seasonListCache[cacheKey]?.let { return it }
+        if (recentlyFailed(cacheKey)) return emptyList()
+        return lead(cacheKey, seasonListInFlight) {
+            val json = tmdbGet("seasons tv=$tmdbId", "/tv/$tmdbId", "language=en-US")
+            if (json == null) {
+                markFailedLookup(cacheKey)
+                emptyList()
+            } else {
+                val seasons = parseSeasons(json)
+                seasonListCache[cacheKey] = seasons
+                seasons
+            }
+        }
     }
+
+    /** Season numbers from a TV payload. Pure. */
+    internal fun parseSeasons(json: String): List<Int> = try {
+        val root = JSONObject(json)
+        root.optJSONArray("seasons")?.let { arr ->
+            (0 until arr.length()).mapNotNull { i ->
+                val s = arr.optJSONObject(i) ?: return@mapNotNull null
+                s.optInt("season_number", -1).takeIf { it > 0 }
+            }
+        } ?: emptyList()
+    } catch (e: Exception) { emptyList() }
 
     /** Fetch full TMDB metadata for of ("movie"|"series"). */
     suspend fun fetchMeta(tmdbId: Int, type: String): TmdbDetail? {
         if (tmdbId <= 0) return null
-        val cacheKey = "$tmdbId|$type"
+        val kind = if (type == "movie") "movie" else "tv"
+        val cacheKey = "$tmdbId|$kind"
         detailCache[cacheKey]?.let { return it }
-        val path = if (type == "movie") "movie" else "tv"
-        val json = tmdbGet(
-            "meta $path=$tmdbId",
-            "/$path/$tmdbId",
-            "language=en-US&append_to_response=external_ids,credits",
-        )
-        val detail = json?.let { runCatching { parseTmdbDetail(it, type) }.getOrNull() }
-        if (detail != null) detailCache[cacheKey] = detail
-        return detail
+        if (recentlyFailed(cacheKey)) return null
+        return lead(cacheKey, metaInFlight) {
+            val json = tmdbGet("meta $kind=$tmdbId", "/$kind/$tmdbId", "language=en-US&append_to_response=external_ids,credits")
+            val detail = json?.let { parseTmdbDetail(it, kind) }
+            if (detail != null) {
+                if (detailCache.size >= DETAIL_CACHE_MAX) {
+                    detailCache.keys.firstOrNull()?.let { detailCache.remove(it) }
+                }
+                detailCache[cacheKey] = detail
+            } else {
+                markFailedLookup(cacheKey)
+            }
+            detail
+        }
     }
 
     /** Resolve an IMDB id to (tmdbId, type) via TMDB's find endpoint. */
     suspend fun findByImdb(imdbId: String): Pair<Int, String>? {
         if (!imdbId.startsWith("tt")) return null
         imdbFindCache[imdbId]?.let { return it }
-        val json = tmdbGet("find imdb=$imdbId", "/find/$imdbId", "external_source=imdb_id&language=en-US")
-        val result = if (json != null) runCatching {
-            val root = JSONObject(json)
-            val movie = root.optJSONArray("movie_results")?.optJSONObject(0)
-            val tv = root.optJSONArray("tv_results")?.optJSONObject(0)
-            when {
-                movie != null -> movie.optInt("id", -1).takeIf { it > 0 }?.let { it to "movie" }
-                tv != null -> tv.optInt("id", -1).takeIf { it > 0 }?.let { it to "series" }
-                else -> null
+        if (recentlyFailed("find:$imdbId")) return null
+        return lead(imdbId, findInFlight) {
+            val json = tmdbGet("find imdb=$imdbId", "/find/$imdbId", "external_source=imdb_id&language=en-US")
+            val result = json?.let { parseFindResult(it) }
+            if (result != null) {
+                if (imdbFindCache.size >= FIND_CACHE_MAX) {
+                    imdbFindCache.keys.firstOrNull()?.let { imdbFindCache.remove(it) }
+                }
+                imdbFindCache[imdbId] = result
+            } else {
+                markFailedLookup("find:$imdbId")
             }
-        }.getOrNull() else null
-        if (result != null) imdbFindCache[imdbId] = result
-        return result
+            result
+        }
     }
+
+    /** Pick the movie or series entry out of a find payload. Pure. */
+    internal fun parseFindResult(json: String): Pair<Int, String>? = try {
+        val root = JSONObject(json)
+        val movie = root.optJSONArray("movie_results")?.optJSONObject(0)
+        val tv = root.optJSONArray("tv_results")?.optJSONObject(0)
+        when {
+            movie != null -> movie.optInt("id", -1).takeIf { it > 0 }?.let { it to "movie" }
+            tv != null -> tv.optInt("id", -1).takeIf { it > 0 }?.let { it to "series" }
+            else -> null
+        }
+    } catch (e: Exception) { null }
 
     /** Fetch TMDB episode metadata for the given of, in parallel. Returns keyed (season, episode) -> metadata. */
     suspend fun fetchEpisodes(tmdbId: Int, seasons: Set<Int>): Map<Pair<Int, Int>, TmdbEpisode> {
         if (tmdbId <= 0 || seasons.isEmpty()) return emptyMap()
-        val semaphore = Semaphore(3)
+        return fetchSeasons(tmdbId, seasons.sorted())
+            .associate { ep -> (ep.seasonNumber to ep.episodeNumber) to ep }
+    }
+
+    /** Fetch several seasons with bounded concurrency, ordered by season then episode. */
+    suspend fun fetchSeasons(tmdbId: Int, seasons: List<Int>): List<TmdbEpisode> {
+        if (tmdbId <= 0 || seasons.isEmpty()) return emptyList()
+        val gate = Semaphore(SEASON_CONCURRENCY)
         return coroutineScope {
-            seasons.map { season ->
+            seasons.distinct().map { season ->
                 async {
-                    semaphore.acquire()
+                    gate.acquire()
                     try {
-                        withTimeoutOrNull(1300L) { fetchSeason(tmdbId, season) }
+                        fetchSeason(tmdbId, season).orEmpty()
                     } finally {
-                        semaphore.release()
+                        gate.release()
                     }
                 }
-            }.awaitAll().filterNotNull().flatten().associate { ep -> (ep.seasonNumber to ep.episodeNumber) to ep }
+            }.awaitAll().flatten().sortedWith(compareBy({ it.seasonNumber }, { it.episodeNumber }))
         }
     }
 
@@ -554,6 +837,8 @@ object TmdbService {
                     year = (str(r, "release_date") ?: str(r, "first_air_date"))?.take(4),
                     poster = str(r, "poster_path")?.let { "$IMG_BASE$it" },
                     rating = r.optDouble("vote_average", -1.0).takeIf { it > 0 },
+                    genreIds = genreIdsOf(r),
+                    popularity = r.optDouble("popularity", 0.0),
                 )
             }.dedupedByTitle()
         } catch (e: Exception) {
@@ -590,6 +875,11 @@ object TmdbService {
                 genres = m.optJSONArray("genres")?.let { arr ->
                     (0 until arr.length()).mapNotNull { i -> str(arr.optJSONObject(i), "name") }
                 },
+                genreIds = m.optJSONArray("genres")?.let { arr ->
+                    (0 until arr.length()).mapNotNull { i ->
+                        arr.optJSONObject(i)?.optInt("id", -1)?.takeIf { it > 0 }
+                    }
+                }.orEmpty(),
                 cast = cast,
                 runtime = m.optInt("runtime", -1).takeIf { it > 0 }
                     ?: m.optJSONArray("episode_run_time")?.optInt(0, -1)?.takeIf { it > 0 },
@@ -602,38 +892,57 @@ object TmdbService {
     private suspend fun fetchSeason(tmdbId: Int, season: Int): List<TmdbEpisode>? {
         val cacheKey = "$tmdbId|$season"
         seasonCache[cacheKey]?.let { return it }
-        val json = tmdbGet("season tv=$tmdbId s=$season", "/tv/$tmdbId/season/$season", "language=en-US")
-            ?: return null
-        val episodes = try {
-            val root = JSONObject(json)
-            root.optJSONArray("episodes")?.let { arr ->
-                (0 until arr.length()).mapNotNull { i ->
-                    val e = arr.optJSONObject(i) ?: return@mapNotNull null
-                    val epNum = e.optInt("episode_number", -1).takeIf { it > 0 } ?: return@mapNotNull null
-                    TmdbEpisode(
-                        seasonNumber = season,
-                        episodeNumber = epNum,
-                        name = str(e, "name"),
-                        overview = str(e, "overview"),
-                        released = str(e, "air_date"),
-                        thumbnail = str(e, "still_path")?.let { "$IMG_BASE$it" },
-                        rating = e.optDouble("vote_average", -1.0).takeIf { it > 0 },
-                        runtime = e.optInt("runtime", -1).takeIf { it > 0 },
-                    )
+        if (recentlyFailed(cacheKey)) return null
+        return lead(cacheKey, seasonInFlight) {
+            val json = tmdbGet("season tv=$tmdbId s=$season", "/tv/$tmdbId/season/$season", "language=en-US")
+            if (json == null) {
+                markFailedLookup(cacheKey)
+                null
+            } else {
+                val episodes = parseSeasonEpisodes(json, season)
+                if (episodes != null) {
+                    if (seasonCache.size >= SEASON_CACHE_MAX) {
+                        seasonCache.keys.firstOrNull()?.let { seasonCache.remove(it) }
+                    }
+                    seasonCache[cacheKey] = episodes
                 }
+                episodes
             }
-        } catch (e: Exception) { null }
-        if (episodes != null) {
-            seasonCache[cacheKey] = episodes
         }
-        return episodes
     }
+
+    /** Episode rows from a season payload. Pure. */
+    private fun parseSeasonEpisodes(json: String, season: Int): List<TmdbEpisode>? = try {
+        val root = JSONObject(json)
+        root.optJSONArray("episodes")?.let { arr ->
+            (0 until arr.length()).mapNotNull { i ->
+                val e = arr.optJSONObject(i) ?: return@mapNotNull null
+                val epNum = e.optInt("episode_number", -1).takeIf { it > 0 } ?: return@mapNotNull null
+                TmdbEpisode(
+                    seasonNumber = season,
+                    episodeNumber = epNum,
+                    name = str(e, "name"),
+                    overview = str(e, "overview"),
+                    released = str(e, "air_date"),
+                    thumbnail = str(e, "still_path")?.let { "$IMG_BASE$it" },
+                    rating = e.optDouble("vote_average", -1.0).takeIf { it > 0 },
+                    runtime = e.optInt("runtime", -1).takeIf { it > 0 },
+                )
+            }
+        }
+    } catch (e: Exception) { null }
 
     /** Read a JSON string field, returning null when blank. */
     private fun str(obj: JSONObject, key: String): String? {
         val v = obj.optString(key)
         return if (v.isBlank()) null else v
     }
+
+    /** Genre ids of a list payload. Pure. */
+    private fun genreIdsOf(obj: JSONObject): List<Int> =
+        obj.optJSONArray("genre_ids")?.let { arr ->
+            (0 until arr.length()).mapNotNull { i -> arr.optInt(i, -1).takeIf { it > 0 } }
+        } ?: emptyList()
 
     /** Parse a TMDB results array into TmdbItems. is "movie" or "tv". */
     private fun parseResults(json: String, type: String): List<TmdbItem> {
@@ -652,6 +961,8 @@ object TmdbService {
                     year = (str(r, "release_date") ?: str(r, "first_air_date"))?.take(4),
                     poster = str(r, "poster_path")?.let { "$IMG_BASE$it" },
                     rating = r.optDouble("vote_average", -1.0).takeIf { it > 0 },
+                    genreIds = genreIdsOf(r),
+                    popularity = r.optDouble("popularity", 0.0),
                 )
             }
         } catch (e: Exception) { emptyList() }

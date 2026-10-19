@@ -11,6 +11,7 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.withTimeoutOrNull
 import org.jsoup.Jsoup
@@ -45,6 +46,8 @@ object StreamEngine {
         val measuredKbps: Long? = null,
         val audioPriority: Int = 0,
         val audioLabel: String = "",
+        /** Host-declared file size token ("1.4GB"); blank when the host gives none. */
+        val sizeLabel: String = "",
         val inlineManifest: String? = null, // HLS master playlist text delivered inline (JSON API) Extra HTTP headers the player must send when fetching (e. g.
 // "User-Agent: ExoPlayer" for CDNs.
         val extraHeaders: Map<String, String> = emptyMap(),
@@ -63,6 +66,8 @@ object StreamEngine {
     /** A resolver throws this when the host legitimately carries no source for this title/episode: library miss. unsupported media type, no Hindi dub. */
     class CleanMissException(message: String) : Exception(message)
 
+    private data class ResolveAttempt(val streams: List<RawStream>, val crash: Throwable? = null)
+
     /** Pick the servers to query for this title. NEUTRAL () � healthy servers in registry order, no Hindi-first placement. no speed-score sorting. */
     private fun selectServers(tmdbId: Int, type: String, season: Int, episode: Int): List<ServerSpec> {
         val healthy = ServerFarm.allServers.filter { HealthMonitor.isHealthy(it.id) }
@@ -71,14 +76,16 @@ object StreamEngine {
 // window with zero network traffic.
         val candidates = if (healthy.isEmpty()) {
             val now = System.currentTimeMillis()
-            if (now - lastFarmProbeAt < FARM_REPROBE_COOLDOWN_MS) {
+            val last = lastFarmProbeAt.get()
+            // Atomic claim, so two concurrent taps cannot both re-probe the whole farm.
+            val claimed = now - last >= FARM_REPROBE_COOLDOWN_MS && lastFarmProbeAt.compareAndSet(last, now)
+            if (!claimed) {
                 Log.w("IndStream", "all servers tripped; re-probe cooldown active " +
-                    "(${(FARM_REPROBE_COOLDOWN_MS - (now - lastFarmProbeAt)) / 1000}s left)")
+                    "(${(FARM_REPROBE_COOLDOWN_MS - (now - last)) / 1000}s left)")
                 emptyList()
             } else {
-                lastFarmProbeAt = now
                 // Clear only the trip state, keeping latency/throughput history so the health data survives the re-probe.
-// (display/debug only � no ranking).
+// (display/debug only � the).
                 Log.w("IndStream", "all ${ServerFarm.allServers.size} servers tripped -- clearing trips, re-probing all")
                 HealthMonitor.resetTrips()
                 ServerFarm.allServers
@@ -107,9 +114,11 @@ object StreamEngine {
         // Without a TMDB id only IMDB-keyed servers (plus dual-id racers) can run.
         val imdbOnly = tmdbId <= 0
         val servers = selectServers(tmdbId, type, season, episode).filter { spec ->
-            if (tmdbOnly) spec.idType != ServerIdType.IMDB
-            else if (!imdbOnly) true
-            else spec.idType == ServerIdType.IMDB
+            when {
+                tmdbOnly -> spec.idType != ServerIdType.IMDB
+                !imdbOnly -> true
+                else -> spec.idType == ServerIdType.IMDB || spec.supportsImdb(type)
+            }
         }
         if (servers.isEmpty()) return
         val sem = Semaphore(MAX_CONCURRENT)
@@ -118,32 +127,85 @@ object StreamEngine {
                 async {
                     sem.acquire()
                     try {
-                        // IMDB id only for the servers that need it � TMDB-keyed servers never wait for (or trigger) the lookup.
+                        // IMDB id only for servers that need it; TMDB primaries never wait for the lookup.
                         val serverStart = System.currentTimeMillis()
-                        val serverImdb = if (spec.idType == ServerIdType.IMDB) imdbId ?: imdbIdProvider?.invoke() else null
-                        if (spec.idType == ServerIdType.IMDB) {
+                        val dual = spec.supportsImdb(type)
+                        val raceSpec = if (dual) spec.copy(recordHealth = false) else spec
+                        val serverImdb = when {
+                            spec.idType == ServerIdType.IMDB -> imdbId ?: imdbIdProvider?.invoke()
+                            dual && imdbOnly -> imdbId ?: imdbIdProvider?.invoke()
+                            else -> imdbId
+                        }
+                        if (spec.idType == ServerIdType.IMDB || (dual && imdbOnly)) {
                             Log.i("IndStream", "${spec.id}: imdb=${serverImdb ?: "MISSING"} after " +
                                 "${System.currentTimeMillis() - serverStart}ms wait")
                         }
-                        // Distinguish a CRASH (resolver throw that is not a clean miss � parse bug / changed upstream shape)). Only timeouts.
-// strike the breaker: a shape.
+                        // A dual server races both key types and keeps the first non-empty result.
                         var crashed: Throwable? = null
                         val outcome = withTimeoutOrNull(spec.timeoutSec * 1000L) {
-                            runCatching { resolveOne(spec, tmdbId, serverImdb, type, season, episode) }
-                                .onFailure { t -> if (t !is CleanMissException) crashed = t }
-                                .recover { t ->
-                                    if (t is CleanMissException) {
-                                        Log.i("IndStream", "${spec.id}: clean miss � ${t.message} (no breaker trip)")
-                                        emptyList<RawStream>()
-                                    } else throw t
-                                }.getOrNull()
+                            suspend fun attempt(keyType: ServerIdType, keyId: String?): ResolveAttempt {
+                                if (keyType == ServerIdType.TMDB && tmdbId <= 0)
+                                    return ResolveAttempt(emptyList())
+                                if (keyType == ServerIdType.IMDB && (keyId == null || !keyId.startsWith("tt")))
+                                    return ResolveAttempt(emptyList())
+                                return try {
+                                    ResolveAttempt(resolveOne(raceSpec, tmdbId, keyId, type, season, episode, keyType))
+                                } catch (t: CleanMissException) {
+                                    Log.i("IndStream", "${spec.id}: clean miss � ${t.message} (no breaker trip)")
+                                    ResolveAttempt(emptyList())
+                                } catch (c: kotlinx.coroutines.CancellationException) {
+                                    throw c
+                                } catch (t: Throwable) {
+                                    Log.w("IndStream", "${spec.id}: resolver crashed: " +
+                                        "${t.javaClass.simpleName}: ${t.message}")
+                                    ResolveAttempt(emptyList(), t)
+                                }
+                            }
+                            val primaryType = if (tmdbId > 0) ServerIdType.TMDB else ServerIdType.IMDB
+                            val primary = async { attempt(primaryType, serverImdb) }
+                            val alt = if (dual && tmdbId > 0) {
+                                async {
+                                    val altId = runCatching { imdbId ?: imdbIdProvider?.invoke() }.getOrNull()
+                                    attempt(ServerIdType.IMDB, altId)
+                                }
+                            } else null
+                            val won = if (alt == null) {
+                                primary.await()
+                            } else {
+                                val altJob = alt
+                                var result: ResolveAttempt? = null
+                                select<Unit> {
+                                    primary.onAwait { p ->
+                                        if (p.streams.isNotEmpty()) result = p
+                                        else {
+                                            val a = altJob.await()
+                                            result = if (a.streams.isNotEmpty()) a
+                                            else if (p.crash != null) p else a
+                                        }
+                                    }
+                                    altJob.onAwait { a ->
+                                        if (a.streams.isNotEmpty()) result = a
+                                        else {
+                                            val p = primary.await()
+                                            result = if (p.streams.isNotEmpty()) p
+                                            else if (p.crash != null) p else a
+                                        }
+                                    }
+                                }
+                                primary.cancel()
+                                altJob.cancel()
+                                result ?: ResolveAttempt(emptyList())
+                            }
+                            crashed = won.crash
+                            won.streams
                         }
                         if (outcome == null) {
                             val ms = System.currentTimeMillis() - serverStart
                             val crash = crashed
                             if (crash != null) {
                                 Log.w("IndStream", "${spec.id}: crashed after ${ms}ms: " +
-                                    "${crash.javaClass.simpleName}: ${crash.message} (no breaker trip)")
+                                    "${crash.javaClass.simpleName}: ${crash.message} (recording failure)")
+                                HealthMonitor.recordFailure(spec.id)
                             } else {
                                 Log.w("IndStream", "${spec.id}: TIMEOUT � no result after ${spec.timeoutSec}s, recording failure")
                                 HealthMonitor.recordFailure(spec.id)
@@ -157,6 +219,7 @@ object StreamEngine {
                             else s
                         }.orEmpty()
                         if (streams.isNotEmpty()) {
+                            if (dual) HealthMonitor.recordSuccess(spec.id)
                             Log.i("IndStream", "${spec.id}: LANDED ${streams.size} streams at " +
                                 "${System.currentTimeMillis() - serverStart}ms")
                             onBatch(spec.id, streams)
@@ -184,11 +247,18 @@ object StreamEngine {
         if (!probeManifests) {
             val dead = withTimeoutOrNull(3000L) {
                 coroutineScope {
+                    // Bounded: a replay can carry dozens of urls and must not burst them all at the CDN.
+                    val gate = Semaphore(6)
                     streams.filter { it.url.isNotBlank() && it.inlineManifest.isNullOrBlank() }
                         .map { raw ->
                             async {
-                                HttpKit.aliveCheck(raw.url, raw.referer, raw.extraHeaders)
-                                    .takeIf { it == false }?.let { raw.url }
+                                gate.acquire()
+                                try {
+                                    HttpKit.aliveCheck(raw.url, raw.referer, raw.extraHeaders)
+                                        .takeIf { it == false }?.let { raw.url }
+                                } finally {
+                                    gate.release()
+                                }
                             }
                         }.awaitAll().filterNotNull()
                 }
@@ -319,6 +389,7 @@ object StreamEngine {
                 qualityHint = r.fullHeight,
                 duplicateIndex = dupIdx,
                 originalLang = originalLang,
+                sizeLabel = raw.sizeLabel.takeIf { it.isNotBlank() },
             )
 
             // DASH manifests need DASH type; HLS stays M3U8.
@@ -371,11 +442,12 @@ object StreamEngine {
         type: String,
         season: Int,
         episode: Int,
+        keyType: ServerIdType = spec.idType,
     ): List<RawStream> {
         val start = System.currentTimeMillis()
         // RC-H (): a MISSING IMDB id is a TMDB-lookup problem (cold cache + 3s cap, or the transient 429s the last commit.
 // fought), NOT this host failing.
-        val id = if (spec.idType == ServerIdType.IMDB)
+        val id = if (keyType == ServerIdType.IMDB)
             (imdbId ?: throw CleanMissException("${spec.id}: IMDB id unavailable (TMDB lookup miss) � host stays in farm"))
         else tmdbId.toString()
         val embedUrl = if (type == "movie") ServerFarm.buildMovieUrl(spec, id)
@@ -390,7 +462,7 @@ object StreamEngine {
                 Log.w("IndStream", "${spec.id}: tv request without season/episode (s=$season e=$episode), skipping")
                 return emptyList()
             }
-            val result = resolveVidlink(spec, tmdbId, type, season, episode)
+            val result = resolveVidlink(spec, id, type, season, episode)
             if (result.isNotEmpty()) { okServer(spec, start, "vidlink api", result.size); return result }
             failServer(spec, "vidlink returned no streams")
             return emptyList()
@@ -464,7 +536,7 @@ object StreamEngine {
             return emptyList()
         }
         if (spec.id == "streamflix") {
-            val result = resolveStreamFlix(spec, tmdbId, type, season, episode)
+            val result = resolveStreamFlix(spec, id, type, season, episode)
             if (result.isNotEmpty()) { okServer(spec, start, "streamflix direct", result.size); return result }
             failServer(spec, "streamflix returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
             return emptyList()
@@ -473,6 +545,24 @@ object StreamEngine {
             val result = resolveHub4k(spec, tmdbId, type, season, episode)
             if (result.isNotEmpty()) { okServer(spec, start, "hub file links", result.size); return result }
             failServer(spec, "hub returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
+            return emptyList()
+        }
+        if (spec.id == "fsl") {
+            val result = resolveFsl(spec, tmdbId, type, season, episode)
+            if (result.isNotEmpty()) { okServer(spec, start, "fast file links", result.size); return result }
+            failServer(spec, "fast file family returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
+            return emptyList()
+        }
+        if (spec.id == "hdmovie2") {
+            val result = resolveHdmovie2(spec, tmdbId, imdbId, type, season, episode)
+            if (result.isNotEmpty()) { okServer(spec, start, "id-keyed file links", result.size); return result }
+            failServer(spec, "id-keyed file host returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
+            return emptyList()
+        }
+        if (spec.id == "olamovies") {
+            val result = resolveOlamovies(spec, tmdbId, type, season, episode)
+            if (result.isNotEmpty()) { okServer(spec, start, "archive file links", result.size); return result }
+            failServer(spec, "archive file host returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
             return emptyList()
         }
         if (spec.id == "vidcore-api") {
@@ -522,7 +612,7 @@ object StreamEngine {
             return emptyList()
         }
         if (spec.id == "braflix") {
-            val result = resolveBraflix(spec, tmdbId, type, season, episode)
+            val result = resolveBraflix(spec, id, type, season, episode)
             if (result.isNotEmpty()) { okServer(spec, start, "braflix api", result.size); return result }
             failServer(spec, "braflix returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
             return emptyList()
@@ -637,7 +727,7 @@ object StreamEngine {
             Log.i("IndStream", "${spec.id}: clean miss � $reason (no breaker trip)")
         } else {
             Log.w("IndStream", "${spec.id}: $reason")
-            HealthMonitor.recordFailure(spec.id)
+            if (spec.recordHealth) HealthMonitor.recordFailure(spec.id)
         }
     }
 
@@ -645,7 +735,7 @@ object StreamEngine {
     private fun okServer(spec: ServerSpec, start: Long, stage: String, streamCount: Int) {
         val ms = System.currentTimeMillis() - start
         Log.d("IndStream", "${spec.id}: OK via $stage, $streamCount streams in ${ms}ms")
-        HealthMonitor.recordSuccess(spec.id)
+        if (spec.recordHealth) HealthMonitor.recordSuccess(spec.id)
     }
 
     /** DECLARED-language hint (never guess): a language counts only when the host itself declares it - e.g. a server brand that names it. */
@@ -687,21 +777,21 @@ object StreamEngine {
     /** VidLink resolver: token API -> stream. playlist (multi-audio HLS master) -> one inline-manifest RawStream. The. master is fetched once here so the. */
     private suspend fun resolveVidlink(
         spec: ServerSpec,
-        tmdbId: Int,
+        id: String,
         type: String,
         season: Int,
         episode: Int,
     ): List<RawStream> {
-        val mediaPage = if (type == "movie") "https://vidlink.pro/movie/$tmdbId"
-        else "https://vidlink.pro/tv/$tmdbId/$season/$episode"
+        val mediaPage = if (type == "movie") "https://vidlink.pro/movie/$id"
+        else "https://vidlink.pro/tv/$id/$season/$episode"
         Log.d("VidLink", "mediaPage=$mediaPage")
 
         // 2004 ("Invalid token") also fires on skewed device clocks: the token
         // embeds unix+480s, so walk the offset ladder before giving up.
         var root: org.json.JSONObject? = null
         for ((attempt, offset) in VidlinkSource.TOKEN_OFFSETS.withIndex()) {
-            val apiUrl = if (type == "movie") VidlinkSource.movieApiUrlAt(tmdbId.toString(), offset)
-            else VidlinkSource.tvApiUrlAt(tmdbId.toString(), season, episode, offset)
+            val apiUrl = if (type == "movie") VidlinkSource.movieApiUrlAt(id, offset)
+            else VidlinkSource.tvApiUrlAt(id, season, episode, offset)
             val jsonText = withTimeoutOrNull(6_000L) {
                 runCatching {
                     app.get(apiUrl, timeout = 6, headers = vidlinkHeaders(mediaPage)).text
@@ -949,7 +1039,13 @@ object StreamEngine {
         season: Int,
         episode: Int,
     ): List<RawStream> {
-        val meta = runCatching { TmdbService.fetchMeta(tmdbId ?: 0, type) }.getOrNull()
+        val meta = try {
+            TmdbService.fetchMeta(tmdbId ?: 0, type)
+        } catch (c: kotlinx.coroutines.CancellationException) {
+            throw c
+        } catch (t: Throwable) {
+            null
+        }
         val title = meta?.name ?: run {
             // Title-keyed API without a title = nothing to search; the host is fine, so a clean miss (no breaker trip) keeps.
 // MovieBox visible.
@@ -1562,7 +1658,13 @@ object StreamEngine {
         season: Int,
         episode: Int,
     ): List<RawStream> {
-        val meta = runCatching { TmdbService.fetchMeta(tmdbId, type) }.getOrNull()
+        val meta = try {
+            TmdbService.fetchMeta(tmdbId, type)
+        } catch (c: kotlinx.coroutines.CancellationException) {
+            throw c
+        } catch (t: Throwable) {
+            null
+        }
         val title = meta?.name?.takeIf { it.isNotBlank() }
             ?: throw CleanMissException("no title for tmdb=$tmdbId")
         val year = meta?.year?.take(4)
@@ -1633,10 +1735,10 @@ object StreamEngine {
     private const val STREAMFLIX_TTL_MS = 30 * 60 * 1000L
     private const val STREAMFLIX_BASE = "https://cf.streamflixserver.site/"
 
-    /** StreamFlix: TMDB-keyed catalog match, direct file links. */
+    /** Catalog match by either id type, direct file links. */
     private suspend fun resolveStreamFlix(
         spec: ServerSpec,
-        tmdbId: Int,
+        id: String,
         type: String,
         season: Int,
         episode: Int,
@@ -1653,10 +1755,13 @@ object StreamEngine {
         }
         val items = data?.let { runCatching { org.json.JSONObject(it).optJSONArray("data") }.getOrNull() }
             ?: throw CleanMissException("no catalog")
+        val imdbKey = id.takeIf { it.startsWith("tt") }
         var item: org.json.JSONObject? = null
         for (i in 0 until items.length()) {
             val it = items.optJSONObject(i) ?: continue
-            if (it.opt("tmdb")?.toString() == tmdbId.toString()) { item = it; break }
+            if (it.opt("tmdb")?.toString() == id ||
+                (imdbKey != null && it.optString("movieimdb").contains(imdbKey, ignoreCase = true))
+            ) { item = it; break }
         }
         val found = item ?: throw CleanMissException("title not in catalog")
         var base = STREAMFLIX_BASE
@@ -1744,10 +1849,90 @@ object StreamEngine {
         return title.contains(year)
     }
 
-    /** Hub post file-host links (hubcloud drive pages). Pure. */
-    internal fun hubDriveLinks(html: String): List<String> {
-        return Regex("""href="(https?://hubcloud\.ist/drive/[^"]+)"""", RegexOption.IGNORE_CASE)
-            .findAll(html).map { it.groupValues[1] }.distinct().toList()
+    /** One hub post download block: label, size, raw languages, gateway links. */
+    internal data class HubItem(
+        val title: String,
+        val size: String,
+        val languages: String,
+        /** Rotator-gateway URLs in site order (primary drive family first). */
+        val gatewayUrls: List<String>,
+    )
+
+    /** Hub post download blocks (header title, size/lang badges, gateways). Pure. */
+    internal fun hub4kItems(html: String): List<HubItem> {
+        val root = Jsoup.parse(html)
+        val langRe = Regex("""(?i)\b(hindi|english|tamil|telugu|malayalam|kannada|bengali|marathi|punjabi|dual|multi)\b""")
+        return root.select("div.download-item").mapNotNull { item ->
+            val header = item.selectFirst("div.download-header") ?: return@mapNotNull null
+            val title = header.selectFirst("div.flex-1, .font-semibold")?.text()?.trim().orEmpty()
+                .ifBlank { header.text().trim() }
+            if (title.isBlank()) return@mapNotNull null
+            val badges = header.select("code .badge").map { it.text().trim() }
+            val size = badges.firstOrNull { normalizeSizeToken(it).isNotBlank() }
+                ?.let { normalizeSizeToken(it) }.orEmpty()
+            // Language badge rides as its own element in the body grid when the header omits it.
+            val langs = (badges + item.select(".badge").map { it.text().trim() })
+                .firstOrNull { langRe.containsMatchIn(it) }
+                .orEmpty()
+            val gateways = item.select("a.btn[href]").map { it.attr("href").trim() }
+                .filter { it.startsWith("http") }
+                .filter { Regex("""greenmotors|hubcloud|hubdrive""", RegexOption.IGNORE_CASE).containsMatchIn(it) }
+                .distinct()
+            HubItem(title, size, langs, gateways)
+        }.filter { it.gatewayUrls.isNotEmpty() }
+    }
+
+    /** Host-declared size badge to the compact token ("73.73 GB" -> "73.73GB"). Pure. */
+    internal fun normalizeSizeToken(text: String): String =
+        Regex("""\d+(?:\.\d+)?\s?(?:GB|MB)""", RegexOption.IGNORE_CASE).find(text)
+            ?.value?.replace(" ", "")?.uppercase().orEmpty()
+
+    /** ROT13 (the rotator's Caesar step). Pure. */
+    internal fun rot13(text: String): String = buildString {
+        for (c in text) when {
+            c in 'A'..'Z' -> append('A' + (c - 'A' + 13) % 26)
+            c in 'a'..'z' -> append('a' + (c - 'a' + 13) % 26)
+            else -> append(c)
+        }
+    }
+
+    /** Junk-tolerant b64 text decode (inline junk and padding drift allowed). Pure. */
+    internal fun b64Text(input: String): String? {
+        val clean = input.filter { it.isLetterOrDigit() || it == '+' || it == '/' || it == '=' }
+        if (clean.length < 4 || clean.length % 4 == 1) return null
+        val padded = clean + "=".repeat((4 - clean.length % 4) % 4)
+        return runCatching { String(Base64Kit.decode(padded), Charsets.UTF_8) }.getOrNull()
+    }
+
+    /** Rotator page -> final drive URL (atob, atob, ROT13, atob, JSON, atob). Pure. */
+    internal fun rotatorTarget(pageHtml: String): String? {
+        val blob = Regex("""'o'\s*,\s*'([A-Za-z0-9+/=]{16,})[^']*'""").find(pageHtml)?.groupValues?.get(1)
+            ?: return null
+        val l1 = b64Text(blob) ?: return null
+        val l2 = b64Text(l1) ?: return null
+        val jsonText = b64Text(rot13(l2)) ?: return null
+        // Trailing junk chars can shear the JSON tail; the o value stays intact, so repair minimally.
+        val oToken = Regex("\"o\"\\s*:\\s*\"([A-Za-z0-9+/=]{10,})").find(jsonText)?.groupValues?.get(1)
+        val wrapped = runCatching { org.json.JSONObject(jsonText) }.getOrNull()
+            ?: oToken?.takeIf { b64Text(it)?.startsWith("http") == true }
+                ?.let { org.json.JSONObject("{\"o\":\"$it\"}") }
+            ?: return null
+        val url = b64Text(wrapped.optString("o"))?.trim() ?: return null
+        return url.takeIf { it.startsWith("http") }
+    }
+
+    /** Dual-audio wording for hub language badges ("Hindi, English" -> Multi). Pure. */
+    internal fun hubLangOf(languages: String): String {
+        val s = languages.lowercase()
+        val hasHindi = s.contains("hindi")
+        val hasOther = Regex("""english|dual|multi|tamil|telugu|malayalam|kannada|japanese|korean|chinese""").containsMatchIn(s)
+        return when {
+            s.contains("hindi") && hasOther -> "Multi"
+            s.contains("hindi") -> "Hindi"
+            Regex("""\b(tamil|telugu|malayalam|kannada|bengali|marathi|punjabi)\b""").containsMatchIn(s) ->
+                releaseLanguageOf(languages).ifBlank { "Multi" }
+            else -> releaseLanguageOf(languages).ifBlank { "" }
+        }
     }
 
     /** Hubcloud download-page buttons as (url, quality). Pure. */
@@ -1773,20 +1958,21 @@ object StreamEngine {
         return out.distinctBy { it.first }
     }
 
-    /** Single hubcloud drive page to file links (token used fresh, inline). */
+    /** Single drive page to file links (token used fresh, inline; drive and token hosts may differ). */
     private suspend fun hubDriveFiles(driveUrl: String, referer: String): List<Pair<String, String>> {
         val drive = withTimeoutOrNull(8_000L) {
             runCatching { app.get(driveUrl, timeout = 8, headers = okHeaders(referer)).text }.getOrNull()
         } ?: return emptyList()
-        val tokenHref = Regex("""hubcloud\.php\?[^"' ]+""").find(drive)?.value ?: return emptyList()
-        val tokenUrl = if (tokenHref.startsWith("http")) tokenHref else "https://hubcloud.ist/$tokenHref"
+        val tokenHref = Regex("""(?:hubcloud|hubdrive)\.php\?[^"' ]+""").find(drive)?.value ?: return emptyList()
+        val origin = Regex("""^https?://[^/]+""").find(driveUrl)?.value ?: return emptyList()
+        val tokenUrl = if (tokenHref.startsWith("http")) tokenHref else "$origin/$tokenHref"
         val page = withTimeoutOrNull(10_000L) {
             runCatching { app.get(tokenUrl, timeout = 10, headers = okHeaders(driveUrl)).text }.getOrNull()
         } ?: return emptyList()
         return hubFileButtons(page).take(4)
     }
 
-    /** Hub-family (Hindi-dub file index): search, year-verified post, file-host links. */
+    /** Hub-family file index: search, year-verified post, gateway-decoded drive files. */
     private suspend fun resolveHub4k(
         spec: ServerSpec,
         tmdbId: Int,
@@ -1794,15 +1980,26 @@ object StreamEngine {
         season: Int,
         episode: Int,
     ): List<RawStream> {
-        val meta = runCatching { TmdbService.fetchMeta(tmdbId, type) }.getOrNull()
+        val meta = try {
+            TmdbService.fetchMeta(tmdbId, type)
+        } catch (c: kotlinx.coroutines.CancellationException) {
+            throw c
+        } catch (t: Throwable) {
+            null
+        }
         val title = meta?.name?.takeIf { it.isNotBlank() }
             ?: throw CleanMissException("no title for tmdb=$tmdbId")
         val year = meta?.year?.take(4)
-        val base = "https://4khdhub.one"
         fun enc(s: String) = java.net.URLEncoder.encode(s, "UTF-8")
-        val searchHtml = withTimeoutOrNull(8_000L) {
-            runCatching { app.get("$base/?s=${enc(title)}", timeout = 8, headers = okHeaders(base)).text }.getOrNull()
-        } ?: throw CleanMissException("no search answer")
+        var base = ""
+        var searchHtml = ""
+        for (candidate in listOf("https://4khdhub.one", "https://4khdhub.com")) {
+            val html = withTimeoutOrNull(8_000L) {
+                runCatching { app.get("$candidate/?s=${enc(title)}", timeout = 8, headers = okHeaders(candidate)).text }.getOrNull()
+            }
+            if (!html.isNullOrBlank()) { base = candidate; searchHtml = html; break }
+        }
+        if (base.isBlank()) throw CleanMissException("no search answer")
         val cards = hubParseCards(searchHtml, base)
         if (cards.isEmpty()) throw CleanMissException("no search hits")
         val ranked = cards.map { it to TitleMatch.titleDistance(title, it.second) }
@@ -1813,26 +2010,459 @@ object StreamEngine {
                 runCatching { app.get(card.first, timeout = 8, headers = okHeaders(base)).text }.getOrNull()
             } ?: continue
             if (!hubPostYearOk(post, year)) continue
-            val lang = releaseLanguageOf(
-                Regex("""<meta\s+property="og:title"\s+content="([^"]+)"""", RegexOption.IGNORE_CASE)
-                    .find(post)?.groupValues?.get(1).orEmpty() + " " + card.second,
-            )
-            val drives = hubDriveLinks(post).take(3)
-            for (d in drives) {
-                val files = hubDriveFiles(d, card.first)
-                if (files.isNotEmpty()) {
-                    val hindi = lang == "Hindi"
-                    return files.map { (url, q) ->
-                        RawStream(spec.id, "${spec.name} $q".trim(),
-                            url, url.contains(".m3u8", ignoreCase = true),
-                            "https://hubcloud.ist/", releaseHeightOf(q),
-                            audioPriority = if (hindi) 4 else if (lang == "Multi") 2 else 1,
-                            audioLabel = lang)
+            val items = hub4kItems(post).let { all ->
+                if (type != "movie" && season > 0) {
+                    all.filter { Regex("""(?i)\bS0?$season\s*E0?$episode\b""").containsMatchIn(it.title) }
+                } else all
+            }.take(4)
+            val out = mutableListOf<RawStream>()
+            for (item in items) {
+                val lang = hubLangOf(item.languages)
+                val priority = when (lang) {
+                    "Hindi" -> 4
+                    "Multi" -> 2
+                    else -> 1
+                }
+                for (gateway in item.gatewayUrls) {
+                    // Rotator gateways hide the drive URL; decode it before the token-page chain.
+                    val gwPage = withTimeoutOrNull(10_000L) {
+                        runCatching { app.get(gateway, timeout = 10, headers = okHeaders(card.first)).text }.getOrNull()
+                    } ?: continue
+                    val driveUrl = rotatorTarget(gwPage)?.let { relUrl(gateway, it) } ?: continue
+                    val referer = Regex("""^https?://[^/]+""").find(driveUrl)?.value ?: "https://hubcloud.ist/"
+                    val files = hubDriveFiles(driveUrl, card.first)
+                    for ((url, q) in files) {
+                        val qText = q.ifBlank {
+                            Regex("""\b(2160p|1440p|1080p|720p|480p)\b""", RegexOption.IGNORE_CASE)
+                                .find(item.title)?.value.orEmpty()
+                        }
+                        out += RawStream(
+                            spec.id, "${spec.name} $qText".trim(), url,
+                            url.contains(".m3u8", ignoreCase = true), referer,
+                            releaseHeightOf(qText.ifBlank { item.title }),
+                            audioPriority = priority, audioLabel = lang,
+                            sizeLabel = item.size,
+                        )
                     }
+                    if (out.size >= 6) break
+                }
+                if (out.size >= 6) break
+            }
+            if (out.isNotEmpty()) return out
+        }
+        throw CleanMissException("no file links")
+    }
+
+    // ---- Fast file family (R2/FSL): parking-heal, title search, gateway chain ----
+
+    /** Fast-file family seeds: family, seed, bootstrap parking host. */
+    private val FSL_SEEDS = listOf(
+        Triple("vegamovies", "https://new1.vegamovies.lease", "https://new2.vegamovies.futbol"),
+        Triple("rogmovies", "https://rogmovies.one", null),
+    )
+    /** Parking page path that forwards to the live host. */
+    private const val FSL_LANDING_PROBE = "/?re=vg&t=2"
+    private val fslBaseCache = java.util.concurrent.ConcurrentHashMap<String, Pair<String, Long>>()
+
+    /** Parking/interstitial page that only announces the live host. Pure. */
+    internal fun fslIsLanding(html: String): Boolean =
+        html.contains("qikly.pro/host") || html.contains("id=\"stx\"")
+
+    /** Most common family href on a page. Pure. */
+    internal fun fslDomainPick(html: String, family: String): String? =
+        Regex("""https?://[a-z0-9.\-]*$family\.[a-z]{2,10}""", RegexOption.IGNORE_CASE)
+            .findAll(html).map { it.value.lowercase() }
+            .filterNot { it.contains("apk") || it.endsWith(".cfd") }
+            .groupingBy { it }.eachCount()
+            .maxByOrNull { it.value }?.key
+
+    /** Fetch (text, final-url) or null. */
+    private suspend fun fslGet(url: String, timeoutSec: Long = 12): Pair<String, String>? {
+        val res = withTimeoutOrNull(timeoutSec * 1000L) {
+            runCatching { app.get(url, timeout = timeoutSec * 1000L, headers = okHeaders(url)) }.getOrNull()
+        } ?: return null
+        return res.text to res.url
+    }
+
+    /** Follows a dead seed through its parking page to the live host. */
+    private suspend fun fslLive(seed: String, bootstrap: String?): Pair<String, String>? {
+        val (html0, url0) = fslGet(seed, 10)
+            ?: (bootstrap?.let { fslGet(it, 10) } ?: return null)
+        if (!fslIsLanding(html0)) return html0 to url0
+        val origin = Regex("""^https?://[^/]+""").find(url0)?.value ?: return null
+        val probed = fslGet(origin + FSL_LANDING_PROBE, 12) ?: return null
+        return if (fslIsLanding(probed.first)) null else probed
+    }
+
+    /** Live family base (healed, cached 30min). */
+    private suspend fun fslBase(family: String, seed: String, bootstrap: String?): String? {
+        fslBaseCache[family]?.let { (cached, at) ->
+            if (System.currentTimeMillis() - at < 30 * 60_000L) return cached
+        }
+        val live = fslLive(seed, bootstrap)
+        val liveBase = live?.let { (html, url) ->
+            val origin = Regex("""^https?://[^/]+""").find(url)?.value ?: url
+            fslDomainPick(html, family) ?: origin
+        } ?: return null
+        fslBaseCache[family] = liveBase to System.currentTimeMillis()
+        return liveBase
+    }
+
+    /** Search the family index (typo-tolerant JSON proxy) for post permalinks. */
+    internal fun fslSearchHits(json: String): List<Pair<String, String>> {
+        val root = runCatching { org.json.JSONObject(json) }.getOrNull() ?: return emptyList()
+        val hits = root.optJSONArray("hits") ?: return emptyList()
+        return (0 until hits.length()).mapNotNull { i ->
+            val doc = hits.optJSONObject(i)?.optJSONObject("document") ?: return@mapNotNull null
+            val permalink = doc.optString("permalink").takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            permalink to doc.optString("post_title")
+        }.filter { it.second.isNotBlank() }
+    }
+
+    /** One download group: heading text (quality/size/lang) + gateway links. */
+    internal data class FslGroup(val heading: String, val gateways: List<String>)
+
+    /** Post download groups: h1-h6 headings own the anchors under them. Pure. */
+    internal fun fslGroups(html: String): List<FslGroup> {
+        val gatewayRe = Regex("""https?://[a-z0-9.\-]*nexdrive\.[a-z]{2,10}/genxfm[^\s"'<>\\]+""", RegexOption.IGNORE_CASE)
+        val doc = Jsoup.parse(html)
+        val entry = doc.selectFirst("div.entry-content, article, main") ?: doc.body()
+        val groups = ArrayList<FslGroup>()
+        var heading = ""
+        var anchors = ArrayList<String>()
+        fun close() {
+            if (anchors.isNotEmpty() && heading.isNotBlank()) groups += FslGroup(heading, anchors.distinct())
+            anchors = ArrayList()
+        }
+        for (el in entry.getAllElements()) {
+            when {
+                el.tagName().matches(Regex("h[1-6]")) -> {
+                    val t = el.text().trim()
+                    if (t.isNotBlank() && t.length < 220) {
+                        if (anchors.isNotEmpty()) close()
+                        heading = if (downloadHeadingShaped(t)) t else ""
+                    }
+                }
+                el.tagName() == "a" -> {
+                    val href = el.attr("abs:href")
+                    if (gatewayRe.containsMatchIn(href)) anchors += href.trimEnd('/') + "/"
                 }
             }
         }
-        throw CleanMissException("no file links")
+        close()
+        // Same heading from repeated episode blocks merges into one group.
+        return groups.groupBy { it.heading }
+            .map { (_, gs) -> FslGroup(gs.first().heading, gs.flatMap { it.gateways }) }
+            .filter { it.gateways.isNotEmpty() }
+    }
+
+    /** Heading noise guard for download groups. Pure. */
+    private fun downloadHeadingShaped(text: String): Boolean =
+        Regex("""(?i)(\d{3,4}p\b|4K|\d+(?:\.\d+)?\s?(?:GB|MB)|/ZiP|/ZIP|\bZIP\b|Batch|Season\s*\d|\bPack\b|DUAL\s*[- ]?AUDIO|HINDI|TAMIL|TELUGU|\bEP(?:\.|ISODE)?\s*\d|S\d{1,2}[\s._-]?E\d{1,3})""").containsMatchIn(text)
+
+    /** Gateway page concrete links: fastdl embeds and cloud-page links. Pure. */
+    internal data class GatewayLinks(val fastdl: List<String>, val cloud: List<String>)
+
+    internal fun gatewayLinksOf(html: String): GatewayLinks {
+        val fastdl = Regex("""https?://fastdl\.[a-z]{2,10}/embed(?:\.php)?\?download=[A-Za-z0-9_\-]+""", RegexOption.IGNORE_CASE)
+            .findAll(html.replace("\\/", "/")).map { it.value }.distinct().toList()
+        val vcloud = Regex("""https?://vcloud\.[a-z]{2,10}/[A-Za-z0-9_\-]{6,}""")
+            .findAll(html).map { it.value }.distinct().toList()
+        return GatewayLinks(fastdl, vcloud)
+    }
+
+    /** Resolve one shortlink page to R2 direct links (label, url). */
+    private suspend fun vcloudR2Links(vcloudUrl: String, referer: String): List<Pair<String, String>> {
+        val page = withTimeoutOrNull(15_000L) {
+            runCatching { app.get(vcloudUrl, timeout = 15, headers = okHeaders(referer)).text }.getOrNull()
+        } ?: return emptyList()
+        val tokenUrl = Regex("""var\s+url\s*=\s*atob\s*\(\s*atob\s*\(\s*['"]([A-Za-z0-9+/=]{16,})['"]\s*\)\s*\)""")
+            .find(page)?.groupValues?.get(1)
+            ?.let { blob -> vcloudDoubleAtob(blob) }
+            ?.takeIf { it.startsWith("http") } ?: return emptyList()
+        val token = withTimeoutOrNull(15_000L) {
+            runCatching { app.get(tokenUrl, timeout = 15, headers = okHeaders(vcloudUrl)).text }.getOrNull()
+        } ?: return emptyList()
+        val btnRe = Regex(
+            """<a\b[^>]*href="([^"]+)"[^>]*>\s*(?:<[^>]+>\s*)*([^<]*(?:Download|Server|File)[^<]*)(?:<[^>]+>\s*)*</a>""",
+            RegexOption.IGNORE_CASE,
+        )
+        val out = ArrayList<Pair<String, String>>()
+        val seen = LinkedHashSet<String>()
+        for (m in btnRe.findAll(token)) {
+            val raw = m.groupValues[1].trim()
+            val label = Regex("""\[([^\]]+)]""").find(m.groupValues[2].trim())?.groupValues?.get(1)?.trim()
+                ?: m.groupValues[2].trim()
+            val abs = if (raw.startsWith("http")) raw else {
+                val origin = Regex("""^https?://[^/]+""").find(tokenUrl)?.value ?: continue
+                "$origin${if (raw.startsWith('/')) raw else "/$raw"}"
+            }
+            if (Regex("""(r2\.cloudflarestorage\.com|r2\.dev)""", RegexOption.IGNORE_CASE).containsMatchIn(abs) && seen.add(abs)) {
+                out += abs to label.take(20)
+            }
+        }
+        return out
+    }
+
+    /** Double-atob token URL decode (url-alphabet tolerant). Pure. */
+    internal fun vcloudDoubleAtob(blob: String): String? {
+        val inner = b64Text(blob.trim()) ?: return null
+        return b64Text(inner.trim())
+    }
+
+    /** Heading size token ("[1.7GB]", "1.7GB/ep"). Pure. */
+    internal fun headingSizeOf(heading: String): String {
+        Regex("""\[\s*(\d+(?:\.\d+)?\s*(?:GB|MB)(?:/E\b|/EP\b|/ZiP|/ZIP)?)\s*]""", RegexOption.IGNORE_CASE)
+            .find(heading)?.let { return normalizeSizeToken(it.groupValues[1]).replace("/ZIP", "") }
+        return normalizeSizeToken(heading)
+    }
+
+    /** Fast-file family server: parking heal, title search, gateway -> R2 direct links. */
+    private suspend fun resolveFsl(
+        spec: ServerSpec,
+        tmdbId: Int,
+        type: String,
+        season: Int,
+        episode: Int,
+    ): List<RawStream> {
+        val meta = try {
+            TmdbService.fetchMeta(tmdbId, type)
+        } catch (c: kotlinx.coroutines.CancellationException) {
+            throw c
+        } catch (t: Throwable) {
+            null
+        }
+        val title = meta?.name?.takeIf { it.isNotBlank() }
+            ?: throw CleanMissException("no title for tmdb=$tmdbId")
+        val year = meta?.year?.take(4)
+        fun enc(s: String) = java.net.URLEncoder.encode(s, "UTF-8")
+        val out = mutableListOf<RawStream>()
+        for ((family, seed, bootstrap) in FSL_SEEDS) {
+            val base = fslBase(family, seed, bootstrap) ?: continue
+            val json = fslGet("$base/ts-search.php?q=${enc(title)}&page=1", 8)?.first ?: continue
+            val hits = fslSearchHits(json)
+            if (hits.isEmpty()) continue
+            val ranked = hits.map { it to TitleMatch.titleDistance(title, it.second) }
+                .sortedByDescending { it.second }
+                .take(2)
+                .filter { (hit, _) -> year == null || Regex("""\((\d{4})""").find(hit.second)?.groupValues?.get(1) == year }
+            for ((hitPair, _) in ranked) {
+                val permalink = hitPair.first
+                val post = fslGet(permalink, 10)?.first ?: continue
+                val groups = fslGroups(post)
+                    .let { all ->
+                        if (type != "movie" && season > 0) {
+                            all.filter { Regex("""(?i)\bS0?$season\s*E0?$episode\b""").containsMatchIn(it.heading) }
+                        } else all
+                    }
+                for (group in groups.take(4)) {
+                    val size = headingSizeOf(group.heading)
+                    val lang = releaseLanguageOf(group.heading)
+                    val priority = when (lang) {
+                        "Hindi" -> 4
+                        "Multi" -> 2
+                        else -> 1
+                    }
+                    val qText = Regex("""\b(2160p|1440p|1080p|720p|480p)\b""", RegexOption.IGNORE_CASE)
+                        .find(group.heading)?.value.orEmpty()
+                    for (gateway in group.gateways) {
+                        val expanded = fslGet(gateway, 15)?.first ?: continue
+                        val gLinks = gatewayLinksOf(expanded)
+                        for (vcloud in gLinks.cloud) {
+                            for ((url, _) in vcloudR2Links(vcloud, gateway)) {
+                                out += RawStream(
+                                    spec.id, "${spec.name} $qText".trim(), url,
+                                    url.contains(".m3u8", ignoreCase = true),
+                                    Regex("""^https?://[^/]+""").find(url)?.value,
+                                    releaseHeightOf(qText.ifBlank { group.heading }),
+                                    audioPriority = priority, audioLabel = lang,
+                                    sizeLabel = size,
+                                )
+                            }
+                            if (out.size >= 6) break
+                        }
+                        if (out.size >= 6) break
+                    }
+                    if (out.size >= 6) break
+                }
+                if (out.isNotEmpty()) break
+            }
+            if (out.isNotEmpty()) break
+        }
+        if (out.isEmpty()) throw CleanMissException("no fast file links")
+        return out
+    }
+
+    // ---- Id-keyed dooplay-style download host ----
+
+    /** Live seeds for the id-keyed download host (frequent domain churn). */
+    private val HD2_SEEDS = listOf("https://hdmovie2a.live", "https://hdmovie2.biz.id")
+
+    /** Post download/player anchors as (url, own label). Pure. */
+    internal fun hd2Anchors(html: String, base: String): List<Pair<String, String>> =
+        Jsoup.parse(html, base).select("a[href]").mapNotNull { a ->
+            val href = a.attr("abs:href").trim()
+            val keep = Regex("""/(?:download|episode|player|watch)/""", RegexOption.IGNORE_CASE).containsMatchIn(href)
+            if (!keep) null else href to a.text().trim()
+        }.filter { !it.first.contains("#") }.distinctBy { it.first }
+
+    /** Id-keyed download host: /search/{imdb-or-tmdb}/ -> post -> player pages -> direct files. */
+    private suspend fun resolveHdmovie2(
+        spec: ServerSpec,
+        tmdbId: Int,
+        imdbId: String?,
+        type: String,
+        season: Int,
+        episode: Int,
+    ): List<RawStream> {
+        val id = imdbId?.takeIf { it.startsWith("tt") } ?: tmdbId.toString().takeIf { tmdbId > 0 }
+            ?: throw CleanMissException("id-keyed host needs a usable id")
+        var post = ""
+        var postUrl = ""
+        for (seed in HD2_SEEDS) {
+            val searchHtml = withTimeoutOrNull(10_000L) {
+                runCatching { app.get("$seed/search/$id/", timeout = 10, headers = okHeaders(seed)).text }.getOrNull()
+            } ?: continue
+            val href = Jsoup.parse(searchHtml).select("a[href]").firstOrNull { a ->
+                Regex("""/(?:movies|series|episode|download)/""").containsMatchIn(a.attr("href"))
+            }?.attr("abs:href") ?: continue
+            postUrl = href
+            post = withTimeoutOrNull(10_000L) {
+                runCatching { app.get(postUrl, timeout = 10, headers = okHeaders(seed)).text }.getOrNull()
+            } ?: continue
+            if (post.isNotBlank()) break
+        }
+        if (post.isBlank()) throw CleanMissException("no live host answered for id=$id")
+        val anchors = hd2Anchors(post, postUrl)
+            .let { all ->
+                if (type != "movie" && season > 0) {
+                    all.filter { (href, label) ->
+                        Regex("""(?i)\bS0?$season\s*E0?$episode\b""").containsMatchIn("$href $label")
+                    }
+                } else all
+            }
+            .take(6)
+        val firstSize = normalizeSizeToken(post)
+        val lang = releaseLanguageOf(Regex("""(?i)\b(hindi|english|tamil|telugu)\b""").find(post)?.value.orEmpty())
+        val out = mutableListOf<RawStream>()
+        for ((href, label) in anchors) {
+            if (out.size >= 6) break
+            val page = withTimeoutOrNull(9_000L) {
+                runCatching { app.get(href, timeout = 9, headers = okHeaders(postUrl)).text }.getOrNull()
+            } ?: continue
+            val (pageHtml, pageUrl) = unwrapPages(page, href, 9)
+            val urls = (harvestUrls(pageHtml) + harvestJsUrls(pageHtml) +
+                listOfNotNull(harvestVideoSource(pageHtml, pageUrl))).distinct().take(2)
+            for (url in urls) {
+                val size = normalizeSizeToken(label).ifBlank { firstSize }
+                val qText = Regex("""\b(2160p|1440p|1080p|720p|480p)\b""", RegexOption.IGNORE_CASE)
+                    .find(label)?.value.orEmpty()
+                out += RawStream(
+                    spec.id, "${spec.name} $qText".trim(), url,
+                    url.contains(".m3u8", ignoreCase = true),
+                    Regex("""^https?://[^/]+""").find(url)?.value,
+                    releaseHeightOf(qText.ifBlank { label }),
+                    audioPriority = if (lang == "Hindi") 4 else 2,
+                    audioLabel = lang,
+                    sizeLabel = size,
+                )
+            }
+        }
+        if (out.isEmpty()) throw CleanMissException("no playable file links")
+        return out.distinctBy { it.url }
+    }
+
+    // ---- Archive-style upload host (title-keyed, flaky live host) ----
+
+    /** File-host anchors on a post page. Pure. */
+    internal fun olaFileAnchors(html: String): List<Pair<String, String>> =
+        Jsoup.parse(html).select("a[href]").mapNotNull { a ->
+            val href = a.attr("abs:href").trim()
+            if (href.isBlank()) return@mapNotNull null
+            val keep = Regex(
+                """pixeldrain\.com/u/|gofile\.io/d/|krakenfiles\.com/view|hubcloud\.[a-z.]*/|hubdrive\.[a-z.]*/|1fichier\.com/|drive\.google\.com/file/""",
+                RegexOption.IGNORE_CASE,
+            ).containsMatchIn(href)
+            if (!keep) null else href to a.text().trim()
+        }.distinctBy { it.first }
+
+    /** Anchor to streamable direct url; null when the host needs an app/JS flow. Pure. */
+    internal fun olaDirectOf(href: String): String? {
+        val pm = Regex("""pixeldrain\.com/u/([A-Za-z0-9_\-]+)""", RegexOption.IGNORE_CASE).find(href) ?: return null
+        return "https://pixeldrain.com/api/file/${pm.groupValues[1]}"
+    }
+
+    /** Archive upload host: seed, title search, file-host anchors with pixeldrain/hub links. */
+    private suspend fun resolveOlamovies(
+        spec: ServerSpec,
+        tmdbId: Int,
+        type: String,
+        season: Int,
+        episode: Int,
+    ): List<RawStream> {
+        val meta = try {
+            TmdbService.fetchMeta(tmdbId, type)
+        } catch (c: kotlinx.coroutines.CancellationException) {
+            throw c
+        } catch (t: Throwable) {
+            null
+        }
+        val title = meta?.name?.takeIf { it.isNotBlank() }
+            ?: throw CleanMissException("no title for tmdb=$tmdbId")
+        val year = meta?.year?.take(4)
+        fun enc(s: String) = java.net.URLEncoder.encode(s, "UTF-8")
+        val base = "https://olamovies.rent"
+        val searchHtml = withTimeoutOrNull(9_000L) {
+            runCatching { app.get("$base/?s=${enc(title)}", timeout = 9, headers = okHeaders(base)).text }.getOrNull()
+        } ?: throw CleanMissException("no search answer from archive host")
+        val ranked = hubParseCards(searchHtml, base)
+            .map { it to TitleMatch.titleDistance(title, it.second) }
+            .sortedByDescending { it.second }
+            .take(2)
+            .filter { (card, _) -> year == null || card.second.contains(year) }
+        if (ranked.isEmpty()) throw CleanMissException("no match")
+        val out = mutableListOf<RawStream>()
+        for ((hitPair, _) in ranked) {
+            val permalink = hitPair.first
+            val post = withTimeoutOrNull(9_000L) {
+                runCatching { app.get(permalink, timeout = 9, headers = okHeaders(base)).text }.getOrNull()
+            } ?: continue
+            val anchors = olaFileAnchors(post)
+                .let { all ->
+                    if (type != "movie" && season > 0) {
+                        all.filter { (href, label) ->
+                            Regex("""(?i)\bS0?$season\s*E0?$episode\b""").containsMatchIn("$href $label")
+                        }
+                    } else all
+                }
+            val firstSize = normalizeSizeToken(post)
+            val lang = releaseLanguageOf(Regex("""(?i)\b(hindi|english|tamil|telugu)\b""").find(post)?.value.orEmpty())
+            for ((href, label) in anchors.take(5)) {
+                if (out.size >= 6) break
+                val directUrls: List<Pair<String, String>> = when {
+                    olaDirectOf(href) != null -> listOf(olaDirectOf(href)!! to label)
+                    Regex("""hubcloud|hubdrive""", RegexOption.IGNORE_CASE).containsMatchIn(href) ->
+                        hubDriveFiles(href.trimEnd('/'), base)
+                    else -> emptyList()
+                }
+                for ((url, q) in directUrls) {
+                    val qText = Regex("""\b(2160p|1440p|1080p|720p|480p)\b""", RegexOption.IGNORE_CASE)
+                        .find("$label $q")?.value.orEmpty()
+                    out += RawStream(
+                        spec.id, "${spec.name} $qText".trim(), url,
+                        url.contains(".m3u8", ignoreCase = true),
+                        Regex("""^https?://[^/]+""").find(url)?.value ?: base,
+                        releaseHeightOf(qText.ifBlank { label }),
+                        audioPriority = if (lang == "Hindi") 4 else 2,
+                        audioLabel = lang,
+                        sizeLabel = normalizeSizeToken(label).ifBlank { firstSize },
+                    )
+                }
+            }
+            if (out.isNotEmpty()) break
+        }
+        if (out.isEmpty()) throw CleanMissException("no file links")
+        return out.distinctBy { it.url }
     }
 
     /** OneTouchTV resolver: title search, AES envelope, per-episode HLS sources. */
@@ -1845,7 +2475,13 @@ object StreamEngine {
     ): List<RawStream> {
         val id = tmdbId ?: return emptyList()
         if (type != "movie" && (season <= 0 || episode <= 0)) return emptyList()
-        val meta = runCatching { TmdbService.fetchMeta(id, type) }.getOrNull()
+        val meta = try {
+            TmdbService.fetchMeta(id, type)
+        } catch (c: kotlinx.coroutines.CancellationException) {
+            throw c
+        } catch (t: Throwable) {
+            null
+        }
         val title = meta?.name ?: throw CleanMissException("no title for tmdb=$id (title-keyed API)")
         val year = meta?.year?.take(4)?.toIntOrNull()
         val hits = OneTouchTvSource.search(title)
@@ -1970,7 +2606,13 @@ object StreamEngine {
         spec: ServerSpec, tmdbId: Int, type: String, season: Int, episode: Int,
     ): List<RawStream> {
         val id = tmdbId.toString()
-        val meta = runCatching { TmdbService.fetchMeta(tmdbId, type) }.getOrNull()
+        val meta = try {
+            TmdbService.fetchMeta(tmdbId, type)
+        } catch (c: kotlinx.coroutines.CancellationException) {
+            throw c
+        } catch (t: Throwable) {
+            null
+        }
         val title = meta?.name.orEmpty()
         val year = meta?.year.orEmpty()
         val api = "https://api.bingr.one/api/stream"
@@ -2151,7 +2793,7 @@ object StreamEngine {
                 n = ((num % id.length) + id.length) % id.length / 2
             }
             val compound = id.substring(0, n) + salt + id.substring(n)
-            java.util.Base64.getEncoder().encodeToString(riveHashO(riveHash2(compound)).toByteArray(Charsets.US_ASCII))
+            Base64Kit.encode(riveHashO(riveHash2(compound)).toByteArray(Charsets.US_ASCII))
         } catch (e: Exception) { "topSecret" }
     }
 
@@ -2318,8 +2960,7 @@ object StreamEngine {
 
     private fun movyBase64Url(payload: String): ByteArray {
         val normalized = payload.replace('-', '+').replace('_', '/')
-        val pad = (4 - normalized.length % 4) % 4
-        return java.util.Base64.getDecoder().decode(normalized + "=".repeat(pad))
+        return Base64Kit.decode(normalized)
     }
 
     /** Decrypt a seed-keyed lane payload; null on a wrong seed or tampered body. Pure. */
@@ -2386,7 +3027,13 @@ object StreamEngine {
         } ?: run { Log.w("Movy", "seed no response"); return emptyList() }
         val seed = runCatching { org.json.JSONObject(seedText).optString("seed") }.getOrNull()
             ?.takeIf { it.isNotBlank() } ?: run { Log.w("Movy", "no seed in response"); return emptyList() }
-        val meta = runCatching { TmdbService.fetchMeta(tmdbId, type) }.getOrNull()
+        val meta = try {
+            TmdbService.fetchMeta(tmdbId, type)
+        } catch (c: kotlinx.coroutines.CancellationException) {
+            throw c
+        } catch (t: Throwable) {
+            null
+        }
         val params = listOf(
             "title" to movyEncode(meta?.name.orEmpty()),
             "mediaType" to (if (type == "movie") "movie" else "tv"),
@@ -2473,12 +3120,12 @@ object StreamEngine {
     // ---- Braflix: browserless JSON API answering with a proxied DASH manifest ----
 
     private suspend fun resolveBraflix(
-        spec: ServerSpec, tmdbId: Int, type: String, season: Int, episode: Int,
+        spec: ServerSpec, id: String, type: String, season: Int, episode: Int,
     ): List<RawStream> {
         if (type != "movie" && (season <= 0 || episode <= 0)) return emptyList()
         val base = "https://braflix.dev"
-        val path = if (type == "movie") "/api/play/movie/$tmdbId"
-        else "/api/play/tv/$tmdbId/$season/$episode"
+        val path = if (type == "movie") "/api/play/movie/$id"
+        else "/api/play/tv/$id/$season/$episode"
         val ref = "$base/"
         val headers = mapOf("User-Agent" to HttpKit.userAgent, "Referer" to ref, "Origin" to base)
         val text = withTimeoutOrNull(12_000L) {
@@ -2486,7 +3133,7 @@ object StreamEngine {
         } ?: run { Log.w("Braflix", "api no response"); return emptyList() }
         val src = braflixSource(text) ?: run { Log.w("Braflix", "no stream in response"); return emptyList() }
         val abs = if (src.stream.startsWith("http")) src.stream else base + src.stream
-        Log.d("Braflix", "got 1 stream for $type/$tmdbId")
+        Log.d("Braflix", "got 1 stream for $type/$id")
         return listOf(
             RawStream(
                 serverId = spec.id, serverName = spec.name,
@@ -2984,7 +3631,13 @@ object StreamEngine {
         // INTERNAL BUDGETS (fits the 60s timeoutSec kill, F8 audit): search
         // 8s/host + one 8s title fallback, card 6s, play 5s �2 candidates,
         // playlist 6s, per-language 5s CONCURRENT � worst chain � 50s.
-        val meta = runCatching { TmdbService.fetchMeta(tmdbId, type) }.getOrNull()
+        val meta = try {
+            TmdbService.fetchMeta(tmdbId, type)
+        } catch (c: kotlinx.coroutines.CancellationException) {
+            throw c
+        } catch (t: Throwable) {
+            null
+        }
         val titleNorm = meta?.name?.lowercase()?.replace(Regex("""[^a-z0-9]"""), "")
         var answeredHost: String? = null
         var cardUrl: String? = null
@@ -3330,8 +3983,7 @@ object StreamEngine {
     private fun sanitizeToken(s: String): String = s.filterNot { it.isISOControl() }.take(64)
 
     /** Last farm-wide re-probe; cooldown keeps a dead uplink) on every single playback tap. */
-    @Volatile
-    private var lastFarmProbeAt = 0L
+    private val lastFarmProbeAt = java.util.concurrent.atomic.AtomicLong(0L)
     private const val FARM_REPROBE_COOLDOWN_MS = 15_000L
 
     /** Per-title cache of resolved streams. Two jobs: 1. */
@@ -3357,9 +4009,11 @@ object StreamEngine {
         /** Merge for into the existing set (dedup by url) and extend TTL. */
         fun put(key: String, streams: List<RawStream>) {
             if (streams.isEmpty()) return
-            val existing = get(key).orEmpty()
-            val merged = (existing + streams).distinctBy { it.url }
-            map[key] = Entry(merged, System.currentTimeMillis() + TTL_MS)
+            // Atomic read-merge-write: server batches land concurrently, so a plain get/put would drop links.
+            map.compute(key) { _, e ->
+                val existing = e?.takeIf { System.currentTimeMillis() <= it.expiresAt }?.streams.orEmpty()
+                Entry((existing + streams).distinctBy { it.url }, System.currentTimeMillis() + TTL_MS)
+            }
         }
 
         fun clear() = map.clear()
