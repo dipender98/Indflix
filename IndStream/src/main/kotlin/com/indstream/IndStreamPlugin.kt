@@ -154,6 +154,8 @@ class IndStreamProvider : MainAPI() {
             rows += Pair("trending|tv", "Trending Series")
             rows += Pair("popular|movie", "Popular Movies")
             rows += Pair("popular|tv", "Popular Series")
+            // Genre rows, so every host that reads this catalog gets the full set.
+            rows += GenreCatalog.rows()
             return mainPageOf(*rows.toTypedArray())
         }
 
@@ -243,12 +245,16 @@ class IndStreamProvider : MainAPI() {
     ): HomePageResponse? {
         // Catalog keys are "<category>|<media>" (see mainPage): category FIRST.
         val parts = request.data.split("|")
-        val kind = parts[0].trim()                                       // "trending" | "popular" | "foryou".
-        val tmdbType = if (parts.getOrNull(1)?.trim() == "tv") "tv" else "movie"
+        val genre = GenreCatalog.parseRow(request.data)
+        val kind = parts[0].trim()                                       // "trending" | "popular" | "foryou" | "genre".
+        val tmdbType = genre?.second ?: if (parts.getOrNull(1)?.trim() == "tv") "tv" else "movie"
         val items = withTimeoutOrNull(if (kind == "foryou") 25_000L else 12_000L) {
             when (kind) {
                 "popular" -> TmdbService.popular(tmdbType, page)
                 "foryou" -> ForYouEngine.row(tmdbType, page)
+                "genre" -> genre
+                    ?.let { (id, type) -> TmdbService.discover(type, listOf(id), page) }
+                    .orEmpty()
                 else -> TmdbService.trending(tmdbType, page)
             }
         }.orEmpty()

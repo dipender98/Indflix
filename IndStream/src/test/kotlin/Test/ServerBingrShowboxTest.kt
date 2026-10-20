@@ -145,9 +145,13 @@ class ServerBingrShowboxTest {
             StreamEngine.ShowboxFile(11, "Show.S02E04.mkv", false),
         )
         assertEquals(11L, StreamEngine.showboxEpisodeFile(eps, 4)?.fid)
-        // Falls back to the first when nothing matches.
-        assertEquals(1L, StreamEngine.showboxSeasonFolder(root, 9)?.fid)
-        assertEquals(10L, StreamEngine.showboxEpisodeFile(eps, 9)?.fid)
+        // No blind fallback when the target is missing from several candidates.
+        assertNull(StreamEngine.showboxSeasonFolder(root, 9))
+        assertNull(StreamEngine.showboxEpisodeFile(eps, 9))
+        val loneDir = listOf(StreamEngine.ShowboxFile(5, "Show.S01", true))
+        assertEquals(5L, StreamEngine.showboxSeasonFolder(loneDir, 9)?.fid)
+        val loneEp = listOf(StreamEngine.ShowboxFile(12, "Show.S01E01.mkv", false))
+        assertEquals(12L, StreamEngine.showboxEpisodeFile(loneEp, 9)?.fid)
     }
 
     @Test

@@ -207,6 +207,45 @@ class ServerAdditionsTest {
     }
 
     @Test
+    fun hub4kItems_parsesEpisodeBlocks() {
+        val html = "<div class=\"episode-download-item\">" +
+            "<div class=\"episode-file-title\">Show.S04E01.2160p.mkv</div>" +
+            "<div class=\"episode-file-info\"><span class=\"badge-psa\">Episode-01</span>" +
+            "<span class=\"badge-size\">6.26 GB</span></div>" +
+            "<div class=\"episode-links\">" +
+            "<a href=\"https://greenmotors.example/?id=drive\">Download HubDrive</a>" +
+            "<a href=\"https://greenmotors.example/?id=cloud\">Download HubCloud</a></div></div>"
+        val items = StreamEngine.hub4kItems(html)
+        assertEquals(1, items.size)
+        assertEquals("Show.S04E01.2160p.mkv", items[0].title)
+        assertEquals("6.26GB", items[0].size)
+        assertEquals(
+            listOf("https://greenmotors.example/?id=cloud", "https://greenmotors.example/?id=drive"),
+            items[0].gatewayUrls,
+        )
+    }
+
+    @Test
+    fun episodeOrSeason_fallsBackToPack() {
+        assertTrue(StreamEngine.episodeMatches("Show.S04E02.2160p", 4, 2))
+        assertTrue(!StreamEngine.episodeMatches("Show.S04E01.2160p", 4, 2))
+        assertTrue(StreamEngine.seasonPackMatches("S04", 4))
+        assertTrue(StreamEngine.seasonPackMatches("Season 1 Complete [260MB/E]", 1))
+        assertEquals(
+            listOf("Show S01E02"),
+            StreamEngine.episodeOrSeason(
+                listOf("Show S01E01", "Show S01E02", "Season 1 Complete"), { it }, "tv", 1, 2,
+            ),
+        )
+        assertEquals(
+            listOf("Season 1 Complete"),
+            StreamEngine.episodeOrSeason(
+                listOf("Show S01E01", "Season 1 Complete"), { it }, "tv", 1, 9,
+            ),
+        )
+    }
+
+    @Test
     fun hub4kItems_parsesPostBlocks() {
         val html = "<div class=\"download-item\"><div class=\"download-header\">" +
             "<div class=\"flex-1\">Show S01E02 (2024) 1080p BluRay</div>" +

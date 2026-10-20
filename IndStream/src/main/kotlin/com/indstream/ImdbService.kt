@@ -73,7 +73,11 @@ object ImdbService {
             if (System.currentTimeMillis() <= it.expiresAt) return it.hits
             cache.remove(key)
         }
-        if (negative.contains(key) && System.currentTimeMillis() <= negative.getValue(key)) return emptyList()
+        val negHit = negative[key]
+        if (negHit != null) {
+            if (System.currentTimeMillis() <= negHit) return emptyList()
+            negative.remove(key)
+        }
         val mine = scope.async(start = kotlinx.coroutines.CoroutineStart.LAZY) {
             val found = suggestRemote(query)
             if (found.isNotEmpty()) {
@@ -177,7 +181,8 @@ object ImdbService {
         metaCache[key]?.let { return it }
         val text = withTimeoutOrNull(7000L) { getText("$CINEMETA_API/$kind/$imdbId.json", 7) } ?: return null
         val detail = parseCinemeta(text, imdbId)?.withCastPhotos() ?: return null
-        if (metaCache.size < CACHE_MAX) metaCache[key] = detail
+        if (metaCache.size >= CACHE_MAX) metaCache.keys.firstOrNull()?.let { metaCache.remove(it) }
+        metaCache[key] = detail
         return detail
     }
 
@@ -282,7 +287,8 @@ object ImdbService {
         }
         val done = out.toMap()
         for ((n, url) in done) {
-            if (photoCache.size < CACHE_MAX * 4) photoCache[n.lowercase()] = url
+            if (photoCache.size >= CACHE_MAX * 4) photoCache.keys.firstOrNull()?.let { photoCache.remove(it) }
+            photoCache[n.lowercase()] = url
         }
         return done
     }
@@ -324,7 +330,8 @@ object ImdbService {
         }
         val done = out.toMap()
         for ((id, r) in fetched) {
-            if (ratingCache.size < CACHE_MAX * 4) ratingCache[id] = r to (System.currentTimeMillis() + CACHE_TTL_MS)
+            if (ratingCache.size >= CACHE_MAX * 4) ratingCache.keys.firstOrNull()?.let { ratingCache.remove(it) }
+            ratingCache[id] = r to (System.currentTimeMillis() + CACHE_TTL_MS)
         }
         return done + fetched
     }
@@ -336,7 +343,7 @@ object ImdbService {
         maxTotal: Int = 15,
     ): List<ActorData>? {
         if (imdb.isNullOrEmpty()) return tmdb?.take(maxTotal)
-        if (tmdb.isNullOrEmpty()) return imdb
+        if (tmdb.isNullOrEmpty()) return imdb.take(maxTotal)
         val seen = imdb.map { it.actor.name.lowercase() }.toHashSet()
         return (imdb + tmdb.filter { seen.add(it.actor.name.lowercase()) }).take(maxTotal)
     }

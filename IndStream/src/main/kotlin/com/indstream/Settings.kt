@@ -1,37 +1,11 @@
-package com.indstream
+﻿package com.indstream
 
-import android.app.Activity
-import android.app.AlertDialog
 import android.content.Context
-import android.content.Intent
-import android.graphics.Color
-import android.graphics.Typeface
-import android.graphics.drawable.GradientDrawable
-import android.net.Uri
-import android.os.Message
-import android.text.InputType
-import android.util.TypedValue
-import android.widget.FrameLayout
-import android.view.Gravity
-import android.view.View
-import android.view.ViewGroup
-import android.webkit.CookieManager
-import android.webkit.WebChromeClient
-import android.webkit.WebResourceError
-import android.webkit.WebResourceRequest
-import android.webkit.WebSettings
-import android.webkit.WebView
-import android.webkit.WebViewClient
-import android.widget.Button
-import android.widget.EditText
-import android.widget.LinearLayout
-import android.widget.ScrollView
-import android.widget.TextView
 import android.widget.Toast
-import com.indstream.foryou.AiService
-import com.indstream.foryou.SimklHistory
+import com.indstream.foryou.AppSession
+import com.indstream.foryou.ForYouRefresh
 
-/** FILE: Settings.kt - plugin settings store + settings dialog (Wyzie Subs API key today). */
+/** FILE: Settings.kt - plugin settings store (keys, AI provider, row refresh mode). */
 object Settings {
 
     /** Wyzie key redemption page (opened by the Get API chip). */
@@ -46,25 +20,16 @@ object Settings {
     /** Host whose session cookie carries the ShowBox token. */
     const val SHOWBOX_HOST = "https://www.febbox.com"
 
-    /** Chrome UA that passes the site's bot check and lets OAuth consent render. */
-    private const val SHOWBOX_UA =
-        "Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.82 Mobile Safari/537.36"
-
-    /** Rewrites navigator.userAgent so the page matches the header UA the request used. */
-    private const val UA_SPOOF_JS =
-        "if(!window.__indSpoofed){window.__indSpoofed=!0;let ua='$SHOWBOX_UA';" +
-            "try{Object.defineProperty(navigator,'userAgent',{get:()=>ua});" +
-            "Object.defineProperty(navigator,'appVersion',{get:()=>ua.replace('Mozilla/','')})}catch(e){}" +
-            "if(!window.chrome)window.chrome={runtime:{},loadTimes:()=>{},csi:()=>{}}}"
-
     private const val PREFS = "indstream_settings"
     private const val KEY = "wyzie_api_key"
     private const val TMDB_KEY = "tmdb_api_key"
     private const val SHOWBOX_KEY = "showbox_token"
     private const val AI_KEY = "ai_api_key"
+    private const val AI_KEY_PREFIX = "ai_api_key_"
     private const val AI_MODEL = "ai_model"
     private const val AI_BASE = "ai_base_url"
     private const val AI_PROVIDER = "ai_provider"
+    private const val FORYOU_MODE = "foryou_refresh_mode"
 
     @Volatile
     private var appContext: Context? = null
@@ -78,6 +43,7 @@ object Settings {
     /** Remember the app context so subtitle fetches can read the key without one. */
     fun init(context: Context) {
         appContext = context.applicationContext
+        AppSession.attach(context)
         load()
     }
 
@@ -181,8 +147,8 @@ object Settings {
 
     // AI provider settings, used by the recommendation reranker.
 
-    @Volatile
-    private var aiCached: String? = null
+    /** Keys are per provider; the legacy single key migrates to the saved provider. */
+    private val aiKeys = HashMap<String, String>()
 
     @Volatile
     private var aiModelCached: String? = null
@@ -196,10 +162,12 @@ object Settings {
     @Volatile
     private var aiLoaded = false
 
-    /** Saved AI key, or null when the user never set one. */
-    fun aiApiKey(): String? {
+    /** Saved key for the selected provider (or the given one), null when unset. */
+    fun aiApiKey(provider: String? = null): String? {
         if (!aiLoaded) loadAi()
-        return aiCached?.takeIf { it.isNotBlank() }
+        val id = provider?.trim()?.takeIf { it.isNotBlank() }
+            ?: aiProviderCached?.takeIf { it.isNotBlank() } ?: "openrouter"
+        return aiKeys[id]?.takeIf { it.isNotBlank() }
     }
 
     /** Selected provider id; empty when nothing was chosen. */
@@ -220,41 +188,101 @@ object Settings {
         return aiBaseCached.orEmpty()
     }
 
-    /** Persist the AI settings. A blank key clears it. */
+    /** Persist the AI settings for one provider. A blank key clears that provider's key. */
     fun saveAi(context: Context, provider: String, rawKey: String, model: String, baseUrl: String) {
         val key = normalizeKey(rawKey)
+        val id = provider.trim().ifBlank { "openrouter" }
         val cleanModel = model.trim()
         val cleanBase = baseUrl.trim().trimEnd('/')
         runCatching {
-            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            val edit = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 .edit()
-                .putString(AI_KEY, key)
                 .putString(AI_MODEL, cleanModel)
                 .putString(AI_BASE, cleanBase)
-                .putString(AI_PROVIDER, provider.trim())
-                .apply()
+                .putString(AI_PROVIDER, id)
+                .remove(AI_KEY)
+            if (key.isBlank()) edit.remove(AI_KEY_PREFIX + id) else edit.putString(AI_KEY_PREFIX + id, key)
+            edit.apply()
         }
-        aiCached = key
+        if (key.isBlank()) aiKeys.remove(id) else aiKeys[id] = key
         aiModelCached = cleanModel
         aiBaseCached = cleanBase
-        aiProviderCached = provider.trim()
+        aiProviderCached = id
         aiLoaded = true
         appContext = context.applicationContext
     }
 
-    /** Drop the saved AI settings. */
-    fun clearAi(context: Context) {
-        saveAi(context, "", "", "", "")
+    /** Drop the saved key/model for one provider. */
+    fun clearAi(context: Context, provider: String? = null) {
+        if (!aiLoaded) loadAi()
+        val id = provider?.trim()?.takeIf { it.isNotBlank() }
+            ?: aiProviderCached?.takeIf { it.isNotBlank() } ?: "openrouter"
+        runCatching {
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit()
+                .remove(AI_KEY_PREFIX + id)
+                .remove(AI_KEY)
+                .putString(AI_MODEL, "")
+                .putString(AI_BASE, "")
+                .apply()
+        }
+        aiKeys.remove(id)
+        aiModelCached = ""
+        aiBaseCached = ""
+        aiLoaded = true
+        appContext = context.applicationContext
+    }
+
+    @Volatile
+    private var forYouModeCached: String? = null
+
+    @Volatile
+    private var forYouModeLoaded = false
+
+    /** How often the personalised rows are rebuilt. */
+    fun forYouRefreshMode(): ForYouRefresh.Mode {
+        if (!forYouModeLoaded) loadForYouMode()
+        return ForYouRefresh.Mode.from(forYouModeCached)
+    }
+
+    /** Persist how often the personalised rows are rebuilt. */
+    fun saveForYouRefreshMode(context: Context, mode: ForYouRefresh.Mode) {
+        runCatching {
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit().putString(FORYOU_MODE, mode.id).apply()
+        }
+        forYouModeCached = mode.id
+        forYouModeLoaded = true
+        appContext = context.applicationContext
+    }
+
+    private fun loadForYouMode() {
+        val ctx = appContext ?: return
+        forYouModeCached = runCatching {
+            ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(FORYOU_MODE, "").orEmpty()
+        }.getOrDefault("")
+        forYouModeLoaded = true
     }
 
     private fun loadAi() {
         val ctx = appContext ?: return
         runCatching {
             val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            aiCached = prefs.getString(AI_KEY, "").orEmpty()
             aiModelCached = prefs.getString(AI_MODEL, "").orEmpty()
             aiBaseCached = prefs.getString(AI_BASE, "").orEmpty()
             aiProviderCached = prefs.getString(AI_PROVIDER, "").orEmpty()
+            aiKeys.clear()
+            prefs.all.forEach { (name, value) ->
+                if (name.startsWith(AI_KEY_PREFIX) && value is String && value.isNotBlank()) {
+                    aiKeys[name.removePrefix(AI_KEY_PREFIX)] = value
+                }
+            }
+            // Older installs stored one key for every provider; keep it under the saved provider.
+            val legacy = prefs.getString(AI_KEY, "").orEmpty()
+            if (legacy.isNotBlank()) {
+                val owner = aiProviderCached?.takeIf { it.isNotBlank() } ?: "openrouter"
+                aiKeys.putIfAbsent(owner, legacy)
+            }
         }
         aiLoaded = true
     }
@@ -282,154 +310,6 @@ object Settings {
             ?.substringAfter('=')
             ?.trim()
             ?.takeIf { it.isNotEmpty() }
-
-    private fun dp(context: Context, v: Int): Int = (v * context.resources.displayMetrics.density).toInt()
-
-    /** Opens the sign-in page in the browser when no activity is available to host a web view. */
-    private fun launchShowboxPage(context: Context) {
-        runCatching {
-            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(SHOWBOX_LINK)))
-        }.onFailure {
-            Toast.makeText(context, "No browser found", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    /**
-     * In-app sign-in sheet: loads the FebBox login page, then reads the session
-     * cookie once the user taps Use this login and hands the token to onToken.
-     */
-    private fun openShowboxLogin(context: Context, onToken: (String) -> Unit) {
-        if (context !is Activity) {
-            launchShowboxPage(context)
-            return
-        }
-        val sheetColor = Color.parseColor("#141416")
-        val textColor = Color.parseColor("#EDEDF2")
-        val hintColor = Color.parseColor("#A3A3AD")
-        val accentColor = Color.parseColor("#2F7CF6")
-
-        val webContainer = FrameLayout(context)
-        val web = WebView(context).apply {
-            layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT,
-            )
-            settings.javaScriptEnabled = true
-            settings.domStorageEnabled = true
-            settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
-            settings.loadWithOverviewMode = true
-            settings.useWideViewPort = true
-            settings.setSupportMultipleWindows(true)
-            settings.javaScriptCanOpenWindowsAutomatically = true
-            settings.userAgentString = SHOWBOX_UA
-            CookieManager.getInstance().setAcceptCookie(true)
-            CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
-            // OAuth opens the consent screen in a popup; host it over the main view.
-            webChromeClient = object : WebChromeClient() {
-                override fun onCreateWindow(view: WebView, isDialog: Boolean, isUserGesture: Boolean, resultMsg: Message?): Boolean {
-                    val popup = WebView(context).apply {
-                        layoutParams = FrameLayout.LayoutParams(
-                            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT,
-                        )
-                        settings.javaScriptEnabled = true
-                        settings.domStorageEnabled = true
-                        settings.userAgentString = SHOWBOX_UA
-                        CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
-                        webChromeClient = object : WebChromeClient() {
-                            override fun onCloseWindow(window: WebView) {
-                                webContainer.removeView(window)
-                                window.destroy()
-                            }
-                        }
-                    }
-                    webContainer.addView(popup)
-                    (resultMsg?.obj as? WebView.WebViewTransport)?.webView = popup
-                    resultMsg?.sendToTarget()
-                    return true
-                }
-            }
-            setBackgroundColor(sheetColor)
-        }
-        val statusText = TextView(context).apply {
-            text = "Loading sign-in page..."
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            setTextColor(hintColor)
-            setPadding(dp(context, 4), dp(context, 4), dp(context, 4), dp(context, 10))
-        }
-        web.webViewClient = object : WebViewClient() {
-            override fun onPageFinished(view: WebView?, url: String?) {
-                view?.evaluateJavascript(UA_SPOOF_JS, null)
-                statusText.text = "Sign in, then tap Use this login."
-            }
-
-            override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
-                if (request?.isForMainFrame == true) {
-                    statusText.text = "Couldn't load sign-in. Check your connection and retry."
-                }
-            }
-        }
-        webContainer.addView(web)
-        web.loadUrl(SHOWBOX_LINK)
-        val useBtn = Button(context).apply {
-            text = "Use this login"
-            setTextColor(Color.WHITE)
-            setTypeface(null, Typeface.BOLD)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-        }
-        val cancelBtn = Button(context).apply {
-            text = "Cancel"
-            setTextColor(textColor)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-        }
-        val browserBtn = Button(context).apply {
-            text = "Open in browser"
-            setTextColor(textColor)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-        }
-        val buttonRow = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.END
-            setPadding(0, dp(context, 10), 0, 0)
-            addView(cancelBtn)
-            addView(browserBtn)
-            addView(useBtn)
-        }
-        val root = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(sheetColor)
-            setPadding(dp(context, 14), dp(context, 14), dp(context, 14), dp(context, 14))
-            addView(statusText)
-            addView(webContainer, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
-            addView(buttonRow)
-        }
-        val dialog = AlertDialog.Builder(context, android.R.style.Theme_Material_Dialog)
-            .setView(root)
-            .create()
-        useBtn.setOnClickListener {
-            val cm = CookieManager.getInstance()
-            val cookie = runCatching { cm.getCookie(SHOWBOX_HOST) ?: cm.getCookie("https://febbox.com") }.getOrNull()
-            val token = uiTokenFromCookie(cookie)
-            if (token == null) {
-                statusText.text = "No session yet - finish signing in, or paste the cookie below."
-                return@setOnClickListener
-            }
-            onToken(token)
-            dialog.dismiss()
-        }
-        cancelBtn.setOnClickListener { dialog.dismiss() }
-        browserBtn.setOnClickListener {
-            launchShowboxPage(context)
-            statusText.text = "Sign in in the browser, then paste the cookie below."
-        }
-        dialog.setOnDismissListener { runCatching { web.destroy() } }
-        dialog.window?.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Color.parseColor("#0F0F11")))
-        dialog.show()
-        dialog.window?.apply {
-            setLayout(
-                (context.resources.displayMetrics.widthPixels * 0.92).toInt(),
-                (context.resources.displayMetrics.heightPixels * 0.82).toInt(),
-            )
-        }
-    }
 
     @Volatile
     private var tmdbCached: String? = null
@@ -471,640 +351,6 @@ object Settings {
         }.getOrDefault("")
         loaded = true
     }
-
-    /** Dark (not pitch-black) settings dialog: key field, redeem link, save/clear. */
-    fun openSettings(context: Context) {
-        val bgColor = Color.parseColor("#0F0F11")
-        val cardColor = Color.parseColor("#141416")
-        val palletColor = Color.parseColor("#19191C")
-        val fieldColor = Color.parseColor("#232329")
-        val borderColor = Color.parseColor("#3D3D46")
-        val textColor = Color.parseColor("#EDEDF2")
-        val hintColor = Color.parseColor("#A3A3AD")
-        val accentColor = Color.parseColor("#2F7CF6")
-        val chipYellow = Color.parseColor("#FFC107")
-        val chipInk = Color.parseColor("#141414")
-        val savedGreen = Color.parseColor("#3FB950")
-
-        fun dp(v: Int): Int = (v * context.resources.displayMetrics.density).toInt()
-        fun rounded(color: Int, radiusDp: Int, strokeDp: Int = 0, strokeColor: Int = borderColor): GradientDrawable =
-            GradientDrawable().apply {
-                shape = GradientDrawable.RECTANGLE
-                setColor(color)
-                cornerRadius = dp(radiusDp).toFloat()
-                if (strokeDp > 0) setStroke(dp(strokeDp), strokeColor)
-            }
-
-        val sectionsStack = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(20), dp(20), dp(16))
-            background = rounded(cardColor, 16)
-        }
-        fun addLabel(s: String, sizeSp: Float, color: Int, bold: Boolean = false): TextView =
-            TextView(context).apply {
-                text = s
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, sizeSp)
-                setTextColor(color)
-                if (bold) setTypeface(null, Typeface.BOLD)
-                sectionsStack.addView(this)
-            }
-
-        addLabel("Settings", 18f, textColor, bold = true)
-        addLabel("Keys are optional - built-ins apply when empty.", 12f, hintColor)
-
-        // Pallet card: tappable header with state + chevron, collapsible body.
-        fun settingsSection(title: String, stateText: String, stateOn: Boolean): LinearLayout {
-            val card = LinearLayout(context).apply {
-                orientation = LinearLayout.VERTICAL
-                background = rounded(palletColor, 12)
-                layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-                ).apply { topMargin = dp(12) }
-            }
-            val sectionBody = LinearLayout(context).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(dp(16), 0, dp(16), dp(14))
-            }
-            val chevron = TextView(context).apply {
-                text = "\u25BE"
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-                setTextColor(hintColor)
-                setPadding(dp(8), 0, 0, 0)
-            }
-            val header = LinearLayout(context).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                isClickable = true
-                isFocusable = true
-                setPadding(dp(16), dp(12), dp(12), dp(12))
-                setOnClickListener {
-                    val open = sectionBody.visibility != View.VISIBLE
-                    sectionBody.visibility = if (open) View.VISIBLE else View.GONE
-                    chevron.text = if (open) "\u25BE" else "\u25B8"
-                }
-            }
-            val titleView = TextView(context).apply {
-                text = title
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-                setTextColor(textColor)
-                setTypeface(null, Typeface.BOLD)
-                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-            }
-            val stateView = TextView(context).apply {
-                text = stateText
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                setTypeface(null, Typeface.BOLD)
-                setTextColor(if (stateOn) savedGreen else hintColor)
-            }
-            header.addView(titleView)
-            header.addView(stateView)
-            header.addView(chevron)
-            card.addView(header)
-            card.addView(sectionBody)
-            sectionsStack.addView(card)
-            return sectionBody
-        }
-
-        // Small pill chip for header actions (Verify, Get API).
-        fun actionChip(label: String, fill: Int, ink: Int, stroke: Int? = null): TextView =
-            TextView(context).apply {
-                text = label
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                setTextColor(ink)
-                setTypeface(null, Typeface.BOLD)
-                background = rounded(fill, 14, if (stroke == null) 0 else 1, stroke ?: fill)
-                setPadding(dp(12), dp(6), dp(12), dp(6))
-                isClickable = true
-                isFocusable = true
-            }
-
-        val wyzieSaved = apiKey() != null
-        val wyzieSection = settingsSection(
-            "Wyzie Subs API Key", if (wyzieSaved) "Saved" else "Not set", wyzieSaved,
-        )
-        val chipRow = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.END
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { bottomMargin = dp(6) }
-        }
-        val getApiChip = actionChip("Get API", Color.TRANSPARENT, textColor, borderColor)
-        val verifyChip = actionChip("Verify", chipYellow, chipInk).apply {
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { leftMargin = dp(8) }
-        }
-        chipRow.addView(getApiChip)
-        chipRow.addView(verifyChip)
-        wyzieSection.addView(chipRow)
-        val wyzieKeyInput = EditText(context).apply {
-            setText(apiKey().orEmpty())
-            setHint("wyzie-...")
-            setHintTextColor(hintColor)
-            setTextColor(textColor)
-            setSingleLine(true)
-            inputType = InputType.TYPE_CLASS_TEXT
-            typeface = Typeface.MONOSPACE
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-            background = rounded(fieldColor, 10, 1)
-            setPadding(dp(12), dp(10), dp(12), dp(10))
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-            )
-            wyzieSection.addView(this)
-        }
-
-        val wyzieStatusText = TextView(context).apply {
-            text = if (wyzieSaved) "Wyzie Subs active - your key will be used."
-            else "No key saved - using built-in subtitles."
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            setTextColor(hintColor)
-            setPadding(0, dp(10), 0, dp(12))
-            wyzieSection.addView(this)
-        }
-
-        val wyzieButtonRow = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.END
-        }
-        // ~25% smaller than the platform Button defaults (14sp, 88x48dp minimums).
-        val clearBtn = Button(context).apply {
-            text = "Clear"
-            setTextColor(textColor)
-            background = rounded(Color.TRANSPARENT, 10)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-            minWidth = 0
-            minHeight = 0
-            setPadding(dp(16), dp(8), dp(16), dp(8))
-        }
-        val saveBtn = Button(context).apply {
-            text = "Save"
-            setTextColor(Color.WHITE)
-            setTypeface(null, Typeface.BOLD)
-            background = rounded(accentColor, 10)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-            minWidth = 0
-            minHeight = 0
-            setPadding(dp(16), dp(8), dp(16), dp(8))
-        }
-        wyzieButtonRow.addView(clearBtn)
-        wyzieButtonRow.addView(saveBtn)
-        wyzieSection.addView(wyzieButtonRow)
-
-        val tmdbSaved = tmdbApiKey() != null
-        val tmdbSection = settingsSection(
-            "TMDB API Key", if (tmdbSaved) "Saved" else "Not set", tmdbSaved,
-        )
-        val tmdbDesc = TextView(context).apply {
-            text = "Paste the API Key (v3 auth) - the short 32-character key. Not the long Read Access Token."
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            setTextColor(hintColor)
-            setPadding(0, 0, 0, dp(6))
-            tmdbSection.addView(this)
-        }
-        val tmdbChipRow = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.END
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { bottomMargin = dp(6) }
-        }
-        val tmdbGetApiChip = actionChip("Get API", Color.TRANSPARENT, textColor, borderColor)
-        val tmdbVerifyChip = actionChip("Verify", chipYellow, chipInk).apply {
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { leftMargin = dp(8) }
-        }
-        tmdbChipRow.addView(tmdbGetApiChip)
-        tmdbChipRow.addView(tmdbVerifyChip)
-        tmdbSection.addView(tmdbChipRow)
-        val tmdbKeyInput = EditText(context).apply {
-            setText(tmdbApiKey().orEmpty())
-            setHint("API Key (v3), 32 characters...")
-            setHintTextColor(hintColor)
-            setTextColor(textColor)
-            setSingleLine(true)
-            inputType = InputType.TYPE_CLASS_TEXT
-            typeface = Typeface.MONOSPACE
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-            background = rounded(fieldColor, 10, 1)
-            setPadding(dp(12), dp(10), dp(12), dp(10))
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-            )
-            tmdbSection.addView(this)
-        }
-        val tmdbStatusText = TextView(context).apply {
-            text = if (tmdbSaved) "Personal TMDB key active - used first for metadata."
-            else "No key saved - using built-in keys."
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            setTextColor(hintColor)
-            setPadding(0, dp(10), 0, dp(12))
-            tmdbSection.addView(this)
-        }
-        val tmdbButtonRow = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.END
-        }
-        val tmdbClearBtn = Button(context).apply {
-            text = "Clear"
-            setTextColor(textColor)
-            background = rounded(Color.TRANSPARENT, 10)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-            minWidth = 0
-            minHeight = 0
-            setPadding(dp(16), dp(8), dp(16), dp(8))
-        }
-        val tmdbSaveBtn = Button(context).apply {
-            text = "Save"
-            setTextColor(Color.WHITE)
-            setTypeface(null, Typeface.BOLD)
-            background = rounded(accentColor, 10)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-            minWidth = 0
-            minHeight = 0
-            setPadding(dp(16), dp(8), dp(16), dp(8))
-        }
-        tmdbButtonRow.addView(tmdbClearBtn)
-        tmdbButtonRow.addView(tmdbSaveBtn)
-        tmdbSection.addView(tmdbButtonRow)
-
-        val showboxSaved = showboxToken() != null
-        val showboxSection = settingsSection(
-            "ShowBox Token (FebBox)", if (showboxSaved) "Saved" else "Not set", showboxSaved,
-        )
-        val showboxDesc = TextView(context).apply {
-            text = "Optional - enables the ShowBox server. Tap Get Token to sign in, or paste the febbox.com `ui` cookie value yourself."
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            setTextColor(hintColor)
-            setPadding(0, 0, 0, dp(6))
-            showboxSection.addView(this)
-        }
-        val showboxChipRow = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.END
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { bottomMargin = dp(6) }
-        }
-        val showboxGetChip = actionChip("Get Token", chipYellow, chipInk)
-        showboxChipRow.addView(showboxGetChip)
-        showboxSection.addView(showboxChipRow)
-        val showboxKeyInput = EditText(context).apply {
-            setText(showboxToken().orEmpty())
-            setHint("ui token / cookie...")
-            setHintTextColor(hintColor)
-            setTextColor(textColor)
-            setSingleLine(true)
-            inputType = InputType.TYPE_CLASS_TEXT
-            typeface = Typeface.MONOSPACE
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-            background = rounded(fieldColor, 10, 1)
-            setPadding(dp(12), dp(10), dp(12), dp(10))
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-            )
-            showboxSection.addView(this)
-        }
-        val showboxStatusText = TextView(context).apply {
-            text = if (showboxSaved) "ShowBox active - the server will use your token."
-            else "No token saved - the ShowBox server stays off."
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            setTextColor(hintColor)
-            setPadding(0, dp(10), 0, dp(12))
-            showboxSection.addView(this)
-        }
-        val showboxButtonRow = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.END
-        }
-        val showboxClearBtn = Button(context).apply {
-            text = "Clear"
-            setTextColor(textColor)
-            background = rounded(Color.TRANSPARENT, 10)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-            minWidth = 0
-            minHeight = 0
-            setPadding(dp(16), dp(8), dp(16), dp(8))
-        }
-        val showboxSaveBtn = Button(context).apply {
-            text = "Save"
-            setTextColor(Color.WHITE)
-            setTypeface(null, Typeface.BOLD)
-            background = rounded(accentColor, 10)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-            minWidth = 0
-            minHeight = 0
-            setPadding(dp(16), dp(8), dp(16), dp(8))
-        }
-        showboxButtonRow.addView(showboxClearBtn)
-        showboxButtonRow.addView(showboxSaveBtn)
-        showboxSection.addView(showboxButtonRow)
-
-        // Text field with the shared style, used by the section below.
-        fun field(value: String, hint: String): EditText = EditText(context).apply {
-            setText(value)
-            setHint(hint)
-            setHintTextColor(hintColor)
-            setTextColor(textColor)
-            setSingleLine(true)
-            inputType = InputType.TYPE_CLASS_TEXT
-            typeface = Typeface.MONOSPACE
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-            background = rounded(fieldColor, 10, 1)
-            setPadding(dp(12), dp(10), dp(12), dp(10))
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-            )
-        }
-
-        val aiSaved = aiApiKey() != null
-        val aiSection = settingsSection(
-            "Made for You AI", if (aiSaved) "Saved" else "Not set", aiSaved,
-        )
-        val aiDesc = TextView(context).apply {
-            text = "Optional - the model only reorders candidates that already match your history. " +
-                "The titles you watched are sent to the provider you pick."
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            setTextColor(hintColor)
-            setPadding(0, 0, 0, dp(6))
-            aiSection.addView(this)
-        }
-        var selectedProvider = aiProviderId()
-        val aiChipRow = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { bottomMargin = dp(6) }
-        }
-        val aiChips = LinkedHashMap<String, TextView>()
-        val aiScroll = android.widget.HorizontalScrollView(context).apply {
-            isHorizontalFadingEdgeEnabled = false
-            isVerticalFadingEdgeEnabled = false
-            overScrollMode = View.OVER_SCROLL_NEVER
-            addView(aiChipRow)
-        }
-        AiService.Provider.entries.forEach { provider ->
-            val chip = actionChip(provider.label, Color.TRANSPARENT, textColor, borderColor).apply {
-                setPadding(dp(10), dp(6), dp(10), dp(6))
-                layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-                ).apply { rightMargin = dp(6) }
-            }
-            aiChips[provider.id] = chip
-            aiChipRow.addView(chip)
-        }
-        aiSection.addView(aiScroll)
-        val aiKeyInput = field(aiApiKey().orEmpty(), "provider API key...")
-        aiSection.addView(aiKeyInput)
-        val aiModelInput = field(aiModel(), "model id...")
-        aiSection.addView(aiModelInput)
-        val aiBaseInput = field(aiBaseUrl(), "https://host/v1")
-        aiBaseInput.visibility = if (selectedProvider == "other") View.VISIBLE else View.GONE
-        aiSection.addView(aiBaseInput)
-        val aiChipActionRow = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.END
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { topMargin = dp(8) }
-        }
-        val aiVerifyChip = actionChip("Verify", chipYellow, chipInk)
-        aiChipActionRow.addView(aiVerifyChip)
-        val aiModelsChip = actionChip("Models", chipYellow, chipInk).apply {
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { leftMargin = dp(6) }
-        }
-        aiChipActionRow.addView(aiModelsChip)
-        aiSection.addView(aiChipActionRow)
-        val aiStatusText = TextView(context).apply {
-            text = if (aiSaved) "Key active - the model reorders your row." else "No key - rows use the local score only."
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            setTextColor(hintColor)
-            setPadding(0, dp(10), 0, dp(6))
-            aiSection.addView(this)
-        }
-        val aiAccountText = TextView(context).apply {
-            text = "Account: checking..."
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            setTextColor(hintColor)
-            setPadding(0, 0, 0, dp(10))
-            aiSection.addView(this)
-        }
-        val aiButtonRow = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.END
-        }
-        val aiClearBtn = Button(context).apply {
-            text = "Clear"
-            setTextColor(textColor)
-            background = rounded(Color.TRANSPARENT, 10)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-            minWidth = 0
-            minHeight = 0
-            setPadding(dp(16), dp(8), dp(16), dp(8))
-        }
-        val aiSaveBtn = Button(context).apply {
-            text = "Save"
-            setTextColor(Color.WHITE)
-            setTypeface(null, Typeface.BOLD)
-            background = rounded(accentColor, 10)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-            minWidth = 0
-            minHeight = 0
-            setPadding(dp(16), dp(8), dp(16), dp(8))
-        }
-        aiButtonRow.addView(aiClearBtn)
-        aiButtonRow.addView(aiSaveBtn)
-        aiSection.addView(aiButtonRow)
-
-        fun refreshAiChips() {
-            aiChips.forEach { (id, chip) ->
-                val on = id == selectedProvider
-                chip.background = if (on) rounded(accentColor, 14) else rounded(Color.TRANSPARENT, 14, 1, borderColor)
-                chip.setTextColor(if (on) Color.WHITE else textColor)
-            }
-        }
-        refreshAiChips()
-        aiChips.forEach { (id, chip) ->
-            chip.setOnClickListener {
-                selectedProvider = id
-                val preset = AiService.Provider.from(id)
-                aiModelInput.setText(preset.defaultModel)
-                aiBaseInput.visibility = if (id == "other") View.VISIBLE else View.GONE
-                refreshAiChips()
-            }
-        }
-
-        val scroll = ScrollView(context).apply {
-            setBackgroundColor(bgColor)
-            setPadding(dp(4), dp(4), dp(4), dp(4))
-            // No fading-edge gradient or overscroll glow near the edges - flat only.
-            isVerticalFadingEdgeEnabled = false
-            isHorizontalFadingEdgeEnabled = false
-            overScrollMode = View.OVER_SCROLL_NEVER
-            addView(sectionsStack)
-        }
-        // AlertDialog with the Material dialog theme and a rounded
-        // window background - no floating-theme edge gradient.
-        val dialog = AlertDialog.Builder(context, android.R.style.Theme_Material_Dialog)
-            .setView(scroll)
-            .create()
-        fun verifyNow(key: String) {
-            if (!isValidKey(key)) {
-                wyzieKeyInput.error = "Key looks too short"
-                return
-            }
-            wyzieStatusText.text = "Verifying key..."
-            Thread {
-                val msg = runCatching {
-                    kotlinx.coroutines.runBlocking { WyzieSubs.testKey(key) }.second
-                }.getOrDefault("Verify failed - no network?")
-                wyzieKeyInput.post { wyzieStatusText.text = msg }
-            }.start()
-        }
-        verifyChip.setOnClickListener { verifyNow(wyzieKeyInput.text.toString()) }
-        getApiChip.setOnClickListener {
-            runCatching {
-                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(KEY_LINK)))
-            }.onFailure {
-                Toast.makeText(context, "No browser found", Toast.LENGTH_SHORT).show()
-            }
-        }
-        clearBtn.setOnClickListener {
-            clear(context)
-            Toast.makeText(context, "Cleared - using built-in subtitles", Toast.LENGTH_SHORT).show()
-            dialog.dismiss()
-        }
-        saveBtn.setOnClickListener {
-            val typed = wyzieKeyInput.text.toString()
-            if (save(context, typed)) {
-                Toast.makeText(context, "Saved", Toast.LENGTH_SHORT).show()
-                dialog.dismiss()
-                // Verify on save: error toast when the key fails.
-                Thread {
-                    val msg = runCatching {
-                        kotlinx.coroutines.runBlocking { WyzieSubs.testKey(typed) }.second
-                    }.getOrDefault("Verify failed - no network?")
-                    if (!msg.startsWith("Key works")) {
-                        android.os.Handler(android.os.Looper.getMainLooper()).post {
-                            Toast.makeText(context, "Wyzie: $msg", Toast.LENGTH_LONG).show()
-                        }
-                    }
-                }.start()
-            } else {
-                wyzieKeyInput.error = "Key looks too short"
-            }
-        }
-        fun tmdbVerifyNow(key: String) {
-            tmdbKeyProblem(key)?.let { tmdbKeyInput.error = it; return }
-            tmdbStatusText.text = "Verifying key..."
-            Thread {
-                val msg = runCatching {
-                    kotlinx.coroutines.runBlocking { TmdbService.testTmdbKey(key) }
-                }.getOrDefault("Verify failed - no network?")
-                tmdbKeyInput.post { tmdbStatusText.text = msg }
-            }.start()
-        }
-        tmdbVerifyChip.setOnClickListener { tmdbVerifyNow(tmdbKeyInput.text.toString()) }
-        tmdbGetApiChip.setOnClickListener {
-            runCatching {
-                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(TMDB_LINK)))
-            }.onFailure {
-                Toast.makeText(context, "No browser found", Toast.LENGTH_SHORT).show()
-            }
-        }
-        tmdbClearBtn.setOnClickListener {
-            clearTmdb(context)
-            Toast.makeText(context, "Cleared - using built-in keys", Toast.LENGTH_SHORT).show()
-            dialog.dismiss()
-        }
-        tmdbSaveBtn.setOnClickListener {
-            val typed = tmdbKeyInput.text.toString()
-            if (saveTmdb(context, typed)) {
-                Toast.makeText(context, "Saved", Toast.LENGTH_SHORT).show()
-                dialog.dismiss()
-            } else {
-                tmdbKeyInput.error = tmdbKeyProblem(typed) ?: "Key looks too short"
-            }
-        }
-        showboxGetChip.setOnClickListener {
-            openShowboxLogin(context) { token ->
-                showboxKeyInput.setText(token)
-                saveShowbox(context, token)
-                showboxStatusText.text = "Token captured - ShowBox active."
-                Toast.makeText(context, "Signed in - token saved", Toast.LENGTH_SHORT).show()
-            }
-        }
-        showboxClearBtn.setOnClickListener {
-            clearShowbox(context)
-            Toast.makeText(context, "Cleared - ShowBox stays off", Toast.LENGTH_SHORT).show()
-            dialog.dismiss()
-        }
-        showboxSaveBtn.setOnClickListener {
-            saveShowbox(context, showboxKeyInput.text.toString())
-            Toast.makeText(context, "Saved", Toast.LENGTH_SHORT).show()
-            dialog.dismiss()
-        }
-        aiVerifyChip.setOnClickListener {
-            val provider = AiService.Provider.from(selectedProvider)
-            val key = aiKeyInput.text.toString().trim()
-            val model = aiModelInput.text.toString().trim()
-            val base = aiBaseInput.text.toString().trim()
-            aiStatusText.text = "Verifying key..."
-            Thread {
-                val msg = runCatching {
-                    kotlinx.coroutines.runBlocking { AiService.testKey(provider, base, model, key) }
-                }.getOrDefault("Verify failed - no network?")
-                aiKeyInput.post { aiStatusText.text = msg }
-            }.start()
-        }
-        aiModelsChip.setOnClickListener {
-            val provider = AiService.Provider.from(selectedProvider)
-            val key = aiKeyInput.text.toString().trim()
-            val model = aiModelInput.text.toString().trim()
-            val base = aiBaseInput.text.toString().trim()
-            aiStatusText.text = "Fetching model list..."
-            Thread {
-                val msg = runCatching {
-                    kotlinx.coroutines.runBlocking { AiService.testModels(provider, base, model, key) }
-                }.getOrDefault("List failed - no network?")
-                aiKeyInput.post { aiStatusText.text = msg }
-            }.start()
-        }
-        aiClearBtn.setOnClickListener {
-            clearAi(context)
-            Toast.makeText(context, "Cleared - rows use the local score", Toast.LENGTH_SHORT).show()
-            dialog.dismiss()
-        }
-        aiSaveBtn.setOnClickListener {
-            saveAi(
-                context, selectedProvider,
-                aiKeyInput.text.toString(), aiModelInput.text.toString(), aiBaseInput.text.toString(),
-            )
-            Toast.makeText(context, "Saved", Toast.LENGTH_SHORT).show()
-            dialog.dismiss()
-        }
-        // Account state lives in the host app, so the check runs off the main thread.
-        Thread {
-            val linked = SimklHistory.refresh()
-            aiAccountText.post {
-                aiAccountText.text = if (linked) {
-                    "Account: linked - the rows follow your history."
-                } else {
-                    "Account: not linked - rows stay hidden until an account is linked in the app."
-                }
-            }
-        }.start()
-        dialog.window?.setBackgroundDrawable(rounded(bgColor, 20))
-        dialog.show()
-        dialog.window?.apply {
-            setLayout(
-                (context.resources.displayMetrics.widthPixels * 0.88).toInt(),
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            )
-        }
-    }
+    /** The provider settings sheet. */
+    fun openSettings(context: Context) = SettingsUi.open(context)
 }
