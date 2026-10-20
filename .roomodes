@@ -1,12 +1,34 @@
 # Indflix Project Rules
 
-## Code style
-- Comments very sparse: only when code is not self-explanatory. Prefer none.
-- One short line max. No doc blocks, no paragraphs.
-- No names of developers, plugins, sites, or titles; state only what the code does.
-- Simple and direct beats clever: no unnecessary abstractions, wrappers, or helpers.
-- Do not over complicate coding/programming if not sure take refernce on internet or ask.
+1. Code Style
 
-## Architecture
-- Do not create unnecessary files: related logic lives in one file and one object.
-- Use logic in creating file and naming them.
+- Keep comments minimal; add them only when clarification is needed.
+- Avoid unnecessary developer, plugin, website, or content names in comments, logs, and user-facing messages. Preserve names and references required for functionality.
+- Prefer simple, readable solutions. Avoid unnecessary abstractions, wrappers, helpers, and duplicate logic.
+- Follow existing project and language conventions.
+
+2. Architecture
+
+- Avoid unnecessary files. Check the existing codebase before creating new ones.
+- Keep related logic in the same file and object when practical. Separate them only when it improves maintainability.
+- Use meaningful names and follow the existing project structure.
+
+3. Implementation
+
+- Understand the relevant code and execution flow before making changes.
+- Make the smallest correct change. Reuse existing logic and preserve unrelated functionality.
+- Avoid unnecessary refactoring, dependencies, and unrequested features.
+- When unsure, consult reliable technical references or ask for clarification instead of guessing.
+
+4. Verification
+
+- Check that the actual problem is solved, not just its symptoms.
+- Run relevant tests or builds when possible.
+- Review changes for regressions, unnecessary files, and unrelated modifications.
+- Report unverified fixes or unresolved issues honestly.
+
+5. Decision-Making
+
+- Prioritize correctness, simplicity, performance, and maintainability.
+- Choose the simplest solution that fits the existing architecture.
+- Implement clear requirements directly; ask questions only when a significant ambiguity affects correctness.
