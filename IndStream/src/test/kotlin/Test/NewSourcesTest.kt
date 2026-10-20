@@ -8,7 +8,6 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-/** Guards the video-lane expansion: Vidrift, Rivestream, Movy, VidSpark, Braflix. */
 class NewSourcesTest {
 
     @Test
@@ -21,8 +20,92 @@ class NewSourcesTest {
     }
 
     @Test
+    fun downloadFarm_presentAndTmdbKeyed() {
+        for (id in listOf("hindmoviez", "hdhub4u", "moviesdrive", "dudefilms", "filmycab")) {
+            val s = ServerFarm.allServers.firstOrNull { it.id == id }
+            assertTrue(s != null, "$id must be in the farm")
+            assertEquals(ServerIdType.TMDB, s!!.idType)
+        }
+    }
+
+    @Test
+    fun titleHits_parsesSearchMarkup() {
+        val html = "<h2 class=\"entry-title\"><a href=\"/jawan-2023/\">Jawan 2023</a></h2>" +
+            "<a href=\"/2026/07/31/film/\"><p>Film (2026)</p></a>" +
+            "<h3 class=\"simple-grid-grid-post-title\"><a href=\"/dude-film/\">Dude Film</a></h3>"
+        val hits = StreamEngine.titleHits(html, "https://site.example")
+        assertEquals(3, hits.size)
+        assertTrue(hits.any { it.first == "https://site.example/jawan-2023/" })
+        assertTrue(hits.any { it.second == "Film (2026)" })
+    }
+
+    @Test
+    fun ariaHits_parsesSearchMarkup() {
+        val html = "<a href=\"/jawan-2023-hindi-webrip-full-movie/\" " +
+            "aria-label=\"Jawan (2023) WEB-DL Hindi | Full Movie\">x</a>" +
+            "<a href=\"/category/action/\" aria-label=\"Action\">x</a>"
+        val hits = StreamEngine.ariaHits(html, "https://site.example")
+        assertEquals(1, hits.size)
+        assertEquals("https://site.example/jawan-2023-hindi-webrip-full-movie/", hits[0].first)
+    }
+
+    @Test
+    fun headingAnchorHits_usesNearestHeading() {
+        val html = "<h3>Jawan 2023 720p [1.4GB]</h3>" +
+            "<p><a href=\"https://links.example/1\">Download Links</a></p>"
+        val hits = StreamEngine.headingAnchorHits(html, "https://site.example", Regex("links\\.example"))
+        assertEquals(1, hits.size)
+        assertEquals("Jawan 2023 720p [1.4GB]", hits[0].second)
+    }
+
+    @Test
+    fun headingAnchorHits_mergesEpisodeHeadingWithFileLabel() {
+        val html = "<h5>Show S01E02 720p [1GB]</h5>" +
+            "<h5><a href=\"https://hubcloud.ist/drive/search-recover.php?from_ac=x\">720p 10bit [1GB]</a></h5>"
+        val hits = StreamEngine.headingAnchorHits(html, "https://site.example", Regex("search-recover"))
+        assertEquals(1, hits.size)
+        assertTrue(hits[0].second.contains("S01E02"))
+        assertTrue(hits[0].second.contains("720p"))
+    }
+
+    @Test
+    fun fileHostLinks_keepsFilesAndSkipsGatewayNoise() {
+        val html = "<a href=\"https://hubcloud.ist/drive/x\">Cloud</a>" +
+            "<a href=\"https://share.example/0:/film.mkv\">Direct</a>" +
+            "<a href=\"https://hubcloud.ist/tg/go?id=x\">Telegram</a>" +
+            "<a href=\"https://pixel.hubcloud.ist/x\">Pixel</a>" +
+            "<a href=\"https://pixeldrain.dev/u/AbC123\">PixelDrain</a>" +
+            "<a href=\"https://host.example/hubcloud.php?token=x\">Token</a>"
+        val hits = StreamEngine.fileHostLinks(html, "https://site.example")
+        assertEquals(3, hits.size)
+        assertTrue(hits.any { it.first.endsWith(".mkv") })
+        assertTrue(hits.any { it.first.contains("pixeldrain") })
+    }
+
+    @Test
+    fun pixeldrainDirect_preservesHostAndConvertsPageUrls() {
+        assertEquals(
+            "https://pixeldrain.dev/api/file/AbC123",
+            StreamEngine.pixeldrainDirect("https://pixeldrain.dev/u/AbC123"),
+        )
+        assertEquals(
+            "https://pixeldrain.com/api/file/AbC123",
+            StreamEngine.pixeldrainDirect("https://pixeldrain.com/api/file/AbC123"),
+        )
+        assertNull(StreamEngine.pixeldrainDirect("https://share.example/u/AbC123"))
+    }
+
+    @Test
+    fun qualityText_and_fileNameMatches() {
+        assertEquals("720p", StreamEngine.qualityText("720p 10Bit HEVC [1GB]"))
+        assertEquals("4K", StreamEngine.qualityText("4K [2160p SDR]"))
+        assertTrue(StreamEngine.fileNameMatches("Jawan", "2023", "Jawan.Extended.Cut.2023.720p.mkv"))
+        assertTrue(!StreamEngine.fileNameMatches("Jawan", "2023", "Kuriyan.Jawan.Bapu.2025.720p.mkv"))
+        assertTrue(StreamEngine.fileNameMatches("Dune Part Two", "2024", "Dune.Part.Two.2024.1080p.mkv"))
+    }
+
+    @Test
     fun rivestream_secretKey_pinnedVectors() {
-        // Pinned against the live API (TMDB 550 / 1396 / 27205 / 603 / 1399).
         assertEquals("NDQzM2UwYzI=", StreamEngine.rivestreamSecretKey("550"))
         assertEquals("Nzg3ZmU5YTI=", StreamEngine.rivestreamSecretKey("1396"))
         assertEquals("LTZmMzMzMjM5", StreamEngine.rivestreamSecretKey("27205"))
@@ -61,7 +144,6 @@ class NewSourcesTest {
 
     @Test
     fun movy_decrypt_pinnedVector() {
-        // Deterministic KDF vector: seed + mediaId + XOR ciphertext.
         val seed = "59741865.p3--9ruju1S0dBTIaxZNN3"
         val cipher = "ZlQsjtYKRCJxWvBYqQ1a3hjSGQUgVNET0rce-3o6STkSpCAwbZQxmQ0bUQzMB6ub5oU" +
             "-OhcTSlmaoJvBS-VUZsLH5h_ZctHyUI2kZEA4C58fIVfFjQ"

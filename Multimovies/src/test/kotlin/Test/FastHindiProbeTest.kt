@@ -8,7 +8,6 @@ import com.multimovies.NxshaSubtitle
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 
-/** Live full-chain timing + Hindi/Indian-language audit for the fastest non-farm carriers. Manual run only. */
 class FastHindiProbeTest {
 
     private fun hindiCount(srcs: List<NxshaSource>): Int {
@@ -18,11 +17,10 @@ class FastHindiProbeTest {
 
     @Test
     fun nxsha_chain_timingAndHindi() = runBlocking {
-        // Inception for comparability with PracticalResolveTest, plus a dubbed title.
         val cases = listOf(
             27205 to "tt1375666",
-            299534 to "tt4154796",   // Avengers: Endgame (widely Hindi-dubbed)
-            360814 to "tt5074352",   // Dangal (natively Hindi)
+            299534 to "tt4154796",
+            360814 to "tt5074352",
         )
         for ((tmdb, imdb) in cases) {
             val src = MultiSourcePuller.Source(

@@ -6,10 +6,8 @@ import android.content.Context
 import android.os.Bundle
 import android.os.SystemClock
 
-/** Tracks app sessions, so cached rows can be rebuilt on every app open. */
 object AppSession {
 
-    /** A quick app switch is not a new session. */
     private const val MIN_ENTRY_GAP_MS = 60_000L
 
     @Volatile
@@ -21,14 +19,11 @@ object AppSession {
     @Volatile
     private var attached = false
 
-    /** Fallback id, stable for the life of the process. */
     private val fallback: Long by lazy { SystemClock.elapsedRealtime() }
 
-    /** Id of the running session; it changes on every app open. */
     val id: Long
         get() = current.takeIf { it != 0L } ?: fallback
 
-    /** Watch the host activities, so coming back to the app starts a new session. */
     fun attach(context: Context) {
         if (attached) return
         val app = context.applicationContext as? Application ?: return
@@ -58,7 +53,6 @@ object AppSession {
         })
     }
 
-    /** Start a new session unless the app was in the foreground a moment ago. */
     fun onForeground() {
         val now = System.currentTimeMillis()
         if (now - lastEntryAt < MIN_ENTRY_GAP_MS) return

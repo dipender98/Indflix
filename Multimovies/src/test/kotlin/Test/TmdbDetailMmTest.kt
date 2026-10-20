@@ -5,7 +5,6 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
 
-/** Guards TMDB detail runtime parsing: movie minutes and series episode minutes. */
 class TmdbDetailMmTest {
 
     @Test

@@ -8,7 +8,6 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-/** Guards live-domain rotation handling: subdomain and TLD changes must both stay detectable. */
 class DomainResolverMmTest {
 
     @Test

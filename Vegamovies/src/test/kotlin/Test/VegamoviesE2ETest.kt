@@ -8,7 +8,6 @@ import com.vegamovies.VegamoviesProvider
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Test
 
-/** End-to-end journey: search -> open a hit -> resolve links -> probe the stream. */
 class VegamoviesE2ETest {
 
     private val p = VegamoviesProvider()

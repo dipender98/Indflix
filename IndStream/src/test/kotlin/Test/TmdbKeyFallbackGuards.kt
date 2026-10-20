@@ -7,7 +7,6 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-/** Guards the pure key-fallback decision logic in TMDB metadata engine. */
 class TmdbKeyFallbackGuards {
 
     @Test
@@ -19,14 +18,13 @@ class TmdbKeyFallbackGuards {
 
     @Test
     fun rate_limit_does_not_rotate_keys() {
-        // The 429 limit is per IP, so another key cannot help - rotating only multiplies the request storm.
         assertFalse(TmdbService.shouldTryNextKey(429, null))
     }
 
     @Test
     fun resource_level_errors_do_not_trigger_auth_fallback() {
-        assertFalse(TmdbService.shouldTryNextKey(400, null)) // bad request (e.g. duplicate param)
-        assertFalse(TmdbService.shouldTryNextKey(404, null)) // id not found
+        assertFalse(TmdbService.shouldTryNextKey(400, null))
+        assertFalse(TmdbService.shouldTryNextKey(404, null))
     }
 
     @Test

@@ -8,10 +8,8 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-/** FILE: EpisodePickerTest. kt - tests for the "wrong episode / vanished server". md RC-A/B/C/D/E, F1-F5): - MovieBox. season-coverage suffix must. */
 class EpisodePickerTest {
 
-    // ── MovieBox season coverage (F4 / RC-E) ───────────────────────────────.
 
     @Test
     fun movieboxSeasonEnd_rangeParsesToLastNumber() {
@@ -23,7 +21,6 @@ class EpisodePickerTest {
         assertNull(StreamEngine.movieboxSeasonEnd("Reacher"))
     }
 
-    // ── Allmovieland card finder (F1/F2 / RC-A/RC-C) ───────────────────────.
 
     private val liveCardHtml = """
         <article class="short-mid new-short">
@@ -44,7 +41,6 @@ class EpisodePickerTest {
 
     @Test
     fun allmovielandCardUrl_matchesCurrentLiveMarkup() {
-        // THE regression).
         assertEquals(
             "https://allmovieland.art/10556-reacher.html",
             StreamEngine.allmovielandCardUrl(liveCardHtml),
@@ -65,7 +61,6 @@ class EpisodePickerTest {
             <a class="new-short__title--link" href="https://allmovieland.art/413-manjhi-the-mountain-man-2015-hindi.html"><h3 class="new-short__title hover-op">Manjhi</h3></a>
             <a class="new-short__title--link" href="https://allmovieland.art/10556-reacher.html"><h3 class="new-short__title hover-op">Reacher</h3></a>
         """.trimIndent()
-        // Title-fallback search results must be slug-).
         assertEquals(
             "https://allmovieland.art/10556-reacher.html",
             StreamEngine.allmovielandCardUrl(mixed, titleNorm = "reacher"),
@@ -78,7 +73,6 @@ class EpisodePickerTest {
         assertNull(StreamEngine.allmovielandCardUrl("<html><body>no cards</body></html>"))
     }
 
-    // ── Allmovieland strict series tree picker (F3 / RC-B) ─────────────────.
 
     private fun leaf(lang: String) = AmNode(lang, "", "", "hash-$lang.txt")
 
@@ -103,15 +97,13 @@ class EpisodePickerTest {
         val ep11 = StreamEngine.pickAllmovielandEpisodeNode(twoLevelTree, 1, 1)
         assertEquals("1-1", ep11?.id)
         val ep13 = StreamEngine.pickAllmovielandEpisodeNode(twoLevelTree, 1, 3)
-        assertEquals("Episode 3", ep13?.title) // title-form only, no episode field.
+        assertEquals("Episode 3", ep13?.title)
         val s2e1 = StreamEngine.pickAllmovielandEpisodeNode(twoLevelTree, 2, 1)
         assertEquals("2-1", s2e1?.id)
     }
 
     @Test
     fun pick_noMatch_returnsNull_neverFirstEntry() {
-        // THE wrong-episode regression: missing episode must yield NO streams, not season-1/episode-1 (the old `?: first()`.
-// fallbacks).
         assertNull(StreamEngine.pickAllmovielandEpisodeNode(twoLevelTree, 1, 9))
         assertNull(StreamEngine.pickAllmovielandEpisodeNode(twoLevelTree, 3, 1))
     }
@@ -127,8 +119,6 @@ class EpisodePickerTest {
 
     @Test
     fun seasonNode_neverConfusedWithEpisodeRows() {
-        // A FLAT episode row's children are language LEAVES (file set) - it must not be treated as a season container (which.
-// guards the strict picker).
         val epRow = flatTree.first()
         assertFalse(StreamEngine.amNodeIsSeason(epRow, 1), "'Episode 1' row with leaf children is not a season")
         assertTrue(StreamEngine.amNodeIsSeason(twoLevelTree.first(), 1))
@@ -141,7 +131,6 @@ class EpisodePickerTest {
         assertTrue(StreamEngine.allmovielandEpisodeTitleMatches("Episode 3", 3))
         assertTrue(StreamEngine.allmovielandEpisodeTitleMatches("S01E03", 3))
         assertTrue(StreamEngine.allmovielandEpisodeTitleMatches("1x03", 3))
-        // Bare numbers are NOT episode labels (the false-match class).
         assertFalse(StreamEngine.allmovielandEpisodeTitleMatches("Part 3", 3))
         assertFalse(StreamEngine.allmovielandEpisodeTitleMatches("Season 3", 3))
         assertFalse(StreamEngine.allmovielandEpisodeTitleMatches("Episode 13", 3))

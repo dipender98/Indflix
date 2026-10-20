@@ -10,7 +10,6 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withTimeoutOrNull
 
-/** Fallback subtitles (OpenSubtitles addon + SubSense top-up). Progressive: hi/en emit first. */
 internal object VegaSubtitles {
 
     private const val BASE = "https://opensubtitles.stremio.homes"
@@ -24,7 +23,6 @@ internal object VegaSubtitles {
     private const val CACHE_MAX = 64
     internal const val GROUP_SIZE = 6
 
-    // Canonical name -> addon ISO-1 code (map order = menu + chunking order).
     private val CODES = mapOf(
         "Hindi" to "hi", "English" to "en", "Tamil" to "ta", "Telugu" to "te",
         "Malayalam" to "ml", "Bengali" to "bn", "Urdu" to "ur",
@@ -51,7 +49,6 @@ internal object VegaSubtitles {
         "Filipino" to "fil", "Dutch" to "nld", "Polish" to "pol",
     )
 
-    // Native-script names as escapes (script-safe regardless of file encoding).
     private val NATIVE = mapOf(
         "Hindi" to "हिन्दी",
         "Tamil" to "தமிழ்",
@@ -71,7 +68,6 @@ internal object VegaSubtitles {
 
     fun desiredLanguages(): Set<String> = LinkedHashSet(CODES.keys)
 
-    // ISO-1/ISO-3 code -> canonical name.
     private val codeToCanon: Map<String, String> by lazy {
         val m = HashMap<String, String>()
         CODES.forEach { (canon, c) -> m[c] = canon }
@@ -96,7 +92,6 @@ internal object VegaSubtitles {
         "hi", "ta", "te", "ml", "bn", "ur", "mr", "kn", "pa", "gu", "ne", "si",
     )
 
-    // hi, en first (fast singles + most-wanted), then the Indian block, then foreign - all chunked.
     private fun groups(codes: Set<String>): List<Set<String>> {
         val out = mutableListOf<Set<String>>()
         codes.filterTo(LinkedHashSet()) { it == "hi" }.takeIf { it.isNotEmpty() }?.let { out.add(it) }
@@ -178,7 +173,6 @@ internal object VegaSubtitles {
         runCatching { parseAddon(text, codes) }.getOrDefault(emptyList())
     }
 
-    /** Progressive fetch: priority emits first so tracks land at playback start. Returns delivered count. */
     suspend fun fetchAndDeliver(
         imdbId: String?,
         season: Int?,
@@ -214,16 +208,13 @@ internal object VegaSubtitles {
             }
         }
         coroutineScope {
-            // Phase 1 (top priority): Hindi + English singles, land at playback start.
             all.take(2).map { launchFetch(imdb, season, episode, it, deadline) }
                 .map { it.await() }.forEach { emit(it) }
-            // Phase 2 (priority batch): rest of the Indian block.
             if (System.currentTimeMillis() < deadline) {
                 all.drop(2).filter { g -> g.all { it in INDIAN_CODES } }
                     .map { launchFetch(imdb, season, episode, it, deadline) }
                     .map { it.await() }.forEach { emit(it) }
             }
-            // Phase 3: foreign languages.
             if (System.currentTimeMillis() < deadline) {
                 all.drop(2).filterNot { g -> g.all { it in INDIAN_CODES } }
                     .map { launchFetch(imdb, season, episode, it, deadline) }

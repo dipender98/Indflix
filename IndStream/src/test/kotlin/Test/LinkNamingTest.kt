@@ -5,17 +5,14 @@ import com.indstream.StreamEngine.RawStream
 import kotlin.test.Test
 import kotlin.test.assertEquals
 
-/** FILE: LinkNamingTest. kt - guards the server-name formatting rules defined in (). - Language tag mapping (raw. strings → canonical short tokens). */
 class LinkNamingTest {
 
     private val IN = "\uD83C\uDDEE\uD83C\uDDF3"
     private val GB = "\uD83C\uDDEC\uD83C\uDDE7"
 
-    // ── languageTag ──────────────────────────────────────────────.
 
     @Test
     fun languageTag_hindiEnglishMulti() {
-        // capital initial - never "eng"/ "hindi" short forms.
         assertEquals("Hindi", LinkNaming.languageTag("Hindi"))
         assertEquals("Hindi", LinkNaming.languageTag("hi"))
         assertEquals("Hindi", LinkNaming.languageTag("हिन्दी"))
@@ -40,29 +37,23 @@ class LinkNamingTest {
 
     @Test
     fun languageTag_blankIsUnknown() {
-        // never a guessed "Multi"/"English".
         assertEquals("Unknown", LinkNaming.languageTag(""))
         assertEquals("Unknown", LinkNaming.languageTag(null))
     }
 
-    // ── languageTagFor ───────────────────────────────────────────.
 
     @Test
     fun languageTagFor_originalUsesTmdbCode() {
-        // EXPLICIT "Original".
         assertEquals("Japanese", LinkNaming.languageTagFor("Original", "ja"))
-        // BLANK is a genuine unknown - never inferred; guessing would mismatch it).
         assertEquals("Unknown", LinkNaming.languageTagFor("", "hi"))
         assertEquals("Unknown", LinkNaming.languageTagFor(null, "en"))
     }
 
     @Test
     fun languageTagFor_explicitOverridesOriginal() {
-        // Explicit "Hindi" stays Hindi even if TMDB says Japanese.
         assertEquals("Hindi", LinkNaming.languageTagFor("Hindi", "ja"))
     }
 
-    // ── displayName ──────────────────────────────────────────────.
 
     @Test
     fun displayName_uniqueServer_noNumber() {
@@ -74,7 +65,6 @@ class LinkNamingTest {
 
     @Test
     fun displayName_hindiBrand_noRedundantTag() {
-        // "MyFlixer Hindi" already carries "hindi" → bracket is suppressed.
         val name = LinkNaming.displayName(
             serverName = "MyFlixer Hindi", audioLabel = "Hindi", qualityHint = 1080,
         )
@@ -83,8 +73,6 @@ class LinkNamingTest {
 
     @Test
     fun displayName_resolutionInName_strippedNotAppended() {
-        // Sub-indicator carries "1080p": the token is STRIPPED and nothing is appended - CloudStream's quality badge shows the.
-// resolution (user spec revision).
         val name = LinkNaming.displayName(
             serverName = "PrimeSrc", audioLabel = "Original", qualityHint = 1080,
             subIndicator = "Nova 1080p",
@@ -110,8 +98,6 @@ class LinkNamingTest {
 
     @Test
     fun displayName_resolutionGluedStripped() {
-        // Resolution glued to a word ("Server1080p"): the strip regex catches it - the name renders "Server" with NO.
-// resolution anywhere in it.
         val name = LinkNaming.displayName(
             serverName = "Server1080p", audioLabel = "Hindi", qualityHint = 1080,
         )
@@ -120,7 +106,6 @@ class LinkNamingTest {
 
     @Test
     fun displayName_fourKStrippedFromName() {
-        // "4K" in the name is stripped; nothing is appended.
         val name = LinkNaming.displayName(
             serverName = "MovieBox 4K", audioLabel = "English", qualityHint = 2160,
         )
@@ -129,7 +114,6 @@ class LinkNamingTest {
 
     @Test
     fun displayName_height2160p_rawHeightTokenStripped() {
-        // Server name carries the raw "2160p" token: stripped, nothing appended.
         val name = LinkNaming.displayName(
             serverName = "Movie 2160p", audioLabel = "English", qualityHint = 2160,
         )
@@ -138,7 +122,6 @@ class LinkNamingTest {
 
     @Test
     fun displayName_noHeightInName_appendsNothing() {
-        // Server name has no resolution token and a known height - still NO token in the name (the player's badge shows it).
         val name = LinkNaming.displayName(
             serverName = "Movie", audioLabel = "English", qualityHint = 2160,
         )
@@ -147,18 +130,15 @@ class LinkNamingTest {
 
     @Test
     fun displayName_height1080p_rawHeightTokenStripped() {
-        // "Movie 1080p": the guessed token is stripped.
         val name = LinkNaming.displayName(
             serverName = "Movie 1080p", audioLabel = "English", qualityHint = 1080,
         )
         assertEquals("Movie ($GB English)", name)
     }
 
-    // ── NO resolution token in names () ──.
 
     @Test
     fun displayName_revision_a_serverTokenStripped_nothingAppended() {
-        // (a) "Server 1080p" → zero resolution tokens in the label.
         val name = LinkNaming.displayName(
             serverName = "Server 1080p", audioLabel = "English", qualityHint = 1080,
         )
@@ -168,7 +148,6 @@ class LinkNamingTest {
 
     @Test
     fun displayName_revision_b_gluedToken_stripped() {
-        // (b) glued "Server1080p" - the strip regex catches it.
         val name = LinkNaming.displayName(
             serverName = "Server1080p", audioLabel = "English", qualityHint = 1080,
         )
@@ -178,7 +157,6 @@ class LinkNamingTest {
 
     @Test
     fun displayName_revision_c_fourKNameToken_stripped() {
-        // (c) "MovieBox 4K" → removed.
         val name = LinkNaming.displayName(
             serverName = "MovieBox 4K", audioLabel = "English", qualityHint = 2160,
         )
@@ -188,8 +166,6 @@ class LinkNamingTest {
 
     @Test
     fun displayName_revision_d_staleWrongToken_neverShown() {
-        // (d) name carries a STALE token ("1080p") while the measured height is 720: the guess is stripped and the real height.
-// belongs to the player's.
         val name = LinkNaming.displayName(
             serverName = "VidEm 1080p", audioLabel = "English", qualityHint = 720,
         )
@@ -198,8 +174,6 @@ class LinkNamingTest {
 
     @Test
     fun displayName_revision_e_stripKeepsDuplicateNumbering() {
-        // (e) the "-N" duplicate suffix must survive the strip: two identical "VidLink 1080p" members (hint 1080) → "VidLink-1.
-// …"/"VidLink-2 …".
         val streams = listOf(
             raw("VidLink 1080p", "English", 1080),
             raw("VidLink 1080p", "English", 1080),
@@ -215,7 +189,6 @@ class LinkNamingTest {
         assertEquals("VidLink-2 ($GB English)", names[1])
     }
 
-    // ── numbering: unique → no number ────────────────────────────.
 
     @Test
     fun dedupe_uniqueKeepsNoNumber() {
@@ -224,7 +197,6 @@ class LinkNamingTest {
         assertEquals(0, nums[0], "unique stream must get index 0 (no number)")
     }
 
-    // ── numbering: 2 identical → -1 / -2 ─────────────────────────.
 
     @Test
     fun dedupe_twoIdentical_numbered1and2() {
@@ -237,7 +209,6 @@ class LinkNamingTest {
         assertEquals(2, nums[1])
     }
 
-    // ── numbering: 5 identical → -1 … -5 ─────────────────────────.
 
     @Test
     fun dedupe_fiveIdentical_numbered1to5() {
@@ -246,7 +217,6 @@ class LinkNamingTest {
         streams.forEachIndexed { i, _ -> assertEquals(i + 1, nums[i]) }
     }
 
-    // ── numbering: 20 identical → -1 … -20 ───────────────────────.
 
     @Test
     fun dedupe_twentyIdentical_numbered1to20() {
@@ -255,7 +225,6 @@ class LinkNamingTest {
         streams.forEachIndexed { i, _ -> assertEquals(i + 1, nums[i]) }
     }
 
-    // ── numbering: mixed groups independent ──────────────────────.
 
     @Test
     fun dedupe_mixedGroups_independent() {
@@ -270,7 +239,6 @@ class LinkNamingTest {
         assertEquals(0, nums[2], "different group is independent")
     }
 
-    // ── integrated displayName with numbering ────────────────────.
 
     @Test
     fun displayName_withNumbering_twoIdentical() {
@@ -302,7 +270,6 @@ class LinkNamingTest {
         }
     }
 
-    // ── canonicalSubtitleName ─────────────────────────────────────.
 
     @Test
     fun canonicalSubtitle_nativeScript() {
@@ -323,7 +290,6 @@ class LinkNamingTest {
         assertEquals("Hindi", LinkNaming.canonicalSubtitleName("hi"))
         assertEquals("English", LinkNaming.canonicalSubtitleName("en"))
         assertEquals("English", LinkNaming.canonicalSubtitleName("English"))
-        // 3-letter ISO 639-2 codes (OpenSubtitles addon shape, ).
         assertEquals("Arabic", LinkNaming.canonicalSubtitleName("ara"))
         assertEquals("German", LinkNaming.canonicalSubtitleName("ger"))
         assertEquals("Hindi", LinkNaming.canonicalSubtitleName("hin"))
@@ -335,7 +301,6 @@ class LinkNamingTest {
         assertEquals("Subtitle", LinkNaming.canonicalSubtitleName(null))
     }
 
-    // ── qualityLabel ──────────────────────────────────────────────.
 
     @Test
     fun qualityLabel_commonHeights() {
@@ -343,15 +308,11 @@ class LinkNamingTest {
         assertEquals("1080p", LinkNaming.qualityLabel(1080))
         assertEquals("720p", LinkNaming.qualityLabel(720))
         assertEquals("", LinkNaming.qualityLabel(0))
-        // 1 sentinel: a DIRECT file whose real height could not be measured → "Auto" (never a guessed 1080p). 0 stays blank.
-// (adaptive HLS).
         assertEquals("Auto", LinkNaming.qualityLabel(-1))
     }
 
     @Test
     fun displayName_directUnknownShowsNoResolution() {
-        // Regression (revised spec): a measured-unknown direct file gets no guessed token - and with the new rule NO name.
-// carries resolution at all, so.
         val name = LinkNaming.displayName("VidRock", "Hindi", qualityHint = -1)
         assertEquals("VidRock ($IN Hindi)", name)
     }
@@ -367,12 +328,10 @@ class LinkNamingTest {
         assertEquals("", LinkNaming.languageFlag(null))
     }
 
-    // ── taggedSubtitleName ───────────────────────────────────────.
     @Test
     fun taggedSubtitleName_tagsSource() {
         assertEquals("Hindi (VidLink)", LinkNaming.taggedSubtitleName("Hindi", "VidLink"))
         assertEquals("English (MovieBox)", LinkNaming.taggedSubtitleName("English", "MovieBox"))
-        // Fallback provenance tag.
         assertEquals("Hindi (Fallback)", LinkNaming.taggedSubtitleName("Hindi", "Fallback"))
     }
 
@@ -385,12 +344,9 @@ class LinkNamingTest {
 
     @Test
     fun taggedSubtitleName_neverDuplicatesSource() {
-        // Already-tagged canonical name is not double-tagged.
         assertEquals("Hindi (VidLink)", LinkNaming.taggedSubtitleName("Hindi (VidLink)", "VidLink"))
     }
 
-    // ── helpers ────────────────────────────────────────────────── Minimal RawStream for naming tests - url/quality are.
-// irrelevant.
     private fun raw(serverName: String, audioLabel: String, qualityHint: Int) =
         RawStream(
             serverId = "test", serverName = serverName,
@@ -398,7 +354,6 @@ class LinkNamingTest {
             isM3u8 = true, qualityHint = qualityHint, audioLabel = audioLabel,
         )
 
-    /** How many times a (regex) resolution token occurs in a label. */
     private fun countToken(label: String, tokenRegex: String) =
         Regex(tokenRegex, RegexOption.IGNORE_CASE).findAll(label).count()
 }

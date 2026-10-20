@@ -7,7 +7,6 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-/** FILE: MasterFactsTest. kt - guards the, derived): - reads REAL master playlists: tallest variant height. (RESOLUTION=WxH) + #EXT-X-MEDIA audio. */
 class MasterFactsTest {
 
     private val master = """
@@ -36,7 +35,6 @@ class MasterFactsTest {
     fun parseMasterFacts_nonMaster_isNull() {
         assertNull(MultiSourcePuller.parseMasterFacts(null))
         assertNull(MultiSourcePuller.parseMasterFacts(""))
-        // Media playlist (no variants) is not a master.
         assertNull(MultiSourcePuller.parseMasterFacts("#EXTM3U\n#EXTINF:4,\nseg.ts"))
     }
 

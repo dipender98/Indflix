@@ -19,13 +19,10 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 
-/** FILE: Settings.kt - plugin settings store + settings dialog (Wyzie Subs API key today). */
 object Settings {
 
-    /** Wyzie key redemption page (opened by the Get API chip). */
     const val KEY_LINK = "https://store.wyzie.io/redeem"
 
-    /** TMDB API settings page (opened by the TMDB Get API chip). */
     const val TMDB_LINK = "https://www.themoviedb.org/settings/api"
 
     private const val PREFS = "multimovies_settings"
@@ -41,25 +38,20 @@ object Settings {
     @Volatile
     private var loaded = false
 
-    /** Remember the app context so subtitle fetches can read the key without one. */
     fun init(context: Context) {
         appContext = context.applicationContext
         load()
     }
 
-    /** Saved key, or null when the user never set one (built-in subtitles stay in use). */
     fun apiKey(): String? {
         if (!loaded) load()
         return cached?.takeIf { it.isNotBlank() }
     }
 
-    /** True when the raw input is usable as a key (blank = "not set", handled by callers). */
     fun isValidKey(raw: String?): Boolean = normalizeKey(raw).length >= 8
 
-    /** Trimmed key, never null. */
     fun normalizeKey(raw: String?): String = raw?.trim().orEmpty()
 
-    /** Persist the key (blank clears it). False when the input is neither blank nor valid. */
     fun save(context: Context, raw: String): Boolean {
         val key = normalizeKey(raw)
         if (key.isNotEmpty() && !isValidKey(key)) return false
@@ -73,25 +65,20 @@ object Settings {
         return true
     }
 
-    /** Drop the saved key; the built-in subtitle stack takes over again. */
     fun clear(context: Context) {
         save(context, "")
     }
 
-    /** Saved TMDB key, or null when never set (built-in keys stay in use). */
     fun tmdbApiKey(): String? {
         if (!tmdbLoaded) loadTmdb()
         return tmdbCached?.takeIf { it.isNotBlank() }
     }
 
-    // TMDB v3 keys are short (32 hex chars); the long eyJ... string is the
-    // Read Access Token (v4) and does not work as ?api_key=.
     fun isValidTmdbKey(raw: String?): Boolean {
         val k = normalizeKey(raw)
         return k.length >= 32 && !k.startsWith("eyJ")
     }
 
-    /** Null when the input is usable; else the exact problem to show. */
     fun tmdbKeyProblem(raw: String?): String? {
         val k = normalizeKey(raw)
         if (k.isEmpty()) return null
@@ -100,7 +87,6 @@ object Settings {
         return null
     }
 
-    /** Persist the TMDB key (blank clears it). False when non-blank but invalid. */
     fun saveTmdb(context: Context, raw: String): Boolean {
         val key = normalizeKey(raw)
         if (key.isNotEmpty() && !isValidTmdbKey(key)) return false
@@ -114,7 +100,6 @@ object Settings {
         return true
     }
 
-    /** Drop the saved TMDB key; the built-in keys take over again. */
     fun clearTmdb(context: Context) {
         saveTmdb(context, "")
     }
@@ -136,7 +121,6 @@ object Settings {
     @Volatile
     private var wyzieFailureNotified = false
 
-    /** One-time notice that the saved key failed (callers fall back to built-in). */
     fun notifyWyzieFailed(reason: String) {
         val ctx = appContext ?: return
         synchronized(this) {
@@ -160,7 +144,6 @@ object Settings {
         loaded = true
     }
 
-    /** Dark (not pitch-black) settings dialog: key field, redeem link, save/clear. */
     fun openSettings(context: Context) {
         val bgColor = Color.parseColor("#0F0F11")
         val cardColor = Color.parseColor("#141416")
@@ -200,7 +183,6 @@ object Settings {
         addLabel("Settings", 18f, textColor, bold = true)
         addLabel("Keys are optional - built-ins apply when empty.", 12f, hintColor)
 
-        // Pallet card: tappable header with state + chevron, collapsible body.
         fun settingsSection(title: String, stateText: String, stateOn: Boolean): LinearLayout {
             val card = LinearLayout(context).apply {
                 orientation = LinearLayout.VERTICAL
@@ -253,7 +235,6 @@ object Settings {
             return sectionBody
         }
 
-        // Small pill chip for header actions (Verify, Get API).
         fun actionChip(label: String, fill: Int, ink: Int, stroke: Int? = null): TextView =
             TextView(context).apply {
                 text = label
@@ -316,7 +297,6 @@ object Settings {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.END
         }
-        // ~25% smaller than the platform Button defaults (14sp, 88x48dp minimums).
         val clearBtn = Button(context).apply {
             text = "Clear"
             setTextColor(textColor)
@@ -421,14 +401,11 @@ object Settings {
         val scroll = ScrollView(context).apply {
             setBackgroundColor(bgColor)
             setPadding(dp(4), dp(4), dp(4), dp(4))
-            // No fading-edge gradient or overscroll glow near the edges - flat only.
             isVerticalFadingEdgeEnabled = false
             isHorizontalFadingEdgeEnabled = false
             overScrollMode = View.OVER_SCROLL_NEVER
             addView(sectionsStack)
         }
-        // AlertDialog with the Material dialog theme and a rounded
-        // window background - no floating-theme edge gradient.
         val dialog = AlertDialog.Builder(context, android.R.style.Theme_Material_Dialog)
             .setView(scroll)
             .create()
@@ -463,7 +440,6 @@ object Settings {
             if (save(context, typed)) {
                 Toast.makeText(context, "Saved", Toast.LENGTH_SHORT).show()
                 dialog.dismiss()
-                // Verify on save: error toast when the key fails.
                 Thread {
                     val msg = runCatching {
                         kotlinx.coroutines.runBlocking { WyzieSubs.testKey(typed) }.second

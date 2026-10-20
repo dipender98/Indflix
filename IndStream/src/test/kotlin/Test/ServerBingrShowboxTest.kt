@@ -10,7 +10,6 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-/** Guards the Bingr and ShowBox farm entries and their pure parse helpers. */
 class ServerBingrShowboxTest {
 
     @Test
@@ -25,7 +24,6 @@ class ServerBingrShowboxTest {
 
     @Test
     fun bingr_servers_includeIndian() {
-        // s62 Bastion is the IN-flagged ladder; the cascade must carry it.
         assertTrue(StreamEngine.BINGR_SRVS.contains("s62"), "IN-flagged srv must be cascaded")
         assertTrue(StreamEngine.BINGR_SRVS.contains("s40"), "s40 drives the aphelion-tv TV path")
         assertTrue(StreamEngine.BINGR_SRVS.isNotEmpty())
@@ -41,7 +39,6 @@ class ServerBingrShowboxTest {
         val query = body["query"] as Map<String, Any?>
         assertEquals("Inception", query["title"])
         assertEquals("2010", query["year"])
-        // A movie must NOT carry season/episode.
         assertTrue(!query.containsKey("season") && !query.containsKey("episode"))
     }
 
@@ -53,7 +50,6 @@ class ServerBingrShowboxTest {
         val query = body["query"] as Map<String, Any?>
         assertEquals(3, query["season"])
         assertEquals(7, query["episode"])
-        // Regression guard: season/episode must NOT sit at the top level.
         assertTrue(!body.containsKey("season") && !body.containsKey("episode"))
     }
 
@@ -145,7 +141,6 @@ class ServerBingrShowboxTest {
             StreamEngine.ShowboxFile(11, "Show.S02E04.mkv", false),
         )
         assertEquals(11L, StreamEngine.showboxEpisodeFile(eps, 4)?.fid)
-        // No blind fallback when the target is missing from several candidates.
         assertNull(StreamEngine.showboxSeasonFolder(root, 9))
         assertNull(StreamEngine.showboxEpisodeFile(eps, 9))
         val loneDir = listOf(StreamEngine.ShowboxFile(5, "Show.S01", true))

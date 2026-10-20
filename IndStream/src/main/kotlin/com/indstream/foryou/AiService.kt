@@ -7,10 +7,8 @@ import java.net.URLEncoder
 import org.json.JSONArray
 import org.json.JSONObject
 
-/** Chat completion client used to rank recommendation candidates. */
 object AiService {
 
-    /** Supported provider presets. */
     enum class Provider(
         val id: String,
         val label: String,
@@ -23,12 +21,10 @@ object AiService {
         OTHER("other", "Other (OpenAI-compatible)", "", "");
 
         companion object {
-            /** Preset for a stored id, unknown ids fall back to the first one. */
             fun from(id: String?): Provider = entries.firstOrNull { it.id == id } ?: OPENROUTER
         }
     }
 
-    /** One title the model may pick. */
     data class Candidate(
         val id: Int,
         val title: String,
@@ -38,12 +34,11 @@ object AiService {
     )
 
     private const val SYSTEM =
-        "You are a film and series recommendation engine. You answer only with a JSON array of integers."
+        "You are a film and series recommendation engine. You pick only titles that closely match " +
+            "the user's taste. You answer only with a JSON array of integers."
 
-    /** True when a key is stored for the selected provider. */
     fun isConfigured(): Boolean = !Settings.aiApiKey().isNullOrBlank()
 
-    /** Rerank the candidates for the given history. Returns the picked ids, best first. */
     suspend fun rank(
         watched: List<ProfileTitle>,
         candidates: List<Candidate>,
@@ -59,7 +54,6 @@ object AiService {
         return extractIds(extractText(body, provider == Provider.GEMINI) ?: return emptyList())
     }
 
-    /** Verify a key with a tiny request. Returns a human readable result. */
     suspend fun testKey(
         provider: Provider,
         baseUrl: String,
@@ -90,7 +84,6 @@ object AiService {
         }
     }
 
-    /** List the models a key can see and check the chosen one. Pure result text. */
     suspend fun testModels(
         provider: Provider,
         baseUrl: String,
@@ -130,11 +123,9 @@ object AiService {
         }
     }
 
-    /** Model list endpoint for a provider. */
     private fun modelsEndpoint(provider: Provider, base: String, key: String): String =
         if (provider == Provider.GEMINI) "$base/models?key=$key" else "$base/models"
 
-    /** Parse a model list payload (OpenAI "data" or Gemini "models" shape). Pure. */
     internal fun parseModels(body: String, gemini: Boolean): List<String> = try {
         val root = JSONObject(body)
         val arr = root.optJSONArray("data") ?: root.optJSONArray("models") ?: return emptyList()
@@ -149,14 +140,12 @@ object AiService {
         emptyList()
     }
 
-    /** Effective base url for a provider, with the stored override applied. */
     fun baseUrl(provider: Provider): String {
         val custom = Settings.aiBaseUrl().trim().trimEnd('/')
         if (custom.isNotBlank()) return custom
         return provider.baseUrl.trimEnd('/')
     }
 
-    /** Build the ranking prompt. Pure. */
     internal fun buildPrompt(
         watched: List<ProfileTitle>,
         candidates: List<Candidate>,
@@ -176,13 +165,14 @@ object AiService {
             appendLine("Candidate titles:")
             appendLine(pool.ifBlank { "- (none)" })
             appendLine()
-            appendLine("Pick the $count candidates the user is most likely to enjoy, best first.")
+            appendLine("Pick up to $count candidates the user is most likely to enjoy, best first.")
+            appendLine("Match on genre, tone, era and rating; prefer strong fits over popular titles.")
+            appendLine("Skip anything only loosely related - never pad the list with weak matches.")
             appendLine("Only use ids from the candidate list, never repeat an id.")
             appendLine("Answer with a JSON array of the tmdb ids only, for example [123, 456]. No other text.")
         }
     }
 
-    /** Pull the id array out of a model reply. Pure. */
     internal fun extractIds(text: String): List<Int> {
         val start = text.indexOf('[')
         val end = text.lastIndexOf(']')
@@ -202,7 +192,6 @@ object AiService {
         }
     }
 
-    /** Pull the reply text out of a provider payload. Pure. */
     internal fun extractText(body: String, gemini: Boolean): String? {
         return try {
             val root = JSONObject(body)
@@ -229,7 +218,6 @@ object AiService {
         }
     }
 
-    /** Chat endpoint for a provider. */
     private fun endpoint(provider: Provider, base: String, model: String, key: String): String =
         if (provider == Provider.GEMINI) {
             "$base/models/${URLEncoder.encode(model, "UTF-8")}:generateContent?key=$key"
@@ -237,7 +225,6 @@ object AiService {
             "$base/chat/completions"
         }
 
-    /** Request headers for a provider. */
     private fun headers(provider: Provider, key: String): Map<String, String> {
         val base = mapOf(
             "Content-Type" to "application/json",
@@ -254,7 +241,6 @@ object AiService {
         }
     }
 
-    /** Request body for a provider. */
     private fun body(provider: Provider, model: String, prompt: String): Map<String, Any?> =
         if (provider == Provider.GEMINI) {
             mapOf(
@@ -279,7 +265,6 @@ object AiService {
             )
         }
 
-    /** POST the prompt and return the raw body. Null on any failure. */
     private suspend fun post(
         provider: Provider,
         base: String,

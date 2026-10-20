@@ -7,10 +7,8 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
-/** FILE: SubtitleProvidersTest. kt - guards the pure subtitle-fetch logic of (): group split, URL building (both. sources), canned-JSON parsing. */
 class SubtitleProvidersTest {
 
-    // ── canned payloads: REAL shapes, probe ─────────── opensubtitles. stremio. homes movie response (Inception, en+hi).
     private val osJson = """
         {"subtitles":[
           {"id":"v3+|13105496|Inception.2010.1080p.BluRay.x265-YAWNTiC_eng SDH",
@@ -29,7 +27,6 @@ class SubtitleProvidersTest {
         ]}
     """.trimIndent()
 
-    /** subsense. nepiraw. com movie response (Inception, eng + the hin entry the second probe returned). Field names/order. verbatim. */
     private val senseJson = """
         {"subtitles":[
           {"id":"subsense-srt-opensubtitles-eng-0",
@@ -53,11 +50,9 @@ class SubtitleProvidersTest {
         ]}
     """.trimIndent()
 
-    // ── budget constant (the root-cause fix) ─────────────────────.
 
     @Test
     fun fetchBudget_coversMeasuredColdLatency() {
-        // 5s; the old 6. 5s cap dropped it. 13s must stay inside the 90s LIVE_FILL window.
         assertEquals(13_000L, SubtilesProvider.FETCH_BUDGET_MS)
         assertTrue(
             SubtilesProvider.FETCH_BUDGET_MS < com.indstream.StreamEngine.LIVE_FILL_MS,
@@ -65,7 +60,6 @@ class SubtitleProvidersTest {
         )
     }
 
-    // ── codesFromLangs / groupRequests ───────────────────────────.
 
     @Test
     fun codesFromLangs_mapsInOrder_dropsUnmapped() {
@@ -110,7 +104,6 @@ class SubtitleProvidersTest {
         val groups = SubtilesProvider.groupRequests(codes)
         assertEquals(linkedSetOf("hi"), groups.first())
         assertEquals(linkedSetOf("en"), groups[1])
-        // Rest of the Indian block comes next in CODES order, chunked by GROUP_SIZE.
         val indianCodes = setOf("hi", "ta", "te", "ml", "bn", "ur", "mr", "kn", "pa", "gu", "ne", "si")
         var idx = 2
         while (idx < groups.size && groups[idx].any { c -> c in indianCodes }) {
@@ -126,12 +119,10 @@ class SubtitleProvidersTest {
         assertEquals(emptyList(), SubtilesProvider.groupRequests(emptySet()))
     }
 
-    // ── buildUrl (opensubtitles addon) ───────────────────────────.
 
     @Test
     fun buildUrl_movie_pipesEncoded() {
         val url = SubtilesProvider.buildUrl("tt1375666", 0, 0, setOf("Hindi", "English"))
-        // codesFromLangs preserves the requested set iteration order, so pin the structure and the code set (not their sequence).
         assertTrue(url.startsWith("https://opensubtitles.stremio.homes/"), url)
         assertTrue(url.endsWith("/subtitles/movie/tt1375666.json"), url)
         assertTrue(url.contains("/ai-translated=true%7Cfrom=all%7Cauto-adjustment=true/subtitles/"), url)
@@ -152,7 +143,6 @@ class SubtitleProvidersTest {
         assertTrue(url.contains("/en%7Chi/"), url)
     }
 
-    // ── subSenseUrl / subSenseLanguages ──────────────────────────.
 
     @Test
     fun subSenseLanguages_mapsIso3_fallsBackToEng() {
@@ -162,7 +152,6 @@ class SubtitleProvidersTest {
 
     @Test
     fun subSenseUrl_movie_exactEncoding() {
-        // Probe-, " left raw (URLEncoder semantics), braces/quotes/ brackets encoded - raw braces 301-strip the segment.
         val url = SubtilesProvider.subSenseUrl("tt1375666", 0, 0, linkedSetOf("English", "Hindi"))
         assertEquals(
             "https://subsense.nepiraw.com/%7B%22languages%22%3A%5B%22eng%22%2C%22hin%22%5D%2C" +
@@ -178,12 +167,10 @@ class SubtitleProvidersTest {
         assertTrue(url.contains("%5B%22eng%22%5D"), url)
     }
 
-    // ── parseOpenSubtitles ───────────────────────────────────────.
 
     @Test
     fun parseOpenSubtitles_realShape_capFilterDedupe() {
         val tracks = SubtilesProvider.parseOpenSubtitles(osJson, setOf("en", "hi"))
-        // 4 entries in: one EN url-duplicate dropped, the zz spam row filtered - 2 survive with canonical names.
         assertEquals(2, tracks.size)
         assertEquals("English", tracks[0].lang)
         assertEquals("Hindi", tracks[1].lang)
@@ -207,13 +194,10 @@ class SubtitleProvidersTest {
         assertEquals(emptyList(), SubtilesProvider.parseOpenSubtitles("""{"junk":1}""", setOf("en")))
     }
 
-    // ── parseSubSense ────────────────────────────────────────────.
 
     @Test
     fun parseSubSense_realShape_iso3LangsAndUrlDedupe() {
         val tracks = SubtilesProvider.parseSubSense(senseJson)
-        // 3 entries in: the eng url-duplicate (probe returned stable urls) drops - ISO-3 "eng"/"hin" canonicalise through.
-// LinkNaming.
         assertEquals(2, tracks.size)
         assertEquals("English", tracks[0].lang)
         assertEquals("Hindi", tracks[1].lang)
@@ -241,7 +225,6 @@ class SubtitleProvidersTest {
         assertEquals(SubtilesProvider.SENSE_MAX_PER_LANG, tracks.size)
     }
 
-    // ── mergeGroups ──────────────────────────────────────────────.
 
     @Test
     fun mergeGroups_priorityFirst_dedupeByUrl() {
@@ -249,8 +232,6 @@ class SubtitleProvidersTest {
         val rest = listOf(SubTrack("Tamil", "https://a/ta.vtt"))
         val retry = listOf(SubTrack("English", "https://a/en.vtt"), SubTrack("Urdu", "https://a/ur.vtt"))
         val merged = SubtilesProvider.mergeGroups(listOf(priority, retry, rest))
-        // group order preserved (priority, retry, rest): the retry group's Urdu rides in BEFORE the rest group's Tamil. The.
-// duplicate English url collapses.
         assertEquals(listOf("Hindi", "English", "Urdu", "Tamil"), merged.map { it.lang })
         assertEquals(4, merged.map { it.url }.toSet().size, "url duplicate collapsed")
     }
@@ -269,7 +250,6 @@ class SubtitleProvidersTest {
         assertEquals(setOf("Tamil"), gaps)
     }
 
-    // ── menu labels (native-script Indian names, Roman/Devanagari Hindi) ──
 
     @Test
     fun subtitleMenuName_indianCarriesNativeScript() {

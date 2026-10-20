@@ -12,7 +12,6 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-/** Guards the keyless IMDB parsers: suggest hits, Cinemeta detail/cast, and episode rows. */
 class ImdbMetaTest {
 
     private val suggest = """

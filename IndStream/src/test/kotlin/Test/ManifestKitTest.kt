@@ -5,8 +5,6 @@ import com.indstream.TitleMatch
 import com.indstream.ServerFarm
 import com.indstream.ServerIdType
 import com.indstream.ServerSpec
-import com.indstream.VidlinkSource
-/** FILE: ManifestKitTest. kt â€” guards the service. - HLS master-playlist parsing (variants, audio renditions). Audio-priority classification. */
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -76,7 +74,6 @@ class ManifestKitTest {
         assertEquals(3, result.audio.size)
         assertEquals(2, result.subtitles.size)
         assertEquals("Hindi", result.audio[0].name)
-        // Hindi + English dual audio must be detected.
         assertTrue(ManifestKit.hasHindiEnglishAudio(result), "expected Hi+En dual audio")
     }
 
@@ -91,7 +88,6 @@ class ManifestKitTest {
         """.trimIndent()
         val result = ManifestKit.parseMaster(master, "https://cdn.example.com/")
         assertNotNull(result)
-        // English+Tamil, no Hindi → NOT Hindi+English dual.
         assertFalse(ManifestKit.hasHindiEnglishAudio(result), "expected false (no Hindi)")
     }
 
@@ -177,8 +173,6 @@ class ManifestKitTest {
 
     @Test
     fun audioPriority_defaultHindiWinsWhenEnglishAlsoPresent() {
-        // RRR-on-VaPlayer style: Hindi is the DEFAULT track, an English track also exists. The label must be "Hindi" (4).
-// never "English" (1) or dual (3).
         val master = """
         #EXTM3U
         #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="Hindi",LANGUAGE="hi",URI="hi.m3u8",DEFAULT=YES
@@ -193,7 +187,6 @@ class ManifestKitTest {
 
     @Test
     fun audioPriority_defaultEnglishWinsWhenHindiAlsoPresent() {
-        // The DEFAULT track is English even though Hindi exists - trust the played track.
         val master = """
         #EXTM3U
         #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="English",LANGUAGE="en",URI="en.m3u8",DEFAULT=YES
@@ -206,7 +199,6 @@ class ManifestKitTest {
         assertEquals(1, ManifestKit.audioPriority(result))
     }
 
-    // ── Indian dub-language labeling () ────────────────.
 
     private fun masterWithAudio(vararg mediaLines: String): ManifestKit.MasterPlaylist? {
         val master = buildString {
@@ -220,8 +212,6 @@ class ManifestKitTest {
 
     @Test
     fun audioLanguageLabel_defaultTeluguWins() {
-        // Telugu dub is the DEFAULT track - the label must be "Telugu", which the old Hindi/English priority model collapsed.
-// to 0/"Unknown".
         val master = masterWithAudio(
             """#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="Telugu",LANGUAGE="te",URI="te.m3u8",DEFAULT=YES""",
             """#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="Hindi",LANGUAGE="hi",URI="hi.m3u8"""",
@@ -260,8 +250,6 @@ class ManifestKitTest {
 
     @Test
     fun audioLanguageLabel_tamilEnglishNoDefaultPrefersTamil() {
-        // No DEFAULT and two languages: an Indian dub is more informative than
-        // the old "English" (priority 1) bucket for this shape.
         val master = masterWithAudio(
             """#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="English",LANGUAGE="en",URI="en.m3u8"""",
             """#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="Tamil",LANGUAGE="ta",URI="ta.m3u8"""",
@@ -286,11 +274,9 @@ class ManifestKitTest {
 
     @Test
     fun audioLanguageLabel_honestUnknowns() {
-        // No audio renditions → null (nothing to label).
         val noAudio = masterWithAudio()
         assertNotNull(noAudio)
         assertNull(ManifestKit.audioLanguageLabel(noAudio))
-        // A rendition with no language signal at all stays unknown — never guessed.
         val mystery = masterWithAudio(
             """#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="Track 1",URI="t1.m3u8"""",
         )
@@ -319,8 +305,6 @@ class ManifestKitTest {
         assertEquals("Hindi", ManifestKit.languageFromName("MyFlixer Hindi", null))
         assertEquals("Tamil", ManifestKit.languageFromName(null, "https://cdn.x/tamil/master.m3u8"))
         assertEquals("Telugu", ManifestKit.languageFromName("Server Telugu 1080p", "x"))
-        // Two-letter codes must NOT match in free-form names/URLs ("note",
-        // "television"…) — only full language names count as declarations.
         assertNull(ManifestKit.languageFromName("server-1", "https://cdn.x/te/master.m3u8"))
         assertNull(ManifestKit.languageFromName("Nova", "https://cdn.x/a.m3u8"))
         assertNull(ManifestKit.languageFromName(null, null))
@@ -374,7 +358,6 @@ class ManifestKitTest {
 
     @Test
     fun bestHeightOf_dispatchesHlsAndMpd() {
-        // HLS master: peak variant height.
         val hls = """
 #EXTM3U
 #EXT-X-STREAM-INF:BANDWIDTH=1200000,RESOLUTION=1280x720
@@ -383,7 +366,6 @@ class ManifestKitTest {
 2160p.m3u8
         """.trimIndent()
         assertEquals(2160, ManifestKit.bestHeightOf(hls, "https://x.example/master.m3u8"))
-        // DASH MPD: peak video representation height (audio set ignored).
         val mpd = """
 <?xml version="1.0" encoding="utf-8"?>
 <MPD xmlns="urn:mpeg:dash:schema:mpd:2011">
@@ -399,7 +381,6 @@ class ManifestKitTest {
 </MPD>
         """.trimIndent()
         assertEquals(1080, ManifestKit.bestHeightOf(mpd, "https://x.example/dash.mpd"))
-        // Nothing usable → honest 0 (unknown), never a guess.
         assertEquals(0, ManifestKit.bestHeightOf(null, "https://x.example/a.m3u8"))
         assertEquals(0, ManifestKit.bestHeightOf("   ", "https://x.example/a.m3u8"))
     }

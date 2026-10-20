@@ -9,7 +9,6 @@ import com.multimovies.NxshaSubtitle
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 
-/** One-off health sweep across every server chain; prints where each chain breaks. Manual run only. */
 class ServerHealthProbeTest {
 
     private val tmdb = "27205"
@@ -48,7 +47,6 @@ class ServerHealthProbeTest {
         keyless.take(5).forEach { println("   ${it.name} ${it.url.take(80)}") }
     }
 
-    /** Site server chips for "Sir" (tmdb 518497 / tt7142506). */
     private suspend fun probeSiteServers() {
         val noSub: (NxshaSubtitle) -> Unit = { }
         println("=== CINEVERSE (modiplay) ===")

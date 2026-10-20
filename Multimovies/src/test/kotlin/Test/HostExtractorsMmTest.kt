@@ -11,7 +11,6 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 import org.json.JSONObject
 
-/** Guards the host extractors: modiplay, vidout, bingr, filmu, 2embed. */
 class HostExtractorsMmTest {
 
     @Test

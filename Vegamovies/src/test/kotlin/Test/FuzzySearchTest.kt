@@ -18,13 +18,8 @@ import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
-/**
- * JVM tests for the fuzzy / typo-tolerant search engine. Datasets mirror live
- * observations: exact-token site hits vs the popular "Baahubali" franchise.
- */
 class FuzzySearchTest {
 
-    /** Real TMDB /search/multi?query=bahubali shape (names, years, vote counts). */
     private val tmdbBahubali = listOf(
         TmdbItem(534116, null, "movie", "Bāhubali: The Epic", "2025", null, 6.4, 42),
         TmdbItem(256040, null, "movie", "Bāhubali: The Beginning", "2015", null, 7.567, 960),
@@ -34,7 +29,6 @@ class FuzzySearchTest {
         TmdbItem(0, null, "tv", "Baahubali: Crown of Blood", null, null, 10.0, 2),
     )
 
-    // ───────────────────────── normalization / typo helpers ─────────────────────────.
 
     @Test
     fun deaccent_collapsesMacronAndTilde() {
@@ -54,7 +48,7 @@ class FuzzySearchTest {
     fun doubleFirstVowel_producesLongVowelTransliteration() {
         assertEquals("baahubali", doubleFirstVowel("bahubali"))
         assertEquals("aavengers", doubleFirstVowel("avengers"))
-        assertNull(doubleFirstVowel("baahubali")) // already long: no variant needed
+        assertNull(doubleFirstVowel("baahubali"))
         assertNull(doubleFirstVowel("xyzzy"))
     }
 
@@ -72,20 +66,17 @@ class FuzzySearchTest {
         assertEquals(0.0, tokenMatchScore("bahubali", listOf("spider", "man")))
     }
 
-    // ───────────────────────── relevance ─────────────────────────.
 
     @Test
     fun relevance_typoQueryReachesFranchiseTitle() {
         assertTrue(relevanceScore("bahubali", "Baahubali: The Beginning (2015)") > 0.7)
         assertTrue(relevanceScore("bahubali", "Sri Bharatha Baahubali (2020)") > 0.7)
-        // The exact-token hit scores highest on pure relevance - popularity must be the tiebreak.
         assertTrue(
             relevanceScore("bahubali", "Bindiya Ke Bahubali") >
                 relevanceScore("bahubali", "Baahubali: The Beginning (2015)"),
         )
     }
 
-    // ───────────────────────── popularity / combined score ─────────────────────────.
 
     @Test
     fun votesBand_mapsVoteCountsToBands() {
@@ -115,9 +106,7 @@ class FuzzySearchTest {
         assertTrue(epic > bindiya, "epic=$epic bindiya=$bindiya")
         assertTrue(bindiya > sri, "bindiya=$bindiya sri=$sri")
     }
-// ───────────────────────── end-to-end ranking ─────────────────────────.
 
-    /** The ts-search hit set for "bahubali" once the typo respelling surfaces the franchise posts. */
     @Test
     fun rank_searchResults_putsBeginningAndConclusionOnTop() {
         val p = VegamoviesProvider()
@@ -147,16 +136,13 @@ class FuzzySearchTest {
         val names = ranked.map { it.name }
         println("RANKED: " + names.joinToString(" | "))
 
-        // The most popular films in India must lead the list.
         assertTrue(names[0].contains("Beginning") || names[0].contains("Conclusion"), "first=$names[0]")
         assertTrue(names[1].contains("Beginning") || names[1].contains("Conclusion"), "second=$names[1]")
         assertTrue(names[0] != names[1])
         assertTrue(names[2].contains("Epic"), "third=$names[2]")
-        // The incidental exact-token hit the site used to rank first is last.
         assertEquals("Sri Bharatha Baahubali (2020)", names.last())
     }
 
-    /** Mirror domains host the same post as identical cleaned titles - they must collapse to one row. */
     @Test
     fun dedupeByName_collapsesMirrorDomains() {
         val p = VegamoviesProvider()

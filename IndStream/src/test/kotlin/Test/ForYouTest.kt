@@ -10,10 +10,8 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-/** Guards the pure logic of the personalised rows: history parsing, prompts, replies, scoring. */
 class ForYouTest {
 
-    // ---- SimklParser ----
 
     private val showJson = """{
       "shows": [{
@@ -68,11 +66,8 @@ class ForYouTest {
 
     @Test
     fun silent_unrated_entries_are_skipped() {
-        // No status and no rating: the user never engaged with it.
         assertEquals(0, SimklParser.parse("""{"shows": [{"movie": {"title": "Lonely"}}]}""").size)
-        // No title cannot be shown either.
         assertEquals(0, SimklParser.parse("""{"movies": [{"status": "completed"}]}""").size)
-        // Junk payloads never throw.
         assertEquals(0, SimklParser.parse("").size)
         assertEquals(0, SimklParser.parse("{broken").size)
     }
@@ -85,7 +80,6 @@ class ForYouTest {
         assertEquals(0L, SimklParser.parseTime("not-a-date"))
     }
 
-    // ---- AiService prompt + reply parsing ----
 
     private fun candidate(id: Int, title: String, genres: String = "Action") =
         AiService.Candidate(id, title, "2020", 7.5, genres)
@@ -96,11 +90,11 @@ class ForYouTest {
             ProfileTitle(10, "tt1", "Old Title", 1999, "movie", true, 8.0, 100L),
             ProfileTitle(null, null, "List Title", null, "tv", false, 0.0, 0L),
         )
-        val prompt = AiService.buildPrompt(watched, listOf(candidate(99, "Pool Title")), 20)
+        val prompt = AiService.buildPrompt(watched, listOf(candidate(99, "Pool Title")), 7)
         assertTrue(prompt.contains("Old Title"))
         assertTrue(prompt.contains("Pool Title"))
         assertTrue(prompt.contains("99"))
-        assertTrue(prompt.contains("20"))
+        assertTrue(prompt.contains("up to 7"))
         assertTrue(prompt.contains("JSON array"))
         assertTrue(prompt.contains("[123, 456]"))
     }
@@ -110,16 +104,16 @@ class ForYouTest {
         val watched = (1..100).map { ProfileTitle(it, null, "w$it", null, "movie", true, 0.0, 0L) }
         val pool = (1..100).map { candidate(it, "c$it") }
         val prompt = AiService.buildPrompt(watched, pool, 20)
-        assertTrue(prompt.lines().count { it.startsWith("- ") } <= 100) // 40 watched + 50 pool
+        assertTrue(prompt.lines().count { it.startsWith("- ") } <= 100)
     }
 
     @Test
     fun extract_ids_reads_json_array_from_prose() {
         assertEquals(listOf(5, 9), AiService.extractIds("Sure: [5, 9] as requested"))
-        assertEquals(listOf(3, 4, 7), AiService.extractIds("[3, 4, \"7\", 3]")) // dupes dropped, strings ok
+        assertEquals(listOf(3, 4, 7), AiService.extractIds("[3, 4, \"7\", 3]"))
         assertTrue(AiService.extractIds("no array here").isEmpty())
         assertTrue(AiService.extractIds("[").isEmpty())
-        assertTrue(AiService.extractIds("[0, -2]").isEmpty()) // non-tmdb ids dropped
+        assertTrue(AiService.extractIds("[0, -2]").isEmpty())
     }
 
     @Test
@@ -144,7 +138,6 @@ class ForYouTest {
         assertTrue(AiService.parseModels("junk", gemini = true).isEmpty())
     }
 
-    // ---- ForYouEngine score ----
 
     private fun item(id: Int, genreIds: List<Int>, rating: Double, popularity: Double) =
         TmdbService.TmdbItem(id, null, "movie", "t$id", "2020", null, rating, genreIds, popularity)
@@ -152,13 +145,13 @@ class ForYouTest {
     @Test
     fun genre_fit_and_seed_hits_beata_bare_high_rating() {
         val weights = mapOf(28 to 3.0)
-        val fitted = item(1, listOf(28), 0.0, 0.0)     // genre match only.
-        val rated = item(2, emptyList(), 9.0, 0.0)     // high rating, no genre match.
+        val fitted = item(1, listOf(28), 0.0, 0.0)
+        val rated = item(2, emptyList(), 9.0, 0.0)
         assertTrue(ForYouEngine.score(fitted, weights, 0) > ForYouEngine.score(rated, weights, 0))
-        val pushed = item(3, emptyList(), 0.0, 0.0)    // seed hits alone.
+        val pushed = item(3, emptyList(), 0.0, 0.0)
         assertTrue(ForYouEngine.score(pushed, weights, 1) > ForYouEngine.score(rated, weights, 0))
         assertTrue(ForYouEngine.score(item(4, emptyList(), 0.0, 300.0), weights, 0) >
-            ForYouEngine.score(item(5, emptyList(), 0.0, 0.0), weights, 0)) // popularity capped at 3.
+            ForYouEngine.score(item(5, emptyList(), 0.0, 0.0), weights, 0))
     }
 
     @Test

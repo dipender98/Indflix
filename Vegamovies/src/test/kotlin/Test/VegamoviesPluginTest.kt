@@ -14,12 +14,10 @@ import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
-/** JVM tests for pure parsing and naming helpers. */
 class VegamoviesPluginTest {
 
     private val p = VegamoviesProvider()
 
-    // ───────────────────── live domain discovery ─────────────────────.
 
     @Test
     fun domainPick_keepsFullOrigin() {
@@ -70,11 +68,9 @@ class VegamoviesPluginTest {
 
     @Test
     fun searchJson_nonJsonBodyIsNotAnIndexAnswer() {
-        // A landing mirror answers HTML: the index must not be mistaken for a hit list.
         assertTrue(p.parseSearchHits("<html><body>parking</body></html>", "https://x").isEmpty())
     }
 
-    // ───────────────────── search JSON mapping ─────────────────────.
 
     private val searchJson = """
     {"hits":[
@@ -129,8 +125,6 @@ class VegamoviesPluginTest {
         assertTrue(p.isSeries("/download-crew-girl-2026-season-1-netflix/", listOf("Web Series"), "Crew Girl (2026)"))
     }
 
-    // ───────────────────── detail page sections ───────────────────── Movie post: one heading per quality, "Download Now".
-// chips (real markup).
     private val movieHtml = """
     <html><head><meta property="og:title" content="Download Avengers: Endgame (2019) Dual Audio {Hindi-English} 480p [500MB] | 720p [1.7GB]"/></head>
     <body><div class="entry-content">
@@ -158,7 +152,6 @@ class VegamoviesPluginTest {
         assertTrue(s.groups.none { it.links.any { l -> l.gatewayUrl.contains("999000") } })
     }
 
-    /** Series post: quality headings with three chip anchors each (real markup). */
     private val seriesHtml = """
     <html><body><div class="entry-content">
       <h1>Download My Bias, My Boss (S01) Prime Video : Dual Audio {Hindi-Korean} K-Drama 480p 720p &amp; 1080p WEB-DL</h1>
@@ -182,11 +175,9 @@ class VegamoviesPluginTest {
         assertEquals(Servers.GDRIVE, g480.links[0].chip)
         assertEquals(Servers.VCLOUD, g480.links[1].chip)
         assertEquals(Servers.ZIP, g480.links[2].chip)
-        // Anchor text is NOT a group label - the heading is.
         assertTrue(g480.links.all { it.heading.contains("480p") })
     }
 
-    /** Series post with explicit per-episode headings, each keeping its own quality/ZIP links. */
     private val explicitEpisodeHtml = """
     <html><body><div class="entry-content">
       <h1>Download Show (2025) S01 Complete Series</h1>
@@ -211,7 +202,6 @@ class VegamoviesPluginTest {
         assertTrue(eps[0].heading.contains("480p"))
         assertTrue(eps[1].heading.contains("720p"))
         assertTrue(eps[2].heading.contains("1080p"))
-        // Episode-level ZIP stays episode-specific, not a pack; the Batch Pack heading is the pack. 480p+ZIP heading means pack text. but episode wins.
         assertTrue(eps[0].pack.not(), "explicit episode with ZIP token is still an episode")
         val pack = s.groups.single { it.episode == null && it.pack }
         assertEquals(1, pack.links.size)
@@ -248,7 +238,6 @@ class VegamoviesPluginTest {
         assertTrue(s.groups.isEmpty())
     }
 
-    // ───────────────────── naming () ─────────────────────.
 
     @Test
     fun qualityInt_parsesResolutionFromHeadings() {
@@ -256,7 +245,6 @@ class VegamoviesPluginTest {
         assertEquals(720, LinkNaming.qualityInt("Season 1 {Hindi-English} 720p NF WEB-DL x264 [500MB/E]"))
         assertEquals(1080, LinkNaming.qualityInt("Avengers: Endgame (2019) {Hindi-English} 1080p BluRay x264 [4.3GB]"))
         assertEquals(2160, LinkNaming.qualityInt("Movie (2019) {Hindi-English} 2160p 4k HDR x265 [7.7GB]"))
-        // Highest token wins when a heading lists several.
         assertEquals(1080, LinkNaming.qualityInt("Season 1 480p | 720p | 1080p WEB-DL"))
         assertEquals(0, LinkNaming.qualityInt("Season 1 Complete Pack"))
     }
@@ -315,11 +303,9 @@ class VegamoviesPluginTest {
         assertTrue(r2.contains("1080p"), r2)
     }
 
-    // ───────────────────── vcloud R2 chain parsing ─────────────────────.
 
     @Test
     fun decodeDoubleAtob_roundTripsTokenLink() {
-        // atob(atob(X)) == ".
         val inner = java.util.Base64.getEncoder()
             .encodeToString("https://vcloud.fit/abc123?token=xyz".toByteArray())
         val outer = java.util.Base64.getEncoder().encodeToString(inner.toByteArray())
@@ -350,7 +336,6 @@ class VegamoviesPluginTest {
         assertEquals(null to null, LinkNaming.seasonEpisodeFrom("Avengers (2019) 480p BluRay"))
     }
 
-    // ───────────────────── fastdl reurl extraction ─────────────────────.
 
     @Test
     fun extractDirect_cleartextReurl() {
@@ -373,7 +358,6 @@ class VegamoviesPluginTest {
         assertNull(NexdriveResolver.extractDirect("<html>captcha wall</html>"))
     }
 
-    // ───────────────────── payload round-trip ─────────────────────.
 
     @Test
     fun payload_jsonRoundTripPreservesAllFields() {
@@ -392,6 +376,6 @@ class VegamoviesPluginTest {
         assertEquals(Servers.GDRIVE, l0.kind)
         assertEquals(1, l0.season)
         assertEquals(2, l0.episode)
-        assertTrue(back.links[2].isGateway) // gateway flag survives the round-trip.
+        assertTrue(back.links[2].isGateway)
     }
 }

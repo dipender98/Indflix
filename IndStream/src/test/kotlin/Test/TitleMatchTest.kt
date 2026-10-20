@@ -5,8 +5,6 @@ import com.indstream.TitleMatch
 import com.indstream.ServerFarm
 import com.indstream.ServerIdType
 import com.indstream.ServerSpec
-import com.indstream.VidlinkSource
-/** FILE: TitleMatchTest. kt â€” guards the service. - Title normalization, variant generation. - Levenshtein distance +. relevance thresholds. - Year. */
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -64,10 +62,10 @@ class TitleMatchTest {
     @Test
     fun yearMatches_respectsTolerance() {
         assertTrue(TitleMatch.yearMatches(2019, 2019))
-        assertTrue(TitleMatch.yearMatches(2019, 2017)) // within tolerance 2.
+        assertTrue(TitleMatch.yearMatches(2019, 2017))
         assertFalse(TitleMatch.yearMatches(2019, 2001))
-        assertTrue(TitleMatch.yearMatches(null, 2001)) // unknown = pass.
-        assertTrue(TitleMatch.yearMatches(2019, null)) // unknown = pass.
+        assertTrue(TitleMatch.yearMatches(null, 2001))
+        assertTrue(TitleMatch.yearMatches(2019, null))
     }
 
     @Test

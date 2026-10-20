@@ -1,20 +1,17 @@
 ﻿package Test
 
+import com.indstream.CryptoKit
 import com.indstream.ManifestKit
-import com.indstream.NaCl
-import com.indstream.TitleMatch
 import com.indstream.ServerFarm
 import com.indstream.ServerIdType
 import com.indstream.ServerSpec
-import com.indstream.VidlinkSource
-/** FILE: VidLinkTest. kt â€” guards VidLinkSource. kt (delete-safe rename-proof tests named after what they test). NaCl secretbox correctness. */
+import com.indstream.StreamEngine
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
-/** Cryptographic correctness tests for (XSalsa20-Poly1305 secretbox) and token encoding. Vectors: - Secretbox Test. Vector #1. - HSalsa20 test vector. */
-class VidlinkTest {
+class PlaybackTokenTest {
 
     private fun hex(b: ByteArray): String = b.joinToString("") { "%02x".format(it) }
     private fun unhex(s: String): ByteArray =
@@ -22,7 +19,6 @@ class VidlinkTest {
 
     @Test
     fun secretbox_naclTestVector1() {
-        // Secretbox Test Vector #1. c: 131-byte message -> 147-byte boxed output (16 MAC + 131 ciphertext).
         val key = unhex(
             "1b27556473e985d462cd51197a9a46c76009549eac6474f206c4ee0844f68389"
         )
@@ -46,104 +42,95 @@ class VidlinkTest {
 
         assertEquals(131, message.size, "vector message size")
         assertEquals(147, expected.size, "vector expected size")
-        val boxed = NaCl.secretbox(message, nonce, key)
+        val boxed = CryptoKit.secretbox(message, nonce, key)
         assertEquals(expected.size, boxed.size, "boxed length")
         assertTrue(boxed.contentEquals(expected), "secretbox output mismatch:\n got ${hex(boxed)}\nwant ${hex(expected)}")
     }
 
     @Test
     fun secretbox_decryptRoundTrip() {
-        // Decrypting our own box with the same primitives must recover the message.
         val key = unhex("c75136c5668bbfe65a7ecad431a745db68b5f381555b38d8f6c699449cf11fcd")
         val nonce = ByteArray(24)
         val message = "603".toByteArray(Charsets.UTF_8) + ByteArray(8) { 0 }
 
-        val boxed = NaCl.secretbox(message, nonce, key)
+        val boxed = CryptoKit.secretbox(message, nonce, key)
 
-        // Manual open: derive keystream, XOR ciphertext back, recompute MAC.
         val mac = boxed.copyOfRange(0, 16)
         val padded = ByteArray(32 + message.size)
         message.copyInto(padded, 32)
-        val ks = NaCl.xsalsa20Keystream(key, nonce, padded.size)
+        val ks = CryptoKit.xsalsa20Keystream(key, nonce, padded.size)
         val cipher = padded.mapIndexed { i, b -> (b.toInt() xor ks[i].toInt()).toByte() }.toByteArray()
-        val recomputedMac = NaCl.poly1305(cipher.copyOfRange(0, 32), cipher.copyOfRange(32, cipher.size))
+        val recomputedMac = CryptoKit.poly1305(cipher.copyOfRange(0, 32), cipher.copyOfRange(32, cipher.size))
 
         assertTrue(recomputedMac.contentEquals(mac), "MAC round-trip failed")
     }
 
     @Test
     fun vidlinkToken_isBase64UrlNoPadding() {
-        val token = VidlinkSource.token("603", 1_700_000_000L)
-        // payload = 24 nonce + (16 MAC + 11-byte message) = 51 bytes -> base64url = ceil(51/3)*4 = 68 chars, no '=' padding.
+        val token = StreamEngine.vidlinkToken("603", 1_700_000_000L)
         assertEquals(68, token.length, "unexpected token length: $token")
         assertTrue(token.none { it == '+' || it == '/' || it == '=' }, "token not base64url: $token")
     }
 
     @Test
     fun vidlinkToken_deterministicPerTimestamp() {
-        val a = VidlinkSource.token("603", 1_700_000_000L)
-        val b = VidlinkSource.token("603", 1_700_000_000L)
+        val a = StreamEngine.vidlinkToken("603", 1_700_000_000L)
+        val b = StreamEngine.vidlinkToken("603", 1_700_000_000L)
         assertEquals(a, b, "same id+timestamp must yield identical tokens")
-        val c = VidlinkSource.token("603", 1_700_000_060L)
+        val c = StreamEngine.vidlinkToken("603", 1_700_000_060L)
         assertTrue(a != c, "different timestamps must yield different tokens")
     }
 
     @Test
     fun vidlinkTokenOffsets_defaultFirstThenSkewVariants() {
-        // Offset ladder: site default first, then clock-skew variants for 2004 retries.
-        assertEquals(listOf(480L, 0L, 960L), VidlinkSource.TOKEN_OFFSETS)
+        assertEquals(listOf(480L, 0L, 960L), StreamEngine.VIDLINK_TOKEN_OFFSETS)
     }
 
     @Test
     fun vidlinkTokenWithOffset_distinctTokensPerOffset() {
-        val a = VidlinkSource.tokenWithOffset("603", 0L)
-        val b = VidlinkSource.tokenWithOffset("603", 960L)
+        val a = StreamEngine.vidlinkTokenWithOffset("603", 0L)
+        val b = StreamEngine.vidlinkTokenWithOffset("603", 960L)
         assertEquals(68, a.length, "unexpected token length: $a")
         assertTrue(a != b, "different offsets must yield different tokens")
     }
 
     @Test
     fun vidlinkApiUrlAt_embedsOffsetToken() {
-        val movie = VidlinkSource.movieApiUrlAt("603", 0L)
+        val movie = StreamEngine.vidlinkMovieApiUrlAt("603", 0L)
         assertTrue(movie.startsWith("https://vidlink.pro/api/b/movie/") && movie.endsWith("?multiLang=1"))
-        val tv = VidlinkSource.tvApiUrlAt("603", 1, 2, 960L)
+        val tv = StreamEngine.vidlinkTvApiUrlAt("603", 1, 2, 960L)
         assertTrue(tv.contains("/api/b/tv/") && tv.endsWith("/1/2?multiLang=1"))
     }
 
     @Test
     fun vidlinkPlayerHeaders_useNativePlayerAgent() {
-        // The bcdn. hakunaymatata. com CDN User-Agent-fingerprints requests: browser UAs get 428, a native player UA gets 206.
-// Playback headers therefore.
-        val ua = VidlinkSource.PLAYER_HEADERS["User-Agent"]
+        val ua = StreamEngine.VIDLINK_PLAYER_HEADERS["User-Agent"]
         assertEquals("ExoPlayer", ua, "vidlink playback must use a native player UA")
     }
 
     @Test
     fun vidlinkPlayerHeaders_baseHasNoReferer() {
-        // Live-). The base playback headers must therefore never include Referer/Origin.
-        assertTrue(!VidlinkSource.PLAYER_HEADERS.containsKey("Referer"),
+        assertTrue(!StreamEngine.VIDLINK_PLAYER_HEADERS.containsKey("Referer"),
             "mwVault CDN 429s on Referer; base headers must not carry one")
-        assertTrue(!VidlinkSource.PLAYER_HEADERS.containsKey("Origin"),
+        assertTrue(!StreamEngine.VIDLINK_PLAYER_HEADERS.containsKey("Origin"),
             "base headers must stay UA-only; Origin comes from per-quality API headers")
     }
 
     @Test
     fun vidlinkQualityHeaders_emptyApiHeaders_yieldsUaOnly() {
-        // mwVault shape: headers: {} - the CDN serves the MP4 to a bare ExoPlayer UA () and rejects anything with a Referer.
         val q = org.json.JSONObject("""{"type":"mp4","url":"https://bcdn.hakunaymatata.com/x.mp4","headers":{},"requiresProxy":true}""")
-        val h = VidlinkSource.qualityPlaybackHeaders(q)
+        val h = StreamEngine.vidlinkPlaybackHeaders(q)
         assertEquals(mapOf("User-Agent" to "ExoPlayer"), h,
             "mwVault streams must play with UA-only headers")
     }
 
     @Test
     fun vidlinkQualityHeaders_mergeApiProvided() {
-        // mbVault shape: per-quality headers carry the exact referer/origin the CDN requires ().
         val q = org.json.JSONObject(
             """{"type":"mp4","url":"https://bcdnxw.hakunaymatata.com/x.mp4",
                "headers":{"referer":"https://filmboom.top/","origin":"https://filmboom.top"},
                "requiresProxy":true}""")
-        val h = VidlinkSource.qualityPlaybackHeaders(q)
+        val h = StreamEngine.vidlinkPlaybackHeaders(q)
         assertEquals("ExoPlayer", h["User-Agent"], "native UA kept")
         assertEquals("https://filmboom.top/", h["Referer"], "API referer must be forwarded")
         assertEquals("https://filmboom.top", h["Origin"], "API origin must be forwarded")

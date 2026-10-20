@@ -10,7 +10,6 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-/** TEMPORARY DEBUG - delete after verifying Wyzie end-to-end. Needs WYZIE_KEY + TMDB_KEY env. */
 class WyzieReacherProbeTest {
 
     private fun get(url: String): Triple<Int?, String?, Boolean> {
@@ -46,7 +45,6 @@ class WyzieReacherProbeTest {
             return
         }
 
-        // Resolve the show -> TMDB id -> IMDb id live (no hardcoded ids).
         val search = tmdb("/search/tv?query=Reacher&include_adult=false", tmdbKey)
         val arr = org.json.JSONObject(search).optJSONArray("results") ?: org.json.JSONArray()
         val hit = (0 until arr.length()).map { arr.optJSONObject(it) }
@@ -58,7 +56,6 @@ class WyzieReacherProbeTest {
         assertTrue(imdb.startsWith("tt"), "no imdb id: $imdb")
         println("Reacher S01E01 resolves to $imdb (tmdb $tmdbId)")
 
-        // Same chunking the app uses for a full language set.
         val codes = SubtilesProvider.codesFromLangs(SubtilesProvider.desiredLanguages())
         val groups = SubtilesProvider.groupRequests(codes)
         assertTrue(groups.isNotEmpty())

@@ -11,22 +11,15 @@ import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.random.Random
 
-/** Builds the personalised catalog rows from the account history. */
 object ForYouEngine {
 
     private const val PREFS = "indstream_foryou"
-    /** Seeds (watched titles) used to seed the candidate pool. */
     private const val MAX_SEEDS = 6
-    /** Candidates handed to the model. */
     private const val MAX_POOL = 40
-    /** Items in one row. */
-    private const val ROW_SIZE = 20
-    /** Parallel catalog calls. */
+    private const val ROW_SIZE = 7
     private const val CONCURRENCY = 4
-    /** Discover pages the pool rotates through, so a rebuild sees other titles. */
     private const val DISCOVER_PAGES = 3
 
-    /** Titles for one row. "movie" or "tv". */
     suspend fun row(type: String, page: Int): List<TmdbService.TmdbItem> {
         if (page > 1) return emptyList()
         val kind = if (type == "movie") "movie" else "tv"
@@ -36,13 +29,11 @@ object ForYouEngine {
         val profile = SimklHistory.fetch()
         if (profile.isEmpty()) return storedRow(kind).orEmpty()
         val items = build(kind, profile, buildCount(kind))
-        // A failed rebuild keeps the last good row instead of emptying the home page.
         if (items.isEmpty()) return storedRow(kind).orEmpty()
         store(kind, items)
         return items
     }
 
-    /** Drop the stored rows, so the next load rebuilds them. */
     fun invalidate(context: Context) {
         runCatching {
             context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -50,7 +41,6 @@ object ForYouEngine {
         }
     }
 
-    /** Build the row: pool from catalog, score locally, then let the model rerank. */
     private suspend fun build(
         kind: String,
         profile: List<ProfileTitle>,
@@ -63,7 +53,6 @@ object ForYouEngine {
             )
             .toList()
         if (ranked.isEmpty()) return@coroutineScope emptyList()
-        // The seed window rotates, so a rebuild starts from other titles than the last one.
         val offset = if (ranked.size <= MAX_SEEDS) 0 else (variant * MAX_SEEDS) % ranked.size
         val seeds = (0 until minOf(MAX_SEEDS, ranked.size)).map { ranked[(offset + it) % ranked.size] }
 
@@ -79,7 +68,6 @@ object ForYouEngine {
             }
         }.awaitAll()
 
-        // Genre picture of the user, weighted by how much each seed matters.
         val genreWeights = HashMap<Int, Double>()
         details.forEachIndexed { i, detail ->
             val w = seeds[i].weight
@@ -104,7 +92,6 @@ object ForYouEngine {
             val discoverPage = 1 + (variant % DISCOVER_PAGES)
             pool.addAll(TmdbService.discover(kind, topGenres, discoverPage))
         }
-        // A per-build shuffle keeps equal scores from always resolving to the same title.
         pool.shuffle(Random(variant * 31L + kind.hashCode()))
 
         val seenTmdb = profile.mapNotNull { it.tmdbId }.toHashSet()
@@ -138,7 +125,6 @@ object ForYouEngine {
         ordered.take(ROW_SIZE)
     }
 
-    /** Local score: genre fit, how many seeds pushed it, rating and popularity. */
     internal fun score(
         item: TmdbService.TmdbItem,
         genreWeights: Map<Int, Double>,
@@ -152,13 +138,12 @@ object ForYouEngine {
         return s
     }
 
-    /** Let the model order the pool. Falls back to the local order. */
     private suspend fun rerank(
         kind: String,
         profile: List<ProfileTitle>,
         scored: List<TmdbService.TmdbItem>,
     ): List<TmdbService.TmdbItem> {
-        if (!AiService.isConfigured()) return scored
+        if (!AiService.isConfigured()) return scored.take(ROW_SIZE)
         val names = TmdbService.genreNames(kind)
         val candidates = scored.mapNotNull { item ->
             val id = item.tmdbId ?: return@mapNotNull null
@@ -171,15 +156,13 @@ object ForYouEngine {
             )
         }
         val watched = profile.filter { it.type == kind }
+            .sortedWith(compareByDescending<ProfileTitle> { it.weight }.thenByDescending { it.lastActivityAt })
         val picked = runCatching { AiService.rank(watched, candidates, ROW_SIZE) }.getOrDefault(emptyList())
-        if (picked.isEmpty()) return scored
+        if (picked.isEmpty()) return scored.take(ROW_SIZE)
         val byId = scored.associateBy { it.tmdbId }
-        val chosen = picked.mapNotNull { byId[it] }
-        val chosenIds = chosen.mapNotNull { it.tmdbId }.toHashSet()
-        return chosen + scored.filter { it.tmdbId != null && it.tmdbId !in chosenIds }
+        return picked.mapNotNull { byId[it] }.distinctBy { it.tmdbId }.take(ROW_SIZE)
     }
 
-    /** Cached row for a type, null when absent or stale. */
     private fun cached(kind: String): List<TmdbService.TmdbItem>? {
         val ctx = Settings.appContextOrNull() ?: return null
         val root = readRoot(ctx, kind) ?: return null
@@ -195,14 +178,12 @@ object ForYouEngine {
         return itemsOf(root, kind)
     }
 
-    /** The last stored row, even when it is stale. */
     private fun storedRow(kind: String): List<TmdbService.TmdbItem>? {
         val ctx = Settings.appContextOrNull() ?: return null
         val root = readRoot(ctx, kind) ?: return null
         return itemsOf(root, kind)
     }
 
-    /** The stored row of one type. */
     private fun readRoot(ctx: Context, kind: String): JSONObject? {
         val raw = runCatching {
             ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(kind, null)
@@ -210,7 +191,6 @@ object ForYouEngine {
         return runCatching { JSONObject(raw) }.getOrNull()
     }
 
-    /** The titles of a stored row. */
     private fun itemsOf(root: JSONObject, kind: String): List<TmdbService.TmdbItem>? = runCatching {
         val arr = root.optJSONArray("items") ?: return@runCatching null
         val out = (0 until arr.length()).mapNotNull { i ->
@@ -226,10 +206,9 @@ object ForYouEngine {
                 rating = o.optDouble("r", 0.0).takeIf { it > 0 },
             )
         }
-        out.takeIf { it.isNotEmpty() }
+        out.take(ROW_SIZE).takeIf { it.isNotEmpty() }
     }.getOrNull()
 
-    /** Persist a computed row so the next home load renders it instantly. */
     private fun store(kind: String, items: List<TmdbService.TmdbItem>) {
         val ctx = Settings.appContextOrNull() ?: return
         val now = System.currentTimeMillis()
@@ -255,7 +234,6 @@ object ForYouEngine {
         }
     }
 
-    /** Build timestamps of one row, newest last. */
     private fun buildLog(ctx: Context, kind: String, now: Long = System.currentTimeMillis()): JSONArray {
         val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val raw = runCatching { prefs.getString(buildsKey(kind), null) }.getOrNull()
@@ -269,7 +247,6 @@ object ForYouEngine {
         return out
     }
 
-    /** Builds of one row inside the daily window. */
     private fun buildsInWindow(ctx: Context, kind: String): Int {
         val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val raw = runCatching { prefs.getString(buildsKey(kind), null) }.getOrNull() ?: return 0
@@ -283,20 +260,16 @@ object ForYouEngine {
         return count
     }
 
-    /** How many times one row was built, so a rebuild can differ from the last one. */
     private fun buildCount(kind: String): Int {
         val ctx = Settings.appContextOrNull() ?: return 0
         return totalCount(ctx, kind)
     }
 
-    /** Total builds of one row, kept across days. */
     private fun totalCount(ctx: Context, kind: String): Int = runCatching {
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getInt(totalKey(kind), 0)
     }.getOrDefault(0)
 
-    /** Prefs key of the build log of one row. */
     private fun buildsKey(kind: String) = "builds_$kind"
 
-    /** Prefs key of the total build counter of one row. */
     private fun totalKey(kind: String) = "total_$kind"
 }

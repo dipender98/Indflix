@@ -17,14 +17,11 @@ cloudstream {
     tvTypes = listOf("Movie", "TvSeries", "Anime", "AnimeMovie", "Cartoon")
     requiresResources = false
     setRepo(System.getenv("GITHUB_REPOSITORY") ?: "https://github.com/dipender98/Indflix")
-    // Icon served from the repo; CloudStream fetches it from plugins.json.
     iconUrl = "https://raw.githubusercontent.com/dipender98/Indflix/main/Multimovies/icon.png"
 }
 
 android {
     namespace = "com.multimovies"
-    // JVM unit tests (AutoPlayPickMmTest etc.) exercise engine code that logs
-    // via android.util.Log — return no-op defaults instead of "not mocked".
     testOptions {
         unitTests.isReturnDefaultValues = true
     }
@@ -34,18 +31,10 @@ dependencies {
     val cloudstream by configurations
     cloudstream("com.lagradost:cloudstream3:pre-release")
 
-    // The recloudstream gradle plugin materializes the CloudStream classes jar
-    // at <gradle home>/caches/cloudstream/... and wires it into `compileOnly`
-    // via a file dependency — which is why `cloudstream3:pre-release` shows
-    // FAILED in dependency reports yet compilation works. Unit tests need the
-    // SAME jar on the test classpath (AutoPlayPickMmTest constructs
-    // ExtractorLink directly). Run any compile task once to materialize it.
     val csJar = File(project.gradle.gradleUserHomeDir, "caches/cloudstream/cloudstream/cloudstream.jar")
     if (csJar.exists()) {
         testImplementation(files(csJar))
     }
-    // newExtractorLink's class-init needs the cryptography provider at runtime;
-    // same guarded pattern (globbed so artifact versions can roll).
     val cryptoJars = fileTree(
         mapOf(
             "dir" to File(project.gradle.gradleUserHomeDir, "caches/modules-2/files-2.1/dev.whyoleg.cryptography"),
@@ -57,11 +46,6 @@ dependencies {
     }
 }
 
-// The CloudStream gradle plugin's `make` dexes the unshrunk classes with plain
-// d8, ignoring AGP's minify settings, so the default .cs3 ships every class and
-// method unminified. shrinkCs3 re-dexes the R8 output of the release variant
-// (minifyReleaseWithR8 -> shrunkClasses.jar, built from proguard-rules.pro) and
-// repackages Multimovies.cs3 with the shrunken dex instead.
 val androidExtension = extensions.getByType(LibraryExtension::class.java)
 val shrunkJar = layout.buildDirectory.file(
     "intermediates/shrunk_classes/release/minifyReleaseWithR8/shrunkClasses.jar"
@@ -125,6 +109,4 @@ tasks.register("shrinkCs3") {
 
 tasks.named("make") { finalizedBy("shrinkCs3") }
 
-// makePluginsJson -> writeCacheEntry reads build/Multimovies.cs3, which shrinkCs3
-// replaces. Declare the dependency explicitly (Gradle 9 fails otherwise).
 tasks.named("writeCacheEntry") { dependsOn("shrinkCs3") }

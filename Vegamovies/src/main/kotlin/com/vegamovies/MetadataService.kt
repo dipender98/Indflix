@@ -1,6 +1,5 @@
 package com.vegamovies
 
-/** TMDB metadata client with in-memory caching. */
 
 import com.lagradost.cloudstream3.Actor
 import com.lagradost.cloudstream3.ActorData
@@ -14,13 +13,11 @@ import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 
-/** Read a JSON string field, returning null when blank. */
 internal fun str(obj: JSONObject, key: String): String? {
     val v: String = obj.optString(key)
     return if (v.isBlank()) null else v
 }
 
-/** TMDB search, detail, and IMDb lookup client with caching. */
 object MetadataService {
 
     private const val TMDB_API_KEY = "e6333b32409e02a4a6eba6fb7ff866bb"
@@ -34,14 +31,12 @@ object MetadataService {
     data class TmdbItem(
         val tmdbId: Int?,
         val imdbId: String?,
-        val type: String,        // "movie" | "series"
+        val type: String,
         val name: String,
         val year: String?,
         val poster: String?,
         val rating: Double?,
-        /** TMDB vote_count - popularity signal for ranking. */
         val votes: Int = 0,
-        /** TMDB popularity metric (informational; ranking uses votes). */
         val popularity: Double = 0.0,
     )
 
@@ -58,7 +53,6 @@ object MetadataService {
         val cast: List<ActorData>? = null,
     )
 
-    /** Search movies + series; returns up to ranked hits. */
     suspend fun search(query: String, limit: Int = 8): List<TmdbItem> {
         if (query.isBlank()) return emptyList()
         val encoded = URLEncoder.encode(query.trim(), "UTF-8")
@@ -71,7 +65,6 @@ object MetadataService {
         return parseMultiSearch(json).take(limit)
     }
 
-    /** Fetch full TMDB metadata for of ("movie"|"series"). */
     suspend fun fetchMeta(tmdbId: Int, type: String): TmdbDetail? {
         if (tmdbId <= 0) return null
         val cacheKey = "$tmdbId|$type"
@@ -83,7 +76,6 @@ object MetadataService {
         return detail
     }
 
-    /** Resolve an IMDb id to (tmdbId, type) via TMDB's find endpoint. */
     suspend fun findByImdb(imdbId: String): Pair<Int, String>? {
         if (!imdbId.startsWith("tt")) return null
         imdbFindCache[imdbId]?.let { return it }
@@ -102,20 +94,16 @@ object MetadataService {
         return result
     }
 
-    /** Per-episode metadata used to label series episode rows. */
     data class TmdbEpisode(
         val name: String? = null,
         val overview: String? = null,
         val thumbnail: String? = null,
-        /** Runtime in minutes, when TMDB knows it. */
         val runTime: Int? = null,
-        /** ISO air date (" "), when present. */
         val aired: String? = null,
     )
 
     private val episodeCache = ConcurrentHashMap<String, Map<Int, TmdbEpisode>>()
 
-    /** TMDB episode names/overviews/thumbnails for, keyed by episode number. wins when the detail fetch already resolved. it; otherwise the IMDB id is. */
     suspend fun episodesForSeason(imdbId: String?, tmdbIdHint: Int?, season: Int): Map<Int, TmdbEpisode> {
         if (season <= 0) return emptyMap()
         val tvId = tmdbIdHint
@@ -124,8 +112,6 @@ object MetadataService {
         val ck = "$tvId|$season"
         episodeCache[ck]?.let { return it }
         val url = "$TMDB_API/tv/$tvId/season/$season?api_key=$TMDB_API_KEY&language=en-US"
-        // Mobile networks routinely need >6s for the first api. themoviedb. org handshake; a cold season fetch must not.
-// silently mean "no episode names". 8s.
         var map: Map<Int, TmdbEpisode> = emptyMap()
         for (attempt in 1..2) {
             val root = runCatching { JSONObject(app.get(url, timeout = 8).text) }.getOrNull() ?: continue
@@ -149,7 +135,6 @@ object MetadataService {
         return map
     }
 
-    /** One-shot title/year → (detail) resolution used by: prefers the IMDb id scraped), falls back to a TMDB title search. Wrapped in a caller-supplied. */
     suspend fun enrich(title: String, year: String?, imdbId: String?): TmdbDetail? {
         imdbId?.takeIf { it.startsWith("tt") }?.let { id ->
             findByImdb(id)?.let { (tmdbId, type) ->
@@ -162,7 +147,6 @@ object MetadataService {
         return fetchMeta(tmdbId, hit.type)
     }
 
-    /** Parse a TMDB /search/multi response (movies + series only), deduped by title+year. */
     fun parseMultiSearch(raw: String?): List<TmdbItem> {
         if (raw.isNullOrBlank()) return emptyList()
         return try {
@@ -192,7 +176,6 @@ object MetadataService {
         }
     }
 
-    /** Collapse search hits sharing a normalized (title, year); highest-rated wins. */
     internal fun List<TmdbItem>.dedupedByTitle(): List<TmdbItem> {
         val best = LinkedHashMap<String, TmdbItem>()
         for (item in this) {
@@ -205,7 +188,6 @@ object MetadataService {
         return best.values.toList()
     }
 
-    /** Parse a TMDB detail response (with external_ids + credits appended). */
     fun parseDetail(raw: String?): TmdbDetail? {
         if (raw.isNullOrBlank()) return null
         return try {

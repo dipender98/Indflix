@@ -9,7 +9,6 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
-/** FILE: QualityFloorMmTest. kt - guards the, TTFB scoring, Hindi tie-breaks) and MultiSourcePuller. sortLinks are. GONE. Links push in ARRIVAL order. */
 class QualityFloorMmTest {
 
     private fun link(
@@ -50,7 +49,6 @@ class QualityFloorMmTest {
 
     @Test
     fun adaptive_alwaysPasses_evenKnownSub720() {
-        // m3u8 masters ramp to their best rendition - never dropped, even when their measured height reads low.
         assertTrue(floor(link("https://x/master360.m3u8", ExtractorLinkType.M3U8, 360)))
         assertTrue(floor(link("https://x/master480.m3u8", ExtractorLinkType.M3U8, 480)))
     }
@@ -63,7 +61,6 @@ class QualityFloorMmTest {
 
     @Test
     fun neutral_noRankingHelpersRemain() {
-        // Structural guard for the).
         val mmMethods = MultiSourcePuller::class.java.declaredMethods.map { it.name }.toSet()
         assertFalse("sortLinks" in mmMethods, "sortLinks (plugin-side ranking) must not exist")
         assertFalse("sourceKey" in mmMethods, "sourceKey (speed/priority key) must not exist")

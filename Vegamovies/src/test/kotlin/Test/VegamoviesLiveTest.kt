@@ -7,12 +7,10 @@ import com.vegamovies.VegamoviesProvider
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Test
 
-/** Live end-to-end checks for loading and link resolution. */
 class VegamoviesLiveTest {
 
     private val p = VegamoviesProvider()
 
-    /** The link CloudStream's player auto-selects: max quality, first registered. */
     private fun List<ExtractorLink>.autoPick(): ExtractorLink? {
         val streamable = filter { it.quality > 0 }
         val best = streamable.maxOfOrNull { it.quality } ?: return null
@@ -22,7 +20,6 @@ class VegamoviesLiveTest {
     @Test
     fun live_search_bahubali_topResults() = runBlocking {
         try {
-            // Exact complaint: site's exact-token search hides the popular "Baahubali" films.
             val res = p.search("bahubali") ?: return@runBlocking println("LIVE SEARCH returned null")
             res.take(8).forEachIndexed { i, r ->
                 println("  [$i] ${r.name}  ${r.url.take(80)}")
@@ -35,7 +32,6 @@ class VegamoviesLiveTest {
     @Test
     fun live_movie_metadata_check() = runBlocking {
         try {
-            // IMDb-less movie post: metadata must come from the TMDB title search.
             val url = "${p.mainUrl}/jack-reacher-2012-dual-audio-hindi-english-movie-480p-720p-1080p/"
             val r = runCatching { p.load(url) }.getOrNull()
             println("META name=${r?.name} year=${r?.year} poster=${r?.posterUrl?.take(40)} " +
@@ -131,7 +127,6 @@ class VegamoviesLiveTest {
     @Test
     fun live_search_works_from_a_parked_host() = runBlocking {
         try {
-            // A mirror without the index endpoint: rotation must still reach hits.
             p.mainUrl = "https://1vegamovies.pics"
             p.bollywoodUrl = "https://new2.rogmovies.click"
             val res = p.search("avengers endgame")

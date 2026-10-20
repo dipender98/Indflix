@@ -7,10 +7,8 @@ import java.net.URL
 import kotlin.test.Test
 import kotlin.test.assertTrue
 
-/** Live network probe: exercises every farm server's real chain entry and reports health. Manual run only (needs network). */
 class ServerProbeTest {
 
-    // Inception (TMDB 27205 / IMDB tt1375666), GoT S1E1 (TMDB 1399 / IMDB tt0944947).
     private val tmdbMovieId = "27205"
     private val imdbMovieId = "tt1375666"
     private val tmdbTvId = "1399"
@@ -68,7 +66,6 @@ class ServerProbeTest {
     @Test
     fun probeAllServers_movieAndTv() {
         val results = mutableListOf<ProbeResult>()
-        // Chain-entry checks for servers whose registry URL is not a plain GET target.
         val special = mapOf(
             "moviebox" to ::checkMovieBox,
             "castletv" to ::checkCastleTv,
@@ -108,7 +105,6 @@ class ServerProbeTest {
         if (deadIds.isNotEmpty()) println("Dead: ${deadIds.joinToString()}")
         println("=".repeat(110))
 
-        // The four previously-failing servers must answer through their real chain entries.
         for (id in special.keys) {
             assertTrue(results.any { it.serverId == id && it.ok }, "$id must answer")
         }
@@ -118,7 +114,6 @@ class ServerProbeTest {
     private fun refererHeaders(referer: String?): Map<String, String> =
         if (referer.isNullOrBlank()) emptyMap() else mapOf("Referer" to referer)
 
-    // Bearer-token endpoint answers 200 with the token in the x-user header; the title search is a POST needing it.
     private fun checkMovieBox(id: String): List<ProbeResult> {
         val url = ServerFarm.buildMovieUrl(ServerFarm.allServers.first { it.id == id }, tmdbMovieId)
         val f = fetch(url)
@@ -127,7 +122,6 @@ class ServerProbeTest {
             "HTTP ${f.code} x-user=${if (token) "present" else "MISSING"} ${f.error ?: ""}".trim()))
     }
 
-    // Chain entry is the security-key fetch; search/detail/video are POSTs needing that key.
     private fun checkCastleTv(id: String): List<ProbeResult> {
         val url = ServerFarm.buildMovieUrl(ServerFarm.allServers.first { it.id == id }, tmdbMovieId)
         val f = fetch(url, mapOf("Accept" to "application/json"))

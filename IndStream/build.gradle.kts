@@ -3,7 +3,7 @@ import java.util.Properties
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
-version = 69
+version = 70
 
 plugins {
     id("com.lagradost.cloudstream3.gradle")
@@ -17,14 +17,11 @@ cloudstream {
     tvTypes = listOf("Movie", "TvSeries")
     requiresResources = false
     setRepo(System.getenv("GITHUB_REPOSITORY") ?: "https://github.com/dipender98/Indflix")
-    // Icon served from the repo; CloudStream fetches it from plugins.json.
     iconUrl = "https://raw.githubusercontent.com/dipender98/Indflix/main/IndStream/icon.png"
 }
 
 android {
     namespace = "com.indstream"
-    // JVM unit tests (AutoPlayPickTest etc.) exercise engine code that logs
-    // via android.util.Log — return no-op defaults instead of "not mocked".
     testOptions {
         unitTests.isReturnDefaultValues = true
     }
@@ -34,19 +31,10 @@ dependencies {
     val cloudstream by configurations
     cloudstream("com.lagradost:cloudstream3:pre-release")
 
-    // The recloudstream gradle plugin materializes the CloudStream classes jar
-    // at <gradle home>/caches/cloudstream/... and wires it into `compileOnly`
-    // via a file dependency — which is why `cloudstream3:pre-release` shows
-    // FAILED in dependency reports yet compilation works. Unit tests that touch
-    // ExtractorLink (NeutralOrderTest asserts emitted link quality/shape) need
-    // the SAME jar on the test classpath. Run any compile task once to
-    // materialize it.
     val csJar = File(project.gradle.gradleUserHomeDir, "caches/cloudstream/cloudstream/cloudstream.jar")
     if (csJar.exists()) {
         testImplementation(files(csJar))
     }
-    // newExtractorLink's class-init needs the cryptography provider at runtime;
-    // same guarded pattern (globbed so artifact versions can roll).
     val cryptoJars = fileTree(
         mapOf(
             "dir" to File(project.gradle.gradleUserHomeDir, "caches/modules-2/files-2.1/dev.whyoleg.cryptography"),
@@ -56,14 +44,9 @@ dependencies {
     if (cryptoJars.isNotEmpty()) {
         testImplementation(files(cryptoJars))
     }
-    // On a clean checkout the modules-2 cache has no dev.whyoleg.cryptography
-    // artifacts, so the glob above is empty and ExtractorApiKt's class-init
-    // (Rabbitstream) throws NoClassDefFoundError on any test that calls emit().
-    // Pin the version CloudStream ships so the extractor registry loads in tests.
     testImplementation("dev.whyoleg.cryptography:cryptography-core:0.6.0")
     testImplementation("dev.whyoleg.cryptography:cryptography-random:0.6.0")
     testImplementation("dev.whyoleg.cryptography:cryptography-provider-jdk:0.6.0")
-    // NiceHttp serializes POST bodies with kotlinx-serialization; same guarded pattern.
     val serialJars = fileTree(
         mapOf(
             "dir" to File(project.gradle.gradleUserHomeDir, "caches/modules-2/files-2.1/org.jetbrains.kotlinx"),
@@ -73,7 +56,6 @@ dependencies {
     if (serialJars.isNotEmpty()) {
         testImplementation(files(serialJars))
     }
-    // NiceHttp builds POST bodies with Jackson; same guarded pattern.
     val jacksonJars = fileTree(
         mapOf(
             "dir" to File(project.gradle.gradleUserHomeDir, "caches/modules-2/files-2.1/com.fasterxml.jackson.core"),
@@ -89,12 +71,9 @@ dependencies {
     if (jacksonJars.isNotEmpty()) {
         testImplementation(files(jacksonJars))
     }
-    // Same clean-checkout gap as crypto above: MainAPIKt's class-init (toJson ->
-    // Jackson) fails without these, so pin them for the unit-test runtime.
     testImplementation("com.fasterxml.jackson.core:jackson-databind:2.17.1")
     testImplementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.17.1")
     testImplementation(kotlin("reflect"))
-    // Jackson-kotlin needs kotlin-reflect at runtime; same guarded pattern.
     val reflectJars = fileTree(
         mapOf(
             "dir" to File(project.gradle.gradleUserHomeDir, "caches/modules-2/files-2.1/org.jetbrains.kotlin"),
@@ -106,11 +85,6 @@ dependencies {
     }
 }
 
-// The CloudStream gradle plugin's `make` dexes the unshrunk classes with plain
-// d8, ignoring AGP's minify settings, so the default .cs3 ships every class and
-// method unminified. shrinkCs3 re-dexes the R8 output of the release variant
-// (minifyReleaseWithR8 -> shrunkClasses.jar, built from proguard-rules.pro) and
-// repackages IndStream.cs3 with the shrunken dex instead.
 val androidExtension = extensions.getByType(LibraryExtension::class.java)
 val shrunkJar = layout.buildDirectory.file(
     "intermediates/shrunk_classes/release/minifyReleaseWithR8/shrunkClasses.jar"
@@ -174,11 +148,6 @@ tasks.register("shrinkCs3") {
 
 tasks.named("make") { finalizedBy("shrinkCs3") }
 
-// The CloudStream plugin's writeCacheEntry (which feeds makePluginsJson) reads
-// the packaged .cs3. Because shrinkCs3 rewrites that artifact with the
-// R8-shrunk dex, the cache task must run AFTER shrinkCs3 — otherwise Gradle
-// fails validation with an implicit-dependency error (or, worse, caches the
-// unshrunk bytes). Match by name so it also applies under --refresh-dependencies.
 tasks.matching { it.name == "writeCacheEntry" }.configureEach {
     mustRunAfter("shrinkCs3")
     dependsOn("shrinkCs3")

@@ -5,14 +5,12 @@ import java.util.Locale
 import java.util.TimeZone
 import org.json.JSONObject
 
-/** Pure reader for the account history payload. */
 object SimklParser {
 
     private val timeFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).apply {
         timeZone = TimeZone.getTimeZone("UTC")
     }
 
-    /** Parse the history payload into profile titles. Never throws. */
     fun parse(json: String): List<ProfileTitle> {
         if (json.isBlank()) return emptyList()
         return try {
@@ -27,7 +25,6 @@ object SimklParser {
         }
     }
 
-    /** Read one list group (shows, anime, movies) into the output list. */
     private fun readGroup(
         arr: org.json.JSONArray?,
         mediaKey: String,
@@ -48,7 +45,6 @@ object SimklParser {
             val totalEpisodes = entry.optInt("total_episodes_count", 0)
             val watched = status == "completed" || status == "watching" ||
                 (watchedEpisodes > 0 && totalEpisodes > 0 && watchedEpisodes >= totalEpisodes)
-            // Lists the user never plays are hints, not history.
             if (!watched && status.isBlank() && rating <= 0) continue
             out += ProfileTitle(
                 tmdbId = tmdbId,
@@ -63,7 +59,6 @@ object SimklParser {
         }
     }
 
-    /** Parse an ISO timestamp to epoch millis. 0 when absent or malformed. */
     fun parseTime(raw: String?): Long {
         if (raw.isNullOrBlank()) return 0L
         return try {

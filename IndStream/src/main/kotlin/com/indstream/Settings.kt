@@ -5,19 +5,14 @@ import android.widget.Toast
 import com.indstream.foryou.AppSession
 import com.indstream.foryou.ForYouRefresh
 
-/** FILE: Settings.kt - plugin settings store (keys, AI provider, row refresh mode). */
 object Settings {
 
-    /** Wyzie key redemption page (opened by the Get API chip). */
     const val KEY_LINK = "https://store.wyzie.io/redeem"
 
-    /** TMDB API settings page (opened by the TMDB Get API chip). */
     const val TMDB_LINK = "https://www.themoviedb.org/settings/api"
 
-    /** FebBox sign-in page loaded by the ShowBox Get Token chip. */
     const val SHOWBOX_LINK = "https://www.febbox.com/"
 
-    /** Host whose session cookie carries the ShowBox token. */
     const val SHOWBOX_HOST = "https://www.febbox.com"
 
     private const val PREFS = "indstream_settings"
@@ -40,29 +35,23 @@ object Settings {
     @Volatile
     private var loaded = false
 
-    /** Remember the app context so subtitle fetches can read the key without one. */
     fun init(context: Context) {
         appContext = context.applicationContext
         AppSession.attach(context)
         load()
     }
 
-    /** App context, when the plugin has been loaded. */
     fun appContextOrNull(): Context? = appContext
 
-    /** Saved key, or null when the user never set one (built-in subtitles stay in use). */
     fun apiKey(): String? {
         if (!loaded) load()
         return cached?.takeIf { it.isNotBlank() }
     }
 
-    /** True when the raw input is usable as a key (blank = "not set", handled by callers). */
     fun isValidKey(raw: String?): Boolean = normalizeKey(raw).length >= 8
 
-    /** Trimmed key, never null. */
     fun normalizeKey(raw: String?): String = raw?.trim().orEmpty()
 
-    /** Persist the key (blank clears it). False when the input is neither blank nor valid. */
     fun save(context: Context, raw: String): Boolean {
         val key = normalizeKey(raw)
         if (key.isNotEmpty() && !isValidKey(key)) return false
@@ -76,25 +65,20 @@ object Settings {
         return true
     }
 
-    /** Drop the saved key; the built-in subtitle stack takes over again. */
     fun clear(context: Context) {
         save(context, "")
     }
 
-    /** Saved TMDB key, or null when never set (built-in keys stay in use). */
     fun tmdbApiKey(): String? {
         if (!tmdbLoaded) loadTmdb()
         return tmdbCached?.takeIf { it.isNotBlank() }
     }
 
-    // TMDB v3 keys are short (32 hex chars); the long eyJ... string is the
-    // Read Access Token (v4) and does not work as ?api_key=.
     fun isValidTmdbKey(raw: String?): Boolean {
         val k = normalizeKey(raw)
         return k.length >= 32 && !k.startsWith("eyJ")
     }
 
-    /** Null when the input is usable; else the exact problem to show. */
     fun tmdbKeyProblem(raw: String?): String? {
         val k = normalizeKey(raw)
         if (k.isEmpty()) return null
@@ -103,7 +87,6 @@ object Settings {
         return null
     }
 
-    /** Persist the TMDB key (blank clears it). False when non-blank but invalid. */
     fun saveTmdb(context: Context, raw: String): Boolean {
         val key = normalizeKey(raw)
         if (key.isNotEmpty() && !isValidTmdbKey(key)) return false
@@ -117,18 +100,15 @@ object Settings {
         return true
     }
 
-    /** Drop the saved TMDB key; the built-in keys take over again. */
     fun clearTmdb(context: Context) {
         saveTmdb(context, "")
     }
 
-    /** Saved FebBox token, or null when never set (the ShowBox server stays off). */
     fun showboxToken(): String? {
         if (!showboxLoaded) loadShowbox()
         return showboxCached?.takeIf { it.isNotBlank() }
     }
 
-    /** Persist the FebBox token (blank clears it). */
     fun saveShowbox(context: Context, raw: String) {
         val token = raw.trim()
         runCatching {
@@ -140,14 +120,11 @@ object Settings {
         appContext = context.applicationContext
     }
 
-    /** Drop the saved token; the ShowBox server goes dormant again. */
     fun clearShowbox(context: Context) {
         saveShowbox(context, "")
     }
 
-    // AI provider settings, used by the recommendation reranker.
 
-    /** Keys are per provider; the legacy single key migrates to the saved provider. */
     private val aiKeys = HashMap<String, String>()
 
     @Volatile
@@ -162,7 +139,6 @@ object Settings {
     @Volatile
     private var aiLoaded = false
 
-    /** Saved key for the selected provider (or the given one), null when unset. */
     fun aiApiKey(provider: String? = null): String? {
         if (!aiLoaded) loadAi()
         val id = provider?.trim()?.takeIf { it.isNotBlank() }
@@ -170,25 +146,21 @@ object Settings {
         return aiKeys[id]?.takeIf { it.isNotBlank() }
     }
 
-    /** Selected provider id; empty when nothing was chosen. */
     fun aiProviderId(): String {
         if (!aiLoaded) loadAi()
         return aiProviderCached?.takeIf { it.isNotBlank() } ?: "openrouter"
     }
 
-    /** Model id for the selected provider. */
     fun aiModel(): String {
         if (!aiLoaded) loadAi()
         return aiModelCached.orEmpty()
     }
 
-    /** Base url override; empty means the provider preset is used. */
     fun aiBaseUrl(): String {
         if (!aiLoaded) loadAi()
         return aiBaseCached.orEmpty()
     }
 
-    /** Persist the AI settings for one provider. A blank key clears that provider's key. */
     fun saveAi(context: Context, provider: String, rawKey: String, model: String, baseUrl: String) {
         val key = normalizeKey(rawKey)
         val id = provider.trim().ifBlank { "openrouter" }
@@ -212,7 +184,6 @@ object Settings {
         appContext = context.applicationContext
     }
 
-    /** Drop the saved key/model for one provider. */
     fun clearAi(context: Context, provider: String? = null) {
         if (!aiLoaded) loadAi()
         val id = provider?.trim()?.takeIf { it.isNotBlank() }
@@ -239,13 +210,11 @@ object Settings {
     @Volatile
     private var forYouModeLoaded = false
 
-    /** How often the personalised rows are rebuilt. */
     fun forYouRefreshMode(): ForYouRefresh.Mode {
         if (!forYouModeLoaded) loadForYouMode()
         return ForYouRefresh.Mode.from(forYouModeCached)
     }
 
-    /** Persist how often the personalised rows are rebuilt. */
     fun saveForYouRefreshMode(context: Context, mode: ForYouRefresh.Mode) {
         runCatching {
             context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -277,7 +246,6 @@ object Settings {
                     aiKeys[name.removePrefix(AI_KEY_PREFIX)] = value
                 }
             }
-            // Older installs stored one key for every provider; keep it under the saved provider.
             val legacy = prefs.getString(AI_KEY, "").orEmpty()
             if (legacy.isNotBlank()) {
                 val owner = aiProviderCached?.takeIf { it.isNotBlank() } ?: "openrouter"
@@ -301,7 +269,6 @@ object Settings {
         showboxLoaded = true
     }
 
-    /** Pull the `ui` cookie value out of a raw cookie string. Pure. */
     internal fun uiTokenFromCookie(cookie: String?): String? =
         cookie?.split(';')
             ?.asSequence()
@@ -328,7 +295,6 @@ object Settings {
     @Volatile
     private var wyzieFailureNotified = false
 
-    /** One-time notice that the saved key failed (callers fall back to built-in). */
     fun notifyWyzieFailed(reason: String) {
         val ctx = appContext ?: return
         synchronized(this) {
@@ -351,6 +317,5 @@ object Settings {
         }.getOrDefault("")
         loaded = true
     }
-    /** The provider settings sheet. */
     fun openSettings(context: Context) = SettingsUi.open(context)
 }

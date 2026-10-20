@@ -6,8 +6,6 @@ import com.indstream.ServerFarm
 import com.indstream.ServerIdType
 import com.indstream.ServerSpec
 import com.indstream.StreamEngine
-import com.indstream.VidlinkSource
-/** FILE: ServerFarmHindiTest. kt â€” guards ServerRegistry. kt for the Hindi MyFlixerAPI entry. Verifies the SeedspÃ©c. + URL builders emit the. */
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -24,8 +22,6 @@ class ServerFarmHindiTest {
     fun vidlink_presentAndMultiLanguage() {
         assertEquals("VidLink", vidlink.name)
         assertEquals(ServerIdType.TMDB, vidlink.idType)
-        // VidLink is multi-audio (Hindi + English dubs), NOT a Hindi-only host. A single declared language would blanket-bias.
-// every stream's label even when.
         assertTrue(vidlink.declaredLanguages.isEmpty(), "VidLink is multi-audio, not Hindi-only — a declared language mislabels English playback")
         assertTrue(vidlink.hasSubtitles)
     }
@@ -58,7 +54,6 @@ class ServerFarmHindiTest {
 
     @Test
     fun vidrock_removed_v63() {
-        // Endpoint now serves SPA HTML instead of JSON on both hosts.
         assertNull(ServerFarm.allServers.firstOrNull { it.id == "vidrock" })
         assertNull(ServerFarm.allServers.firstOrNull { it.id == "vidrock-net" })
     }
@@ -66,17 +61,13 @@ class ServerFarmHindiTest {
     @Test
     fun videm_presentAndImdbKeyed() {
         val s = ServerFarm.allServers.firstOrNull { it.id == "videm" }
-        // Disabled (links resolve but playback errors) - assert the DISABLED state so a re-enable is a conscious act.
         assertEquals(null, s)
     }
 
-    // NHD disabled (service broken, no streams + delays). Re-enable this test alongside the ServerSpec in ServerRegistry.
-// kt. @Test fun.
 
     @Test
     fun myflixerHindi_presentAndImdbKeyed() {
         val s = ServerFarm.allServers.firstOrNull { it.id == "myflixer-hindi" }
-        // Disabled (captcha-walled embed + 404 ajax) - assert the DISABLED state so a re-enable is a conscious act.
         assertEquals(null, s)
     }
 
@@ -84,17 +75,13 @@ class ServerFarmHindiTest {
     fun moviebox_presentAndTitled() {
         val s = ServerFarm.allServers.first { it.id == "moviebox" }
         assertEquals("MovieBox", s.name)
-        // TMDB-keyed: the resolver is title-keyed and never reads the IMDB id, so IMDB keying only delayed its start behind.
-// the id lookup.
         assertEquals(ServerIdType.TMDB, s.idType)
-        // DASH ladders reach 2160p; nothing downstream may clamp quality (no per-server cap).
         assertEquals("https://movieboxonline.net/", s.referer)
         assertTrue(s.hasSubtitles)
     }
 
     @Test
     fun moviebox_rejectionClass() {
-        // 429 is transient throttling (no token retry); 401/403 or non-zero body codes reject the bearer.
         assertTrue(!StreamEngine.movieboxAuthRejected(429, "429"))
         assertTrue(!StreamEngine.movieboxAuthRejected(429, "0"))
         assertTrue(!StreamEngine.movieboxAuthRejected(200, "0"))
@@ -107,13 +94,11 @@ class ServerFarmHindiTest {
     @Test
     fun primesrc_presentAndImdbKeyed() {
         val s = ServerFarm.allServers.firstOrNull { it.id == "primesrc" }
-        // Disabled (API returns no streams) - assert the DISABLED state so a re-enable is a conscious act.
         assertEquals(null, s)
     }
 
     @Test
     fun nhd_disabledUpstream404() {
-        // Removed v46 (movie pipeline 404s upstream). Re-enable alongside the ServerSpec + resolver.
         assertNull(ServerFarm.allServers.firstOrNull { it.id == "nhd" })
     }
 
@@ -121,15 +106,11 @@ class ServerFarmHindiTest {
     fun netmirror_presentAndTmdbKeyed() {
         val s = ServerFarm.allServers.first { it.id == "netmirror" }
         assertEquals("NetMirror", s.name)
-        // TMDB-keyed embed-tmdb JSON API (Netflix-grade progressive MP4 ladders) + variants-tmdb dub fan-out. The default.
-// ladder's audio is NOT.
         assertEquals(ServerIdType.TMDB, s.idType)
         assertTrue(s.declaredLanguages.isEmpty(), "default-ladder audio undeclared — never guessed")
         assertTrue(s.isJsonApi, "embed-tmdb JSON API")
         assertTrue(s.hasSubtitles, "API captions carry language (incl. Bengali/Punjabi)")
         assertEquals("https://net27.cc/", s.referer)
-        // Round-3: the resolve chain is default-embed ‖ variants (12s/6s) then a dub fan-out (dub embeds in parallel, 12s) →.
-// ~24s worst; the kill sits 50s.
         assertEquals(50, s.timeoutSec, "netmirror farm kill must sit above the 24s dub fan-out chain")
         val m = ServerFarm.buildMovieUrl(s, "27205")
         assertEquals("https://net27.cc/api/embed-tmdb/27205", m)
@@ -139,7 +120,6 @@ class ServerFarmHindiTest {
 
     @Test
     fun netmirrorDubLabel_policyOriginalPlusEnglishPlusIndian() {
-        // ), ENGLISH, and every official INDIAN dub - drop all other foreign dubs and the subtitle-only "* sub" rows.
         assertEquals("Original", StreamEngine.netmirrorDubLabel("Japanese dub", isOriginal = true))
         assertEquals("Original", StreamEngine.netmirrorDubLabel("Korean", isOriginal = true))
         assertEquals("English", StreamEngine.netmirrorDubLabel("English dub", isOriginal = false))
@@ -148,12 +128,10 @@ class ServerFarmHindiTest {
         assertEquals("Telugu", StreamEngine.netmirrorDubLabel("Telugu dub", isOriginal = false))
         assertEquals("Bengali", StreamEngine.netmirrorDubLabel("Bengali dub", isOriginal = false))
         assertEquals("Gujarati", StreamEngine.netmirrorDubLabel("Gujarati dub", isOriginal = false))
-        // Foreign non-English dubs dropped.
         assertNull(StreamEngine.netmirrorDubLabel("ptbr dub", isOriginal = false))
         assertNull(StreamEngine.netmirrorDubLabel("esla dub", isOriginal = false))
         assertNull(StreamEngine.netmirrorDubLabel("Russian dub", isOriginal = false))
         assertNull(StreamEngine.netmirrorDubLabel("French dub", isOriginal = false))
-        // so are subtitle-only variants (same audio as the default).
         assertNull(StreamEngine.netmirrorDubLabel("Arabic sub", isOriginal = false))
         assertNull(StreamEngine.netmirrorDubLabel("Default", isOriginal = false))
         assertNull(StreamEngine.netmirrorDubLabel(null, isOriginal = false))
@@ -167,7 +145,6 @@ class ServerFarmHindiTest {
 
     @Test
     fun farm_withinServerCap() {
-        // No registry cap: the farm grows freely, ranked fastest-first at emit.
         assertTrue(ServerFarm.allServers.size >= 9, "farm keeps every live server")
         assertTrue(ServerFarm.allServers.isNotEmpty())
         assertNotNull(ServerFarm.allServers.firstOrNull { it.id == "vidlink" })
@@ -175,13 +152,11 @@ class ServerFarmHindiTest {
 
     @Test
     fun vidup_removed_v63() {
-        // enc-dec.app/api/enc-vidup helper returns HTTP 400 — chain broken.
         assertNull(ServerFarm.allServers.firstOrNull { it.id == "vidup" })
     }
 
     @Test
     fun vidcore_retired_vidcoreApiPresent() {
-        // vidcore.io enc-dec servers endpoint 404s upstream; the working VidCore is the vidrack API.
         assertNull(ServerFarm.allServers.firstOrNull { it.id == "vidcore" })
         val api = ServerFarm.allServers.first { it.id == "vidcore-api" }
         assertEquals("VidCore", api.name)
@@ -194,21 +169,14 @@ class ServerFarmHindiTest {
         val s = ServerFarm.allServers.first { it.id == "allmovieland" }
         assertEquals("Allmovieland", s.name)
         assertEquals(ServerIdType.IMDB, s.idType)
-        // Multi-language host () - the declared set documents the coverage but must NOT be a single language (no blanket bias.
-// per-entry resolver labels win).
         assertEquals(setOf("Hindi", "Tamil", "Telugu", "Bengali"), s.declaredLanguages)
-        // timeoutSec 30→60 (F8 budget-invariant): the documented chain ceilings - search 8s×2 hosts (IMDB pass) + 8s title.
-// fallback + card 6 + 2×(play 5 +.
         assertEquals(60, s.timeoutSec, "allmovieland farm kill must fit the resolver chain")
-        // DOMAIN MOVE (): . one 301s to. art - the spec pins the live host; allmovielandHosts() carries the fallback.
         val m = ServerFarm.buildMovieUrl(s, "tt1375666")
         assertTrue(m.contains("allmovieland.art") && m.contains("tt1375666"))
     }
 
     @Test
     fun allmovieland_hosts_fallbackOrderPinned() {
-        // Pure: newest host first (. art live today), . one kept as the manual fallback if. art moves again (StreamEngine.
-// resolveAllmovieland loops).
         assertEquals(
             listOf("https://allmovieland.art", "https://allmovieland.one"),
             StreamEngine.allmovielandHosts(),
@@ -217,14 +185,12 @@ class ServerFarmHindiTest {
 
     @Test
     fun moviebox_timeoutBudgetFitsFarmKill() {
-        // Budgets: bearer 8 + search 15 + auth retry 12 + throttle retry 10+2 + detail 8 + dl/play 8 ⇒ worst chain ≈ 63s.
         val s = ServerFarm.allServers.first { it.id == "moviebox" }
         assertEquals(65, s.timeoutSec, "MovieBox chain ceilings (8/15[+12]/[10+2]/8/8) must fit this kill")
     }
 
     @Test
     fun bulletTrainServers_present() {
-        // The fast direct-API servers (no embed chain) that survived the v63 cull.
         val ids = setOf("vidlink", "vaplayer", "moviebox", "allmovieland", "netmirror",
             "castletv", "streamflix", "onetouchtv", "vidcore-api")
         for (id in ids) {
@@ -233,7 +199,6 @@ class ServerFarmHindiTest {
                 "$id must be in the farm",
             )
         }
-        // Removed/dead servers must NOT be in the live farm.
         val disabled = setOf("vidrock", "vidrock-net", "vidnest", "vidup",
             "twoembed", "vidfast", "autoembed", "vidphantom", "vsembed", "twoembed-skin",
             "vidsrcme", "vidsrc-pm", "rive", "vidsrcto", "videasy",
@@ -251,7 +216,6 @@ class ServerFarmHindiTest {
 
     @Test
     fun farm_withinExpandedCap() {
-        // Uncapped farm: size only grows, never trimmed to fit.
         assertTrue(ServerFarm.allServers.size >= 9, "farm keeps every live server")
     }
 }

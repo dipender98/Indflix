@@ -1,11 +1,15 @@
 ﻿package com.indstream
 
-import android.app.Activity
 import android.app.AlertDialog
 import android.content.Context
 import android.content.Intent
 import android.content.res.ColorStateList
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.ColorFilter
+import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
@@ -14,23 +18,17 @@ import android.graphics.drawable.LayerDrawable
 import android.graphics.drawable.RippleDrawable
 import android.graphics.drawable.StateListDrawable
 import android.net.Uri
-import android.os.Message
 import android.text.InputType
 import android.text.method.PasswordTransformationMethod
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
-import android.webkit.CookieManager
-import android.webkit.WebChromeClient
-import android.webkit.WebResourceError
-import android.webkit.WebResourceRequest
-import android.webkit.WebSettings
-import android.webkit.WebView
-import android.webkit.WebViewClient
 import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -45,10 +43,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
-/** The provider settings sheet: keys, personalised rows and the AI reranker. */
 object SettingsUi {
 
-    /** Kept in step with the module version in the build script. */
     private const val VERSION = "69"
 
     private val BG = Color.parseColor("#0B0B10")
@@ -63,11 +59,9 @@ object SettingsUi {
     private val SUCCESS = Color.parseColor("#3FD37A")
     private val SUCCESS_SOFT = Color.parseColor("#122E1F")
 
-    /** Arrow and close glyphs, written as escapes so the source stays plain ASCII. */
     private const val GLYPH_CHEVRON = "\u203A"
     private const val GLYPH_CLOSE = "\u2715"
 
-    /** One collapsible card. */
     private class Card(
         val root: LinearLayout,
         val shell: LinearLayout,
@@ -77,13 +71,10 @@ object SettingsUi {
         val bar: View,
     )
 
-    /** One selectable option row of a schedule list. */
     private class Option(val root: LinearLayout, val dot: View)
 
-    /** Masked input with its own Show/Hide pill. */
-    private class Secret(val root: LinearLayout, val input: EditText, val toggle: TextView)
+    private class Secret(val root: LinearLayout, val input: EditText, val toggle: View)
 
-    /** Opens the settings sheet. */
     fun open(context: Context) {
         val density = context.resources.displayMetrics.density
         fun dp(v: Number): Int = (v.toFloat() * density).roundToInt()
@@ -110,6 +101,60 @@ object SettingsUi {
         fun ripple(content: Drawable, color: Int = Color.argb(34, 255, 255, 255)): RippleDrawable =
             RippleDrawable(ColorStateList.valueOf(color), content, null)
 
+        val control = dp(42)
+        val gap = dp(8)
+
+        fun eyeIcon(crossed: Boolean, color: Int): Drawable = object : Drawable() {
+            private val pen = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                style = Paint.Style.STROKE
+                strokeWidth = dp(1.6f).toFloat()
+                strokeCap = Paint.Cap.ROUND
+                strokeJoin = Paint.Join.ROUND
+                this.color = color
+            }
+            private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                style = Paint.Style.FILL
+                this.color = color
+            }
+
+            override fun getIntrinsicWidth(): Int = dp(20)
+            override fun getIntrinsicHeight(): Int = dp(20)
+
+            override fun draw(canvas: Canvas) {
+                val w = bounds.width().toFloat()
+                val h = bounds.height().toFloat()
+                val cx = bounds.exactCenterX()
+                val cy = bounds.exactCenterY()
+                val halfW = w * 0.42f
+                val halfH = h * 0.26f
+                val eye = Path().apply {
+                    moveTo(cx - halfW, cy)
+                    cubicTo(cx - halfW * 0.45f, cy - halfH, cx + halfW * 0.45f, cy - halfH, cx + halfW, cy)
+                    cubicTo(cx + halfW * 0.45f, cy + halfH, cx - halfW * 0.45f, cy + halfH, cx - halfW, cy)
+                    close()
+                }
+                canvas.drawPath(eye, pen)
+                canvas.drawCircle(cx, cy, h * 0.13f, fill)
+                if (crossed) {
+                    val d = w * 0.34f
+                    canvas.drawLine(cx - d, cy + d, cx + d, cy - d, pen)
+                }
+            }
+
+            override fun setAlpha(alpha: Int) {
+                pen.alpha = alpha
+                fill.alpha = alpha
+            }
+
+            override fun setColorFilter(colorFilter: ColorFilter?) {
+                pen.colorFilter = colorFilter
+                fill.colorFilter = colorFilter
+            }
+
+            @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
+            override fun getOpacity(): Int = PixelFormat.TRANSLUCENT
+        }
+
         fun label(
             value: String,
             size: Float,
@@ -126,13 +171,14 @@ object SettingsUi {
         }
 
         fun chip(value: String): TextView = label(value, 12f, TEXT_DIM, medium = true).apply {
-            setPadding(dp(14), dp(9), dp(14), dp(9))
+            gravity = Gravity.CENTER
+            setPadding(dp(16), 0, dp(16), 0)
             background = ripple(rounded(Color.TRANSPARENT, 999, 1))
             isClickable = true
             isFocusable = true
             layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { rightMargin = dp(8) }
+                ViewGroup.LayoutParams.WRAP_CONTENT, control,
+            ).apply { rightMargin = gap }
         }
 
         fun markChip(target: TextView, on: Boolean) {
@@ -156,8 +202,8 @@ object SettingsUi {
             stateListAnimator = null
             setPadding(dp(18), 0, dp(18), 0)
             layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, dp(42),
-            ).apply { leftMargin = dp(8) }
+                ViewGroup.LayoutParams.WRAP_CONTENT, control,
+            ).apply { leftMargin = gap }
         }
 
         fun field(value: String, hint: String): EditText = EditText(context).apply {
@@ -179,16 +225,17 @@ object SettingsUi {
             )
         }
 
-        /** Key field: masked by default, with a Show/Hide pill. */
         fun secret(value: String, hint: String): Secret {
             val input = field(value, hint).apply {
                 setPadding(dp(14), dp(12), dp(10), dp(12))
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
             }
-            val toggle = chip("Show").apply {
-                layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-                ).apply { leftMargin = dp(8) }
+            val toggle = ImageView(context).apply {
+                scaleType = ImageView.ScaleType.CENTER
+                background = ripple(rounded(Color.TRANSPARENT, 999, 1))
+                isClickable = true
+                isFocusable = true
+                layoutParams = LinearLayout.LayoutParams(control, control).apply { leftMargin = gap }
             }
             val root = LinearLayout(context).apply {
                 orientation = LinearLayout.HORIZONTAL
@@ -206,8 +253,8 @@ object SettingsUi {
                     if (visible) null else PasswordTransformationMethod.getInstance()
                 input.typeface = Typeface.MONOSPACE
                 input.setSelection(input.text.length)
-                toggle.text = if (visible) "Hide" else "Show"
-                markChip(toggle, visible)
+                toggle.setImageDrawable(eyeIcon(visible, if (visible) ACCENT else TEXT_DIM))
+                toggle.contentDescription = if (visible) "Hide key" else "Show key"
             }
             var visible = false
             paint(false)
@@ -223,7 +270,6 @@ object SettingsUi {
             setBackgroundColor(DIVIDER)
         }
 
-        /** Vertical list container for selectable options. */
         fun optionList(): LinearLayout = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             layoutParams = LinearLayout.LayoutParams(
@@ -346,6 +392,12 @@ object SettingsUi {
         }
 
         fun addRow(card: Card, top: Int, vararg views: View) {
+            views.lastOrNull()?.let { last ->
+                (last.layoutParams as? LinearLayout.LayoutParams)?.let {
+                    it.rightMargin = 0
+                    last.layoutParams = it
+                }
+            }
             val row = LinearLayout(context).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.END or Gravity.CENTER_VERTICAL
@@ -421,7 +473,6 @@ object SettingsUi {
                 text = value.uppercase()
             }
 
-        // ---- Header ----
 
         val close = label(GLYPH_CLOSE, 14f, TEXT_DIM).apply {
             gravity = Gravity.CENTER
@@ -453,17 +504,16 @@ object SettingsUi {
             },
         )
 
-        // ---- Made for You ----
 
         val forYouCard = card(
-            "Made for You",
+            "Made for You - Recommendation",
             "Rows built from your watch history",
             "Checking",
             false,
         )
         add(
             forYouCard,
-            label("Enabling \"Made for You\" catalogue", 12f, TEXT_DIM)
+            label("Enabling \"Made for You - Recommendation\" catalogue", 12f, TEXT_DIM)
                 .apply { setPadding(0, dp(12), 0, 0) },
         )
         add(forYouCard, sectionLabel("Refresh schedule", 18))
@@ -508,11 +558,10 @@ object SettingsUi {
             }
         }
 
-        // ---- Subtitle key ----
 
         val wyzieSaved = Settings.apiKey() != null
         val wyzieCard = card(
-            "Subtitles key",
+            "Subtitles Key",
             "Optional - built-in subtitles work without it",
             if (wyzieSaved) "Saved" else "Not set",
             wyzieSaved,
@@ -523,7 +572,8 @@ object SettingsUi {
         ).apply { setPadding(0, dp(10), 0, 0) }
         val wyzieSecret = secret(Settings.apiKey().orEmpty(), "api key...")
         val wyzieKeyInput = wyzieSecret.input
-        add(wyzieCard, wyzieSecret.root, 12)
+        add(wyzieCard, sectionLabel("Wyzie", 14))
+        add(wyzieCard, wyzieSecret.root)
         add(wyzieCard, wyzieStatus)
         val wyzieGetChip = chip("Get key")
         val wyzieVerifyChip = chip("Verify")
@@ -566,11 +616,10 @@ object SettingsUi {
             setState(wyzieCard, if (on) "Saved" else "Not set", on)
         }
 
-        // ---- Catalog key ----
 
         val tmdbSaved = Settings.tmdbApiKey() != null
         val tmdbCard = card(
-            "Catalog key",
+            "TMDB API Key",
             "Optional - built-in keys work without it",
             if (tmdbSaved) "Saved" else "Not set",
             tmdbSaved,
@@ -630,7 +679,6 @@ object SettingsUi {
             setState(tmdbCard, if (on) "Saved" else "Not set", on)
         }
 
-        // ---- Session token ----
 
         val showboxSaved = Settings.showboxToken() != null
         val showboxCard = card(
@@ -645,7 +693,8 @@ object SettingsUi {
         ).apply { setPadding(0, dp(10), 0, 0) }
         val showboxSecret = secret(Settings.showboxToken().orEmpty(), "session value...")
         val showboxKeyInput = showboxSecret.input
-        add(showboxCard, showboxSecret.root, 12)
+        add(showboxCard, sectionLabel("FebBox", 14))
+        add(showboxCard, showboxSecret.root)
         add(showboxCard, showboxStatus)
         val showboxSignIn = chip("Sign in")
         val showboxClear = action("Clear", false)
@@ -653,13 +702,8 @@ object SettingsUi {
         addRow(showboxCard, 12, showboxSignIn)
         addRow(showboxCard, 10, showboxClear, showboxSave)
         showboxSignIn.setOnClickListener {
-            openSignIn(context) { token ->
-                showboxKeyInput.setText(token)
-                Settings.saveShowbox(context, token)
-                showboxStatus.text = "Signed in - the extra server is in use."
-                setState(showboxCard, "Saved", true)
-                Toast.makeText(context, "Signed in", Toast.LENGTH_SHORT).show()
-            }
+            openLink(context, Settings.SHOWBOX_LINK)
+            showboxStatus.text = "Sign in in the browser, then paste the session value here."
         }
         showboxClear.setOnClickListener {
             Settings.clearShowbox(context)
@@ -675,18 +719,22 @@ object SettingsUi {
             setState(showboxCard, if (on) "Saved" else "Not set", on)
         }
 
-        // ---- AI reranker ----
 
         val aiSaved = Settings.aiApiKey() != null
         val aiCard = card(
-            "AI reranker",
+            "AI API Keys",
             "Optional - reorders the rows you already match",
             if (aiSaved) "Saved" else "Not set",
             aiSaved,
         )
         var selectedProvider = Settings.aiProviderId()
         val providerChips = LinkedHashMap<String, TextView>()
-        val providerRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
+        val providerRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            )
+        }
         AiService.Provider.entries.forEach { provider ->
             val target = chip(provider.label)
             providerChips[provider.id] = target
@@ -694,10 +742,13 @@ object SettingsUi {
         }
         add(
             aiCard,
-            ScrollView(context).apply {
+            HorizontalScrollView(context).apply {
                 overScrollMode = View.OVER_SCROLL_NEVER
-                isHorizontalFadingEdgeEnabled = false
                 isFillViewport = false
+                isHorizontalFadingEdgeEnabled = false
+                isHorizontalScrollBarEnabled = false
+                isVerticalScrollBarEnabled = false
+                setPadding(0, 0, 0, 0)
                 addView(providerRow)
             },
             12,
@@ -796,7 +847,6 @@ object SettingsUi {
             setState(aiCard, if (on) "Saved" else "Not set", on)
         }
 
-        // ---- Footer ----
 
         content.addView(
             label("Version $VERSION - keys stay on this device.", 10.5f, TEXT_FAINT)
@@ -819,14 +869,12 @@ object SettingsUi {
         built.show()
         fitHeight()
 
-        // The account decides whether the rows exist, so it is checked off the main thread.
         Thread {
             val on = SimklHistory.refresh()
             forYouCard.root.post { setState(forYouCard, if (on) "On" else "Off", on) }
         }.start()
     }
 
-    /** Opens a link in the browser, or complains when there is none. */
     private fun openLink(context: Context, url: String) {
         runCatching {
             context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
@@ -835,180 +883,6 @@ object SettingsUi {
         }
     }
 
-    /** Opens the sign-in page in the browser when no activity can host a web view. */
-    private fun launchSignInPage(context: Context) {
-        openLink(context, Settings.SHOWBOX_LINK)
-    }
-
-    /**
-     * In-app sign-in sheet: loads the sign-in page, then reads the session
-     * cookie once the user confirms and hands the token to onToken.
-     */
-    private fun openSignIn(context: Context, onToken: (String) -> Unit) {
-        if (context !is Activity) {
-            launchSignInPage(context)
-            return
-        }
-        val webContainer = FrameLayout(context).apply {
-            background = GradientDrawable().apply {
-                setColor(Color.parseColor("#101016"))
-                cornerRadius = dp(context, 12).toFloat()
-            }
-            clipToOutline = true
-        }
-        val web = WebView(context).apply {
-            layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT,
-            )
-            settings.javaScriptEnabled = true
-            settings.domStorageEnabled = true
-            settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
-            settings.loadWithOverviewMode = true
-            settings.useWideViewPort = true
-            settings.setSupportMultipleWindows(true)
-            settings.javaScriptCanOpenWindowsAutomatically = true
-            settings.userAgentString = SIGNIN_UA
-            CookieManager.getInstance().setAcceptCookie(true)
-            CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
-            // The consent screen opens in a popup, so it is hosted over the main view.
-            webChromeClient = object : WebChromeClient() {
-                override fun onCreateWindow(
-                    view: WebView?,
-                    isDialog: Boolean,
-                    isUserGesture: Boolean,
-                    resultMsg: Message?,
-                ): Boolean {
-                    val popup = WebView(context).apply {
-                        layoutParams = FrameLayout.LayoutParams(
-                            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT,
-                        )
-                        settings.javaScriptEnabled = true
-                        settings.domStorageEnabled = true
-                        settings.userAgentString = SIGNIN_UA
-                        CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
-                        webChromeClient = object : WebChromeClient() {
-                            override fun onCloseWindow(window: WebView) {
-                                webContainer.removeView(window)
-                                window.destroy()
-                            }
-                        }
-                    }
-                    webContainer.addView(popup)
-                    (resultMsg?.obj as? WebView.WebViewTransport)?.webView = popup
-                    resultMsg?.sendToTarget()
-                    return true
-                }
-            }
-            setBackgroundColor(Color.TRANSPARENT)
-        }
-        val statusText = TextView(context).apply {
-            text = "Loading the sign-in page..."
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            setTextColor(TEXT_DIM)
-            setPadding(dp(context, 2), dp(context, 0), dp(context, 2), dp(context, 10))
-        }
-        web.webViewClient = object : WebViewClient() {
-            override fun onPageFinished(view: WebView?, url: String?) {
-                view?.evaluateJavascript(UA_SPOOF_JS, null)
-                statusText.text = "Sign in, then tap Use this login."
-            }
-
-            override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
-                if (request?.isForMainFrame == true) {
-                    statusText.text = "Couldn't load the sign-in page. Check your connection and retry."
-                }
-            }
-        }
-        webContainer.addView(web)
-
-        fun sheetButton(value: String, primary: Boolean): Button = Button(context).apply {
-            text = value
-            isAllCaps = false
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-            setTextColor(if (primary) Color.WHITE else TEXT)
-            minWidth = 0
-            minHeight = 0
-            stateListAnimator = null
-            setPadding(dp(context, 16), 0, dp(context, 16), 0)
-            background = GradientDrawable().apply {
-                setColor(if (primary) ACCENT else Color.TRANSPARENT)
-                cornerRadius = dp(context, 12).toFloat()
-                if (!primary) setStroke(dp(context, 1), BORDER)
-            }
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, dp(context, 42),
-            ).apply { leftMargin = dp(context, 8) }
-        }
-
-        val cancelBtn = sheetButton("Cancel", false)
-        val browserBtn = sheetButton("Open in browser", false)
-        val useBtn = sheetButton("Use this login", true)
-        val buttonRow = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.END or Gravity.CENTER_VERTICAL
-            setPadding(0, dp(context, 12), 0, 0)
-            addView(cancelBtn)
-            addView(browserBtn)
-            addView(useBtn)
-        }
-        val root = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            background = GradientDrawable().apply {
-                setColor(BG)
-                cornerRadius = dp(context, 20).toFloat()
-            }
-            setPadding(dp(context, 14), dp(context, 14), dp(context, 14), dp(context, 14))
-            addView(statusText)
-            addView(
-                webContainer,
-                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f),
-            )
-            addView(buttonRow)
-        }
-        val signIn = AlertDialog.Builder(context, android.R.style.Theme_Material_Dialog)
-            .setView(root)
-            .create()
-        useBtn.setOnClickListener {
-            val cm = CookieManager.getInstance()
-            val cookie = runCatching {
-                cm.getCookie(Settings.SHOWBOX_HOST) ?: cm.getCookie("https://febbox.com")
-            }.getOrNull()
-            val token = Settings.uiTokenFromCookie(cookie)
-            if (token == null) {
-                statusText.text = "No session yet - finish signing in, or paste the value below."
-                return@setOnClickListener
-            }
-            onToken(token)
-            signIn.dismiss()
-        }
-        cancelBtn.setOnClickListener { signIn.dismiss() }
-        browserBtn.setOnClickListener {
-            launchSignInPage(context)
-            statusText.text = "Sign in in the browser, then paste the value here."
-        }
-        signIn.setOnDismissListener { runCatching { web.destroy() } }
-        signIn.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-        signIn.window?.setDimAmount(0.6f)
-        signIn.show()
-        signIn.window?.setLayout(
-            (context.resources.displayMetrics.widthPixels * 0.92f).roundToInt(),
-            (context.resources.displayMetrics.heightPixels * 0.82f).roundToInt(),
-        )
-    }
-
-    /** Browser agent that passes the site's bot check. */
-    private const val SIGNIN_UA =
-        "Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.82 Mobile Safari/537.36"
-
-    /** Rewrites the reported agent so the page matches the header that was sent. */
-    private const val UA_SPOOF_JS =
-        "if(!window.__indSpoofed){window.__indSpoofed=!0;let ua='$SIGNIN_UA';" +
-            "try{Object.defineProperty(navigator,'userAgent',{get:()=>ua});" +
-            "Object.defineProperty(navigator,'appVersion',{get:()=>ua.replace('Mozilla/','')})}catch(e){}" +
-            "if(!window.chrome)window.chrome={runtime:{},loadTimes:()=>{},csi:()=>{}}}"
-
-    /** Density helper. */
     private fun dp(context: Context, v: Number): Int =
         (v.toFloat() * context.resources.displayMetrics.density).roundToInt()
 }

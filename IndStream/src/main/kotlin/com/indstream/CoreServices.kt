@@ -1,10 +1,10 @@
 package com.indstream
-/** FILE: CoreServices. kt â€” shared primitives. - shared HTTP helpers (speed probing, common headers). - TMDB search /. metadata / season data. - HLS. */
 
 import com.lagradost.cloudstream3.Actor
 import com.lagradost.cloudstream3.ActorData
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.*
+import java.math.BigInteger
 import java.net.URLEncoder
 import java.util.LinkedHashMap
 import java.util.concurrent.ConcurrentHashMap
@@ -27,7 +27,6 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.jsoup.nodes.Document
 
-/** Lean HTTP helpers for the module. Shares the CloudStream app client (with its cookie jar) but keeps -specific. timeouts and header logic in one place. */
 object HttpKit {
 
     const val DEFAULT_TIMEOUT = 12L
@@ -37,14 +36,12 @@ object HttpKit {
     val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
     val commonHeaders = mapOf("User-Agent" to userAgent)
 
-    /** GET with timeout. Returns null on any error. */
     suspend fun get(url: String, timeout: Long = DEFAULT_TIMEOUT): String? {
         return withTimeoutOrNull(timeout * 1000L) {
             runCatching { app.get(url, timeout = timeout, headers = commonHeaders).text }.getOrNull()
         }
     }
 
-    /** GET with referer. */
     suspend fun getWithReferer(url: String, referer: String, timeout: Long = DEFAULT_TIMEOUT): String? {
         return withTimeoutOrNull(timeout * 1000L) {
             runCatching {
@@ -53,26 +50,22 @@ object HttpKit {
         }
     }
 
-    /** GET returning a parsed Jsoup Document. */
     suspend fun getDocument(url: String, timeout: Long = DEFAULT_TIMEOUT): Document? {
         return withTimeoutOrNull(timeout * 1000L) {
             runCatching { app.get(url, timeout = timeout, headers = commonHeaders).document }.getOrNull()
         }
     }
 
-    /** GET returning parsed JSON Object. */
     suspend fun getJson(url: String, timeout: Long = DEFAULT_TIMEOUT): JSONObject? {
         val text = get(url, timeout) ?: return null
         return runCatching { JSONObject(text) }.getOrNull()
     }
 
-    /** GET returning parsed JSON Array. */
     suspend fun getJsonArray(url: String, timeout: Long = DEFAULT_TIMEOUT): JSONArray? {
         val text = get(url, timeout) ?: return null
         return runCatching { JSONArray(text) }.getOrNull()
     }
 
-    /** Resolve a possibly-relative URL against a base. */
     fun resolveUrl(base: String, path: String): String {
         if (path.startsWith("http", ignoreCase = true)) return path
         if (path.startsWith("//")) return "https:$path"
@@ -82,7 +75,6 @@ object HttpKit {
             ?: if (path.startsWith("/")) "$schemeHost$path" else "$schemeHost/$path"
     }
 
-    /** Measure approximate throughput of a stream URL via ranged GET (first 128KB). */
     suspend fun probeSpeed(url: String, referer: String? = null): Long? {
         return withTimeoutOrNull(5000L) {
             runCatching {
@@ -92,15 +84,12 @@ object HttpKit {
                 val resp = app.get(url, timeout = 5, headers = headers)
                 val elapsed = System.currentTimeMillis() - start
                 if (elapsed < 1) return@runCatching null
-                // Count bytes, not decoded characters.
                 val bytes = resp.body.contentLength().takeIf { it > 0 } ?: resp.body.bytes().size.toLong()
-                // throughput in KB/s.
                 (bytes * 1000L) / (elapsed * 1024L)
             }.getOrNull()
         }
     }
 
-    /** Cheap liveness check for REPLAYED (possibly stale/expired) stream URLs: one tiny ranged request. Returns TRUE (alive. 2xx/3xx/416), FALSE (dead. 429 rate-limit is UNKNOWN (null), not dead. */
     suspend fun aliveCheck(
         url: String,
         referer: String? = null,
@@ -120,7 +109,6 @@ object HttpKit {
         }.getOrNull()
     }
 
-    /** Measure the REAL pixel height of a direct (non-HLS) media file by parsing its ISO-BMFF (MP4/MOV) container. Fetches. the `moov` box - front for. */
     suspend fun resolveHeight(
         url: String,
         referer: String? = null,
@@ -142,7 +130,6 @@ object HttpKit {
         return heightFromMoov(moov)
     }
 
-    /** Ranged GET returning raw bytes, or null on any failure/timeout. */
     private suspend fun fetchRange(url: String, range: String, hdrs: Map<String, String>): ByteArray? {
         return withTimeoutOrNull(3000L) {
             runCatching {
@@ -152,7 +139,6 @@ object HttpKit {
         }
     }
 
-    /** Total file size (bytes) via a 0-byte ranged GET, or null. */
     private suspend fun contentLength(url: String, hdrs: Map<String, String>): Long? {
         return withTimeoutOrNull(3000L) {
             runCatching {
@@ -164,7 +150,6 @@ object HttpKit {
         }
     }
 
-    /** Locate the `moov` top-level box bytes, or null. */
     private fun findMoov(data: ByteArray): ByteArray? {
         var i = 0
         while (i + 8 <= data.size) {
@@ -176,7 +161,6 @@ object HttpKit {
         return null
     }
 
-    /** First non-zero video track size, ladder-normalized. */
     private fun heightFromMoov(moov: ByteArray): Int {
         fun walk(start: Int, end: Int): Int {
             var i = start
@@ -198,7 +182,6 @@ object HttpKit {
         return walk(0, moov.size)
     }
 
-    /** Width + height (px), version 1 → +96; top 16 bits of 16.16. */
     private fun parseTkhdSize(b: ByteArray, off: Int, size: Int): Pair<Int, Int> {
         if (size < 12) return 0 to 0
         val version = b[off + 8].toInt() and 0xFF
@@ -211,22 +194,18 @@ object HttpKit {
         return fixed(off + base) to fixed(off + base + 4)
     }
 
-    /** Big-endian uint32. */
     private fun read32(b: ByteArray, off: Int): Int =
         ((b[off].toInt() and 0xFF) shl 24) or ((b[off + 1].toInt() and 0xFF) shl 16) or
             ((b[off + 2].toInt() and 0xFF) shl 8) or (b[off + 3].toInt() and 0xFF)
 }
 
-/** Base64 codec that does not rely on the java.util API, so it also works on old Android runtimes. Pure. */
 object Base64Kit {
 
     private const val ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 
-    /** Rewrites the custom alphabet to the standard one: the '-_.' sequence stands for '/', '@' for '+'. */
     fun fromCustom(input: String): String =
         input.replace("-_.", "/").replace("@", "+")
 
-    /** Decodes standard base64 (padding optional). Throws on a character outside the alphabet. */
     fun decode(input: String): ByteArray {
         val clean = input.trim().replace(Regex("\\s+"), "").trimEnd('=')
         val out = ByteArray((clean.length * 6) / 8)
@@ -246,7 +225,6 @@ object Base64Kit {
         return out.copyOf(pos)
     }
 
-    /** Encodes bytes as standard base64 with padding. */
     fun encode(data: ByteArray): String {
         if (data.isEmpty()) return ""
         val out = StringBuilder((data.size + 2) / 3 * 4)
@@ -277,48 +255,197 @@ object Base64Kit {
     }
 }
 
-/** TMDB metadata engine for. Search, detail, episodes, IMDB→TMDB lookup. */
+object CryptoKit {
+
+    private val SIGMA = "expand 32-byte k".toByteArray(Charsets.US_ASCII)
+
+    private fun rotl(v: Int, n: Int): Int = (v shl n) or (v ushr (32 - n))
+
+    private fun quarterRound(x: IntArray, a: Int, b: Int, c: Int, d: Int) {
+        x[b] = x[b] xor rotl(x[a] + x[d], 7)
+        x[c] = x[c] xor rotl(x[b] + x[a], 9)
+        x[d] = x[d] xor rotl(x[c] + x[b], 13)
+        x[a] = x[a] xor rotl(x[d] + x[c], 18)
+    }
+
+    private fun load32(b: ByteArray, off: Int): Int =
+        (b[off].toInt() and 0xFF) or
+            ((b[off + 1].toInt() and 0xFF) shl 8) or
+            ((b[off + 2].toInt() and 0xFF) shl 16) or
+            ((b[off + 3].toInt() and 0xFF) shl 24)
+
+    private fun store32(out: ByteArray, off: Int, v: Int) {
+        out[off] = (v and 0xFF).toByte()
+        out[off + 1] = ((v ushr 8) and 0xFF).toByte()
+        out[off + 2] = ((v ushr 16) and 0xFF).toByte()
+        out[off + 3] = ((v ushr 24) and 0xFF).toByte()
+    }
+
+    private fun core(input: IntArray, addOriginal: Boolean): IntArray {
+        val x = input.copyOf()
+        var i = 20
+        while (i > 0) {
+            quarterRound(x, 0, 4, 8, 12)
+            quarterRound(x, 5, 9, 13, 1)
+            quarterRound(x, 10, 14, 2, 6)
+            quarterRound(x, 15, 3, 7, 11)
+            quarterRound(x, 0, 1, 2, 3)
+            quarterRound(x, 5, 6, 7, 4)
+            quarterRound(x, 10, 11, 8, 9)
+            quarterRound(x, 15, 12, 13, 14)
+            i -= 2
+        }
+        if (addOriginal) for (j in 0 until 16) x[j] += input[j]
+        return x
+    }
+
+    private fun hsalsa20(key: ByteArray, nonce16: ByteArray): ByteArray {
+        val state = IntArray(16)
+        state[0] = load32(SIGMA, 0)
+        state[1] = load32(key, 0)
+        state[2] = load32(key, 4)
+        state[3] = load32(key, 8)
+        state[4] = load32(key, 12)
+        state[5] = load32(SIGMA, 4)
+        state[6] = load32(nonce16, 0)
+        state[7] = load32(nonce16, 4)
+        state[8] = load32(nonce16, 8)
+        state[9] = load32(nonce16, 12)
+        state[10] = load32(SIGMA, 8)
+        state[11] = load32(key, 16)
+        state[12] = load32(key, 20)
+        state[13] = load32(key, 24)
+        state[14] = load32(key, 28)
+        state[15] = load32(SIGMA, 12)
+        val out = core(state, addOriginal = false)
+        val res = ByteArray(32)
+        val picks = intArrayOf(0, 5, 10, 15, 6, 7, 8, 9)
+        picks.forEachIndexed { i, w -> store32(res, i * 4, out[w]) }
+        return res
+    }
+
+    private fun salsa20Block(key32: ByteArray, nonce8: ByteArray, blockIndex: Long): ByteArray {
+        val state = IntArray(16)
+        state[0] = load32(SIGMA, 0)
+        state[1] = load32(key32, 0)
+        state[2] = load32(key32, 4)
+        state[3] = load32(key32, 8)
+        state[4] = load32(key32, 12)
+        state[5] = load32(SIGMA, 4)
+        state[6] = load32(nonce8, 0)
+        state[7] = load32(nonce8, 4)
+        state[8] = blockIndex.toInt()
+        state[9] = (blockIndex ushr 32).toInt()
+        state[10] = load32(SIGMA, 8)
+        state[11] = load32(key32, 16)
+        state[12] = load32(key32, 20)
+        state[13] = load32(key32, 24)
+        state[14] = load32(key32, 28)
+        state[15] = load32(SIGMA, 12)
+        val out = core(state, addOriginal = true)
+        val res = ByteArray(64)
+        for (i in 0 until 16) store32(res, i * 4, out[i])
+        return res
+    }
+
+    internal fun xsalsa20Keystream(key: ByteArray, nonce24: ByteArray, length: Int): ByteArray {
+        require(key.size == 32 && nonce24.size == 24)
+        val subkey = hsalsa20(key, nonce24.copyOfRange(0, 16))
+        val nonce8 = nonce24.copyOfRange(16, 24)
+        val out = ByteArray(length)
+        var offset = 0
+        var block = 0L
+        while (offset < length) {
+            val blockBytes = salsa20Block(subkey, nonce8, block)
+            val n = minOf(64, length - offset)
+            blockBytes.copyInto(out, offset, 0, n)
+            offset += n
+            block++
+        }
+        return out
+    }
+
+    private fun leBytesToBig(b: ByteArray): BigInteger =
+        BigInteger(1, b.reversedArray())
+
+    private fun bigToLeBytes(v: BigInteger, size: Int): ByteArray {
+        val out = ByteArray(size)
+        var x = v
+        for (i in 0 until size) {
+            out[i] = x.and(BigInteger.valueOf(0xFF)).toInt().toByte()
+            x = x.shiftRight(8)
+        }
+        return out
+    }
+
+    internal fun poly1305(key: ByteArray, msg: ByteArray): ByteArray {
+        require(key.size == 32)
+        val p = BigInteger.valueOf(2).pow(130).subtract(BigInteger.valueOf(5))
+        val rBytes = key.copyOfRange(0, 16)
+        rBytes[3] = (rBytes[3].toInt() and 15).toByte()
+        rBytes[4] = (rBytes[4].toInt() and 252).toByte()
+        rBytes[7] = (rBytes[7].toInt() and 15).toByte()
+        rBytes[8] = (rBytes[8].toInt() and 252).toByte()
+        rBytes[11] = (rBytes[11].toInt() and 15).toByte()
+        rBytes[12] = (rBytes[12].toInt() and 252).toByte()
+        rBytes[15] = (rBytes[15].toInt() and 15).toByte()
+        val r = leBytesToBig(rBytes)
+        val s = leBytesToBig(key.copyOfRange(16, 32))
+        var h = BigInteger.ZERO
+        var i = 0
+        while (i < msg.size) {
+            val end = minOf(i + 16, msg.size)
+            val block = msg.copyOfRange(i, end) + 0x01
+            h = h.add(leBytesToBig(block)).multiply(r).mod(p)
+            i += 16
+        }
+        h = h.add(s).mod(BigInteger.valueOf(2).pow(128))
+        return bigToLeBytes(h, 16)
+    }
+
+    internal fun secretbox(message: ByteArray, nonce24: ByteArray, key: ByteArray): ByteArray {
+        require(nonce24.size == 24 && key.size == 32)
+        val full = ByteArray(32 + message.size)
+        message.copyInto(full, 32)
+        val ks = xsalsa20Keystream(key, nonce24, full.size)
+        val c = ByteArray(full.size) { (full[it].toInt() xor ks[it].toInt()).toByte() }
+        val mac = poly1305(c.copyOfRange(0, 32), c.copyOfRange(32, c.size))
+        val out = ByteArray(16 + message.size)
+        mac.copyInto(out, 0)
+        c.copyInto(out, 16, 32, c.size)
+        return out
+    }
+}
+
 object TmdbService {
 
     private const val API_KEY_PRIMARY = "e6333b32409e02a4a6eba6fb7ff866bb"
     private const val API_KEY_FALLBACK = "a721dd910292becd0d78ed436463db21"
     private const val API = "https://api.themoviedb.org/3"
-    /** Same API, different hostname: some networks reset the primary host at TLS/SNI level. */
     private const val API_ALIAS = "https://api.tmdb.org/3"
     private val API_HOSTS = listOf(API, API_ALIAS)
     private const val IMG_BASE = "https://image.tmdb.org/t/p/w500"
     private const val IMG_BACKDROP = "https://image.tmdb.org/t/p/w1280"
     private const val LOG_TAG = "IndStream"
 
-    /** Search-result cache TTL / bounds. Results don't change minute-to-minute; a hit makes history re-clicks instant and. immune to upstream blips. */
     private const val SEARCH_CACHE_TTL_MS = 15 * 60 * 1000L
     private const val SEARCH_CACHE_MAX = 64
-    /** Cap on riding someone else's in-flight search before giving up. Sized for a primary→fallback key retry. */
     private const val SEARCH_INFLIGHT_WAIT_MS = 11_000L
-    /** How long a failed lookup stays known-bad, so an outage is not re-fetched on every tap. */
     private const val NEGATIVE_TTL_MS = 60_000L
-    /** TTL for the catalog rows behind the home page. */
     private const val CATALOG_TTL_MS = 10 * 60 * 1000L
-    /** Caps for the in-memory maps, so a long session cannot grow them without bound. */
     private const val DETAIL_CACHE_MAX = 128
     private const val SEASON_CACHE_MAX = 256
     private const val SEASON_LIST_CACHE_MAX = 64
     private const val CATALOG_CACHE_MAX = 64
     private const val FIND_CACHE_MAX = 128
     private const val NEGATIVE_CACHE_MAX = 256
-    /** Consecutive transport failures after which the API is skipped for a while. */
     private const val BREAKER_THRESHOLD = 3
     private const val BREAKER_COOLDOWN_MS = 60_000L
-    /** Only failures this close together count as a run; scattered ones never trip the breaker. */
     private const val BREAKER_WINDOW_MS = 30_000L
-    /** How many seasons are fetched at once (each one is a request). */
     private const val SEASON_CONCURRENCY = 3
-    /** Per-request timeout in seconds. */
     private const val REQUEST_TIMEOUT_SEC = 8L
-    /** Extra attempts when the connection drops before the API answers (resets/timeouts). */
     private const val TRANSPORT_RETRIES = 4
     private const val TRANSPORT_RETRY_DELAY_MS = 150L
-    /** Only fast failures are retried; a real timeout would just burn the whole request budget. */
     private const val TRANSPORT_RETRY_MAX_ELAPSED_MS = 2500L
 
     private val detailCache = ConcurrentHashMap<String, TmdbDetail>()
@@ -327,33 +454,26 @@ object TmdbService {
     private val seasonListCache = ConcurrentHashMap<String, List<Int>>()
     private val catalogCache = ConcurrentHashMap<String, Pair<List<TmdbItem>, Long>>()
     private val genreNameCache = ConcurrentHashMap<String, Map<Int, String>>()
-    /** Lookups that recently failed, so an outage is not re-fetched on every tap. */
     private val negativeCache = ConcurrentHashMap<String, Long>()
 
-    /** One TMDB call's outcome; `unreachable` keeps an API outage out of the negative cache. */
     private data class TmdbReply(val body: String? = null, val unreachable: Boolean = false)
 
-    /** One search hit (movie or series). */
     data class TmdbItem(
         val tmdbId: Int?,
         val imdbId: String?,
-        val type: String,      // "movie" or "series".
+        val type: String,
         val name: String,
         val year: String?,
         val poster: String?,
         val rating: Double?,
-        /** Genre ids, when the payload carried them. */
         val genreIds: List<Int> = emptyList(),
-        /** Popularity score, when the payload carried it. */
         val popularity: Double = 0.0,
     )
 
-    /** Full metadata for a detail page. */
     data class TmdbDetail(
         val tmdbId: Int? = null,
         val imdbId: String? = null,
         val name: String? = null,
-        /** TMDB "original_language" code ("hi", "ja", "en", …). Powers the (original) tag on emitted server names - a stream. whose audio label is "Original". */
         val originalLanguage: String? = null,
         val poster: String? = null,
         val backdrop: String? = null,
@@ -361,14 +481,11 @@ object TmdbService {
         val rating: Double? = null,
         val overview: String? = null,
         val genres: List<String>? = null,
-        /** Genre ids, for genre-filtered catalog queries. */
         val genreIds: List<Int> = emptyList(),
         val cast: List<ActorData>? = null,
-        /** Runtime in minutes (movie `runtime`, series first `episode_run_time`). */
         val runtime: Int? = null,
     )
 
-    /** Per-episode metadata. */
     data class TmdbEpisode(
         val seasonNumber: Int = -1,
         val episodeNumber: Int = -1,
@@ -377,11 +494,9 @@ object TmdbService {
         val released: String? = null,
         val thumbnail: String? = null,
         val rating: Double? = null,
-        /** Episode runtime in minutes. */
         val runtime: Int? = null,
     )
 
-    /** Search movies + series via TMDB /search/multi - cached + deduplicated. All three plugins share the TMDB key set. */
     suspend fun search(query: String): List<TmdbItem> {
         if (query.isBlank()) return emptyList()
         val key = query.trim().lowercase()
@@ -394,7 +509,6 @@ object TmdbService {
             lead(key, searchInFlight) {
                 val (found, unreachable) = searchRemote(query)
                 if (found == null) {
-                    // The API did not answer; remember it unless the host was unreachable.
                     markFailedLookup("search:$key", unreachable)
                     emptyList()
                 } else {
@@ -412,7 +526,6 @@ object TmdbService {
         return hits ?: emptyList()
     }
 
-    /** The /search/multi round-trip; null items when the API did not answer, plus whether it was unreachable. */
     private suspend fun searchRemote(query: String): Pair<List<TmdbItem>?, Boolean> {
         val encoded = URLEncoder.encode(query.trim(), "UTF-8")
         val reply = tmdbGet(
@@ -424,41 +537,35 @@ object TmdbService {
         return parseTmdbMultiSearch(json) to false
     }
 
-    /** Whether to fall through to the next key: a rejected key (401/403), a server error (5xx) or a 2xx body whose
-     * JSON reports a key failure. A 429 is NOT here - the limit is per IP, so another key cannot help. */
     internal fun shouldTryNextKey(httpCode: Int, tmdbTripStatus: Int?): Boolean =
         tmdbTripStatus != null ||
             httpCode == 401 ||
             httpCode == 403 ||
             httpCode >= 500
 
-    /** Pause before retrying an IP rate limit on the same key. */
     internal const val TMDB_429_RETRY_DELAY_MS = 1500L
 
-    /** Rate-limit retry: once, same key, short pause. Key rotation can't help an IP-based 429. */
     internal fun rateLimitRetryDelayMs(httpCode: Int, attempt: Int): Long? =
         if (httpCode == 429 && attempt == 0) TMDB_429_RETRY_DELAY_MS else null
 
-    /** GET a TMDB endpoint, falling back primary→second key on a rejected key.
-     * Carries the 2xx body, a genuine non-key error body, or an unreachable flag. */
     private suspend fun tmdbGet(op: String, path: String, query: String, timeout: Long = REQUEST_TIMEOUT_SEC): TmdbReply {
         if (breakerOpen()) {
             android.util.Log.w(LOG_TAG, "TMDB $op SKIPPED (breaker open)")
             return TmdbReply(unreachable = true)
         }
-        // Personal key first when the user saved one in Settings.
+        val personal = Settings.tmdbApiKey()?.trim()?.takeIf { it.isNotEmpty() }
         val keys = buildList {
-            Settings.tmdbApiKey()?.let { add("personal" to it) }
+            personal?.let { add("personal" to it) }
             add("primary" to API_KEY_PRIMARY)
             add("fallback" to API_KEY_FALLBACK)
         }
+        if (personal != null) android.util.Log.d(LOG_TAG, "TMDB $op using personal key")
         var lastReason = "no keys configured"
         for ((index, pair) in keys.withIndex()) {
             val (label, key) = pair
             var attempt = 0
             var netAttempt = 0
             while (true) {
-                // Cycle hosts on transport failures, so a blocked hostname is skipped quickly.
                 val url = "${API_HOSTS[netAttempt % API_HOSTS.size]}$path?api_key=$key&$query"
                 val startedAt = System.currentTimeMillis()
                 val responded: Pair<Int, String> = try {
@@ -467,7 +574,6 @@ object TmdbService {
                 } catch (c: CancellationException) {
                     throw c
                 } catch (t: Throwable) {
-                    // A fast reset is a transport blip, not a key problem: retry the same key briefly.
                     val fastFailure = System.currentTimeMillis() - startedAt <= TRANSPORT_RETRY_MAX_ELAPSED_MS
                     if (fastFailure && netAttempt < TRANSPORT_RETRIES) {
                         netAttempt++
@@ -476,14 +582,12 @@ object TmdbService {
                         delay(retryMs)
                         continue
                     }
-                    // Still unreachable after retries: the key is not implicated, so stop instead of burning the next one.
                     lastReason = "$label NET-FAIL(${t.javaClass.simpleName}: ${(t.message ?: "").take(120)})"
                     android.util.Log.w(LOG_TAG, "TMDB $op $lastReason (transport failure after $TRANSPORT_RETRIES retries: no key rotation)")
                     recordTransportFailure()
                     return TmdbReply(unreachable = true)
                 }
                 val (code, body) = responded
-                // IP rate limits ignore key rotation: pause once and retry the same key before giving up.
                 val retryMs = rateLimitRetryDelayMs(code, attempt)
                 if (retryMs != null) {
                     attempt++
@@ -507,9 +611,6 @@ object TmdbService {
                     recordTransportSuccess()
                     return TmdbReply(body)
                 }
-                // Resource-level HTTP error (400/404/…): not a key issue, so don't burn the second key. Surface the
-                // reason and hand the body to the caller, which parses it to an empty result just as before.
-                // A resource-level answer still means the API is reachable.
                 recordTransportSuccess()
                 android.util.Log.w(LOG_TAG, "TMDB $op $label HTTP $code (not a key issue: no fallback): ${safeSnippet(body)}")
                 return TmdbReply(body)
@@ -523,7 +624,6 @@ object TmdbService {
     private fun fallingBack(index: Int, keys: List<Pair<String, String>>): String =
         if (index < keys.lastIndex) " → trying ${keys[index + 1].first}" else " → no keys left"
 
-    /** Lightweight key check for Settings Verify: /configuration answers 200 for a valid v3 key. Never throws. */
     suspend fun testTmdbKey(raw: String): String {
         val key = raw.trim()
         if (key.isEmpty()) return "Enter a key first"
@@ -542,9 +642,6 @@ object TmdbService {
         return "Verify failed - no network?"
     }
 
-    /** If the 2xx error body carries `success:false` with a *key*-level TMDB status code (7 invalid, 10 suspended,
-     * 30 rate-limit exceeded) return that code; otherwise null (the response is either a valid 2xx payload or
-     * some other error the caller can treat as an empty result). */
     internal fun tmdbKeyTripCode(body: String): Int? {
         val root = runCatching { JSONObject(body) }.getOrNull() ?: return null
         if (root.optBoolean("success", true)) return null
@@ -567,7 +664,6 @@ object TmdbService {
     private val searchCache = ConcurrentHashMap<String, SearchEntry>()
     private val searchScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    /** One shared request per key, so N callers make a single network call. */
     private val searchInFlight = ConcurrentHashMap<String, Deferred<List<TmdbItem>>>()
     private val metaInFlight = ConcurrentHashMap<String, Deferred<TmdbDetail?>>()
     private val findInFlight = ConcurrentHashMap<String, Deferred<Pair<Int, String>?>>()
@@ -579,7 +675,6 @@ object TmdbService {
     private var breakerOpenUntil = 0L
     private var breakerLastFailureAt = 0L
 
-    /** Runs a load once per key: the first caller leads, the rest await the same result. */
     private suspend fun <T> lead(
         key: String,
         inflight: ConcurrentHashMap<String, Deferred<T>>,
@@ -596,15 +691,12 @@ object TmdbService {
         return mine.await()
     }
 
-    /** True while recent transport failures mean the API is not answering. */
     private fun breakerOpen(): Boolean = synchronized(breakerLock) {
         System.currentTimeMillis() < breakerOpenUntil
     }
 
-    /** Counts a transport failure; a run of them opens the breaker. */
     private fun recordTransportFailure() = synchronized(breakerLock) {
         val now = System.currentTimeMillis()
-        // Failures far apart are not a run, so the streak starts over.
         if (now - breakerLastFailureAt > BREAKER_WINDOW_MS) breakerFailures = 0
         breakerLastFailureAt = now
         breakerFailures++
@@ -615,10 +707,8 @@ object TmdbService {
         }
     }
 
-    /** A successful call clears the failure streak. */
     private fun recordTransportSuccess() = synchronized(breakerLock) { breakerFailures = 0 }
 
-    /** True when this lookup already failed recently. */
     private fun recentlyFailed(key: String): Boolean {
         val exp = negativeCache[key] ?: return false
         if (System.currentTimeMillis() > exp) {
@@ -628,7 +718,6 @@ object TmdbService {
         return true
     }
 
-    /** Remembers a failed lookup for a short while, so an outage is not re-fetched. */
     private fun markFailed(key: String) {
         if (negativeCache.size >= NEGATIVE_CACHE_MAX) {
             negativeCache.entries.minByOrNull { it.value }?.let { negativeCache.remove(it.key) }
@@ -636,20 +725,16 @@ object TmdbService {
         negativeCache[key] = System.currentTimeMillis() + NEGATIVE_TTL_MS
     }
 
-    /** Remembers a failed lookup unless the API simply did not answer - a retry may still work then. */
     private fun markFailedLookup(key: String, unreachable: Boolean = false) {
         if (!unreachable) markFailed(key)
     }
 
-    /** Trending this week - powers the home page. is "movie" or "tv". */
     suspend fun trending(type: String, page: Int = 1): List<TmdbItem> =
         catalog("trending:$type:$page", type) { tmdbGet("trending $type", "/trending/$type/week", "language=en-US&page=$page") }
 
-    /** Popular titles - extra home page row. is "movie" or "tv". */
     suspend fun popular(type: String, page: Int = 1): List<TmdbItem> =
         catalog("popular:$type:$page", type) { tmdbGet("popular $type", "/$type/popular", "language=en-US&page=$page") }
 
-    /** Titles recommended for a title the user already saw. is "movie" or "tv". */
     suspend fun recommendations(tmdbId: Int, type: String): List<TmdbItem> {
         if (tmdbId <= 0) return emptyList()
         val kind = if (type == "movie") "movie" else "tv"
@@ -658,7 +743,43 @@ object TmdbService {
         }
     }
 
-    /** Titles matching the given genre ids. is "movie" or "tv". */
+    data class Genre(val label: String, val movieId: Int, val tvId: Int = 0)
+
+    val genres = listOf(
+        Genre("Action", 28, 10759),
+        Genre("Comedy", 35, 35),
+        Genre("Crime", 80, 80),
+        Genre("Drama", 18, 18),
+        Genre("Mystery", 9648, 9648),
+        Genre("Sci-Fi & Fantasy", 878, 10765),
+    )
+
+    fun genreId(genre: Genre, type: String): Int =
+        if (type == "movie") genre.movieId else genre.tvId
+
+    fun genreRowKey(genre: Genre, type: String): String =
+        "genre|${genreId(genre, type)}|${if (type == "movie") "movie" else "tv"}"
+
+    fun genreRowTitle(genre: Genre, type: String): String =
+        "${genre.label} ${if (type == "movie") "Movies" else "Series"}"
+
+    fun genreRows(): List<Pair<String, String>> {
+        val out = ArrayList<Pair<String, String>>(genres.size * 2)
+        genres.forEach { genre ->
+            out += genreRowKey(genre, "movie") to genreRowTitle(genre, "movie")
+            if (genre.tvId > 0) out += genreRowKey(genre, "tv") to genreRowTitle(genre, "tv")
+        }
+        return out
+    }
+
+    fun parseGenreRow(data: String): Pair<Int, String>? {
+        val parts = data.split("|")
+        if (parts.size < 3 || parts[0].trim() != "genre") return null
+        val id = parts[1].trim().toIntOrNull()?.takeIf { it > 0 } ?: return null
+        val type = if (parts[2].trim() == "tv") "tv" else "movie"
+        return id to type
+    }
+
     suspend fun discover(type: String, genreIds: List<Int>, page: Int = 1): List<TmdbItem> {
         val kind = if (type == "movie") "movie" else "tv"
         val genres = genreIds.take(3).joinToString("|")
@@ -671,7 +792,6 @@ object TmdbService {
         }
     }
 
-    /** Genre id to name map for a type. Cached for the session. */
     suspend fun genreNames(type: String): Map<Int, String> {
         val kind = if (type == "movie") "movie" else "tv"
         genreNameCache[kind]?.let { return it }
@@ -686,7 +806,6 @@ object TmdbService {
         return map
     }
 
-    /** Parse a genre list payload. Pure. */
     internal fun parseGenreNames(json: String): Map<Int, String> = try {
         val root = JSONObject(json)
         val arr = root.optJSONArray("genres") ?: return emptyMap()
@@ -700,7 +819,6 @@ object TmdbService {
         emptyMap()
     }
 
-    /** Cached catalog row, so the home page does not refetch on every open. */
     private suspend fun catalog(key: String, type: String, fetch: suspend () -> TmdbReply): List<TmdbItem> {
         catalogCache[key]?.let { (items, expiresAt) ->
             if (System.currentTimeMillis() <= expiresAt) return items
@@ -721,7 +839,6 @@ object TmdbService {
         return items
     }
 
-    /** Season numbers for a TV show (excludes specials/season 0). */
     suspend fun fetchTvSeasons(tmdbId: Int): List<Int> {
         if (tmdbId <= 0) return emptyList()
         val cacheKey = "seasons:$tmdbId"
@@ -744,7 +861,6 @@ object TmdbService {
         }
     }
 
-    /** Season numbers from a TV payload. Pure. */
     internal fun parseSeasons(json: String): List<Int> = try {
         val root = JSONObject(json)
         root.optJSONArray("seasons")?.let { arr ->
@@ -755,7 +871,6 @@ object TmdbService {
         } ?: emptyList()
     } catch (e: Exception) { emptyList() }
 
-    /** Fetch full TMDB metadata for of ("movie"|"series"). */
     suspend fun fetchMeta(tmdbId: Int, type: String): TmdbDetail? {
         if (tmdbId <= 0) return null
         val kind = if (type == "movie") "movie" else "tv"
@@ -778,7 +893,6 @@ object TmdbService {
         }
     }
 
-    /** Resolve an IMDB id to (tmdbId, type) via TMDB's find endpoint. */
     suspend fun findByImdb(imdbId: String): Pair<Int, String>? {
         if (!imdbId.startsWith("tt")) return null
         imdbFindCache[imdbId]?.let { return it }
@@ -799,7 +913,6 @@ object TmdbService {
         }
     }
 
-    /** Pick the movie or series entry out of a find payload. Pure. */
     internal fun parseFindResult(json: String): Pair<Int, String>? = try {
         val root = JSONObject(json)
         val movie = root.optJSONArray("movie_results")?.optJSONObject(0)
@@ -811,14 +924,12 @@ object TmdbService {
         }
     } catch (e: Exception) { null }
 
-    /** Fetch TMDB episode metadata for the given of, in parallel. Returns keyed (season, episode) -> metadata. */
     suspend fun fetchEpisodes(tmdbId: Int, seasons: Set<Int>): Map<Pair<Int, Int>, TmdbEpisode> {
         if (tmdbId <= 0 || seasons.isEmpty()) return emptyMap()
         return fetchSeasons(tmdbId, seasons.sorted())
             .associate { ep -> (ep.seasonNumber to ep.episodeNumber) to ep }
     }
 
-    /** Fetch several seasons with bounded concurrency, ordered by season then episode. */
     suspend fun fetchSeasons(tmdbId: Int, seasons: List<Int>): List<TmdbEpisode> {
         if (tmdbId <= 0 || seasons.isEmpty()) return emptyList()
         val gate = Semaphore(SEASON_CONCURRENCY)
@@ -836,13 +947,10 @@ object TmdbService {
         }
     }
 
-    /** Fetch all episodes of one season (used by the provider's TV detail). */
     suspend fun fetchSeasonPublic(tmdbId: Int, season: Int): List<TmdbEpisode> {
         return fetchSeason(tmdbId, season).orEmpty()
     }
 
-    // Internal helpers ------------------------------------------------------------------ Collapse search hits sharing a.
-// normalized (title, year). TMDB.
     internal fun List<TmdbItem>.dedupedByTitle(): List<TmdbItem> {
         val best = LinkedHashMap<String, TmdbItem>()
         for (item in this) {
@@ -855,7 +963,6 @@ object TmdbService {
         return best.values.toList()
     }
 
-    /** Parse a TMDB `/search/multi` response, deduplicated by (title, year). */
     internal fun parseTmdbMultiSearch(json: String): List<TmdbItem> {
         return try {
             val root = JSONObject(json)
@@ -868,7 +975,7 @@ object TmdbService {
                 val name = str(r, "title") ?: str(r, "name") ?: return@mapNotNull null
                 TmdbItem(
                     tmdbId = r.optInt("id", -1).takeIf { it > 0 },
-                    imdbId = null, // IMDB id not in search results; fetch detail if needed.
+                    imdbId = null,
                     type = type,
                     name = name,
                     year = (str(r, "release_date") ?: str(r, "first_air_date"))?.take(4),
@@ -883,7 +990,6 @@ object TmdbService {
         }
     }
 
-    /** Parse a TMDB detail payload (movie `runtime`, series `episode_run_time`). Testable. */
     internal fun parseTmdbDetail(raw: String?, type: String): TmdbDetail? {
         if (raw.isNullOrBlank()) return null
         return try {
@@ -949,7 +1055,6 @@ object TmdbService {
         }
     }
 
-    /** Episode rows from a season payload. Pure. */
     private fun parseSeasonEpisodes(json: String, season: Int): List<TmdbEpisode>? = try {
         val root = JSONObject(json)
         root.optJSONArray("episodes")?.let { arr ->
@@ -970,19 +1075,16 @@ object TmdbService {
         }
     } catch (e: Exception) { null }
 
-    /** Read a JSON string field, returning null when blank. */
     private fun str(obj: JSONObject, key: String): String? {
         val v = obj.optString(key)
         return if (v.isBlank()) null else v
     }
 
-    /** Genre ids of a list payload. Pure. */
     private fun genreIdsOf(obj: JSONObject): List<Int> =
         obj.optJSONArray("genre_ids")?.let { arr ->
             (0 until arr.length()).mapNotNull { i -> arr.optInt(i, -1).takeIf { it > 0 } }
         } ?: emptyList()
 
-    /** Parse a TMDB results array into TmdbItems. is "movie" or "tv". */
     private fun parseResults(json: String, type: String): List<TmdbItem> {
         return try {
             val root = JSONObject(json)
@@ -1007,10 +1109,8 @@ object TmdbService {
     }
 }
 
-/** Pure parsers for HLS master playlists and DASH MPDs. No network, no Android, no CloudStream dependency - safe for. JVM unit tests. */
 object ManifestKit {
 
-    /** Resolve a possibly-relative URL against a base. Pure (no network). */
     fun resolveUrl(base: String, path: String): String {
         if (path.startsWith("http", ignoreCase = true)) return path
         if (path.startsWith("//")) return "https:$path"
@@ -1020,7 +1120,6 @@ object ManifestKit {
             ?: if (path.startsWith("/")) "$schemeHost$path" else "$schemeHost/$path"
     }
 
-    /** One video variant in an HLS master playlist. */
     data class Variant(
         val url: String,
         val height: Int,
@@ -1031,9 +1130,8 @@ object ManifestKit {
         val width: Int = 0,
     )
 
-    /** One EXT-X-MEDIA rendition (audio or subtitles). */
     data class MediaRendition(
-        val type: String,       // "AUDIO" | "SUBTITLES".
+        val type: String,
         val groupId: String,
         val name: String,
         val language: String?,
@@ -1042,7 +1140,6 @@ object ManifestKit {
         val default: Boolean = false,
     )
 
-    /** Parsed master playlist. */
     data class MasterPlaylist(
         val variants: List<Variant>,
         val audio: List<MediaRendition>,
@@ -1053,7 +1150,6 @@ object ManifestKit {
         val hasSubtitles: Boolean get() = subtitles.isNotEmpty()
     }
 
-    /** Parse an HLS master playlist text. Returns null if no variants found. */
     fun parseMaster(text: String?, baseUrl: String = ""): MasterPlaylist? {
         if (text.isNullOrBlank()) return null
         val lines = text.lines()
@@ -1071,7 +1167,6 @@ object ManifestKit {
                     val attrs = parseAttrs(line.removePrefix("#EXT-X-STREAM-INF:"))
                     val uri = lines.getOrNull(i + 1)?.trim()?.takeIf { it.isNotEmpty() && !it.startsWith("#") }
                     if (uri != null) {
-                        // Scope crops (1920x800/920) are still 1080p-class.
                         val (w, h) = parseResolution(attrs["RESOLUTION"])
                         variants.add(
                             Variant(
@@ -1085,7 +1180,7 @@ object ManifestKit {
                             )
                         )
                     }
-                    i++ // consume the URI line.
+                    i++
                 }
             }
             i++
@@ -1115,7 +1210,6 @@ object ManifestKit {
         )
     }
 
-    /** Parse `KEY=VALUE, KEY2="VALUE2"` attr lists (values may be quoted). */
     fun parseAttrs(raw: String?): Map<String, String> {
         if (raw.isNullOrBlank()) return emptyMap()
         val out = LinkedHashMap<String, String>()
@@ -1128,10 +1222,8 @@ object ManifestKit {
         return out
     }
 
-    /** True if the playlist is a master (multi-variant) rather than a media playlist. */
     fun isMaster(text: String?): Boolean = text != null && text.contains("#EXT-X-STREAM-INF")
 
-    /** One representation in a DASH MPD. */
     data class Representation(
         val id: String,
         val height: Int,
@@ -1140,12 +1232,10 @@ object ManifestKit {
         val width: Int = 0,
     )
 
-    /** Parse a DASH MPD text into video representations. */
     fun parseMpd(text: String?): List<Representation> {
         if (text.isNullOrBlank()) return emptyList()
         val reps = mutableListOf<Representation>()
 
-        // Iterate AdaptationSets; mimeType lives on the set, not the Representation.
         val setRegex = Regex("""<AdaptationSet\b([^>]*)>(.*?)</AdaptationSet>""", RegexOption.DOT_MATCHES_ALL)
         setRegex.findAll(text).forEach { setMatch ->
             val setAttrs = parseXmlAttrs(setMatch.groupValues[1])
@@ -1176,7 +1266,6 @@ object ManifestKit {
         return out
     }
 
-    /** Deterministic identity key for dedup: host + normalized path. */
     fun urlKey(url: String): String {
         return url
             .lowercase()
@@ -1185,11 +1274,9 @@ object ManifestKit {
             .trimEnd('/')
     }
 
-    /** Rank variants by quality (height desc), used to label links. */
     fun bestHeight(variants: List<Variant>): Int =
         variants.maxOfOrNull { normalizeHeight(it.width, it.height) } ?: 0
 
-    /** "1920x800" -> (1920, 800); missing/garbled -> (0, 0). */
     fun parseResolution(raw: String?): Pair<Int, Int> {
         if (raw.isNullOrBlank()) return 0 to 0
         val nums = Regex("""\d+""").findAll(raw).mapNotNull { it.value.toIntOrNull() }.toList()
@@ -1197,14 +1284,12 @@ object ManifestKit {
         return nums[0] to nums[1]
     }
 
-    /** Scope crops carry full width but cut height, so ladder by width. */
     fun normalizeHeight(width: Int, height: Int): Int {
         if (width <= 0) return height.coerceAtLeast(0)
         val wide = ((width * 9 + 8) / 16).coerceAtLeast(0)
         return max(height, wide)
     }
 
-    /** Peak video height of a manifest text, HLS master or DASH MPD alike. Dispatches on content (`<MPD` →, else) so. adaptive links (HLS m3u8 AND DASH. */
     fun bestHeightOf(text: String?, url: String): Int {
         if (text.isNullOrBlank()) return 0
         return if (text.contains("<MPD", ignoreCase = true)) {
@@ -1214,7 +1299,6 @@ object ManifestKit {
         }
     }
 
-    /** Human label for a height: "4K"/"1080p"/"720p"/"480p"/"Auto". */
     fun qualityLabel(height: Int): String = when {
         height >= 2160 -> "4K"
         height >= 1440 -> "1440p"
@@ -1226,10 +1310,8 @@ object ManifestKit {
         else -> "Auto"
     }
 
-    /** Max of two, but treats 0 (unknown) as -inf so known quality wins. */
     fun maxQuality(a: Int, b: Int): Int = if (a <= 0) b else if (b <= 0) a else max(a, b)
 
-    /** Best resolution token (height) embedded in a URL/filename like ". . . /1080p/. . . " → 1080, else 0. */
     fun resolutionFromUrl(url: String?): Int {
         if (url.isNullOrBlank()) return 0
         return Regex("""(?<!\d)(\d{3,4})p(?!\d)""", RegexOption.IGNORE_CASE).findAll(url).maxOfOrNull {
@@ -1237,11 +1319,9 @@ object ManifestKit {
         } ?: 0
     }
 
-    // ── Language detection ────────────────────────────────── Language codes we know.
     private val LANG_HINDI = setOf("hi", "hin")
     private val LANG_ENGLISH = setOf("en", "eng")
 
-    /** True if a rendition's language is Hindi (handles hi, hin, hi-IN, hindi, हिन्दी). */
     fun isHindi(rendition: MediaRendition): Boolean {
         val lang = rendition.language?.lowercase()
         if (lang != null && (lang in LANG_HINDI || lang.startsWith("hi"))) return true
@@ -1250,14 +1330,12 @@ object ManifestKit {
             rendition.name.contains("हिंदी", ignoreCase = true)
     }
 
-    /** True if a rendition's language is English (handles en, eng, en-US, english). */
     fun isEnglish(rendition: MediaRendition): Boolean {
         val lang = rendition.language?.lowercase()
         if (lang != null && (lang in LANG_ENGLISH || lang.startsWith("en"))) return true
         return rendition.name.contains("english", ignoreCase = true)
     }
 
-    /** True if a master playlist has at least Hindi + English audio tracks. */
     fun hasHindiEnglishAudio(master: MasterPlaylist): Boolean {
         if (master.audio.isEmpty()) return false
         val hasHindi = master.audio.any { isHindi(it) }
@@ -1265,7 +1343,6 @@ object ManifestKit {
         return hasHindi && hasEnglish
     }
 
-    /** True if a stream URL's name/context suggests Hindi audio. */
     fun isHindiFromName(name: String?, url: String?): Boolean {
         val hay = buildString {
             name?.let { append(it.lowercase()); append(' ') }
@@ -1274,7 +1351,6 @@ object ManifestKit {
         return hay.contains("hindi") || hay.contains("हिन्दी") || hay.contains("हिंदी")
     }
 
-    /** True if a stream URL's name/context suggests English audio. */
     fun isEnglishFromName(name: String?, url: String?): Boolean {
         val hay = buildString {
             name?.let { append(it.lowercase()); append(' ') }
@@ -1283,16 +1359,12 @@ object ManifestKit {
         return Regex("""\beng(lish)?\b""").containsMatchIn(hay)
     }
 
-    /** True if rendition is likely the original/default track (default=YES or name "original"). A rendition with NO. language attribute is NOT "original". */
     fun isOriginal(rendition: MediaRendition): Boolean =
         rendition.default ||
             rendition.name.contains("original", ignoreCase = true)
 
-    // ── Indian dub languages (, not just Hindi - Tamil/Telugu dubs previously fell out of audioPriority's Hindi/English.
-// buckets as "Unknown") ── One.
     data class DubLanguage(val canonical: String, val codes: Set<String>, val names: Set<String>)
 
-    /** The official Indian dubbing languages, Hindi first (Hindi is the most common host-wide dub). Detection is. containment-based over codes and names. */
     val INDIAN_DUB_LANGUAGES = listOf(
         DubLanguage("Hindi", setOf("hi", "hin"), setOf("hindi", "हिन्दी", "हिंदी")),
         DubLanguage("Tamil", setOf("ta", "tam"), setOf("tamil", "தமிழ்")),
@@ -1305,7 +1377,6 @@ object ManifestKit {
         DubLanguage("Gujarati", setOf("gu", "guj"), setOf("gujarati", "ગુજરાતી")),
     )
 
-    /** Canonical Indian-dub language of a rendition ("ta", "ta-IN", "Tamil", "தமிழ்" …), or null. Hindi included - for. renditions the generic isHindi(). */
     fun indianLanguageOf(rendition: MediaRendition): String? {
         val lang = rendition.language?.lowercase()
         if (!lang.isNullOrBlank()) {
@@ -1317,7 +1388,6 @@ object ManifestKit {
         return INDIAN_DUB_LANGUAGES.firstOrNull { spec -> spec.names.any { name.contains(it) } }?.canonical
     }
 
-    /** Canonical Indian-dub language token declared in a server name and/or URL ("…tamil…", "…/te/…", "MyFlixer Hindi"), or. null. The host-declared. */
     fun languageFromName(name: String?, url: String?): String? {
         val hay = buildString {
             name?.let { append(it.lowercase()); append(' ') }
@@ -1327,11 +1397,8 @@ object ManifestKit {
         return INDIAN_DUB_LANGUAGES.firstOrNull { spec -> spec.names.any { hay.contains(it) } }?.canonical
     }
 
-    /** Audio-language LABEL of the track the player auto-selects - the display counterpart of. Same precedence (DEFAULT=YES. rendition, else the single. */
     fun audioLanguageLabel(master: MasterPlaylist): String? {
         if (master.audio.isEmpty()) return null
-        // Hindi/English keep their legacy buckets; an Indian dub beats the "Original" fallback (a DEFAULT=YES `te` track on an.
-// English title is a Telugu.
         fun trackLabel(t: MediaRendition): String? = when {
             isHindi(t) -> "Hindi"
             isEnglish(t) -> "English"
@@ -1341,8 +1408,6 @@ object ManifestKit {
         }
         val defaultTrack = master.audio.firstOrNull { it.default }
         if (defaultTrack != null) return trackLabel(defaultTrack)
-        // No explicit DEFAULT: a single audio rendition IS what plays - label it precisely. Several renditions with no default.
-// = true dual/multi audio.
         if (master.audio.size == 1) return trackLabel(master.audio.first())
         val hasHindi = master.audio.any { isHindi(it) }
         val hasEnglish = master.audio.any { isEnglish(it) }
@@ -1356,7 +1421,6 @@ object ManifestKit {
         }
     }
 
-    /** Returns priority 4(Hindi) > 3(Hindi+English) > 2(Original) > 1(English) > 0(Other). Prefers the track the player. actually auto-selects - the. */
     fun audioPriority(master: MasterPlaylist): Int {
         if (master.audio.isEmpty()) return 0
         val defaultTrack = master.audio.firstOrNull { it.default }
@@ -1368,8 +1432,6 @@ object ManifestKit {
                 else -> 0
             }
         }
-        // No explicit DEFAULT: a single audio rendition IS what plays - label it precisely. Several renditions with no default.
-// = true dual/multi audio.
         if (master.audio.size == 1) {
             val t = master.audio.first()
             return when {
@@ -1392,10 +1454,8 @@ object ManifestKit {
     }
 }
 
-/** Pure, JVM-testable helpers for title normalization and fuzzy matching. No network, no Android - safe for unit tests. */
 object TitleMatch {
 
-    /** Strip punctuation, collapse whitespace, lowercase. Keeps unicode letters/digits. */
     fun normalizeTitle(title: String?): String {
         if (title.isNullOrBlank()) return ""
         return title
@@ -1406,20 +1466,16 @@ object TitleMatch {
             .replace(Regex("\\s+"), " ")
     }
 
-    /** Common spelling variants of a title ("&"→"and", roman numerals, accents). */
     fun titleVariants(title: String?): List<String> {
         val n = normalizeTitle(title)
         if (n.isBlank()) return emptyList()
         val variants = linkedSetOf(n)
-        // "a & b" ↔ "a and b" - must be derived.
         if (title != null) {
             variants += normalizeTitle(title.replace("&", " and "))
             variants += normalizeTitle(title.replace(Regex("\\band\\b", RegexOption.IGNORE_CASE), "&"))
         }
-        // apostrophes dropped / kept.
         variants += n.replace("'", "")
         variants += n.replace("’", "")
-        // roman numeral ↔ number (basic).
         variants += n.replace(Regex("\\biv\\b"), "4")
         variants += n.replace(Regex("\\biii\\b"), "3")
         variants += n.replace(Regex("\\bii\\b"), "2")
@@ -1427,7 +1483,6 @@ object TitleMatch {
         return variants.filter { it.isNotBlank() }.distinct()
     }
 
-    /** Classic Levenshtein distance. */
     fun levenshtein(a: String, b: String): Int {
         if (a == b) return 0
         if (a.isEmpty()) return b.length
@@ -1446,52 +1501,43 @@ object TitleMatch {
         return dp[a.length][b.length]
     }
 
-    /** Relevance 0. . 1 - exact normalized match = 1. 0. */
     fun titleDistance(query: String, title: String): Double {
         val q = normalizeTitle(query)
         val t = normalizeTitle(title)
         if (q.isBlank() || t.isBlank()) return 0.0
         if (q == t) return 1.0
-        // token-prefix bonus: every query token starts one of the title tokens.
         val qTokens = q.split(" ")
         val tTokens = t.split(" ")
         if (qTokens.all { qt -> tTokens.any { tt -> tt.startsWith(qt) } }) {
             val lenScore = q.length.toDouble() / t.length.toDouble()
             return 0.7 + 0.3 * min(1.0, lenScore)
         }
-        // levenshtein similarity on the full strings.
         val maxLen = maxOf(q.length, t.length)
         if (maxLen == 0) return 0.0
         return 1.0 - levenshtein(q, t).toDouble() / maxLen
     }
 
-    /** Whether the title plausibly matches given the release year. */
     fun yearMatches(queryYear: Int?, candidateYear: Int?, tolerance: Int = 2): Boolean {
         if (queryYear == null || candidateYear == null) return true
         return abs(queryYear - candidateYear) <= tolerance
     }
 
-    /** Combined gate used by search: strict token match + score threshold. */
     fun isRelevant(query: String, title: String, queryYear: Int?, candidateYear: Int?): Boolean {
         if (!yearMatches(queryYear, candidateYear)) return false
-        // Strip any embedded years (e. g. "Joker (2019)") before comparing titles.
         val q = stripYearTokens(normalizeTitle(query))
         val t = stripYearTokens(normalizeTitle(title))
         return titleDistance(q, t) >= 0.7
     }
 
-    /** Remove standalone 4-digit year tokens ("2019", "2001"). */
     private fun stripYearTokens(normalized: String): String {
         if (normalized.isBlank()) return normalized
         val stripped = normalized.split(" ")
             .filterNot { it.matches(Regex("(19|20)\\d{2}")) }
             .joinToString(" ")
             .trim()
-        // A title that is only a year ("1917") must not collapse to an empty string.
         return stripped.ifBlank { normalized }
     }
 
-    /** Extract 4-digit year, or null. */
     fun parseYear(raw: String?): Int? {
         if (raw.isNullOrBlank()) return null
         return Regex("(19|20)\\d{2}").find(raw)?.value?.toIntOrNull()

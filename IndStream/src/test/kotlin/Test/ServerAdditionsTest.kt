@@ -1,6 +1,5 @@
 ﻿package Test
 
-import com.indstream.CastleTvSource
 import com.indstream.ServerFarm
 import com.indstream.ServerIdType
 import com.indstream.StreamEngine
@@ -12,18 +11,15 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-/** Guards the Sept 2026 farm expansion: 2Embed, CastleTV, StreamFlix, 4KHDHub. */
 class ServerAdditionsTest {
 
     @Test
     fun vixsrc_disabledCloudflareChallenge() {
-        // Disabled (whole domain serves a bot challenge to automated clients) - assert the DISABLED state so a re-enable is a conscious act.
         assertNull(ServerFarm.allServers.firstOrNull { it.id == "vixsrc" })
     }
 
     @Test
     fun deadServers_stayOut() {
-        // v46 removals (verified dead): nhd 404, vidapi DNS, zxc sub DNS, vidsrc-to/nontongo Cloudflare.
         for (id in setOf("nhd", "vidapi", "zxcstreams", "vidsrc-to", "nontongo")) {
             assertNull(ServerFarm.allServers.firstOrNull { it.id == id }, "$id must stay out")
         }
@@ -31,7 +27,6 @@ class ServerAdditionsTest {
 
     @Test
     fun videasy_removed_v63() {
-        // Dropped in v62; assert it stays out of the farm.
         assertNull(ServerFarm.allServers.firstOrNull { it.id == "videasy" })
     }
 
@@ -46,7 +41,6 @@ class ServerAdditionsTest {
 
     @Test
     fun embedBatch_removed_v63() {
-        // Generic-pipeline embeds: 0 streams (players load via JS / lazy data-src).
         for (id in setOf(
             "twoembed", "vidfast", "autoembed", "vidphantom", "vsembed",
             "twoembed-skin", "vidsrcme", "vidsrc-pm", "rive", "vidsrcto",
@@ -76,18 +70,18 @@ class ServerAdditionsTest {
 
     @Test
     fun onetouchtv_pureHelpers() {
-        assertEquals(1080, com.indstream.OneTouchTvSource.heightOf("1080p"))
-        assertEquals(720, com.indstream.OneTouchTvSource.heightOf("720p"))
-        assertEquals(2160, com.indstream.OneTouchTvSource.heightOf("4K"))
-        assertEquals(0, com.indstream.OneTouchTvSource.heightOf("Auto"))
-        assertEquals(0, com.indstream.OneTouchTvSource.heightOf(null))
+        assertEquals(1080, StreamEngine.releaseHeightOf("1080p"))
+        assertEquals(720, StreamEngine.releaseHeightOf("720p"))
+        assertEquals(2160, StreamEngine.releaseHeightOf("4K"))
+        assertEquals(0, StreamEngine.releaseHeightOf("Auto"))
+        assertEquals(0, StreamEngine.releaseHeightOf(null))
         val hits = listOf(
-            com.indstream.OneTouchTvSource.Hit("a", "Dune Part Two (2024)", "2024", "movie"),
-            com.indstream.OneTouchTvSource.Hit("b", "Dune (2021)", "2021", "movie"),
+            StreamEngine.VodHit("a", "Dune Part Two (2024)", "2024", "movie"),
+            StreamEngine.VodHit("b", "Dune (2021)", "2021", "movie"),
         )
-        assertEquals("a", com.indstream.OneTouchTvSource.matchTitle(hits, "Dune Part Two", 2024, "movie")?.id)
-        assertEquals(null, com.indstream.OneTouchTvSource.matchTitle(hits, "Dune Part Two", 2021, "movie")?.id)
-        assertEquals(null, com.indstream.OneTouchTvSource.matchTitle(emptyList(), "Dune", 2024, "movie"))
+        assertEquals("a", StreamEngine.matchVodTitle(hits, "Dune Part Two", 2024, "movie")?.id)
+        assertEquals(null, StreamEngine.matchVodTitle(hits, "Dune Part Two", 2021, "movie")?.id)
+        assertEquals(null, StreamEngine.matchVodTitle(emptyList(), "Dune", 2024, "movie"))
     }
 
     @Test
@@ -124,10 +118,7 @@ class ServerAdditionsTest {
 
     @Test
     fun hubDisabledJsGateway() {
-        // Re-enabled: the rotator gateway is decoded client-side (v68), so the
-        // hub-family resolver works again. A later removal must be conscious.
         assertNotNull(ServerFarm.allServers.firstOrNull { it.id == "4khdhub" })
-        // New downloadable fast-file hosts land with the same expansion.
         for (id in setOf("fsl", "hdmovie2", "olamovies")) {
             assertNotNull(ServerFarm.allServers.firstOrNull { it.id == id }, "$id must be present")
         }
@@ -135,36 +126,34 @@ class ServerAdditionsTest {
 
     @Test
     fun vidrock_removed_v63() {
-        // vidrock + mirror: /api/movie/{id}/ now returns SPA HTML, not JSON.
         assertNull(ServerFarm.allServers.firstOrNull { it.id == "vidrock" })
         assertNull(ServerFarm.allServers.firstOrNull { it.id == "vidrock-net" })
     }
 
     @Test
     fun castleDecrypt_liveVector() {
-        // Captured against the live API: secKey + cipher must round-trip.
         assertEquals(
             "hello-castle-1080p",
-            CastleTvSource.decrypt("XP4abirPGczy5P0SITVv+4mF5GM4XmyP1UXyVmi8ouA=", "ZkpBVG0qa2dmSg=="),
+            StreamEngine.decryptApiPayload("XP4abirPGczy5P0SITVv+4mF5GM4XmyP1UXyVmi8ouA=", "ZkpBVG0qa2dmSg=="),
         )
-        assertNull(CastleTvSource.decrypt("!!!not-base64!!!", "ZkpBVG0qa2dmSg=="))
+        assertNull(StreamEngine.decryptApiPayload("!!!not-base64!!!", "ZkpBVG0qa2dmSg=="))
     }
 
     @Test
     fun castlePickTrack_hindiFirst() {
-        fun t(id: String, name: String, v: Boolean) = CastleTvSource.Track(id, name, v)
+        fun t(id: String, name: String, v: Boolean) = StreamEngine.AudioTrack(id, name, v)
         val tracks = listOf(t("1", "English", true), t("2", "Hindi", true), t("3", "Tamil", false))
-        assertEquals("2", CastleTvSource.pickTrack(tracks)?.languageId)
-        assertEquals("1", CastleTvSource.pickTrack(listOf(t("1", "English", true)))?.languageId)
-        assertNull(CastleTvSource.pickTrack(emptyList()))
+        assertEquals("2", StreamEngine.pickAudioTrack(tracks)?.languageId)
+        assertEquals("1", StreamEngine.pickAudioTrack(listOf(t("1", "English", true)))?.languageId)
+        assertNull(StreamEngine.pickAudioTrack(emptyList()))
     }
 
     @Test
     fun castleQualityOf_labels() {
-        assertEquals("1080p", CastleTvSource.qualityOf("FHD 1080p", 3))
-        assertEquals("4K", CastleTvSource.qualityOf("UHD", 4))
-        assertEquals("720p", CastleTvSource.qualityOf(null, 2))
-        assertEquals("", CastleTvSource.qualityOf(null, 0))
+        assertEquals("1080p", StreamEngine.apiQualityLabel("FHD 1080p", 3))
+        assertEquals("4K", StreamEngine.apiQualityLabel("UHD", 4))
+        assertEquals("720p", StreamEngine.apiQualityLabel(null, 2))
+        assertEquals("", StreamEngine.apiQualityLabel(null, 0))
     }
 
     @Test
@@ -277,7 +266,6 @@ class ServerAdditionsTest {
 
     @Test
     fun rotatorTarget_liveVector() {
-        // Captured gateway blob (with trailing junk chars) -> drive url.
         val blob = "Y214WE0xWjNZbXRhVUdwMmIxQldObFo2ZFRCeFZVOXRRbmxxYVV0UU9XRndla2w1YjNveGFYRlVPV3h3YkRWM1RERnFhVzVVT1dkTlNtdDFiM3BGZVhCNWFtbFdkbXAyYjJ4V05sWjZVMVpJZDA5M1JsSXdNa2RWZURWdk1rVkxSbnBqZGtWdGVHdEtlRm94Y0ZSYWJVaExUVzVHVW1OcVRWUXhTWEY1ZUd4S1lXTk5XbmxqWkV4M1YwWmFTV05rUjNveGRVbFVhekpXWVQ5QQ=="
         val page = "<script>s('o','$blob?@',180*1000)</script>"
         assertEquals("https://hubcloud.ist/drive/cfscfcoduf3fi9o", StreamEngine.rotatorTarget(page))
@@ -290,7 +278,6 @@ class ServerAdditionsTest {
             "4KHDHub (\uD83C\uDDEE\uD83C\uDDF3 Hindi) 1.4GB",
             com.indstream.LinkNaming.displayName("4KHDHub", "Hindi", sizeLabel = "1.4GB"),
         )
-        // Blank size: name unchanged.
         assertEquals(
             "VidLink (Multi)",
             com.indstream.LinkNaming.displayName("VidLink", "Multi"),
@@ -341,6 +328,27 @@ class ServerAdditionsTest {
     }
 
     @Test
+    fun vcloudPageMatchesEpisode_taggedPages() {
+        assertTrue(StreamEngine.vcloudPageMatchesEpisode("Show.S02E05.1080p.mkv", "tv", 2, 5))
+        assertFalse(StreamEngine.vcloudPageMatchesEpisode("Show.S02E01.1080p.mkv", "tv", 2, 5))
+        assertTrue(StreamEngine.vcloudPageMatchesEpisode("Show.S02.1080p.mkv", "tv", 2, 5))
+        assertTrue(StreamEngine.vcloudPageMatchesEpisode("Film.2024.1080p.mkv", "tv", 2, 5))
+        assertTrue(StreamEngine.vcloudPageMatchesEpisode("Show.S02E01.1080p.mkv", "movie", 2, 5))
+    }
+
+    @Test
+    fun episodeFirstOrder_rotatesToRequested() {
+        assertEquals(
+            listOf("e5", "e1", "e2"),
+            StreamEngine.episodeFirstOrder(listOf("e1", "e2", "e5"), "tv", 2, 5),
+        )
+        assertEquals(
+            listOf("e1", "e2", "e5"),
+            StreamEngine.episodeFirstOrder(listOf("e1", "e2", "e5"), "movie", 2, 5),
+        )
+    }
+
+    @Test
     fun hd2Anchors_downloadPaths() {
         val html = "<a href=\"/download/tt1-film-480p/\">480p</a>" +
             "<a href=\"/movies/tt1-film/\">post</a>" +
@@ -377,20 +385,27 @@ class ServerAdditionsTest {
     }
 
     @Test
+    fun hubFileButtons_skipsGatewayNoise() {
+        val html = "<div class=\"card-header\">Jawan 2023 720p</div>" +
+            "<a class=\"btn btn-success\" href=\"https://pixeldrain.dev/u/AbC123\">Download</a>" +
+            "<a class=\"btn btn-primary\" href=\"https://hubcloud.ist/tg/go?id=x\">Telegram</a>" +
+            "<a class=\"btn btn-danger\" href=\"https://pixel.hubcloud.ist/x\">Pixel</a>" +
+            "<a class=\"btn btn-primary\" href=\"https://hubcloud.ist/drive/admin\">Admin</a>"
+        val out = StreamEngine.hubFileButtons(html)
+        assertEquals(1, out.size)
+        assertEquals("https://pixeldrain.dev/api/file/AbC123", out[0].first)
+        assertEquals("720p", out[0].second)
+    }
+
+    @Test
     fun speedRankMs_unmeasuredLast_hindiDiscount() {
-        // Unmeasured sorts after everything measured.
         assertEquals(Double.MAX_VALUE, StreamEngine.speedRankMs(null, "Hindi"))
         assertTrue(StreamEngine.speedRankMs(1000L, "English") < Double.MAX_VALUE)
-        // Same latency: Hindi wins outright.
         assertTrue(StreamEngine.speedRankMs(1000L, "Hindi") < StreamEngine.speedRankMs(1000L, "English"))
-        // Small bonus only: a 2x-faster English stream still beats Hindi.
         assertTrue(StreamEngine.speedRankMs(500L, "English") < StreamEngine.speedRankMs(1000L, "Hindi"))
-        // Near-tie flips to Hindi: 1000/1.1 = 909 < 950.
         assertTrue(StreamEngine.speedRankMs(1000L, "Hindi") < StreamEngine.speedRankMs(950L, "English"))
-        // Multi + Indian dubs get the smaller bonus.
         assertTrue(StreamEngine.speedRankMs(1000L, "Multi") < StreamEngine.speedRankMs(1000L, "English"))
         assertTrue(StreamEngine.speedRankMs(1000L, "Tamil") < StreamEngine.speedRankMs(1000L, "English"))
-        // Zero-latency inline manifests top everything.
         assertEquals(0.0, StreamEngine.speedRankMs(0L, "Unknown"))
     }
 
@@ -412,7 +427,6 @@ class ServerAdditionsTest {
             onLink = { out.add(it) },
             probeManifests = false,
         )
-        // Nothing measured: stable arrival order wins over language.
         assertEquals(
             listOf(
                 "https://x.example/eng.m3u8",

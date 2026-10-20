@@ -1,5 +1,4 @@
 ﻿package com.multimovies
-/** FILE: ExternalSources. kt â€” third-party stream APIs (id -> direct streams). Deterministic JSON endpoints that work. without the site. */
 
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.utils.ExtractorLink
@@ -30,20 +29,16 @@ data class NxshaSource(
 
 data class NxshaSubtitle(val lang: String, val url: String)
 
-/** Nxsha (nxsha. space) extractor. The web player resolves streams through same-origin endpoints whose request and. response bodies are CryptoJS-AES. */
 object NxshaExtractor {
 
     private const val BASE_URL = "https://nxsha.space"
     private const val TMDB_PROXY_FIND = "https://fk.nxsha.xyz/api/v1/wxdb/3/find"
 
-    // Budgets fit inside MultiSourcePuller's outer SOURCE_TIMEOUT_MS (15s): servers (~4s) + one parallel wave of source.
-// lookups (~8s).
     private const val SERVERS_BUDGET_MS = 4_000L
     private const val SOURCES_BUDGET_MS = 8_000L
     private const val LOOKUP_BUDGET_MS = 5_000L
     private const val MAX_PARALLEL_PROVIDERS = 4
 
-    /** Per-title single-flight memo so the dooplayer embed AND the GlobalSource entry for the same title share one API. resolution instead of doubling. */
     private const val MEMO_TTL_MS = 2 * 60 * 1000L
     private const val MEMO_MAX_SIZE = 32
 
@@ -59,7 +54,6 @@ object NxshaExtractor {
         "Accept" to "*/*",
     )
 
-    // Entry point.
 
     suspend fun extract(src: MultiSourcePuller.Source, onSubtitle: (NxshaSubtitle) -> Unit): List<NxshaSource> =
         withContext(Dispatchers.IO) {
@@ -86,7 +80,6 @@ object NxshaExtractor {
             }
         }
 
-    /** EmbedPrefetchCache-style single-flight: exactly one caller runs, concurrent + repeat callers within the TTL join its. result; empty results are not. */
     private suspend fun resolveOrJoin(key: String, resolve: suspend () -> List<NxshaSource>): List<NxshaSource> {
         memo.values.removeAll { System.currentTimeMillis() > it.expiresAt && it.deferred.isCompleted }
         memo[key]?.let { return it.deferred.await() }
@@ -102,13 +95,10 @@ object NxshaExtractor {
             result
         } catch (t: Throwable) {
             memo.remove(key)
-            // Cancellation must propagate (structured concurrency); joiners get it via the cancelled job.
             if (t is kotlinx.coroutines.CancellationException) {
                 job.cancel()
                 throw t
             }
-            // Complete normally with an empty result so concurrent/duplicate callers awaiting this job get emptyList() instead of.
-// an exception propagating.
             job.complete(emptyList())
             emptyList()
         }
@@ -131,13 +121,10 @@ object NxshaExtractor {
         referer: String,
         onSubtitle: (NxshaSubtitle) -> Unit,
     ): List<NxshaSource> {
-        // /api/sources needs a TMDB id; resolve imdb -> tmdb through the open TMDB proxy when the page only gave us an IMDB id.
         var tmdb = tmdbId
         if (tmdb == null && imdbId != null) tmdb = resolveTmdbFromImdb(imdbId, type)
         if (tmdb == null) return emptyList()
 
-        // 1) server list (works with tmdb or imdb; pass both when known). Try the resolved origin first; if it doesn't serve.
-// the API (a dooplayer may hand.
         val candidates = listOf(baseUrl, BASE_URL).distinct()
         var servers = emptyList<NxshaServer>()
         var apiBase = candidates.first()
@@ -163,8 +150,6 @@ object NxshaExtractor {
         }
         if (servers.isEmpty()) return emptyList()
 
-        // 2) per-provider sources, bounded-parallel, nitro-first order. The subtitle
-        // lookup rides alongside and never gates the streams (outer kill is 15s).
         val collected = coroutineScope {
             val subsJob = async { runCatching { fetchSubtitles(apiBase, tmdb, type, season, episode, onSubtitle) } }
             val sem = Semaphore(MAX_PARALLEL_PROVIDERS)
@@ -186,7 +171,6 @@ object NxshaExtractor {
         return collected
     }
 
-    /** GET one of the site's API endpoints with an encrypted q; returns the decrypted JSON. */
     private suspend fun apiGet(endpoint: String, payload: Map<String, Any?>, budgetMs: Long): JSONObject? {
         val q = NxshaProtocol.encodeData(payload)
         val body = HttpKit.get("$endpoint?q=$q", headers = sharedHeaders, budgetMs = budgetMs) ?: return null
@@ -194,7 +178,6 @@ object NxshaExtractor {
         return NxshaProtocol.decodeData(envelope.optString("_hash"))
     }
 
-    /** Fetch + map one provider's sources. Direct streams emit as-is; embed entries go through the CloudStream registry. then unwrapEmbed, and are. */
     private suspend fun fetchProviderSources(
         baseUrl: String,
         server: NxshaServer,
@@ -240,7 +223,6 @@ object NxshaExtractor {
                         quality = quality,
                         isM3u8 = streamType.equals("m3u8", true) || streamType.equals("hls", true) ||
                             url.contains(".m3u8", ignoreCase = true),
-                        // DASH manifests (.mpd) are adaptive too - mistyping them as VIDEO breaks playback.
                         isDash = streamType.equals("mpd", true) || streamType.equals("dash", true) ||
                             url.contains(".mpd", ignoreCase = true),
                     )
@@ -248,7 +230,6 @@ object NxshaExtractor {
                 continue
             }
 
-            // Embedded entry: another site's player page. Try the registry first (some hosts have extractors), then unwrapEmbed.
             val registryLinks = mutableListOf<ExtractorLink>()
             val registryOk = runCatching {
                 loadExtractor(
@@ -292,7 +273,6 @@ object NxshaExtractor {
         return out
     }
 
-    /** Best-effort subtitles; direct opensubtitles/srt links work as-is in CloudStream (server-side fetch, no browser CORS. involved). */
     private suspend fun fetchSubtitles(
         baseUrl: String,
         tmdbId: String,
@@ -320,7 +300,6 @@ object NxshaExtractor {
         }
     }
 
-    /** imdb -> tmdb id via Nxsha's open TMDB proxy (last resort for pages that only carry an IMDB id, e. g. IMDB-keyed. dooplayer embeds). */
     private suspend fun resolveTmdbFromImdb(imdbId: String, type: String): String? {
         val body = HttpKit.get(
             "$TMDB_PROXY_FIND/$imdbId?external_source=imdb_id",
@@ -328,7 +307,6 @@ object NxshaExtractor {
             budgetMs = LOOKUP_BUDGET_MS,
         ) ?: return null
         val obj = runCatching { JSONObject(body) }.getOrNull() ?: return null
-        // Prefer the array matching the requested type, but fall back to the other one when empty.
         val primary = if (type == "movie") "movie_results" else "tv_results"
         val secondary = if (type == "movie") "tv_results" else "movie_results"
         return listOf(primary, secondary).firstNotNullOfOrNull { key ->
@@ -338,7 +316,6 @@ object NxshaExtractor {
     }
 }
 
-/** One entry of the decrypted /api/servers list (subset of fields we use). */
 internal data class NxshaServer(
     val name: String,
     val scraper: String,
@@ -346,13 +323,10 @@ internal data class NxshaServer(
     val highPriority: Int,
 )
 
-/** Pure Nxsha wire-protocol logic: envelope crypto, id parsing, server rules. Kept free of CloudStream imports (and. isolated) so it runs on the plain. */
 internal object NxshaProtocol {
 
-    /** AES passphrase of the API envelopes. Extracted from the player bundle, module 41159 (rotated keys happen). */
     internal const val PASSPHRASE = "f4488ab4da401203d23baa129fc546153898162524635d6776826d0c867ccaa3"
 
-    /** Random ~10-char salt mimicking Math. random(). toString(36). substring(2, 12). */
     fun randomSalt(): String {
         val alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
         val sb = StringBuilder(10)
@@ -360,7 +334,6 @@ internal object NxshaProtocol {
         return sb.toString()
     }
 
-    /** Build the base64url(no padding) encrypted `q` parameter value. ): payload + _req_ts + _req_salt -> JSON -> CryptoJS. AES -> base64url without '='. */
     fun encodeData(payload: Map<String, Any?>): String {
         val json = JSONObject()
         payload.forEach { (k, v) -> json.put(k, v ?: JSONObject.NULL) }
@@ -370,7 +343,6 @@ internal object NxshaProtocol {
             .replace("+", "-").replace("/", "_").replace("=", "")
     }
 
-    /** Decrypt a response `_hash` envelope to its JSON payload (the player's decodeData()). Returns null on. malformed/undecryptable input. */
     fun decodeData(hash: String?): JSONObject? {
         if (hash.isNullOrBlank()) return null
         val std = hash.replace("-", "+").replace("_", "/")
@@ -387,7 +359,6 @@ internal object NxshaProtocol {
         val episode: Int?,
     )
 
-    /** Extract ids/type/season/episode. Handles path form `/embed/movie/{tmdb}` & `/embed/tv/{tmdb}/{s}/{e}`, query form. `?tmdb=&type=&s=&e=`, and. */
     fun parseIdsFromUrl(url: String): ParsedIds {
         val pathMatch = Regex("""/embed/(movie|tv)/(\d{2,10})(?:/(\d{1,4}))?(?:/(\d{1,4}))?""").find(url)
         var tmdb: String? = pathMatch?.groupValues?.getOrNull(2)
@@ -395,7 +366,6 @@ internal object NxshaProtocol {
         var season: Int? = pathMatch?.groupValues?.getOrNull(3)?.toIntOrNull()?.takeIf { type == "tv" }
         var episode: Int? = pathMatch?.groupValues?.getOrNull(4)?.toIntOrNull()?.takeIf { type == "tv" }
 
-        // IMDB id in the path (`/embed/movie/tt1375666`): the site now serves Nxsha movie embeds this way.
         val pathImdb = Regex("""/embed/(?:movie|tv)/(tt\d{6,10})(?:[/?&#]|$)""").find(url)
             ?.groupValues?.getOrNull(1)
         if (type == null) {
@@ -426,19 +396,14 @@ internal object NxshaProtocol {
         queryValue("e", "episode", "ep")?.toIntOrNull()?.let { episode = it }
         val imdb = pathImdb
             ?: queryValue("imdb", "imdb_id", "imdbid")?.takeIf { it.matches(Regex("""tt\d{6,10}""")) }
-        // season/episode are NOT filtered on type here: query-form embeds such as?imdb=tt. . . &s=1&e=1 (no type=) must keep.
-// them so extract() can infer tv.
         return ParsedIds(tmdb, imdb, type, season, episode)
     }
 
-    /** Server ordering: high_priority asc, then listed position asc. No provider gets a hardcoded top slot. */
     fun orderServers(servers: List<NxshaServer>): List<NxshaServer> =
         servers.sortedWith(compareBy<NxshaServer> { it.highPriority }.thenBy { it.position })
 
-    /** Retired upstream scrapers: listed online but never resolve (fail/timeout every call). */
     private val RETIRED_SCRAPERS = setOf("vidking")
 
-    /** Filter the raw servers array to usable entries: web_support, not disabled, not retired, serves (missing `types` = compatible). then ordered. */
     fun parseServers(arr: JSONArray?, type: String): List<NxshaServer> {
         if (arr == null) return emptyList()
         val out = mutableListOf<NxshaServer>()
@@ -463,15 +428,12 @@ internal object NxshaProtocol {
         return orderServers(out)
     }
 
-    /** Short display label: "Nitro - " -> "Nitro". */
     fun shortServerName(name: String): String =
         name.substringBefore('-').trim().ifEmpty { name.trim() }
 
-    /** True when a quality string marks a Hindi audio track ("Hindi dub: 1080", "720p | Hindi", " - 720P"). */
     fun isHindiQuality(quality: String?): Boolean =
         quality.orEmpty().contains("hindi", ignoreCase = true)
 
-    /** Prefer the origin of an nxsha. * embed URL (the dooplayer may hand out a different host than the canonical base). else the canonical base. Only. */
     fun baseUrlFor(url: String, fallback: String): String {
         val schemeHost = Regex("""^(https?)://[^/]+""").find(url)?.value ?: return fallback
         val host = schemeHost.substringAfter("://").lowercase()
@@ -481,7 +443,6 @@ internal object NxshaProtocol {
     }
 }
 
-/** A resolved stream. xyz - name, URL, quality, type, and headers for the player. Pure Kotlin data class (no. CloudStream dependency) so the extractor. */
 data class VidemSource(
     val name: String,
     val url: String,
@@ -490,7 +451,6 @@ data class VidemSource(
     val headers: Map<String, String> = emptyMap(),
 )
 
-/** Dedicated extractor for (a fast, multi-server TMDB/IMDB-keyed embed player discovered via the vidapi. xyz. aggregator. The player is fully. */
 object VidemExtractor {
 
     private const val BASE_URL = "https://videm.xyz"
@@ -505,11 +465,8 @@ object VidemExtractor {
         "Referer" to BASE_URL,
     )
 
-    /** Extract streams. xyz for the given. Returns a list of entries, one per server that responded with a playable URL. */
     suspend fun extract(src: MultiSourcePuller.Source): List<VidemSource> =
         withContext(Dispatchers.IO) {
-            // Prefer the IMDB id (always available via load() without a TMDB public-API call); fall back to the cached TMDB id.
-// only if needed.
             val imdbId = src.imdbId?.takeIf { it.startsWith("tt") }
             val tmdbId = src.tmdbId?.takeIf { it.matches(Regex("""\d{2,10}""")) }
             val id = imdbId ?: tmdbId ?: return@withContext emptyList()
@@ -551,7 +508,6 @@ object VidemExtractor {
                             }"
                             var playJson = HttpKit.getJson(playUrl, headers = sharedHeaders, budgetMs = PLAY_TIMEOUT_MS)
                                 ?: return@async
-                            // Stale mint: the player re-mints with fresh=1 when the first answer carries no url.
                             if (playJson.optString("url", "").isBlank()) {
                                 playJson = HttpKit.getJson("$playUrl&fresh=1", headers = sharedHeaders, budgetMs = PLAY_TIMEOUT_MS)
                                     ?: return@async
@@ -579,18 +535,15 @@ object VidemExtractor {
             results
         }
 
-    /** Extract `var Q = {. . . }` JSON. */
     internal fun parseQConfig(html: String): JSONObject? {
         val m = Regex("""var\s+Q\s*=\s*(\{.*?\});""", RegexOption.DOT_MATCHES_ALL)
             .find(html) ?: return null
         val raw = m.groupValues[1]
-        // Normalise escaped slashes the JSON parser can't handle.
         val cleaned = raw.replace("\\/", "/")
         return runCatching { JSONObject(cleaned) }.getOrNull()
     }
 }
 
-/** One resolved GDMirror HLS stream. */
 data class GdMirrorStream(
     val name: String,
     val url: String,
@@ -598,9 +551,6 @@ data class GdMirrorStream(
     val referer: String? = null,
 )
 
-/** GDMirror (streams.iqsmartgames.com) extractor. The dooplayer embed is a JS shell, resolved statically:
- *  embed vars -> mymovieapi/myseriesapi (fileslugs) -> embedhelper2 (mirror embeds) -> mirror player page
- *  (packed JWPlayer `links` carrying HLS masters). */
 object GdMirrorExtractor {
 
     private const val DEF_API = "https://streams.iqsmartgames.com"
@@ -672,10 +622,8 @@ object GdMirrorExtractor {
     }
 }
 
-/** Pure GDMirror wire logic: embed/vars/api parsing, mirror mapping, packed-player unpack. */
 internal object GdMirrorProtocol {
 
-    /** Site-wide static key for keyless embeds (the player page ships an empty myKey when the parent omits one). */
     internal const val FALLBACK_KEY = "e11a7debaaa4f5d25b671706ffe4d2acb56efbd4"
 
     internal data class Embed(val pageUrl: String, val kind: String, val id: String, val season: String?, val episode: String?, val key: String?)
@@ -683,7 +631,6 @@ internal object GdMirrorProtocol {
     internal data class GdFile(val slug: String, val fileName: String)
     internal data class Mirror(val site: String, val base: String, val url: String)
 
-    /** Parse an iqsmartgames embed URL: /embed/movie/{id} or /embed/tv/{id}/{s}/{e} plus ?key=. */
     internal fun parseEmbed(url: String): Embed? {
         val path = Regex("""/embed/(movie|tv)/([^/?#]+)(?:/(\d+)(?:/(\d+))?)?""").find(url) ?: return null
         val key = Regex("""[?&]key=([^&#]+)""").find(url)?.groupValues?.get(1)
@@ -694,7 +641,6 @@ internal object GdMirrorProtocol {
     private fun jsVar(page: String, name: String): String? =
         Regex("""(?:let|var|const)\s+$name\s*=\s*"([^"]*)"""").find(page)?.groupValues?.get(1)
 
-    /** Embed-page JS vars with URL-derived fallbacks so one missing var never kills the chain. */
     internal fun parseVars(page: String, embed: Embed): Vars {
         val id = jsVar(page, "FinalID")?.ifEmpty { null } ?: embed.id
         val idType = jsVar(page, "idType")?.ifEmpty { null }
@@ -711,7 +657,6 @@ internal object GdMirrorProtocol {
     internal const val DEF_API = "https://streams.iqsmartgames.com"
     internal const val DEF_PLAYER = "https://pro.iqsmartgames.com"
 
-    /** mymovieapi / myseriesapi URL for the resolved vars. */
     internal fun apiUrl(v: Vars): String {
         val enc: (String) -> String = { URLEncoder.encode(it, "UTF-8") }
         return if (v.season != null || v.epname != null) {
@@ -722,7 +667,6 @@ internal object GdMirrorProtocol {
         }
     }
 
-    /** `data` array -> (fileslug, filename), blanks dropped. */
     internal fun parseFiles(json: JSONObject): List<GdFile> {
         val arr = json.optJSONArray("data") ?: return emptyList()
         val out = mutableListOf<GdFile>()
@@ -736,7 +680,6 @@ internal object GdMirrorProtocol {
 
     internal fun isHindiName(name: String?): Boolean = name?.contains("hindi", ignoreCase = true) == true
 
-    /** embedhelper2 response -> mirror embeds in sources order: siteUrl + base64(mresult)[siteKey]. */
     internal fun parseMirrors(body: String): List<Mirror> {
         val root = runCatching { JSONObject(body) }.getOrNull() ?: return emptyList()
         val sources = root.optJSONObject("sources") ?: return emptyList()
@@ -753,7 +696,6 @@ internal object GdMirrorProtocol {
             val site = o.optString("friendlyName").ifBlank { siteKey }
             out.add(Mirror(site, base, base + code))
         }
-        // JSONObject key order is not contractual: verified player families first, then stable key order.
         return out.sortedWith(compareBy({ mirrorPriority(it.site) }, { it.site }))
     }
 
@@ -763,7 +705,6 @@ internal object GdMirrorProtocol {
         else -> 2
     }
 
-    /** Mirror player page -> HLS master urls (hls4, hls3, hls2 preference), relative resolved against the page. */
     internal fun extractHls(html: String, mirrorBase: String): List<String> {
         val start = html.indexOf("eval(function(p,a,c,k,e,d)").takeIf { it >= 0 } ?: return emptyList()
         val end = html.indexOf(".split('|')))", start).takeIf { it > start } ?: return emptyList()
@@ -783,7 +724,6 @@ internal object GdMirrorProtocol {
         return if (ref.startsWith("/")) "$schemeHost$ref" else "$schemeHost/$ref"
     }
 
-    /** Dean Edwards packer unpack: eval(function(p,a,c,k,e,d){...}('P',A,C,'K'.split('|'))). Null-safe. */
     internal fun deanUnpack(block: String): String? = runCatching {
         val m = Regex("""\}\('([\s\S]*?)',(\d+),(\d+),'([\s\S]*)'\.split\('\|'\)\)\)""")
             .find(block) ?: return null
@@ -810,7 +750,6 @@ internal object GdMirrorProtocol {
         s
     }.getOrNull()
 
-    /** Unescape a JS string literal body (no surrounding quotes): \\ \' \" \/ \n \r \t \xNN \uNNNN. */
     internal fun unescapeJs(s: String): String {
         val out = StringBuilder(s.length)
         var i = 0
@@ -846,15 +785,12 @@ internal object GdMirrorProtocol {
 
 }
 
-/** True for a directly playable stream URL. */
 internal fun isMediaUrl(u: String): Boolean {
     val l = u.lowercase()
-    // `.urlset/master.txt` is standard HLS manifest naming on these CDNs; bare .txt is not a stream.
     return l.contains(".m3u8") || l.contains(".mp4") || l.contains(".mpd") ||
         l.contains(".webm") || l.contains(".mkv") || l.contains(".urlset/")
 }
 
-/** Modiplay (Cineverse backend) extractor. Embed/proxy pages carry a static tokenized HLS relay. */
 object ModiplayExtractor {
 
     private const val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
@@ -867,8 +803,6 @@ object ModiplayExtractor {
                 mapOf("User-Agent" to UA, "Referer" to pageUrl),
                 6_000L,
             ) ?: return emptyList()
-            // The player iframe proxies the chosen platform; its page carries the real HLS master.
-            // The iframe src keeps HTML entities (&amp;) - a browser decodes them before requesting, so must we.
             val frame = Regex(
                 """<iframe[^>]+src=["']([^"']*proxy\.php[^"']*)["']""",
                 RegexOption.IGNORE_CASE,
@@ -888,7 +822,6 @@ object ModiplayExtractor {
         return emptyList()
     }
 
-    /** Fetch a proxy player page and pull the HLS master it relays (encoded url= param or inline). */
     private suspend fun proxyStreams(proxyUrl: String, referer: String): List<String> {
         val html = HttpKit.get(proxyUrl, mapOf("User-Agent" to UA, "Referer" to referer), 6_000L)
             ?: return emptyList()
@@ -904,7 +837,6 @@ object ModiplayExtractor {
     }
 }
 
-/** Stream URLs from a modiplay page: direct HLS first, relay second. Pure. */
 internal fun parseModiplayStreams(html: String, baseUrl: String): List<String> {
     if (html.isBlank()) return emptyList()
     val clean = html.replace("\\/", "/").replace("&amp;", "&")
@@ -915,19 +847,16 @@ internal fun parseModiplayStreams(html: String, baseUrl: String): List<String> {
     Regex("""["']src["']\s*:\s*["']([^"']*stream_proxy\.php[^"']*)["']""").findAll(clean).forEach { m ->
         out.add(MultiSourcePuller.resolveRelative(baseUrl, m.groupValues[1].trim()))
     }
-    // Relay relay shape: `var src="...stream_proxy.php?url=..."` (var form, not the JSON key above).
     Regex("""(?:var|let|const)\s+src\s*=\s*["']([^"']*stream_proxy\.php[^"']*)["']""").findAll(clean).forEach { m ->
         out.add(MultiSourcePuller.resolveRelative(baseUrl, m.groupValues[1].trim()))
     }
     Regex("""EMBED_URL\s*=\s*['"]([^'"]+)['"]""").findAll(clean).forEach { m ->
-        // Skip bare embed prefixes ("https://host/e/") - the real id is concatenated at runtime.
         val v = m.groupValues[1].trim()
         if (!v.endsWith("/")) out.add(MultiSourcePuller.resolveRelative(baseUrl, v))
     }
     return out.filter { it.startsWith("http") }.distinct()
 }
 
-/** VidSrc (vsembed) resolver. The embed shell exposes a JSON endpoint with the player URL. */
 object VsEmbedExtractor {
 
     suspend fun resolve(pageUrl: String, type: String, season: Int?, episode: Int?): String? {
@@ -950,7 +879,6 @@ object VsEmbedExtractor {
     }
 }
 
-/** Vidout extractor. Streams come from a public endpoint keyed by TMDB id. */
 object VidoutExtractor {
 
     private const val BASE_URL = "https://raw.githubusercontent.com/Watchout2025/api/refs/heads/main/hls"
@@ -963,7 +891,6 @@ object VidoutExtractor {
     }
 }
 
-/** Stream URLs from a vidout endpoint body (JSON sources or plain URL lines). Pure. */
 internal fun parseVidoutBody(body: String): List<String> {
     val t = body.trim()
     if (t.isEmpty()) return emptyList()
@@ -998,7 +925,6 @@ internal fun parseVidoutBody(body: String): List<String> {
         .distinct()
 }
 
-/** Bingr extractor. The stream endpoint needs a server id; known ids are tried in order. */
 object BingrExtractor {
 
     private const val API = "https://api.bingr.one/api/stream"
@@ -1044,7 +970,6 @@ object BingrExtractor {
     }
 }
 
-/** Bingr stream request body. Pure. */
 internal fun bingrBody(
     srv: String,
     type: String,
@@ -1066,7 +991,6 @@ internal fun bingrBody(
     return o.toString()
 }
 
-/** Filmu box extractor. Scrapers need the bundled API key. */
 object FilmuExtractor {
 
     private const val BASE_URL = "https://box.filmu.in"
@@ -1107,7 +1031,6 @@ object FilmuExtractor {
     }
 }
 
-/** Filmu scraper sources mapped to streams. Pure. */
 internal fun parseFilmuSources(root: JSONObject, prov: String): List<VidemSource> {
     val arr = root.optJSONArray("sources") ?: return emptyList()
     val out = ArrayList<VidemSource>()
@@ -1133,7 +1056,6 @@ internal fun parseFilmuSources(root: JSONObject, prov: String): List<VidemSource
     return out
 }
 
-/** VidBolt scraper extractor. Endpoints need no auth. */
 object VidboltExtractor {
 
     private const val BASE_URL = "https://scraper.vidbolt.xyz"
@@ -1192,7 +1114,6 @@ object VidboltExtractor {
     }
 }
 
-/** 2embed page helper: the static iframe target lacks the title id; append the known one. Pure. */
 internal fun resolveTwoEmbedTarget(html: String, imdbId: String?): String? {
     if (html.isBlank()) return null
     val target = Regex("""data-src\s*=\s*["']([^"']+)["']""").find(html)?.groupValues?.get(1)

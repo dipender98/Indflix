@@ -5,33 +5,24 @@ import java.text.Normalizer
 import kotlin.math.abs
 import kotlin.math.min
 
-/**
- * Fuzzy/typo-tolerant relevance for ts-search hits: corrected-spelling probes,
- * Levenshtein token matching, and a TMDB vote-count popularity tiebreak.
- */
-
 private val NON_ALNUM_UNICODE = Regex("""[^\p{L}\p{M}\p{N}]+""")
 private val COMBINING_MARKS = Regex("""\p{M}""")
 private val YEAR_TOKEN = Regex("""^[12]\d{3}$""")
 
-/** Words too generic to carry meaning in a probe or a query token. */
 internal val SEARCH_STOPWORDS = setOf(
     "the", "a", "an", "and", "or", "of", "for", "in", "on", "at", "to", "with",
     "vs", "v", "s", "e", "de", "la", "le", "el", "en", "feat", "ft", "ze",
 )
 
-/** NFKD decomposition + strip of combining marks: "Bāhubali" -> "Bahubali". */
 internal fun deaccent(s: String): String =
     Normalizer.normalize(s, Normalizer.Form.NFKD).replace(COMBINING_MARKS, "")
 
-/** Lowercase, apostrophes dropped, non-alphanumeric -> space, whitespace collapsed. */
 internal fun normalizeTitle(t: String): String =
     deaccent(t.lowercase().replace("'", "").replace("’", "").trim())
         .replace(NON_ALNUM_UNICODE, " ")
         .replace(Regex("""\s+"""), " ")
         .trim()
 
-/** Classic Levenshtein edit distance (two-row implementation). */
 internal fun levenshteinDistance(a: String, b: String): Int {
     if (a == b) return 0
     if (a.isEmpty()) return b.length
@@ -51,7 +42,6 @@ internal fun levenshteinDistance(a: String, b: String): Int {
     return prev[b.length]
 }
 
-/** Double the first vowel: "bahubali" -> "baahubali" (common long-vowel transliteration). Null when no vowel / already long. */
 internal fun doubleFirstVowel(word: String): String? {
     val idx = word.indexOfFirst { it.lowercaseChar() in "aeiou" }
     if (idx < 0) return null
@@ -60,7 +50,6 @@ internal fun doubleFirstVowel(word: String): String? {
     return word.substring(0, idx + 1) + word[idx] + word.substring(idx + 1)
 }
 
-/** Typo-tolerant respellings of a query: at most [max] vowel-doubling variants ("bahubali" -> "baahubali"). */
 internal fun queryVariants(query: String, max: Int = 2): List<String> {
     val tokens = normalizeTitle(query).split(' ').filter { it.length >= 3 }
     if (tokens.isEmpty()) return emptyList()
@@ -74,11 +63,9 @@ internal fun queryVariants(query: String, max: Int = 2): List<String> {
     }
     return variants.distinct()
 }
-/** Significant query tokens: >=2 chars, not stopwords, deduped. */
 internal fun significantQueryTokens(query: String): List<String> =
     normalizeTitle(query).split(' ').filter { it.length >= 2 && it !in SEARCH_STOPWORDS }.distinct()
 
-/** Best fuzzy match of one query token vs title tokens: 1.0 exact/substring, 0.9 prefix, 0.8 typo. */
 internal fun tokenMatchScore(token: String, titleTokens: List<String>): Double {
     if (titleTokens.any { it == token }) return 1.0
     if (titleTokens.any { it.length >= 4 && it.contains(token) }) return 1.0
@@ -89,7 +76,6 @@ internal fun tokenMatchScore(token: String, titleTokens: List<String>): Double {
     return 0.0
 }
 
-/** Query-vs-title relevance in [0,1]: weighted mean of token matches, shrunk for extra title words. */
 internal fun relevanceScore(query: String, title: String): Double {
     val qNorm = normalizeTitle(query)
     val tNorm = normalizeTitle(title)
@@ -105,7 +91,6 @@ internal fun relevanceScore(query: String, title: String): Double {
     var matchedAny = false
     for (tok in qTokens) {
         var best = tokenMatchScore(tok, tTokens)
-        // A standalone 4-digit query token can match the title's release year.
         if (best < 1.0 && tok.length == 4 && tok.all { it.isDigit() } && tTokens.any { it == tok }) best = 1.0
         if (best <= 0.0) continue
         matchedAny = true
@@ -116,13 +101,11 @@ internal fun relevanceScore(query: String, title: String): Double {
     return (sum / qTokens.size - 0.03 * min(extraWords, 5)).coerceIn(0.0, 1.0)
 }
 
-/** Significant non-year tokens of a title, for building ts-search probes. */
 internal fun probeTokens(title: String): List<String> =
     normalizeTitle(title).split(' ')
         .filter { it.length >= 2 && it !in SEARCH_STOPWORDS && !YEAR_TOKEN.matches(it) }
         .distinct()
 
-/** Vote count -> popularity band. TMDB vote_count is its most honest popularity signal. */
 internal fun votesBand(votes: Int): Double = when {
     votes >= 5000 -> 1.0
     votes >= 2000 -> 0.95
@@ -135,7 +118,6 @@ internal fun votesBand(votes: Int): Double = when {
     else -> 0.0
 }
 
-/** Best TMDB item fuzzy-matching [title] (year-compatible when both are known), else null. */
 internal fun bestTmdbMatch(tmdb: List<TmdbItem>, title: String, year: Int?): TmdbItem? {
     var best: TmdbItem? = null
     var bestRel = 0.0
@@ -152,19 +134,16 @@ internal fun bestTmdbMatch(tmdb: List<TmdbItem>, title: String, year: Int?): Tmd
     return best
 }
 
-/** Popularity boost (0..1) of a hit, from its fuzzy-matching TMDB item's votes. */
 internal fun popularityScore(tmdb: List<TmdbItem>, title: String, year: Int?): Double =
     bestTmdbMatch(tmdb, title, year)?.let { votesBand(it.votes) } ?: 0.0
 
-/** Final ranking score: relevance dominates, TMDB vote popularity breaks ties. */
 internal fun combinedScore(query: String, title: String, year: Int?, tmdb: List<TmdbItem>): Double {
     val rel = relevanceScore(query, title)
     if (rel <= 0.0) return 0.0
-    if (rel >= 0.999) return 1.0 // exact normalized match wins outright
+    if (rel >= 0.999) return 1.0
     return 0.6 * rel + 0.4 * popularityScore(tmdb, title, year)
 }
 
-/** Collapse mirror-domain duplicates sharing a normalized (title, year); first (highest-ranked) survives. */
 internal fun List<com.lagradost.cloudstream3.SearchResponse>.dedupeByName(): List<com.lagradost.cloudstream3.SearchResponse> {
     val seen = HashSet<String>()
     return filter {
@@ -172,7 +151,6 @@ internal fun List<com.lagradost.cloudstream3.SearchResponse>.dedupeByName(): Lis
     }
 }
 
-/** Year on a search card (both concrete SearchResponse types carry one). */
 internal fun searchYear(r: com.lagradost.cloudstream3.SearchResponse): Int? = when (r) {
     is com.lagradost.cloudstream3.MovieSearchResponse -> r.year
     is com.lagradost.cloudstream3.TvSeriesSearchResponse -> r.year

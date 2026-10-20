@@ -1,19 +1,15 @@
 package com.vegamovies
 
-/** Formats resolved links for display. */
 
-/** Server family names. */
 internal object Servers {
     const val GDRIVE = "G-Drive"
     const val VCLOUD = "V-Cloud"
     const val ZIP = "Batch/Zip"
-    /** Gateway page with an unknown server family. */
     const val GATE = "Server"
 
     const val CAP_BOTH = "Streamable+Downloadable"
     const val CAP_DL = "Downloadable"
 
-    /** Canonical label for a server family. */
     fun labelFor(kind: String): String = when (kind) {
         GDRIVE -> "G-Drive (Google Drive)"
         VCLOUD -> "V-Cloud"
@@ -21,7 +17,6 @@ internal object Servers {
         else -> "Vegamovies Server"
     }
 
-    /** Which family a concrete server URL belongs to (host-based fallback). */
     fun kindOf(url: String): String = when {
         url.contains("fastdl") -> GDRIVE
         url.contains("vcloud") -> VCLOUD
@@ -30,23 +25,18 @@ internal object Servers {
     }
 }
 
-/** Resolved link data used for display. */
 internal data class RawLink(
     val url: String,
     val kind: String,
-    /** Heading text the link was scraped under (quality/lang/size tokens). */
     val heading: String,
-    /** True = gate page that can't be streamed: label "Downloadable", open in browser. */
     val browserOnly: Boolean,
     val season: Int? = null,
     val episode: Int? = null,
-    /** Concrete CDN name behind a resolved row, e. g. "FSLv2 Server" (V-Cloud chain). */
     val serverTag: String = "",
 )
 
 internal object LinkNaming {
 
-    /** Resolution parsed from the heading; zero means unknown. */
     fun qualityInt(heading: String?): Int {
         if (heading.isNullOrBlank()) return 0
         Regex("""(?i)\b(\d{3,4})p\b""").findAll(heading)
@@ -56,7 +46,6 @@ internal object LinkNaming {
         return 0
     }
 
-    /** Final ExtractorLink display name - see file header for format. */
     fun displayName(l: RawLink): String {
         val sb = StringBuilder(Servers.labelFor(l.kind))
         if (l.serverTag.isNotBlank()) sb.append(' ').append('(').append(l.serverTag).append(')')
@@ -72,12 +61,10 @@ internal object LinkNaming {
         return sb.toString().trim()
     }
 
-    /** Extracts ordered display tokens from a heading. */
     fun parseTokens(heading: String): List<String> {
         if (heading.isBlank()) return emptyList()
         val out = LinkedHashSet<String>(6)
 
-        // Quality: 2160p / 1080p / 720p / 480p / 4K.
         Regex("""(?i)\b(2160p(?:\s?4K)?|1080p|720p|480p|4K)\b""").find(heading)?.let {
             val q = it.groupValues[1].lowercase().replace(Regex("""\s+"""), " ")
             out.add(
@@ -89,11 +76,9 @@ internal object LinkNaming {
             )
         }
 
-        // Language group: {Hindi-English} / - verbatim, one only.
         Regex("""([{\[](?:Hindi|English|Dual|Multi|Tamil|Telugu|Korean|Japanese|Chinese|French|Spanish|German|Italian|Russian|Turkish|Malayalam|Kannada|Bengali|Marathi|Gujarati|Punjabi)[^)}\]]{0,60}[}\]])""", RegexOption.IGNORE_CASE)
             .find(heading)?.let { out.add(it.groupValues[1]) }
 
-        // Source/codec tokens, first two seen, normalized.
         Regex("""(?i)\b(web[\s-]?dl|webrip|bluray|bdrip|brrip|hdrip|hdcam|hdtc|hdts|telesync|dvdrip|ppvrip|amzn|dsny\+?|atvp\+?|hmax|nfx?|x264|x265|hevc|avc|aac\d(?:\.\d)?|ddp?\d(?:\.\d)?|e-?ac3|atmos|hdr10\+?|hdr|60\s?fps)\b""")
             .findAll(heading)
             .map { normalizeCodec(it.value) }
@@ -102,11 +87,9 @@ internal object LinkNaming {
             .take(2)
             .forEach { out.add(it) }
 
-        // Size.
         Regex("""\[\s*(\d+(?:\.\d+)?\s*(?:GB|MB)(?:/E\b|/EP\b|/ZiP|/ZIP)?)\s*]""", RegexOption.IGNORE_CASE)
             .find(heading)?.let { out.add(normalizeSize(it.groupValues[1])) }
 
-        // Pack badge.
         if (isPack(heading)) out.add("Complete")
 
         return out.toList()
@@ -146,7 +129,6 @@ internal object LinkNaming {
         }
     }
 
-    /** Parses season and episode markers. */
     fun seasonEpisodeFrom(heading: String): Pair<Int?, Int?> {
         Regex("""(?i)\bS(\d{1,2})[\s.\-_]?E(?:P)?\s?0*(\d{1,3})\b""").find(heading)?.let {
             return it.groupValues[1].toIntOrNull() to it.groupValues[2].toIntOrNull()
@@ -159,7 +141,6 @@ internal object LinkNaming {
         return season to ep
     }
 
-    /** Chip text ("⚡ G-Direct ") → server kind, "" when none matches. */
     fun kindFromChip(chip: String): String = when {
         chip.contains("G-Direct", true) || chip.contains("G-Drive", true) || chip.contains("Direct", true) -> Servers.GDRIVE
         chip.contains("V-Cloud", true) -> Servers.VCLOUD
@@ -167,11 +148,9 @@ internal object LinkNaming {
         else -> ""
     }
 
-    /** Archive marker. "Complete"/"All Episodes" are title noise, not packs. */
     fun isPack(text: String?): Boolean =
         text != null && Regex("""(?i)\b(batch|pack|zip)\b""").containsMatchIn(text)
 
-    /** Resolves server family from chip, heading, title, and URL. */
     fun resolveKind(chipText: String, heading: String, gatewayTitle: String?, concreteUrl: String): String {
         kindFromChip(chipText).ifBlank { kindFromChip(heading) }.ifBlank {
             gatewayTitle?.let { kindFromChip(it) }.orEmpty()

@@ -6,7 +6,6 @@ import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 
-/** Guards the runtime-independent base64 codec used by the encrypted sources. */
 class Base64KitTest {
 
     @Test
@@ -51,7 +50,6 @@ class Base64KitTest {
 
     @Test
     fun customAlphabetMapsTheMultiCharTokenToOne() {
-        // The '-_.' sequence is one symbol of the custom alphabet, '@' is another.
         assertEquals("/", Base64Kit.fromCustom("-_."))
         assertEquals("+", Base64Kit.fromCustom("@"))
         assertEquals("ab//+cd", Base64Kit.fromCustom("ab-_.-_.@cd"))

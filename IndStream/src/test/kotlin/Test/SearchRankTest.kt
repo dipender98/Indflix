@@ -6,7 +6,6 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
-/** Guards fuzzy ranking parity plus both-id URL parsing. */
 class SearchRankTest {
 
     @Test

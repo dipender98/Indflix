@@ -1,6 +1,5 @@
 ﻿package Test
 
-import com.indstream.CastleTvSource
 import com.indstream.HttpKit
 import com.indstream.StreamEngine
 import com.indstream.TitleMatch
@@ -11,12 +10,10 @@ import kotlin.test.Test
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
-/** Practical chain checks, sequential and deterministic: TMDB reliability, then each fixed server's real pipeline. Manual run only. */
 class PracticalResolveTest {
 
     @Test
     fun tmdb_fetchMetaReliable() = runBlocking {
-        // Title-keyed servers (moviebox/castletv) all depend on this lookup.
         repeat(3) { i ->
             val t = System.currentTimeMillis()
             val meta = TmdbService.fetchMeta(27205, "movie")
@@ -29,14 +26,14 @@ class PracticalResolveTest {
 
     @Test
     fun castletv_fullChain() = runBlocking {
-        val sec = CastleTvSource.securityKey()
+        val sec = StreamEngine.apiSecurityKey()
         assertNotNull(sec, "seckey must issue")
-        val rows = CastleTvSource.search(sec, "Inception 2010")
+        val rows = StreamEngine.searchApi(sec, "Inception 2010")
         println("CastleTV search rows: ${rows.size} ${rows.take(3)}")
         assertTrue(rows.isNotEmpty(), "search must hit")
         val best = rows.maxByOrNull { TitleMatch.titleDistance("Inception", it.second) }
         assertNotNull(best, "title match")
-        val det = CastleTvSource.details(sec, best.first)
+        val det = StreamEngine.apiDetails(sec, best.first)
         assertNotNull(det, "details must load")
         val eps = det.optJSONArray("episodes")
         assertNotNull(eps, "episodes array")
@@ -47,13 +44,13 @@ class PracticalResolveTest {
         val tracksJson = ep.optJSONArray("tracks")
         val tracks = (0 until (tracksJson?.length() ?: 0)).mapNotNull { i ->
             val t = tracksJson!!.optJSONObject(i) ?: return@mapNotNull null
-            CastleTvSource.Track(t.optString("languageId"), t.optString("languageName"), t.optBoolean("existIndividualVideo"))
+            StreamEngine.AudioTrack(t.optString("languageId"), t.optString("languageName"), t.optBoolean("existIndividualVideo"))
         }
-        val pick = CastleTvSource.pickTrack(tracks)
+        val pick = StreamEngine.pickAudioTrack(tracks)
         println("CastleTV tracks: ${tracks.map { it.languageName }} pick=${pick?.languageName}")
-        val data = CastleTvSource.video(sec, best.first, epId, pick?.languageId?.takeIf { it.isNotBlank() }, 3)
+        val data = StreamEngine.apiVideo(sec, best.first, epId, pick?.languageId?.takeIf { it.isNotBlank() }, 3)
         assertNotNull(data, "video must resolve")
-        val vids = CastleTvSource.videosOf(data, 3)
+        val vids = StreamEngine.apiVideos(data, 3)
         println("CastleTV videos: ${vids.map { it.quality to it.url.take(80) }}")
         assertTrue(vids.isNotEmpty(), "video urls")
         assertTrue(HttpKit.aliveCheck(vids.first().url) != false, "first video must be playable")
@@ -88,20 +85,17 @@ class PracticalResolveTest {
 
     @Test
     fun moviebox_fullChain() = runBlocking {
-        // Real single-server resolve: token + search + detail + play/download.
         val spec = com.indstream.ServerFarm.allServers.first { it.id == "moviebox" }
         val out = StreamEngine.resolveOne(spec, 27205, "tt1375666", "movie", 1, 1)
         println("MovieBox streams: ${out.size} ${out.map { it.qualityHint to it.url.take(70) }}")
         assertTrue(out.isNotEmpty(), "moviebox must resolve streams")
         assertTrue(out.all { it.url.startsWith("http") && it.qualityHint > 0 }, "streams carry urls + heights")
-        // Liveness is best-effort (CDN 429s test IPs); logged, not asserted.
         val live = out.map { it to (HttpKit.aliveCheck(it.url, it.referer, it.extraHeaders) != false) }
         live.forEach { (s, ok) -> println("  ${s.qualityHint}p alive=$ok ${s.url.take(70)}") }
     }
 
     @Test
     fun farmDiagnose_missingServers() = runBlocking {
-        // Per-server resolve with exception capture: WHY do servers land empty?
         val ids = com.indstream.ServerFarm.allServers.map { it.id }
         for (id in ids) {
             val spec = com.indstream.ServerFarm.allServers.first { it.id == id }
@@ -119,7 +113,6 @@ class PracticalResolveTest {
 
     @Test
     fun farmTiming_allServers() = runBlocking {
-        // Full-farm timing: which servers land streams and how fast (diagnoses UI no-shows).
         val t0 = System.currentTimeMillis()
         val rows = java.util.Collections.synchronizedList(mutableListOf<Triple<String, Int, Long>>())
         StreamEngine.resolveRealtime(27205, "movie", -1, -1, imdbIdProvider = { "tt1375666" }) { sid, streams ->
@@ -135,7 +128,6 @@ class PracticalResolveTest {
 
     @Test
     fun onetouchtv_fullChain() = runBlocking {
-        // Dune Part Two (TMDB 693134) carries OneTouchTV; Inception does not (library gap, not a bug).
         val spec = com.indstream.ServerFarm.allServers.first { it.id == "onetouchtv" }
         val out = StreamEngine.resolveOne(spec, 693134, "tt15239678", "movie", 1, 1)
         println("OneTouchTV streams: ${out.size} ${out.map { it.qualityHint to it.url.take(70) }}")

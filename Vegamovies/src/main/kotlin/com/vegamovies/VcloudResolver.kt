@@ -4,7 +4,6 @@ import com.lagradost.cloudstream3.app
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.io.encoding.Base64
 
-/** Resolves V-Cloud shortlinks to seekable R2 stream URLs. */
 internal data class VcloudStream(val url: String, val tag: String)
 
 internal object VcloudResolver {
@@ -12,23 +11,19 @@ internal object VcloudResolver {
     private val cacheSize
         get() = 64
 
-    /** Parses the double-encoded token URL. */
     val ATOB_ATOB = Regex(
         """var\s+url\s*=\s*atob\s*\(\s*atob\s*\(\s*['"]([A-Za-z0-9+/=]{16,})['"]\s*\)\s*\)""",
     )
 
-    /** Parses download buttons. */
     val BTN = Regex(
         """<a\b[^>]*href="([^"]+)"[^>]*>\s*(?:<[^>]+>\s*)*([^<]*(?:Download|Server|File)[^<]*)(?:<[^>]+>\s*)*</a>""",
         RegexOption.IGNORE_CASE,
     )
 
-    /** Emits only R2/FSL streamable links. */
     val STREAMABLE_HOST = Regex("""(r2\.cloudflarestorage\.com|r2\.dev)""", RegexOption.IGNORE_CASE)
 
     private val directCache = ConcurrentHashMap<String, List<VcloudStream>>()
 
-    /** Resolves and caches one V-Cloud URL. */
     suspend fun resolve(
         vcloudUrl: String,
         referer: String,
@@ -72,7 +67,6 @@ internal object VcloudResolver {
         return emptyList()
     }
 
-    /** Decodes a double Base64 value. */
     internal fun decodeDoubleAtob(blob: String): String? = try {
         val inner = String(decodeB64(blob.trim()))
         String(decodeB64(inner.trim()))

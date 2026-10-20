@@ -8,7 +8,6 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-/** Guards GDMirror's pure wire logic: embed/vars/api parsing, mirror mapping, packed-player unpack. */
 class GdMirrorTest {
 
     @Test
@@ -106,7 +105,6 @@ class GdMirrorTest {
             "dead":{"siteUrl":"https://x.example/"}
         },"mresult":"$mresult"}"""
         val mirrors = GdMirrorProtocol.parseMirrors(body)
-        // dead has no code -> dropped; order preserved.
         assertEquals(listOf("streamhg", "earnvids"), mirrors.map { it.site })
         assertEquals("https://hanerix.com/e/code1", mirrors[0].url)
         assertEquals("https://hanerix.com/e/", mirrors[0].base)
@@ -132,8 +130,6 @@ class GdMirrorTest {
     fun extractHls_prefersHls4ThenHls2() {
         val unpacked = "var links={\"hls4\":\"/stream/a/master.m3u8\"," +
             "\"hls2\":\"https://cdn.example/h/master.m3u8\"};"
-        // Bypass packing: feed already-unpacked-looking page via eval wrapper is overkill;
-        // assert the regex stage through a minimal packed block instead.
         val block = "eval(function(p,a,c,k,e,d){while(c--)if(k[c])p=p.replace(" +
             "new RegExp('\\\\b'+c.toString(a)+'\\\\b','g'),k[c]);return p}" +
             "('0',10,1,'$unpacked'.split('|')))"

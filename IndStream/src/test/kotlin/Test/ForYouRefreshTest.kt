@@ -6,7 +6,6 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
-/** Guards the refresh modes of the personalised rows. */
 class ForYouRefreshTest {
 
     private val hour = 60L * 60 * 1000
@@ -50,13 +49,10 @@ class ForYouRefreshTest {
     fun twice_daily_allows_two_builds_per_day() {
         val now = 100L * hour
         assertTrue(stale(ForYouRefresh.Mode.TWICE_DAILY, now = now, builtAt = 0))
-        // One build, and the second one is not due yet.
         assertFalse(stale(ForYouRefresh.Mode.TWICE_DAILY, now = now, builtAt = now - hour, builds = 1))
-        // One build, and the second one is due.
         assertTrue(
             stale(ForYouRefresh.Mode.TWICE_DAILY, now = now, builtAt = now - 13 * hour, builds = 1),
         )
-        // Two builds in the window - the day is used up.
         assertFalse(
             stale(ForYouRefresh.Mode.TWICE_DAILY, now = now, builtAt = now - 13 * hour, builds = 2),
         )

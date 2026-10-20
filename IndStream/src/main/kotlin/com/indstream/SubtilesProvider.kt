@@ -12,30 +12,21 @@ import kotlinx.coroutines.withTimeoutOrNull
 import java.net.URLEncoder
 import java.util.concurrent.ConcurrentHashMap
 
-/** FILE: SubtilesProvider. kt - THE subtitle provider (, no server captions, every play gets its subtitles). PRIMARY. the OpenSubtitles v3+ Stremio. */
 object SubtilesProvider {
 
     private const val BASE = "https://opensubtitles.stremio.homes"
     private const val SENSE_BASE = "https://subsense.nepiraw.com"
     private const val CONFIG = "ai-translated=true|from=all|auto-adjustment=true"
-    /** Wall-clock budget for the whole fetch. Measured live: the addon answers 2-3s warm but 11. 5s cold; the old 6. 5s cap. dropped those answers. */
     const val FETCH_BUDGET_MS = 13_000L
-    /** SubSense second-source call: <1s warm (measured), so 5s is the generous tail; fired only while the main window still. has time. */
     private const val SENSE_CALL_MS = 5_000L
-    /** How many tracks per language survive into the menu (addon returns dozens of near-duplicate releases otherwise). */
     internal const val MAX_PER_LANG = 3
-    /** SubSense cap -, five tracks per language keeps the menu readable either way. */
     internal const val SENSE_MAX_PER_LANG = 5
-    /** Re-watching the same episode within the TTL reuses the parsed list. */
     private const val CACHE_TTL_MS = 15 * 60 * 1000L
     private const val CACHE_MAX = 64
-    /** How long an empty result is remembered, so a dead addon is not asked again on every play. */
     private const val EMPTY_TTL_MS = 90_000L
 
-    /** How many codes one addon request carries; the addon slows down on big multi-language requests, so the rest is fetched in parallel chunks. */
     internal const val GROUP_SIZE = 6
 
-    /** Always requested: English + the Indian block (map order = desired order + chunking). */
     private val CODES = mapOf(
         "Hindi" to "hi", "English" to "en", "Tamil" to "ta", "Telugu" to "te",
         "Malayalam" to "ml", "Bengali" to "bn", "Urdu" to "ur",
@@ -43,7 +34,6 @@ object SubtilesProvider {
         "Gujarati" to "gu", "Nepali" to "ne", "Sinhala" to "si",
     )
 
-    /** Canonical language -> SubSense ISO-3 codes (probe: the response `lang`/id carry ISO-3; the same request codes are. accepted). Only. */
     private val SENSE_ISO3 = mapOf(
         "English" to "eng", "Hindi" to "hin", "Tamil" to "tam", "Telugu" to "tel",
         "Malayalam" to "mal", "Bengali" to "ben", "Urdu" to "urd",
@@ -58,75 +48,58 @@ object SubtilesProvider {
     )
 
     private val cache = ConcurrentHashMap<String, Pair<Long, List<SubtitleFile>>>()
-    /** Fetches that returned nothing, so a repeat play does not hit the addons again straight away. */
     private val empty = ConcurrentHashMap<String, Long>()
 
-    /** English + Indian block, plus the title's own original language (a 2-letter TMDB code) when present. */
     fun desiredLanguages(originalLang: String?): Set<String> {
         val wanted = LinkedHashSet(CODES.keys)
         originalLang?.takeIf { it.length == 2 }?.lowercase()?.let { wanted.add(it) }
         return wanted
     }
 
-    /** Which of none of the stream servers carried (= canonical names emitted by the server-owned subtitle pass). */
     fun missingLanguages(covered: Set<String>, desired: Set<String>): Set<String> =
         desired - covered
 
-    /** Canonical names -> ISO-1 codes; a 2-letter code (the title's original language) passes through as-is. Pure. */
     internal fun codesFromLangs(langs: Set<String>): Set<String> =
         langs.mapNotNull { lang ->
             if (lang.length == 2) lang.lowercase() else codeForLang(lang)
         }.toCollection(LinkedHashSet())
 
-    /** ISO-1 code for one canonical language name (English + Indian block only). */
     internal fun codeForLang(name: String): String? = CODES[name]
 
-    /** ISO-1 codes for Indian languages — always batch-pulled first so they land at the top of the menu. */
     private val INDIAN_LANG_CODES: Set<String> = linkedSetOf(
         "hi", "ta", "te", "ml", "bn", "ur", "mr", "kn", "pa", "gu", "ne", "si",
     )
 
-    /** Priority batch: English → original → all Indian langs → rest foreign. */
     internal val PRIORITY_CODES: Set<String> = linkedSetOf("en") + INDIAN_LANG_CODES
 
-    /** Request codes into addon groups: Hindi first (fast single-code request + first menu row),
-     *  then English, original, rest of the Indian block (chunked), then foreign in GROUP_SIZE chunks. */
     internal fun groupRequests(codes: Set<String>, originalCode: String? = null): List<Set<String>> {
         if (codes.isEmpty()) return emptyList()
         val groups = mutableListOf<Set<String>>()
-        // 1. Hindi (always first when requested).
         codes.filterTo(LinkedHashSet()) { it == "hi" }
             .takeIf { it.isNotEmpty() }?.let { groups.add(it) }
-        // 2. English.
         codes.filterTo(LinkedHashSet()) { it == "en" }
             .takeIf { it.isNotEmpty() }?.let { groups.add(it) }
-        // 3. Original language (if neither Hindi nor English).
         if (originalCode != null && originalCode != "en" && originalCode != "hi" && codes.contains(originalCode)) {
             groups.add(linkedSetOf(originalCode))
         }
-        // 4. Rest of the Indian block, chunked (already-grouped codes excluded).
         val grouped = groups.flatten().toSet()
         codes.filterTo(LinkedHashSet()) { it in INDIAN_LANG_CODES && it !in grouped }
             .chunked(GROUP_SIZE)
             .forEach { groups.add(it.toCollection(LinkedHashSet())) }
-        // 5. Everything else in GROUP_SIZE chunks (preserves CODES insertion order = Indian→foreign).
         codes.filterTo(LinkedHashSet()) { it !in groups.flatten().toSet() }
             .chunked(GROUP_SIZE)
             .forEach { groups.add(it.toCollection(LinkedHashSet())) }
         return groups
     }
 
-    /** Names still uncovered after a batch of parsed tracks came back - drives the SubSense top-up request. Pure. */
     internal fun stillMissing(wanted: Set<String>, tracks: List<SubTrack>): Set<String> =
         wanted - tracks.map { it.lang }.toSet()
 
-    /** SubSense wants ISO-3 for the languages we know it supports; unknown names are dropped. Empty -> request "eng" (its. guaranteed language - an empty. */
     internal fun subSenseLanguages(names: Set<String>): Set<String> {
         val mapped = names.mapNotNull { SENSE_ISO3[it] }.toCollection(LinkedHashSet())
         return mapped.ifEmpty { linkedSetOf("eng") }
     }
 
-    /** Build the addon URL for one imdb id. Movies + series paths). season/episode <= 0 -> movie. are canonical language. names ("Hindi", "English", …). */
     internal fun buildUrl(imdbId: String, season: Int, episode: Int, langs: Set<String>): String {
         val codes = codesFromLangs(langs)
         val langPath = if (codes.isEmpty()) "en|hi" else codes.joinToString("|")
@@ -136,7 +109,6 @@ object SubtilesProvider {
         return "$BASE/" + pipe(langPath) + "/" + pipe(CONFIG) + "/subtitles/$idPart.json"
     }
 
-    /** Build the SubSense URL for one imdb id. The config segment is the US-ASCII URL-encoded JSON - probe) braces get the. segment 301-stripped, so the. */
     internal fun subSenseUrl(imdbId: String, season: Int, episode: Int, langs: Set<String>): String {
         val list = subSenseLanguages(langs).joinToString(",") { "\"$it\"" }
         val cfg = """{"languages":[$list],"maxSubtitles":${SENSE_MAX_PER_LANG + 1}}"""
@@ -145,10 +117,8 @@ object SubtilesProvider {
         return "$SENSE_BASE/" + URLEncoder.encode(cfg, "UTF-8") + "/subtitles/$idPart.json"
     }
 
-    /** One parsed subtitle track (pure test boundary): canonical display language name + download url. Mapped to only in so. group parsing, dedupe and cap. */
     internal data class SubTrack(val lang: String, val url: String, val menu: String = lang)
 
-    /** Parse the OpenSubtitles-addon response keeping per requested code. Real shape (probe): {lang_code: "en", lang. "eng", title, url: "…/sub. vtt?…"}. */
     internal fun parseOpenSubtitles(text: String, wantCodes: Set<String>): List<SubTrack> {
         val arr = org.json.JSONObject(text).optJSONArray("subtitles") ?: return emptyList()
         val perLang = HashMap<String, Int>()
@@ -159,7 +129,6 @@ object SubtilesProvider {
             val url = s.optString("url").takeIf { it.startsWith("http") && seenUrls.add(it) }
                 ?: continue
             val code = (s.optString("lang_code").ifBlank { s.optString("lang") }).lowercase()
-            // lang_code is ISO1 ("hi"), lang may be ISO2/3 ("hin"/"per") - accept only the languages we actually asked for.
             val code1 = code.take(2)
             if (code1 !in wantCodes && code !in wantCodes) continue
             if ((perLang[code1] ?: 0) >= MAX_PER_LANG) continue
@@ -171,7 +140,6 @@ object SubtilesProvider {
         return out
     }
 
-    /** Parse the SubSense response keeping per language. Shape: {"subtitles":[{...}]}. */
     internal fun parseSubSense(text: String): List<SubTrack> {
         val arr = org.json.JSONObject(text).optJSONArray("subtitles") ?: return emptyList()
         val perLang = HashMap<String, Int>()
@@ -181,8 +149,6 @@ object SubtilesProvider {
             val s = arr.optJSONObject(i) ?: continue
             val url = s.optString("url").takeIf { it.startsWith("http") && seenUrls.add(it) }
                 ?: continue
-            // `lang` is authoritative; the id "subsense-srt-opensubtitles-<iso3>-<n>" is only a fallback (its LAST token is a.
-// counter, so scan segments).
             var canon = ""
             var raw = s.optString("lang")
             if (raw.isNotBlank()) {
@@ -202,7 +168,6 @@ object SubtilesProvider {
         return out
     }
 
-    /** Merge parsed groups priority-first, deduped by url, capped per language overall. Pure. */
     internal fun mergeGroups(groups: List<List<SubTrack>>): List<SubTrack> {
         val out = LinkedHashMap<String, SubTrack>()
         for (group in groups) for (t in group) {
@@ -218,7 +183,6 @@ object SubtilesProvider {
         return capped
     }
 
-    /** Fetch fallback subtitles for covering (canonical language names). Empty list on any failure/timeout - this must. never break playback. */
     suspend fun fetch(
         imdbId: String?,
         season: Int,
@@ -231,7 +195,6 @@ object SubtilesProvider {
         return out
     }
 
-    /** Race every source at once: addon groups plus SubSense fire together, first answers win. */
     suspend fun fetchAndDeliver(
         imdbId: String?,
         season: Int,
@@ -280,12 +243,10 @@ object SubtilesProvider {
             fresh.forEach { onTrack(SubtitleFile(it.menu, it.url)) }
         }
         coroutineScope {
-            // Addon groups and SubSense launch together; awaiting in order keeps hi/en first.
             val pending = groups.map { launchFetch(imdb, season, episode, it, deadline) } +
                 async { fetchSubSense(imdb, season, episode, missing, deadline) }
             pending.forEach { emit(it.await()) }
             if (delivered == 0 && System.currentTimeMillis() < deadline) {
-                // Cold-start tail: every group died - one more priority attempt with what is left.
                 Log.d("SubtilesProvider", "all groups empty — one priority retry")
                 groups.firstOrNull()?.let { emit(launchFetch(imdb, season, episode, it, deadline).await()) }
             }
@@ -301,7 +262,6 @@ object SubtilesProvider {
         return delivered
     }
 
-    /** Async fetch+parse of one addon group with its own timeout built). */
     private fun CoroutineScope.launchFetch(
         imdb: String, season: Int, episode: Int, codes: Set<String>, deadline: Long,
     ): Deferred<List<SubTrack>> = async {
@@ -313,7 +273,6 @@ object SubtilesProvider {
         tracks
     }
 
-    /** HTTP + parse for one group; null-safe: any failure -> empty list. */
     private suspend fun fetchGroup(url: String, codes: Set<String>, budgetMs: Long): List<SubTrack> {
         Log.d("SubtilesProvider", "GET $url")
         val text = withTimeoutOrNull(budgetMs) {
@@ -328,7 +287,6 @@ object SubtilesProvider {
         return runCatching { parseOpenSubtitles(text, codes) }.getOrDefault(emptyList())
     }
 
-    /** but taking pre-mapped ISO-1 codes (groups are already codes, not canonical names, once has run). */
     private fun buildUrlOf(imdbId: String, season: Int, episode: Int, codes: Set<String>): String {
         val langPath = if (codes.isEmpty()) "en|hi" else codes.joinToString("|")
         val idPart = if (season > 0 && episode > 0) "series/$imdbId:$season:$episode"
@@ -337,7 +295,6 @@ object SubtilesProvider {
         return "$BASE/" + pipe(langPath) + "/" + pipe(CONFIG) + "/subtitles/$idPart.json"
     }
 
-    /** Best-effort SubSense top-up for (canonical names). Never throws, never blocks past -or-, and its failure is simply. an empty list - the primary. */
     private suspend fun fetchSubSense(
         imdb: String, season: Int, episode: Int, gaps: Set<String>, deadline: Long,
     ): List<SubTrack> {
@@ -361,7 +318,7 @@ object SubtilesProvider {
         if (cache.size >= CACHE_MAX) {
             val now = System.currentTimeMillis()
             cache.entries.filter { it.value.first <= now }.forEach { cache.remove(it.key) }
-            if (cache.size >= CACHE_MAX) return // still full of fresh entries - skip caching.
+            if (cache.size >= CACHE_MAX) return
         }
         cache[key] = (System.currentTimeMillis() + CACHE_TTL_MS) to subs
     }

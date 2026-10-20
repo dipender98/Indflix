@@ -8,7 +8,6 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
-/** FILE: NeutralOrderTest. kt - guards the): - RawStream carries NO ordering fields (no ttfb/resolve/score) - a Hindi. stream and an English stream. */
 class NeutralOrderTest {
 
     private fun stream(
@@ -28,11 +27,8 @@ class NeutralOrderTest {
 
     @Test
     fun rawStream_hasNoRankingFields() {
-        // Structural guard: two streams differing only in language/quality are equal-weight - nothing in the model can rank.
-// one above the other.
         val hindi = stream("hindiHost", audioPriority = 4, qualityHint = 2160)
         val english = stream("englishHost", audioPriority = 1, qualityHint = 480)
-        // Only data, no derived ordering: fields exist for LABELS, not scores.
         assertEquals(4, hindi.audioPriority)
         assertEquals(2160, hindi.qualityHint)
         assertEquals("hindiHost", hindi.serverName)
@@ -41,7 +37,6 @@ class NeutralOrderTest {
 
     @Test
     fun arrivalOrder_isPreserved_noImplicitSorting() {
-        // The contract emit() follows: the caller's list order (arrival order) is the emission order. No sorting can reorder it.
         val arrivals = listOf(
             stream("slowButFirst"),
             stream("fastButSecond"),
@@ -53,14 +48,12 @@ class NeutralOrderTest {
 
     @Test
     fun hindiLabel_isDisplayOnly() {
-        // audioPriority=4 only feeds the display label ("Hindi") via LinkNaming - it must not imply any selection behaviour here.
         val hindi = stream("h", audioPriority = 4)
         val other = stream("e", audioPriority = 0)
         assertEquals("h", hindi.serverId)
         assertEquals("e", other.serverId)
     }
 
-    // ── Quality floor () ───────────.
 
     @Test
     fun qualityFloor_dropsKnownSub720NonAdaptive() {
@@ -78,7 +71,6 @@ class NeutralOrderTest {
 
     @Test
     fun qualityFloor_adaptiveAlwaysPasses_evenSub720() {
-        // An m3u8 master ALWAYS passes: it ABR-ramps to its best rendition no matter what the master header reads.
         assertTrue(StreamEngine.passesQualityFloor(isAdaptive = true, height = 360))
         assertTrue(StreamEngine.passesQualityFloor(isAdaptive = true, height = 480))
         assertTrue(StreamEngine.passesQualityFloor(isAdaptive = true, height = 0))
@@ -86,12 +78,10 @@ class NeutralOrderTest {
 
     @Test
     fun qualityFloor_unknownHeight_cannotBeProvenLow() {
-        // 0 (unknown) and -1 ("Auto" sentinel) stay - a low quality can't be proven for them.
         assertTrue(StreamEngine.passesQualityFloor(isAdaptive = false, height = 0))
         assertTrue(StreamEngine.passesQualityFloor(isAdaptive = false, height = -1))
     }
 
-    // ── Emission: arrival order + real quality height ────────────.
 
     @Test
     fun emit_dropsSub720Progressive_keepsAdaptiveAndUnknown() = runBlocking {
@@ -109,10 +99,8 @@ class NeutralOrderTest {
             probeManifests = false,
         )
         val urls = out.map { it.url }
-        // KNOWN sub-720 progressive files: dropped.
         assertFalse(urls.contains("https://x.example/p360.mp4"))
         assertFalse(urls.contains("https://x.example/p480.mp4"))
-        // 720p+ progressive, adaptive (even when the master reads low), and unknown-height streams: kept.
         assertTrue(urls.contains("https://x.example/p720.mp4"))
         assertTrue(urls.contains("https://x.example/m480.m3u8"))
         assertTrue(urls.contains("https://x.example/mUnknown.m3u8"))
@@ -135,7 +123,7 @@ class NeutralOrderTest {
         val byUrl = out.associateBy { it.url }
         assertEquals(1080, byUrl["https://x.example/hd.mp4"]!!.quality)
         assertEquals(1080, byUrl["https://x.example/master.m3u8"]!!.quality)
-        assertEquals(0, byUrl["https://x.example/mystery.m3u8"]!!.quality) // unknown stays 0.
+        assertEquals(0, byUrl["https://x.example/mystery.m3u8"]!!.quality)
     }
 
     @Test
@@ -149,8 +137,6 @@ class NeutralOrderTest {
         assertEquals(1, out.size)
         val link = out[0]
         assertEquals(1080, link.quality)
-        // ): the server name carries NO resolution token - CloudStream's quality badge (. quality) is the single resolution.
-// print. "1080p 1080p" was the.
         assertEquals(0, Regex("""\d{3,4}p|4K""", RegexOption.IGNORE_CASE).findAll(link.name).count(),
             "name must be resolution-free: ${link.name}")
     }
@@ -164,18 +150,14 @@ class NeutralOrderTest {
             probeManifests = false,
         )
         assertEquals(1, out.size)
-        // No declared/measured height → quality stays 0 (Unknown badge) and the name prints neither a guess nor an "Auto" marker.
         assertFalse(out[0].name.contains("Auto"))
         assertEquals(0, Regex("""\d{3,4}p|4K""", RegexOption.IGNORE_CASE).findAll(out[0].name).count())
         assertEquals(0, out[0].quality)
     }
 
-    // ── Adaptive peak-resolution: quality field only (revision) ──.
 
     @Test
     fun emit_hlsInlineManifest_liftsQualityToPeak_neverOnName() = runBlocking {
-        // Harvest path leaves qualityHint=0; the inline master parse must lift the emitted quality to the PEAK variant (2160).
-// the name stays.
         val master = """
 #EXTM3U
 #EXT-X-STREAM-INF:BANDWIDTH=1500000,RESOLUTION=1280x720
@@ -204,8 +186,6 @@ class NeutralOrderTest {
 
     @Test
     fun emit_dashMpdInlineManifest_labelsPeakResolution() = runBlocking {
-        // DASH ladder: parseMpd must yield the peak video representation (1080) so the adaptive link labels "1080p" like its.
-// HLS sibling.
         val mpd = """
 <?xml version="1.0" encoding="utf-8"?>
 <MPD xmlns="urn:mpeg:dash:schema:mpd:2011">
@@ -241,7 +221,6 @@ class NeutralOrderTest {
 
     @Test
     fun emit_declaredHindiUrl_labelsHindi_unknownStaysUnknown() = runBlocking {
-        // Host-declared language (". . . hindi. . . " CDN path) → "(🇮🇳 Hindi)" tag.
         val declared = mutableListOf<com.lagradost.cloudstream3.utils.ExtractorLink>()
         StreamEngine.emit(
             listOf(stream("h1", url = "https://cdn.example/hindi/title/file.mp4", isM3u8 = false, qualityHint = 720)),
@@ -250,7 +229,6 @@ class NeutralOrderTest {
         )
         assertEquals(1, declared.size)
         assertTrue(declared[0].name.contains("(\uD83C\uDDEE\uD83C\uDDF3 Hindi)"))
-        // No declaration anywhere → honest "Unknown", never a guess.
         val unknown = mutableListOf<com.lagradost.cloudstream3.utils.ExtractorLink>()
         StreamEngine.emit(
             listOf(stream("n1", url = "https://cdn.example/a/b/file.mp4", isM3u8 = false, qualityHint = 720)),

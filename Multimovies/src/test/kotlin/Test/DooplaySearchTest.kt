@@ -9,7 +9,6 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-/** Guards the site live-search JSON parser: hit mapping, rating/year handling, error bodies, and nonce scraping. */
 class DooplaySearchTest {
 
     private val payload = """

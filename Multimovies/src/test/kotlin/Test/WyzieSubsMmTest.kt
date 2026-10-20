@@ -7,10 +7,8 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-/** FILE: WyzieSubsMmTest.kt - guards Wyzie URL building, tolerant parsing, and key validation. */
 class WyzieSubsMmTest {
 
-    // Real Wyzie /search shape (docs): a JSON array of subtitle objects.
     private val wyzieJson = """
         [{"id":"1955024019",
           "url":"https://sub.wyzie.io/c/198e0c4d/id/1955024019?format=srt&encoding=UTF-8",

@@ -1,5 +1,4 @@
 package com.multimovies
-/** Keyless IMDB metadata: suggest lookup plus Cinemeta detail, cast and episodes. */
 
 import com.lagradost.cloudstream3.Actor
 import com.lagradost.cloudstream3.ActorData
@@ -14,7 +13,6 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 
-/** One suggest hit: IMDB id, title, year and "movie" | "series". */
 internal data class ImdbSuggestHit(
     val imdbId: String,
     val title: String,
@@ -22,7 +20,6 @@ internal data class ImdbSuggestHit(
     val type: String,
 )
 
-/** Full title detail sourced from Cinemeta (names only for cast). */
 internal data class ImdbDetail(
     val imdbId: String? = null,
     val name: String? = null,
@@ -33,11 +30,9 @@ internal data class ImdbDetail(
     val overview: String? = null,
     val genres: List<String>? = null,
     val cast: List<ActorData>? = null,
-    /** Runtime in minutes, parsed from Cinemeta's "179 min" form. */
     val runtime: Int? = null,
 )
 
-/** One episode row from a Cinemeta series payload. */
 internal data class ImdbEpisode(
     val season: Int,
     val episode: Int,
@@ -55,16 +50,13 @@ internal object ImdbMeta {
 
     private val metaCache = ConcurrentHashMap<String, ImdbDetail>()
     private val episodeCache = ConcurrentHashMap<String, Map<Pair<Int, Int>, ImdbEpisode>>()
-    /** Actor name (lowercased) to headshot URL. */
     private val photoCache = ConcurrentHashMap<String, String>()
 
-    /** Suggest lookup by title. Never throws. */
     suspend fun suggest(query: String): List<ImdbSuggestHit> {
         if (query.isBlank()) return emptyList()
         return parseSuggest(suggestRaw(query))
     }
 
-    /** Raw suggest payload for a query. Never throws. */
     private suspend fun suggestRaw(query: String): String? {
         val slug = query.trim().lowercase().replace(Regex("""\s+"""), "_")
         return withTimeoutOrNull(6000L) {
@@ -74,7 +66,6 @@ internal object ImdbMeta {
         }
     }
 
-    /** Full detail by IMDB id, cast carries headshots. Cached. Never throws. */
     suspend fun fetchMeta(imdbId: String, type: String): ImdbDetail? {
         if (!imdbId.startsWith("tt")) return null
         val kind = if (type == "movie") "movie" else "series"
@@ -87,7 +78,6 @@ internal object ImdbMeta {
         return detail
     }
 
-    /** Fill cast headshots via person suggest (bounded, cached). Never throws. */
     private suspend fun ImdbDetail.withCastPhotos(): ImdbDetail {
         val names = cast.orEmpty().map { it.actor.name }.filter { it.isNotBlank() }.distinct()
         if (names.isEmpty()) return this
@@ -99,7 +89,6 @@ internal object ImdbMeta {
         })
     }
 
-    /** Headshot per actor name via person suggest. Finished rows persist past the budget. Never throws. */
     suspend fun fetchCastPhotos(names: List<String>, max: Int = 15): Map<String, String> {
         val wanted = names.filter { it.isNotBlank() }.distinct().take(max)
         if (wanted.isEmpty()) return emptyMap()
@@ -131,7 +120,6 @@ internal object ImdbMeta {
         return done
     }
 
-    /** Episode map keyed by (season, episode), cached. Never throws. */
     suspend fun fetchEpisodes(imdbId: String): Map<Pair<Int, Int>, ImdbEpisode> {
         if (!imdbId.startsWith("tt")) return emptyMap()
         episodeCache[imdbId]?.let { return it }
@@ -144,7 +132,6 @@ internal object ImdbMeta {
     }
 }
 
-/** Map a suggest payload to hits. Game entries are dropped. Pure. */
 internal fun parseSuggest(raw: String?): List<ImdbSuggestHit> {
     if (raw.isNullOrBlank()) return emptyList()
     return try {
@@ -167,7 +154,6 @@ internal fun parseSuggest(raw: String?): List<ImdbSuggestHit> {
     }
 }
 
-/** Map a Cinemeta envelope to detail. Pure. */
 internal fun parseImdbMeta(raw: String?, imdbId: String): ImdbDetail? {
     if (raw.isNullOrBlank()) return null
     return try {
@@ -197,12 +183,10 @@ internal fun parseImdbMeta(raw: String?, imdbId: String): ImdbDetail? {
     }
 }
 
-/** Minutes from Cinemeta's "179 min" form, else null. Pure. */
 internal fun parseRuntimeMinutes(raw: String?): Int? {
     if (raw.isNullOrBlank()) return null
     return Regex("""(\d+)""").find(raw)?.groupValues?.get(1)?.toIntOrNull()?.takeIf { it > 0 }
 }
-/** Map a Cinemeta series payload to episode rows. Pure. */
 internal fun parseImdbEpisodes(raw: String?): List<ImdbEpisode> {
     if (raw.isNullOrBlank()) return emptyList()
     return try {
@@ -225,7 +209,6 @@ internal fun parseImdbEpisodes(raw: String?): List<ImdbEpisode> {
     }
 }
 
-/** Headshot for a person query: exact name hit wins, else the top person hit. Pure. */
 internal fun parsePersonImage(raw: String?, want: String): String? {
     if (raw.isNullOrBlank() || want.isBlank()) return null
     return try {
@@ -244,7 +227,6 @@ internal fun parsePersonImage(raw: String?, want: String): String? {
     }
 }
 
-/** Extend IMDB names with TMDB-exclusive cast rows. IMDB order and photos win. Pure. */
 internal fun mergeImdbCast(
     imdb: List<ActorData>?,
     tmdb: List<ActorData>?,

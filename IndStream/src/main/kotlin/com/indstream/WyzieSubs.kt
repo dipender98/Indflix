@@ -10,32 +10,25 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withTimeoutOrNull
 
-/** FILE: WyzieSubs.kt - Wyzie Subs client, used only when the user saved their own key. */
 object WyzieSubs {
 
     private const val BASE = "https://sub.wyzie.io"
     private const val TAG = "WyzieSubs"
 
-    /** Single-request budget; the app keeps filling streams while this runs. */
     const val FETCH_BUDGET_MS = 30_000L
 
-    /** Source-list budget; the lookup is cached afterwards. */
     internal const val SOURCES_BUDGET_MS = 2_500L
-    /** Per-key source-list cache TTL. */
     private const val SOURCES_TTL_MS = 6 * 60 * 60 * 1000L
     private val sourcesCache = ConcurrentHashMap<String, Pair<Long, List<String>>>()
 
-    /** Cap per language so one source can't flood the menu. */
     internal const val MAX_PER_LANG = 5
 
-    // One language-group fetch outcome: tracks, hard failure, or blank reply.
     private data class GroupResult(
         val tracks: List<SubtilesProvider.SubTrack>,
         val failure: String?,
         val blank: Boolean,
     )
 
-    /** Build the /search URL. Null when no id or no key. */
     fun buildUrl(
         imdbId: String?,
         season: Int,
@@ -48,10 +41,8 @@ object WyzieSubs {
         val id = imdbId?.takeIf { it.startsWith("tt") } ?: return null
         val out = StringBuilder("$BASE/search?id=${enc(id)}")
         if (season > 0 && episode > 0) out.append("&season=$season&episode=$episode")
-        // Raw commas (docs show language=en,es) - each code encoded on its own.
         val langs = codes.filter { it.isNotBlank() }.distinct().joinToString(",") { enc(it) }
         if (langs.isNotBlank()) out.append("&language=$langs")
-        // Scope to this key's sources; `all` is rejected for some keys.
         out.append(sourceQuery(sources))
         out.append("&key=${enc(key)}")
         return out.toString()
@@ -59,13 +50,11 @@ object WyzieSubs {
 
     private fun enc(s: String): String = URLEncoder.encode(s, "UTF-8")
 
-    /** `&source=a,b` for this key's sources, else empty (fail open to the default). */
     internal fun sourceQuery(sources: List<String>?): String {
         val list = sources?.filter { it.isNotBlank() }?.distinct().orEmpty()
         return if (list.isEmpty()) "" else "&source=" + list.joinToString(",") { enc(it) }
     }
 
-    /** Sources this key can query, via /sources (cached); null when unknown. Never throws. */
     suspend fun keySources(apiKey: String, deadline: Long): List<String>? {
         val key = apiKey.trim().ifEmpty { return null }
         val now = System.currentTimeMillis()
@@ -77,7 +66,6 @@ object WyzieSubs {
         return list
     }
 
-    /** `available` list, or every source when all are free; empty when unknown. Pure. */
     internal fun parseSources(text: String?): List<String> {
         val o = text?.trim()?.takeIf { it.startsWith("{") }
             ?.let { runCatching { org.json.JSONObject(it) }.getOrNull() } ?: return emptyList()
@@ -90,7 +78,6 @@ object WyzieSubs {
         return (0 until arr.length()).mapNotNull { arr.optString(it).takeIf { s -> s.isNotBlank() } }
     }
 
-    /** Tolerant parse: array root, {"subtitles":[...]}, or a single object. */
     internal fun parse(text: String, wantCodes: Set<String>): List<SubtilesProvider.SubTrack> {
         val arr = runCatching {
             val t = text.trim()
@@ -122,14 +109,11 @@ object WyzieSubs {
         return out
     }
 
-    /** Null when the body looks like usable subtitle data; else a short failure reason. */
     internal fun failureReason(code: Int?, text: String?): String? {
-        // "No subtitles found" is a healthy empty result on any status.
         if (text?.contains("no subtitles found", ignoreCase = true) == true) return null
         if (code == 401) return "key rejected"
         if (code == 429 || code == 402) return "limit reached"
         if (code != null && code !in 200..299) {
-            // Read the error body first: a 403 can still mean an invalid key.
             val reason = bodyReason(text)
             if (reason != null && reason != "server error") return reason
             return if (code == 400) "request rejected" else "server error ($code)"
@@ -143,7 +127,6 @@ object WyzieSubs {
         return bodyReason(text) ?: "server error"
     }
 
-    /** Classify an error body; null when it looks like usable data. */
     private fun bodyReason(text: String?): String? {
         if (text.isNullOrBlank()) return null
         val t = text.trim()
@@ -164,7 +147,6 @@ object WyzieSubs {
         }
     }
 
-    // Chunked fetch: small parallel requests per language group, not one giant query.
     suspend fun fetchAndDeliver(
         imdbId: String?,
         season: Int,
@@ -181,11 +163,9 @@ object WyzieSubs {
         if (groups.isEmpty()) return 0
         val deadline = System.currentTimeMillis() + FETCH_BUDGET_MS
         val masked = apiKey.trim()
-        // Scope searches to this key's sources first (cached after the first play).
         val srcEnd = minOf(deadline, System.currentTimeMillis() + SOURCES_BUDGET_MS)
         val sources = runCatching { keySources(apiKey, srcEnd) }.getOrNull()
         Log.d(TAG, "sources=${sources?.joinToString(",") ?: "default"}")
-        // One small request per group, all in flight at once.
         val results = coroutineScope {
             groups.map { group ->
                 async {
@@ -199,7 +179,6 @@ object WyzieSubs {
                 }
             }.awaitAll()
         }
-        // Merge priority-first, deduped by url and capped per language.
         val seen = HashSet<String>()
         val perLang = HashMap<String, Int>()
         var tracks = results.flatMap { it.tracks }.filter { t ->
@@ -215,7 +194,6 @@ object WyzieSubs {
                 return 0
             }
             if (System.currentTimeMillis() < deadline) {
-                // Empty but healthy: the filter may have excluded everything server-side.
                 Log.d(TAG, "empty with filter - one unfiltered retry")
                 buildUrl(imdbId, season, episode, emptySet(), apiKey, sources)?.let { retryUrl ->
                     val (retryCode, retryText) = get(retryUrl, deadline)
@@ -239,7 +217,6 @@ object WyzieSubs {
         return tracks.size
     }
 
-    /** Live key check used by the Verify link and the save check. Never throws. */
     suspend fun testKey(apiKey: String): Pair<Boolean, String> {
         val key = apiKey.trim()
         if (key.isEmpty()) return false to "Enter a key first"
@@ -254,7 +231,6 @@ object WyzieSubs {
         else false to "Key accepted but no subs returned"
     }
 
-    /** GET bounded by the shared deadline; (status code, body), nulls on failure/timeout. */
     private suspend fun get(url: String, deadline: Long): Pair<Int?, String?> {
         val budget = deadline - System.currentTimeMillis()
         if (budget <= 0) return null to null

@@ -35,24 +35,14 @@ dependencies {
     if (csJar.exists()) {
         testImplementation(files(csJar))
     }
-    // MainAPI's companion initializes a kotlinx-serialization Json builder at
-    // class-load time — the json artifact must be on the unit-test runtime path.
     testImplementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
-    // ...and a Jackson JsonMapper (cloudstream3's NiceHttp JSON layer).
     testImplementation("com.fasterxml.jackson.core:jackson-databind:2.17.1")
     testImplementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.17.1")
-    // ExtractorLink's enclosing ExtractorApiKt static-init resolves a
-    // CryptographyProvider (CloudStream core dep) — the JVM test path needs
-    // the same libs the app process provides on device.
     testImplementation("dev.whyoleg.cryptography:cryptography-core:0.6.0")
     testImplementation("dev.whyoleg.cryptography:cryptography-provider-optimal:0.6.0")
-    // LoadResponse.addDate (episode air dates) statically references kotlinx-datetime
-    // — provided by the app runtime on device, needed on the JVM test path too.
     testImplementation("org.jetbrains.kotlinx:kotlinx-datetime:0.8.0")
 }
 
-// Mirrors the Multimovies shrinkCs3 task: re-dex the R8-minified release classes
-// into the shipped .cs3 instead of the unshrunk d8 output.
 val androidExtension = extensions.getByType(LibraryExtension::class.java)
 val shrunkJar = layout.buildDirectory.file(
     "intermediates/shrunk_classes/release/minifyReleaseWithR8/shrunkClasses.jar"

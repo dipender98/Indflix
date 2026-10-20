@@ -1,5 +1,12 @@
 # Indflix Project Rules
 
 ## Code style
-- Comments very sparse: only when code is not self-explanatory. "*Prefer none*".
-- Only generic comment if by chance your making - No names of developers, plugins, sites, or titles; state only what the code does.
+- Comments very sparse: only when code is not self-explanatory. Prefer none.
+- One short line max. No doc blocks, no paragraphs.
+- No names of developers, plugins, sites, or titles; state only what the code does.
+- Simple and direct beats clever: no unnecessary abstractions, wrappers, or helpers.
+- Do not over complicate coding/programming if not sure take refernce on internet or ask.
+
+## Architecture
+- Do not create unnecessary files: related logic lives in one file and one object.
+- Use logic in creating file and naming them.

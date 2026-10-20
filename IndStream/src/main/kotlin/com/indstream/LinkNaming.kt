@@ -2,30 +2,20 @@ package com.indstream
 
 import com.indstream.StreamEngine.RawStream
 
-/** FILE: LinkNaming. kt - the ONE naming rule every emitted link must follow (, , revised): `{ServerName }. ({Language})` - {ServerName} base server. */
 object LinkNaming {
 
-    /** Resolution display token ("\d{3, 4}p" / "4K"), glued forms included: deliberately NO leading \b so. "Server1080p"/"x1080p" are caught, and a. */
     private val RESOLUTION_TOKEN =
         Regex("""\s*(?:\d{3,4}p|4K)\b""", RegexOption.IGNORE_CASE)
 
-    /** Canonical display name for a language: FULL name with a capital initial - "Hindi", "English", "Japanese", "Multi" (. never short forms like. */
     fun languageTag(raw: String?): String {
-        // Truly unknown audio (the server gave no language signal at all) is labelled "Unknown" - never guessed as.
-// "Multi"/"Original"/"English" (, say so.
         if (raw.isNullOrBlank()) return "Unknown"
         val s = raw.trim().lowercase()
-        // Dual/multi audio FIRST: duo wording or the "a+b" combo form must win over the single-language checks below (a string.
-// like "Hindi+English" contains.
         if (s.contains("dual") || s.contains("multi") || s.contains("+") || s.contains("&") ||
             s.contains("hindi+english") || s.contains("hindi & english") || s.contains("both")) return "Multi"
-        // "Original" is not a language - callers pass the TMDB original_language so languageTagFor() maps it to the real name.
-// on its own it stays.
         if (s == "original" || s == "orig" || s == "org") return "Original"
         return canonicalSubtitleName(s)
     }
 
-    /** Map a raw audio label to the tag for a stream of a title whose original language is (TMDB code, e. g. "ja"). */
     fun languageTagFor(raw: String?, originalLang: String? = null): String {
         val s = raw?.trim()?.lowercase().orEmpty()
         if (s.isEmpty()) return "Unknown"
@@ -35,7 +25,6 @@ object LinkNaming {
         return languageTag(s)
     }
 
-    /** Country-flag emoji for a canonical single-language tag; "" for Multi/Unknown/Original/unknown. Pure. */
     fun languageFlag(tag: String?): String = when (tag) {
         "Hindi", "Tamil", "Telugu", "Malayalam", "Kannada", "Marathi", "Punjabi", "Gujarati" -> flag("IN")
         "English" -> flag("GB")
@@ -64,16 +53,13 @@ object LinkNaming {
         else -> ""
     }
 
-    /** Regional-indicator flag emoji from a 2-letter ISO country code. Pure. */
     private fun flag(cc: String): String =
         cc.uppercase().map { Character.toChars(0x1F1E6 + (it - 'A')).concatToString() }.joinToString("")
 
-    /** True when (a sub-server label like "Server 1080p", "Fade 1080p", "Nova") carries a resolution token. Kept as a query. helper - strips these tokens). */
     fun hasResolution(indicator: String?): Boolean =
         !indicator.isNullOrBlank() &&
             Regex("""\b(\d{3,4})p\b""", RegexOption.IGNORE_CASE).containsMatchIn(indicator)
 
-    /** Build the final display name: `{Server } ({Language}) [size]`. No resolution token is printed - CloudStream renders the. link's quality badge itself (. */
     fun displayName(
         serverName: String,
         audioLabel: String? = "",
@@ -86,11 +72,8 @@ object LinkNaming {
         val base = serverName.trim().ifBlank { "Server" }
         val tag = languageTagFor(audioLabel, originalLang)
         val nameWithSub = if (subIndicator.isNullOrBlank()) base else "$base $subIndicator".trim()
-        // separated by "-": "VidLink-2 (Hindi) 1080p" - NOT at the end of the whole label.
         val serverPart = if (duplicateIndex > 0) "$nameWithSub-$duplicateIndex" else nameWithSub
 
-        // Brands already naming the language ("MyFlixer Hindi" + Hindi tag) don't repeat it: the (lang) bracket is dropped for.
-// them.
         val tagPart = if (
             tag != "Multi" &&
             Regex("\\b${Regex.escape(tag)}\\b", RegexOption.IGNORE_CASE).containsMatchIn(nameWithSub)
@@ -99,21 +82,16 @@ object LinkNaming {
             if (f.isBlank()) "($tag)" else "($f $tag)"
         }
 
-        // ): the server name carries NO resolution token - CloudStream shows each link's quality badge itself (ExtractorLink.
-// quality), so printing it here.
         val serverDisplay = RESOLUTION_TOKEN.replace(serverPart, "").trim()
         val tagDisplay = if (tagPart.isBlank()) "" else RESOLUTION_TOKEN.replace(tagPart, "").trim()
-        // Host-declared size rides LAST ("4KHDHub 1080p (Hindi) 1.4GB"); blank when the host gives none.
         val sizePart = sizeLabel?.trim().orEmpty()
         val parts = listOf(serverDisplay, tagDisplay, sizePart).filter { it.isNotBlank() }
         return parts.joinToString(" ")
     }
 
-    /** ) res" string when the caller has already folded the sub-server into the base name. */
     fun displayName(base: String, audioLabel: String?, qualityHint: Int): String =
         displayName(base, audioLabel, qualityHint, subIndicator = null, duplicateIndex = 0)
 
-    /** Height → display token ("4K", "1080p", "720p"). . < 0 is the sentinel for a DIRECT file whose real resolution could. not be measured (renders as. */
     fun qualityLabel(height: Int): String = when {
         height >= 2160 -> "4K"
         height >= 1440 -> "1440p"
@@ -126,7 +104,6 @@ object LinkNaming {
         else -> ""
     }
 
-    /** Number every member of a duplicate group (positional). When s share the same (base name + language tag +. resolution), they are numbered 1. */
     fun dedupeNames(streams: List<RawStream>, originalLang: String? = null): List<Int> {
         fun keyOf(s: RawStream): String {
             val tag = languageTagFor(s.audioLabel, originalLang)
@@ -138,32 +115,28 @@ object LinkNaming {
         return streams.map { s ->
             val key = keyOf(s)
             if ((totals[key] ?: 0) <= 1) {
-                0 // singleton - no number.
+                0
             } else {
                 val n = (running[key] ?: 0) + 1
                 running[key] = n
-                n // first of the group gets -1, next -2, . . . to the last.
+                n
             }
         }
     }
 
-    /** Subtitle provenance tag (, per-server subs): the player's subtitle menu is a single global list, so every track. carries its source - "Hindi. */
     fun taggedSubtitleName(canonical: String, source: String?): String {
         val c = canonical.trim()
         val src = source?.trim().orEmpty()
         if (src.isEmpty() || c.isEmpty()) return c
-        // Don't double-tag ("Hindi (VidLink)" + "VidLink" stays as-is).
         if (c.endsWith("($src)", ignoreCase = true)) return c
         return "$c ($src)"
     }
 
-    /** Native-script / code subtitle names -> canonical English names, so the subtitle menu shows "Urdu", "Bengali". "Arabic" … instead of a dozen. */
     fun canonicalSubtitleName(raw: String?): String {
         val s = raw?.trim().orEmpty()
         if (s.isBlank()) return "Subtitle"
         val lower = s.lowercase()
         return when {
-            // Devanagari Hindi: native script or the script name rides along with plain "Hindi".
             lower.contains("हिन्द") || lower.contains("हिंद") || lower.contains("देवनागरी") || lower.contains("devanagari") || lower == "hi" || lower == "hin" || lower.contains("hindi") -> "Hindi"
             lower.contains("اُردُو") || lower.contains("اردو") || lower.contains("urdu") || lower == "ur" || lower == "urd" -> "Urdu"
             lower.contains("বাংলা") || lower.contains("bengali") || lower.contains("bangla") || lower == "bn" || lower == "ben" || lower == "bang" -> "Bengali"
@@ -200,7 +173,6 @@ object LinkNaming {
         }
     }
 
-    /** Indian canonical name (native-script name). Devanagari escapes: verified code points, script-safe regardless of file bytes. */
     val INDIAN_NATIVE = mapOf(
         "Hindi" to "\u0939\u093F\u0928\u094D\u0926\u0940",
         "Tamil" to "\u0BA4\u0BAE\u0BB4\u0BCD",
@@ -216,8 +188,6 @@ object LinkNaming {
         "Sinhala" to "\u0DC3\u0DD2\u0D82\u0DC4\u0DBD",
     )
 
-    /** Menu label for a parsed track: Indian languages show "English-name (native-script)" so Devanagari and the roman name read as one.
-     *  Hindi: the sources give no script code (probe: always hi/hin + English titles), so plain = Devanagari - OpenSubtitles' own convention; roman only when the release title/label says so or an AI-translated flag rides. */
     fun subtitleMenuName(canon: String, raw: String?): String {
         val lower = raw?.lowercase().orEmpty()
         if (canon == "Hindi") {

@@ -10,7 +10,6 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
-/** Guards the 2.0 site parsers: search API, inline servers, id extraction. */
 class V2SearchMmTest {
 
     @Test

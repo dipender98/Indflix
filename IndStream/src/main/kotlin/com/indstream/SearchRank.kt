@@ -3,31 +3,26 @@ package com.indstream
 import java.text.Normalizer
 import kotlin.math.min
 
-/** Typo-tolerant ranking shared by both search sources. */
 object SearchRank {
 
     private val NON_ALNUM = Regex("""[^\p{L}\p{M}\p{N}]+""")
     private val MARKS = Regex("""\p{M}""")
     private val YEAR_TOKEN = Regex("""^[12]\d{3}$""")
 
-    /** Tokens too generic to carry query meaning. */
     internal val STOPWORDS = setOf(
         "the", "a", "an", "and", "or", "of", "for", "in", "on", "at", "to", "with",
         "vs", "v", "s", "e", "de", "la", "le", "el", "en", "feat", "ft", "ze",
     )
 
-    /** Fold accents for transliterated titles. */
     internal fun deaccent(s: String): String =
         Normalizer.normalize(s, Normalizer.Form.NFKD).replace(MARKS, "")
 
-    /** Lowercase, apostrophes dropped, punctuation to spaces. */
     internal fun normalizeTitle(t: String): String =
         deaccent(t.lowercase().replace("'", "").replace("’", "").trim())
             .replace(NON_ALNUM, " ")
             .replace(Regex("""\s+"""), " ")
             .trim()
 
-    /** Two-row edit distance. */
     internal fun levenshtein(a: String, b: String): Int {
         if (a == b) return 0
         if (a.isEmpty()) return b.length
@@ -47,7 +42,6 @@ object SearchRank {
         return prev[b.length]
     }
 
-    /** Double the first vowel for long-vowel transliterations. Null when absent or already long. */
     internal fun doubleFirstVowel(word: String): String? {
         val idx = word.indexOfFirst { it.lowercaseChar() in "aeiou" }
         if (idx < 0) return null
@@ -56,7 +50,6 @@ object SearchRank {
         return word.substring(0, idx + 1) + word[idx] + word.substring(idx + 1)
     }
 
-    /** Typo-tolerant respellings of a query, at most [max]. */
     internal fun queryVariants(query: String, max: Int = 2): List<String> {
         val tokens = normalizeTitle(query).split(' ').filter { it.length >= 3 }
         if (tokens.isEmpty()) return emptyList()
@@ -70,11 +63,9 @@ object SearchRank {
         return out.distinct()
     }
 
-    /** Significant query tokens for scoring. */
     internal fun queryTokens(query: String): List<String> =
         normalizeTitle(query).split(' ').filter { it.length >= 2 && it !in STOPWORDS }.distinct()
 
-    /** Best match of one token against title tokens. */
     internal fun tokenScore(token: String, titleTokens: List<String>): Double {
         if (titleTokens.any { it == token }) return 1.0
         if (titleTokens.any { it.length >= 4 && it.contains(token) }) return 1.0
@@ -85,7 +76,6 @@ object SearchRank {
         return 0.0
     }
 
-    /** Query-vs-title relevance in [0, 1]. */
     internal fun relevance(query: String, title: String): Double {
         val qNorm = normalizeTitle(query)
         val tNorm = normalizeTitle(title)
@@ -108,7 +98,6 @@ object SearchRank {
         return (sum / qTokens.size - 0.03 * min(extra, 5)).coerceIn(0.0, 1.0)
     }
 
-    /** Lower suggest rank means more popular. */
     internal fun rankBand(rank: Int?): Double = when {
         rank == null || rank <= 0 -> 0.0
         rank <= 1000 -> 1.0
@@ -118,7 +107,6 @@ object SearchRank {
         else -> 0.4
     }
 
-    /** Final score: relevance dominates, popularity breaks ties. */
     fun combined(query: String, title: String, imdbRank: Int?, tmdbRating: Double?): Double {
         val rel = relevance(query, title)
         if (rel <= 0.0) return 0.0
@@ -127,10 +115,8 @@ object SearchRank {
         return 0.6 * rel + 0.4 * pop
     }
 
-    /** Collapse duplicates sharing normalized (title, year). First survives. */
     fun dedupeKey(name: String, year: Int?): String = normalizeTitle(name) + "|" + (year ?: 0)
 
-    /** Significant non-year tokens for follow-up probes. */
     internal fun probeTokens(title: String): List<String> =
         normalizeTitle(title).split(' ')
             .filter { it.length >= 2 && it !in STOPWORDS && !YEAR_TOKEN.matches(it) }

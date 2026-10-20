@@ -15,7 +15,6 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-/** Guards the audit fixes: cache blank-id guard, language-aware dedupe tag. */
 class AuditFixesMmTest {
 
     private fun link(source: String, url: String) = ExtractorLink(
@@ -107,7 +106,6 @@ class AuditFixesMmTest {
 
     @Test
     fun enrichLabel_zeroBudget_skipsProbeKeepsUrlFacts() = runBlocking {
-        // Zero budget: no master fetch, height from URL quality, language local-only.
         val l = link("Cineverse", "https://cdn.example/x/1080p/master.m3u8")
         val out = MultiSourcePuller.enrichLabel(l, probeBudgetMs = 0L)
         assertEquals(1080, out.quality)

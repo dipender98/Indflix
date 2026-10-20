@@ -6,7 +6,6 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-// Pure checks for signed-cookie handling.
 class MovieBoxCookieTest {
 
     private fun policyCookie(resource: String, unpadded: Boolean = false): String {
@@ -25,7 +24,6 @@ class MovieBoxCookieTest {
 
     @Test
     fun referer_isAllowedMirror() {
-        // File CDN returns 429 for stale mirrors; only this passes.
         assertEquals("https://movieboxonline.net/", StreamEngine.MOVIEBOX_REFERER)
     }
 

@@ -7,7 +7,6 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-/** Guards the keyless suggest + metadata parsers backing the TMDB race. */
 class ImdbSearchTest {
 
     @Test

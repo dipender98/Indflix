@@ -16,7 +16,6 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 
-/** Keyless suggest + metadata source backing the TMDB race. */
 object ImdbService {
 
     private const val SUGGEST_API = "https://v3.sg.media-imdb.com/suggestion/x"
@@ -25,17 +24,15 @@ object ImdbService {
     private const val CACHE_MAX = 64
     private const val WAIT_MS = 11_000L
 
-    /** One suggest hit. */
     data class ImdbHit(
         val imdbId: String,
         val title: String,
         val year: Int?,
-        val type: String, // "movie" | "tv".
+        val type: String,
         val poster: String?,
         val rank: Int?,
     )
 
-    /** Full detail merged from a metadata race. */
     data class MetaDetail(
         val imdbId: String? = null,
         val tmdbId: Int? = null,
@@ -47,7 +44,6 @@ object ImdbService {
         val overview: String? = null,
         val genres: List<String>? = null,
         val cast: List<ActorData>? = null,
-        /** Runtime in minutes, parsed from Cinemeta's "179 min" form. */
         val runtime: Int? = null,
     )
 
@@ -56,16 +52,11 @@ object ImdbService {
     private val inFlight = ConcurrentHashMap<String, kotlinx.coroutines.Deferred<List<ImdbHit>>>()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val metaCache = ConcurrentHashMap<String, MetaDetail>()
-    /** Actor name (lowercased) to headshot URL. */
     private val photoCache = ConcurrentHashMap<String, String>()
-    /** IMDB id to (rating, expiresAt). */
     private val ratingCache = ConcurrentHashMap<String, Pair<Double, Long>>()
-    /** Queries that recently returned nothing, so a dead upstream is not asked again on every keystroke. */
     private val negative = ConcurrentHashMap<String, Long>()
-    /** How long an empty suggest answer is remembered. */
     private const val NEGATIVE_TTL_MS = 60_000L
 
-    /** Suggest lookup with in-memory cache. Never throws. */
     suspend fun suggest(query: String): List<ImdbHit> {
         if (query.isBlank()) return emptyList()
         val key = query.trim().lowercase()
@@ -115,15 +106,12 @@ object ImdbService {
     private suspend fun suggestRemote(query: String): List<ImdbHit> =
         parseSuggest(suggestRaw(query))
 
-    /** Raw suggest payload for a query. Never throws. */
     private suspend fun suggestRaw(query: String): String? {
-        // Suggest keys collapse whitespace to underscores.
         val slug = query.trim().lowercase().replace(Regex("""\s+"""), "_")
         val encoded = URLEncoder.encode(slug, "UTF-8")
         return withTimeoutOrNull(6000L) { getText("$SUGGEST_API/$encoded.json", 6) }
     }
 
-    /** GET a body; a cancellation propagates, any other failure yields null. */
     private suspend fun getText(url: String, timeoutSec: Long): String? = try {
         app.get(url, timeout = timeoutSec).text
     } catch (c: kotlinx.coroutines.CancellationException) {
@@ -132,7 +120,6 @@ object ImdbService {
         null
     }
 
-    /** Map a suggest payload to hits. Name-kind entries are dropped. Pure. */
     fun parseSuggest(raw: String?): List<ImdbHit> {
         if (raw.isNullOrBlank()) return emptyList()
         return try {
@@ -156,7 +143,6 @@ object ImdbService {
         } catch (e: Exception) { emptyList() }
     }
 
-    /** Headshot for a person query: exact name hit wins, else the top person hit. Pure. */
     fun parsePersonImage(raw: String?, want: String): String? {
         if (raw.isNullOrBlank() || want.isBlank()) return null
         return try {
@@ -173,7 +159,6 @@ object ImdbService {
         } catch (e: Exception) { null }
     }
 
-    /** Keyless full metadata by IMDB id. Cast carries headshots. Never throws. */
     suspend fun fetchMeta(imdbId: String, type: String): MetaDetail? {
         if (!imdbId.startsWith("tt")) return null
         val kind = if (type == "movie") "movie" else "series"
@@ -186,7 +171,6 @@ object ImdbService {
         return detail
     }
 
-    /** Fill cast headshots via person suggest (bounded, cached). Never throws. */
     private suspend fun MetaDetail.withCastPhotos(): MetaDetail {
         val names = cast.orEmpty().map { it.actor.name }.filter { it.isNotBlank() }.distinct()
         if (names.isEmpty()) return this
@@ -198,7 +182,6 @@ object ImdbService {
         })
     }
 
-    /** Map a Cinemeta envelope to detail. Pure. */
     fun parseCinemeta(raw: String?, imdbId: String): MetaDetail? {
         if (raw.isNullOrBlank()) return null
         return try {
@@ -226,13 +209,11 @@ object ImdbService {
         } catch (e: Exception) { null }
     }
 
-    /** Minutes from Cinemeta's "179 min" form, else null. Pure. */
     fun parseRuntimeMinutes(raw: String?): Int? {
         if (raw.isNullOrBlank()) return null
         return Regex("""(\d+)""").find(raw)?.groupValues?.get(1)?.toIntOrNull()?.takeIf { it > 0 }
     }
 
-    /** Episode rows from a Cinemeta series payload. Pure. */
     fun parseCinemetaEpisodes(raw: String?): List<TmdbService.TmdbEpisode> {
         if (raw.isNullOrBlank()) return emptyList()
         return try {
@@ -242,7 +223,6 @@ object ImdbService {
                 val season = v.optInt("season", -1).takeIf { it > 0 } ?: return@mapNotNull null
                 val ep = v.optInt("episode", -1).takeIf { it > 0 }
                     ?: v.optInt("number", -1).takeIf { it > 0 } ?: return@mapNotNull null
-                // Live payloads carry `name` (not `title`), `description`/`firstAired` variants.
                 val released = v.optString("released").takeIf { it.isNotBlank() }
                     ?: v.optString("firstAired").takeIf { it.isNotBlank() }
                 TmdbService.TmdbEpisode(
@@ -260,7 +240,6 @@ object ImdbService {
         } catch (e: Exception) { emptyList() }
     }
 
-    /** Headshot per actor name via person suggest. Finished rows persist past the budget. Never throws. */
     suspend fun fetchCastPhotos(names: List<String>, max: Int = 15): Map<String, String> {
         val wanted = names.filter { it.isNotBlank() }.distinct().take(max)
         if (wanted.isEmpty()) return emptyMap()
@@ -293,7 +272,6 @@ object ImdbService {
         return done
     }
 
-    /** IMDB ratings by id via Cinemeta (lightweight: no cast enrichment). Finished rows persist past the budget. */
     suspend fun fetchRatings(ids: List<Pair<String, String>>): Map<String, Double> {
         val wanted = ids.distinctBy { it.first }.filter { it.first.startsWith("tt") }
         if (wanted.isEmpty()) return emptyMap()
@@ -336,7 +314,6 @@ object ImdbService {
         return done + fetched
     }
 
-    /** Extend IMDB names with TMDB-exclusive cast rows. IMDB order and photos win. Pure. */
     fun mergeCast(
         imdb: List<ActorData>?,
         tmdb: List<ActorData>?,
@@ -348,7 +325,6 @@ object ImdbService {
         return (imdb + tmdb.filter { seen.add(it.actor.name.lowercase()) }).take(maxTotal)
     }
 
-    /** Raw series payload for episode listing. Never throws. */
     suspend fun fetchSeriesRaw(imdbId: String): String? {
         if (!imdbId.startsWith("tt")) return null
         return withTimeoutOrNull(7000L) { getText("$CINEMETA_API/series/$imdbId.json", 7) }

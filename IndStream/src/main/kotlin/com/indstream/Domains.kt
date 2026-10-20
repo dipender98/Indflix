@@ -4,7 +4,6 @@ import com.lagradost.cloudstream3.app
 import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
 
-/** Live host registry: rotated domains come from the shared public lists, so seeds are only fallbacks. */
 object Domains {
     private const val PRIMARY = "https://raw.githubusercontent.com/phisher98/TVVVV/refs/heads/main/domains.json"
     private const val SECONDARY = "https://raw.githubusercontent.com/SaurabhKaperwan/Utils/refs/heads/main/urls.json"
