@@ -1,4 +1,4 @@
-﻿package com.indstream
+package com.indstream
 
 import android.app.AlertDialog
 import android.content.Context
@@ -847,17 +847,6 @@ object SettingsUi {
             setState(aiCard, if (on) "Saved" else "Not set", on)
         }
 
-
-        content.addView(
-            label("Version $VERSION - keys stay on this device.", 10.5f, TEXT_FAINT)
-                .apply {
-                    gravity = Gravity.CENTER
-                    setPadding(0, dp(10), 0, dp(2))
-                    layoutParams = LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-                    )
-                },
-        )
 
         val built = AlertDialog.Builder(context, android.R.style.Theme_Material_Dialog)
             .setView(sheet)
