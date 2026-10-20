@@ -2,4 +2,4 @@
 
 ## Code style
 - Comments very sparse: only when code is not self-explanatory. "*Prefer none*".
-- only comment if by chance your making - No names of developers, plugins, sites, or titles; state only what the code does.
+- Only generic comment if by chance your making - No names of developers, plugins, sites, or titles; state only what the code does.
