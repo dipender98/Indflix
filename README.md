@@ -7,8 +7,8 @@ multiple independent stream servers per title and exposes
 
 New to CloudStream? Start with the [CloudStream Wiki](https://cloudstream.miraheze.org).
 
-##Join the Telegram Group
-https://t.me/+zWzCcoj9q143NTBl
+## Join the Telegram Group
+(https://t.me/+zWzCcoj9q143NTBl).
 
 ## Install
 
