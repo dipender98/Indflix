@@ -468,6 +468,9 @@ object TmdbService {
         val rating: Double?,
         val genreIds: List<Int> = emptyList(),
         val popularity: Double = 0.0,
+        val voteCount: Int = 0,
+        val originalLanguage: String? = null,
+        val overview: String? = null,
     )
 
     data class TmdbDetail(
@@ -743,6 +746,14 @@ object TmdbService {
         }
     }
 
+    suspend fun similar(tmdbId: Int, type: String): List<TmdbItem> {
+        if (tmdbId <= 0) return emptyList()
+        val kind = if (type == "movie") "movie" else "tv"
+        return catalog("similar:$kind:$tmdbId", kind) {
+            tmdbGet("similar $kind=$tmdbId", "/$kind/$tmdbId/similar", "language=en-US&page=1")
+        }
+    }
+
     data class Genre(val label: String, val movieId: Int, val tvId: Int = 0)
 
     val genres = listOf(
@@ -780,15 +791,25 @@ object TmdbService {
         return id to type
     }
 
-    suspend fun discover(type: String, genreIds: List<Int>, page: Int = 1): List<TmdbItem> {
+    suspend fun discover(
+        type: String,
+        genreIds: List<Int>,
+        page: Int = 1,
+        language: String? = null,
+        sortBy: String = "popularity.desc",
+        minVotes: Int = 0,
+    ): List<TmdbItem> {
         val kind = if (type == "movie") "movie" else "tv"
         val genres = genreIds.take(3).joinToString("|")
         if (genres.isBlank()) return emptyList()
-        return catalog("discover:$kind:$genres:$page", kind) {
-            tmdbGet(
-                "discover $kind", "/discover/$kind",
-                "language=en-US&page=$page&sort_by=popularity.desc&include_adult=false&with_genres=$genres",
-            )
+        val query = buildString {
+            append("language=en-US&page=$page&sort_by=$sortBy&include_adult=false&with_genres=$genres")
+            if (!language.isNullOrBlank()) append("&with_original_language=$language")
+            if (minVotes > 0) append("&vote_count.gte=$minVotes")
+        }
+        val key = "discover:$kind:$genres:$page:$sortBy:${language.orEmpty()}:$minVotes"
+        return catalog(key, kind) {
+            tmdbGet("discover $kind", "/discover/$kind", query)
         }
     }
 
@@ -983,6 +1004,9 @@ object TmdbService {
                     rating = r.optDouble("vote_average", -1.0).takeIf { it > 0 },
                     genreIds = genreIdsOf(r),
                     popularity = r.optDouble("popularity", 0.0),
+                    voteCount = r.optInt("vote_count", 0).coerceAtLeast(0),
+                    originalLanguage = str(r, "original_language"),
+                    overview = str(r, "overview"),
                 )
             }.dedupedByTitle()
         } catch (e: Exception) {
@@ -1103,6 +1127,9 @@ object TmdbService {
                     rating = r.optDouble("vote_average", -1.0).takeIf { it > 0 },
                     genreIds = genreIdsOf(r),
                     popularity = r.optDouble("popularity", 0.0),
+                    voteCount = r.optInt("vote_count", 0).coerceAtLeast(0),
+                    originalLanguage = str(r, "original_language"),
+                    overview = str(r, "overview"),
                 )
             }
         } catch (e: Exception) { emptyList() }

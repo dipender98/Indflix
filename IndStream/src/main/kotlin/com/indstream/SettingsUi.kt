@@ -19,6 +19,7 @@ import android.graphics.drawable.RippleDrawable
 import android.graphics.drawable.StateListDrawable
 import android.net.Uri
 import android.text.InputType
+import android.text.TextUtils
 import android.text.method.PasswordTransformationMethod
 import android.util.TypedValue
 import android.view.Gravity
@@ -178,7 +179,7 @@ object SettingsUi {
         fun chip(value: String): TextView = label(value, 12f, TEXT_DIM, medium = true).apply {
             gravity = Gravity.CENTER
             setPadding(dp(16), 0, dp(16), 0)
-            background = ripple(rounded(Color.TRANSPARENT, 999, 1))
+            background = ripple(rounded(Color.TRANSPARENT, 12, 1))
             isClickable = true
             isFocusable = true
             layoutParams = LinearLayout.LayoutParams(
@@ -189,7 +190,7 @@ object SettingsUi {
         fun markChip(target: TextView, on: Boolean) {
             target.setTextColor(if (on) Color.WHITE else TEXT_DIM)
             target.background = ripple(
-                rounded(if (on) ACCENT else Color.TRANSPARENT, 999, if (on) 0 else 1),
+                rounded(if (on) ACCENT else Color.TRANSPARENT, 12, if (on) 0 else 1),
             )
         }
 
@@ -515,7 +516,7 @@ object SettingsUi {
             orientation = LinearLayout.VERTICAL
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
-        heading.addView(label("Provider settings", 20f, TEXT, medium = true))
+        heading.addView(label("IndStream Settings", 20f, TEXT, medium = true))
         heading.addView(
             label("Keys are optional - built-ins apply while a field is empty.", 11.5f, TEXT_DIM)
                 .apply { setPadding(0, dp(5), 0, 0) },
@@ -545,6 +546,20 @@ object SettingsUi {
             label("Enabling \"Made for You - Recommendation\" catalogue", 12f, TEXT_DIM)
                 .apply { setPadding(0, dp(12), 0, 0) },
         )
+        val shuffleOn = Settings.shuffleRows()
+        val shuffleOpt = option(
+            "Shuffle all rows",
+            if (shuffleOn) "Items in every row appear in random order" else "Rows keep their normal order",
+        )
+        paintOption(shuffleOpt, shuffleOn)
+        shuffleOpt.root.setOnClickListener {
+            val on = !Settings.shuffleRows()
+            Settings.saveShuffleRows(context, on)
+            paintOption(shuffleOpt, on)
+            shuffleOpt.summary.text =
+                if (on) "Items in every row appear in random order" else "Rows keep their normal order"
+        }
+        add(forYouCard, shuffleOpt.root, 4)
         add(forYouCard, sectionLabel("Refresh schedule", 18))
         val modeOptions = LinkedHashMap<ForYouRefresh.Mode, Option>()
         val modeList = optionList()
@@ -590,45 +605,136 @@ object SettingsUi {
 
         val allServers = ServerFarm.allServers
         var offCount = allServers.count { !Settings.serverEnabled(it.id) }
-        val catalogueCard = card(
-            "Catalogue",
-            "Shuffle rows and turn off servers that do not work",
-            if (offCount == 0) "All on" else "$offCount off",
+        fun providersStateText(): String = when (offCount) {
+            0 -> "All on"
+            allServers.size -> "All off"
+            else -> "$offCount off"
+        }
+        val providersCard = card(
+            "Servers/Providers",
+            "Choose which providers supply streams",
+            providersStateText(),
             offCount < allServers.size,
         )
-        val shuffleOn = Settings.shuffleRows()
-        val shuffleOpt = option(
-            "Shuffle all rows",
-            if (shuffleOn) "Every row is randomized" else "Rows keep their normal order",
-        )
-        paintOption(shuffleOpt, shuffleOn)
-        shuffleOpt.root.setOnClickListener {
-            val on = !Settings.shuffleRows()
-            Settings.saveShuffleRows(context, on)
-            paintOption(shuffleOpt, on)
-            shuffleOpt.summary.text = if (on) "Every row is randomized" else "Rows keep their normal order"
+        fun refreshProvidersState() {
+            offCount = allServers.count { !Settings.serverEnabled(it.id) }
+            setState(
+                providersCard,
+                providersStateText(),
+                offCount < allServers.size,
+            )
         }
-        add(catalogueCard, shuffleOpt.root)
-        add(catalogueCard, sectionLabel("Servers", 18))
-        val serverList = optionList()
-        allServers.forEach { spec ->
-            val opt = option(spec.name, if (Settings.serverEnabled(spec.id)) "On" else "Off")
-            paintOption(opt, Settings.serverEnabled(spec.id))
-            opt.root.setOnClickListener {
-                val on = !Settings.serverEnabled(spec.id)
-                Settings.saveServerEnabled(context, spec.id, on)
-                opt.summary.text = if (on) "On" else "Off"
-                paintOption(opt, on)
-                offCount = allServers.count { !Settings.serverEnabled(it.id) }
-                setState(
-                    catalogueCard,
-                    if (offCount == 0) "All on" else "$offCount off",
-                    offCount < allServers.size,
+
+        class ProviderTile(val spec: ServerSpec, val root: LinearLayout, val dot: View)
+
+        fun providerTags(spec: ServerSpec): String {
+            val tags = ArrayList<String>()
+            if (spec.animeOnly) tags += "Anime"
+            when {
+                spec.timeoutSec <= 15 -> tags += "Very fast"
+                spec.timeoutSec <= 25 -> tags += "Fast"
+            }
+            if (spec.isJsonApi) tags += "Reliable"
+            val multiAudio = spec.movieUrl.contains("multilang", true) ||
+                spec.tvUrl.contains("multilang", true) ||
+                spec.declaredLanguages.size >= 2
+            if (multiAudio) tags += "Multi audio"
+            return tags.take(3).joinToString(" \u00B7 ")
+        }
+
+        fun providerTile(spec: ServerSpec): ProviderTile {
+            val dot = View(context).apply {
+                layoutParams = LinearLayout.LayoutParams(dp(9), dp(9)).apply { leftMargin = dp(8) }
+            }
+            val name = label(spec.name, 12.5f, TEXT, medium = true).apply {
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            }
+            val titleRow = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                addView(name)
+                addView(dot)
+            }
+            val tags = label(providerTags(spec), 9.5f, TEXT_FAINT).apply {
+                maxLines = 2
+                ellipsize = TextUtils.TruncateAt.END
+                setPadding(0, dp(4), 0, 0)
+            }
+            val root = LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(11), dp(9), dp(11), dp(9))
+                isClickable = true
+                isFocusable = true
+                addView(titleRow)
+                addView(tags)
+            }
+            return ProviderTile(spec, root, dot)
+        }
+
+        fun paintProvider(tile: ProviderTile) {
+            val on = Settings.serverEnabled(tile.spec.id)
+            tile.root.background = ripple(
+                rounded(if (on) SURFACE_2 else Color.TRANSPARENT, 12, 1, if (on) ACCENT else BORDER),
+            )
+            tile.dot.background = if (on) circle(SUCCESS) else circle(Color.TRANSPARENT, 2, BORDER)
+            tile.root.contentDescription =
+                "${tile.spec.name}, ${if (on) "enabled" else "disabled"}"
+        }
+
+        val providerTiles = allServers.map { spec ->
+            providerTile(spec).also { tile ->
+                paintProvider(tile)
+                tile.root.setOnClickListener {
+                    Settings.saveServerEnabled(context, spec.id, !Settings.serverEnabled(spec.id))
+                    paintProvider(tile)
+                    refreshProvidersState()
+                }
+            }
+        }
+        fun paintServerTiles() {
+            providerTiles.forEach(::paintProvider)
+        }
+
+        add(providersCard, sectionLabel("All servers", 18))
+        val enableAll = chip("Enable all")
+        val disableAll = chip("Disable all")
+        addRow(providersCard, 0, enableAll, disableAll)
+        enableAll.setOnClickListener {
+            Settings.saveAllServersEnabled(context, allServers.map { it.id }, true)
+            paintServerTiles()
+            refreshProvidersState()
+        }
+        disableAll.setOnClickListener {
+            Settings.saveAllServersEnabled(context, allServers.map { it.id }, false)
+            paintServerTiles()
+            refreshProvidersState()
+        }
+
+        val providerGrid = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+        val providerRows = providerTiles.chunked(2)
+        providerRows.forEachIndexed { rowIndex, rowTiles ->
+            val row = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
+            rowTiles.forEachIndexed { index, tile ->
+                val lp = LinearLayout.LayoutParams(0, dp(66), 1f)
+                if (index < rowTiles.lastIndex) lp.rightMargin = gap
+                row.addView(tile.root, lp)
+            }
+            if (rowTiles.size == 1) {
+                row.addView(
+                    View(context),
+                    LinearLayout.LayoutParams(0, 1, 1f).apply { leftMargin = gap },
                 )
             }
-            serverList.addView(opt.root)
+            providerGrid.addView(
+                row,
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                ).apply { if (rowIndex < providerRows.lastIndex) bottomMargin = gap },
+            )
         }
-        add(catalogueCard, serverList)
+        add(providersCard, providerGrid, 10)
 
 
         val wyzieSaved = Settings.apiKey() != null
@@ -749,46 +855,6 @@ object SettingsUi {
             tmdbStatus.text =
                 if (on) "Your key is used for metadata first." else "Built-in keys are in use."
             setState(tmdbCard, if (on) "Saved" else "Not set", on)
-        }
-
-
-        val showboxSaved = Settings.showboxToken() != null
-        val showboxCard = card(
-            "Extra server sign-in",
-            "Optional - one more server becomes available",
-            if (showboxSaved) "Saved" else "Not set",
-            showboxSaved,
-        )
-        val showboxStatus = label(
-            if (showboxSaved) "Signed in - the extra server is in use." else "The extra server stays off.",
-            11.5f, TEXT_DIM,
-        ).apply { setPadding(0, dp(10), 0, 0) }
-        val showboxSecret = secret(Settings.showboxToken().orEmpty(), "session value...")
-        val showboxKeyInput = showboxSecret.input
-        add(showboxCard, sectionLabel("FebBox", 14))
-        add(showboxCard, showboxSecret.root)
-        add(showboxCard, showboxStatus)
-        val showboxSignIn = chip("Sign in")
-        val showboxClear = action("Clear", false)
-        val showboxSave = action("Save", true)
-        addRow(showboxCard, 12, showboxSignIn)
-        addRow(showboxCard, 10, showboxClear, showboxSave)
-        showboxSignIn.setOnClickListener {
-            openLink(context, Settings.SHOWBOX_LINK)
-            showboxStatus.text = "Sign in in the browser, then paste the session value here."
-        }
-        showboxClear.setOnClickListener {
-            Settings.clearShowbox(context)
-            showboxKeyInput.setText("")
-            showboxStatus.text = "The extra server stays off."
-            setState(showboxCard, "Not set", false)
-        }
-        showboxSave.setOnClickListener {
-            Settings.saveShowbox(context, showboxKeyInput.text.toString())
-            val on = Settings.showboxToken() != null
-            showboxStatus.text =
-                if (on) "Signed in - the extra server is in use." else "The extra server stays off."
-            setState(showboxCard, if (on) "Saved" else "Not set", on)
         }
 
 

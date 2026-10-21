@@ -224,7 +224,7 @@ class IndStreamProvider : MainAPI() {
         val genre = TmdbService.parseGenreRow(request.data)
         val kind = parts[0].trim()
         val tmdbType = genre?.second ?: if (parts.getOrNull(1)?.trim() == "tv") "tv" else "movie"
-        val items = withTimeoutOrNull(if (kind == "foryou") 25_000L else 12_000L) {
+        val items = withTimeoutOrNull(if (kind == "foryou") 35_000L else 12_000L) {
             when (kind) {
                 "popular" -> TmdbService.popular(tmdbType, page)
                 "foryou" -> ForYouEngine.row(tmdbType, page)

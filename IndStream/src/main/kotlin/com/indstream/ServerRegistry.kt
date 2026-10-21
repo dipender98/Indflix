@@ -113,14 +113,6 @@ object ServerFarm {
             hasSubtitles = false, timeoutSec = 30,
         ),
         ServerSpec(
-            id = "showbox", name = "ShowBox",
-            idType = ServerIdType.IMDB,
-            movieUrl = "https://showbox.media/search?keyword={id}",
-            tvUrl = "https://showbox.media/search?keyword={id}",
-            referer = "https://showbox.media/",
-            hasSubtitles = false, timeoutSec = 40,
-        ),
-        ServerSpec(
             id = "vidrift", name = "Vidrift",
             idType = ServerIdType.TMDB,
             movieUrl = "https://embed.vidrift.net/embed/movie/{id}",
@@ -143,14 +135,6 @@ object ServerFarm {
             tvUrl = "https://api.wecollege.net/seed?mediaId={id}",
             referer = "https://www.movy.sx/",
             hasSubtitles = true, timeoutSec = 25,
-        ),
-        ServerSpec(
-            id = "vidspark", name = "VidSpark",
-            idType = ServerIdType.TMDB,
-            movieUrl = "https://vidspark.to/api/vidora/v1/movie/{id}",
-            tvUrl = "https://vidspark.to/api/vidora/v1/tv/{id}/{season}/{episode}",
-            referer = "https://vidspark.to/",
-            hasSubtitles = true, timeoutSec = 20,
         ),
         ServerSpec(
             id = "braflix", name = "Braflix",
@@ -177,23 +161,6 @@ object ServerFarm {
             referer = "https://new1.vegamovies.lease/",
             hasSubtitles = false, timeoutSec = 60,
             declaredLanguages = setOf("Hindi", "Tamil", "Telugu"),
-        ),
-        ServerSpec(
-            id = "hdmovie2", name = "HDMovie2",
-            idType = ServerIdType.TMDB,
-            supportsImdbMovie = true, supportsImdbTv = true,
-            movieUrl = "https://hdmovie2a.live/search/{id}/",
-            tvUrl = "https://hdmovie2a.live/search/{id}",
-            referer = "https://hdmovie2a.live/",
-            hasSubtitles = false, timeoutSec = 35,
-        ),
-        ServerSpec(
-            id = "olamovies", name = "OlaMovies",
-            idType = ServerIdType.TMDB,
-            movieUrl = "https://olamovies.rent/",
-            tvUrl = "https://olamovies.rent/",
-            referer = "https://olamovies.rent/",
-            hasSubtitles = false, timeoutSec = 35,
         ),
         ServerSpec(
             id = "hindmoviez", name = "HindMoviez",
@@ -225,14 +192,6 @@ object ServerFarm {
             movieUrl = "https://dudefilms.events/",
             tvUrl = "https://dudefilms.events/",
             referer = "https://dudefilms.events/",
-            hasSubtitles = false, timeoutSec = 60,
-        ),
-        ServerSpec(
-            id = "filmycab", name = "FilmyCab",
-            idType = ServerIdType.TMDB,
-            movieUrl = "https://filmycab.store/",
-            tvUrl = "https://filmycab.store/",
-            referer = "https://filmycab.store/",
             hasSubtitles = false, timeoutSec = 60,
         ),
         ServerSpec(

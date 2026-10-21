@@ -508,18 +508,6 @@ object StreamEngine {
             failServer(spec, "fast file family returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
             return emptyList()
         }
-        if (spec.id == "hdmovie2") {
-            val result = resolveHdmovie2(spec, tmdbId, imdbId, type, season, episode)
-            if (result.isNotEmpty()) { okServer(spec, start, "id-keyed file links", result.size); return result }
-            failServer(spec, "id-keyed file host returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
-            return emptyList()
-        }
-        if (spec.id == "olamovies") {
-            val result = resolveOlamovies(spec, tmdbId, type, season, episode)
-            if (result.isNotEmpty()) { okServer(spec, start, "archive file links", result.size); return result }
-            failServer(spec, "archive file host returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
-            return emptyList()
-        }
         if (spec.id == "hindmoviez") {
             val result = resolveLinkIndex(spec, tmdbId, type, season, episode)
             if (result.isNotEmpty()) { okServer(spec, start, "link index files", result.size); return result }
@@ -544,12 +532,6 @@ object StreamEngine {
             failServer(spec, "archive gateway returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
             return emptyList()
         }
-        if (spec.id == "filmycab") {
-            val result = resolveFileGateway(spec, tmdbId, type, season, episode)
-            if (result.isNotEmpty()) { okServer(spec, start, "file gateway links", result.size); return result }
-            failServer(spec, "file gateway returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
-            return emptyList()
-        }
         if (spec.id == "vidcore-api") {
             val result = resolveVidcore(spec, tmdbId, type, season, episode)
             if (result.isNotEmpty()) { okServer(spec, start, "vidcore api", result.size); return result }
@@ -562,13 +544,6 @@ object StreamEngine {
             failServer(spec, "bingr returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
             return emptyList()
         }
-        if (spec.id == "showbox") {
-            val result = resolveShowBox(spec, imdbId, type, season, episode)
-            if (result.isNotEmpty()) { okServer(spec, start, "showbox share chain", result.size); return result }
-            failServer(spec, "showbox returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
-            return emptyList()
-        }
-
         if (spec.id == "vidrift") {
             val result = resolveVidrift(spec, tmdbId, type, season, episode)
             if (result.isNotEmpty()) { okServer(spec, start, "vidrift embed", result.size); return result }
@@ -585,12 +560,6 @@ object StreamEngine {
             val result = resolveMovy(spec, tmdbId, type, season, episode)
             if (result.isNotEmpty()) { okServer(spec, start, "movy api", result.size); return result }
             failServer(spec, "movy returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
-            return emptyList()
-        }
-        if (spec.id == "vidspark") {
-            val result = resolveVidSpark(spec, tmdbId, type, season, episode)
-            if (result.isNotEmpty()) { okServer(spec, start, "vidspark api", result.size); return result }
-            failServer(spec, "vidspark returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
             return emptyList()
         }
         if (spec.id == "braflix") {
@@ -2635,51 +2604,6 @@ object StreamEngine {
         throw CleanMissException("no file links")
     }
 
-    private suspend fun resolveFileGateway(
-        spec: ServerSpec,
-        tmdbId: Int,
-        type: String,
-        season: Int,
-        episode: Int,
-    ): List<RawStream> {
-        val (title, year) = titleYear(tmdbId, type)
-        fun enc(s: String) = java.net.URLEncoder.encode(s, "UTF-8")
-        val base = Domains.base("filmycab") ?: "https://filmycab.store"
-        val search = fetchText("$base/?s=${enc(title)}", base)
-            ?: throw CleanMissException("no search answer")
-        val posts = rankedHits(titleHits(search, base), title, year)
-        if (posts.isEmpty()) throw CleanMissException("no match")
-        val out = mutableListOf<RawStream>()
-        for (postUrl in posts) {
-            val post = fetchText(postUrl, base) ?: continue
-            val gateways = Jsoup.parse(post, postUrl).select("a[href]").mapNotNull { a ->
-                val href = a.attr("abs:href").trim()
-                if (!href.contains("linkmake.in/view3", ignoreCase = true)) return@mapNotNull null
-                href
-            }.distinct()
-            for (gateway in gateways.take(2)) {
-                val page = fetchText(gateway, postUrl) ?: continue
-                val filePages = Jsoup.parse(page, gateway).select("a[href]").mapNotNull { a ->
-                    val href = a.attr("abs:href").trim()
-                    if (!href.contains("filesdl", ignoreCase = true)) return@mapNotNull null
-                    href to a.text().trim()
-                }.distinctBy { it.first }
-                val links = episodeOrSeason(filePages, { "${it.second} ${it.first}" }, type, season, episode).take(6)
-                for ((fileUrl, label) in links) {
-                    val filePage = fetchText(fileUrl, gateway) ?: continue
-                    val hosts = fileHostLinks(filePage, fileUrl)
-                    out += hostStreams(
-                        spec, hosts, label, fileUrl,
-                        releaseLanguageOf(label).ifBlank { releaseLanguageOf(post) },
-                        normalizeSizeToken(label).ifBlank { normalizeSizeToken(filePage) },
-                    )
-                }
-            }
-            if (out.isNotEmpty()) return out.distinctBy { it.url }
-        }
-        throw CleanMissException("no file links")
-    }
-
     private val FSL_SEEDS = listOf(
         Triple("vegamovies", "https://new1.vegamovies.lease", "https://new2.vegamovies.futbol"),
         Triple("rogmovies", "https://rogmovies.one", null),
@@ -2957,159 +2881,6 @@ object StreamEngine {
         return out
     }
 
-
-    private val HD2_SEEDS = listOf("https://hdmovie2a.live", "https://hdmovie2.biz.id")
-
-    internal fun hd2Anchors(html: String, base: String): List<Pair<String, String>> =
-        Jsoup.parse(html, base).select("a[href]").mapNotNull { a ->
-            val href = a.attr("abs:href").trim()
-            val keep = Regex("""/(?:download|episode|player|watch)/""", RegexOption.IGNORE_CASE).containsMatchIn(href)
-            if (!keep) null else href to a.text().trim()
-        }.filter { !it.first.contains("#") }.distinctBy { it.first }
-
-    private suspend fun resolveHdmovie2(
-        spec: ServerSpec,
-        tmdbId: Int,
-        imdbId: String?,
-        type: String,
-        season: Int,
-        episode: Int,
-    ): List<RawStream> {
-        val id = imdbId?.takeIf { it.startsWith("tt") } ?: tmdbId.toString().takeIf { tmdbId > 0 }
-            ?: throw CleanMissException("id-keyed host needs a usable id")
-        var post = ""
-        var postUrl = ""
-        val seeds = (listOfNotNull(Domains.base("hdmovie2")) + HD2_SEEDS).distinct()
-        for (seed in seeds) {
-            val searchHtml = withTimeoutOrNull(10_000L) {
-                catching { app.get("$seed/search/$id/", timeout = 10, headers = okHeaders(seed)).text }.getOrNull()
-            } ?: continue
-            val href = Jsoup.parse(searchHtml).select("a[href]").firstOrNull { a ->
-                Regex("""/(?:movies|series|episode|download)/""").containsMatchIn(a.attr("href"))
-            }?.attr("abs:href") ?: continue
-            postUrl = href
-            post = withTimeoutOrNull(10_000L) {
-                catching { app.get(postUrl, timeout = 10, headers = okHeaders(seed)).text }.getOrNull()
-            } ?: continue
-            if (post.isNotBlank()) break
-        }
-        if (post.isBlank()) throw CleanMissException("no live host answered for id=$id")
-        val anchors = episodeOrSeason(
-            hd2Anchors(post, postUrl), { "${it.first} ${it.second}" }, type, season, episode,
-        ).take(6)
-        val firstSize = normalizeSizeToken(post)
-        val lang = releaseLanguageOf(Regex("""(?i)\b(hindi|english|tamil|telugu)\b""").find(post)?.value.orEmpty())
-        val out = mutableListOf<RawStream>()
-        for ((href, label) in anchors) {
-            if (out.size >= 6) break
-            val page = withTimeoutOrNull(9_000L) {
-                catching { app.get(href, timeout = 9, headers = okHeaders(postUrl)).text }.getOrNull()
-            } ?: continue
-            val (pageHtml, pageUrl) = unwrapPages(page, href, 9)
-            val urls = (harvestUrls(pageHtml) + harvestJsUrls(pageHtml) +
-                listOfNotNull(harvestVideoSource(pageHtml, pageUrl))).distinct().take(2)
-            for (url in urls) {
-                val size = normalizeSizeToken(label).ifBlank { firstSize }
-                val qText = Regex("""\b(2160p|1440p|1080p|720p|480p)\b""", RegexOption.IGNORE_CASE)
-                    .find(label)?.value.orEmpty()
-                out += RawStream(
-                    spec.id, "${spec.name} $qText".trim(), url,
-                    url.contains(".m3u8", ignoreCase = true),
-                    Regex("""^https?://[^/]+""").find(url)?.value,
-                    releaseHeightOf(qText.ifBlank { label }),
-                    audioPriority = if (lang == "Hindi") 4 else 2,
-                    audioLabel = lang,
-                    sizeLabel = size,
-                )
-            }
-        }
-        if (out.isEmpty()) throw CleanMissException("no playable file links")
-        return out.distinctBy { it.url }
-    }
-
-
-    internal fun olaFileAnchors(html: String): List<Pair<String, String>> =
-        Jsoup.parse(html).select("a[href]").mapNotNull { a ->
-            val href = a.attr("abs:href").trim()
-            if (href.isBlank()) return@mapNotNull null
-            val keep = Regex(
-                """pixeldrain\.com/u/|gofile\.io/d/|krakenfiles\.com/view|hubcloud\.[a-z.]*/|hubdrive\.[a-z.]*/|1fichier\.com/|drive\.google\.com/file/""",
-                RegexOption.IGNORE_CASE,
-            ).containsMatchIn(href)
-            if (!keep) null else href to a.text().trim()
-        }.distinctBy { it.first }
-
-    internal fun olaDirectOf(href: String): String? {
-        val pm = Regex("""pixeldrain\.com/u/([A-Za-z0-9_\-]+)""", RegexOption.IGNORE_CASE).find(href) ?: return null
-        return "https://pixeldrain.com/api/file/${pm.groupValues[1]}"
-    }
-
-    private suspend fun resolveOlamovies(
-        spec: ServerSpec,
-        tmdbId: Int,
-        type: String,
-        season: Int,
-        episode: Int,
-    ): List<RawStream> {
-        val meta = try {
-            TmdbService.fetchMeta(tmdbId, type)
-        } catch (c: kotlinx.coroutines.CancellationException) {
-            throw c
-        } catch (t: Throwable) {
-            null
-        }
-        val title = meta?.name?.takeIf { it.isNotBlank() }
-            ?: throw CleanMissException("no title for tmdb=$tmdbId")
-        val year = meta?.year?.take(4)
-        fun enc(s: String) = java.net.URLEncoder.encode(s, "UTF-8")
-        val base = Domains.base("olamovies") ?: "https://olamovies.rent"
-        val searchHtml = withTimeoutOrNull(9_000L) {
-            catching { app.get("$base/?s=${enc(title)}", timeout = 9, headers = okHeaders(base)).text }.getOrNull()
-        } ?: throw CleanMissException("no search answer from archive host")
-        val ranked = hubParseCards(searchHtml, base)
-            .map { it to TitleMatch.titleDistance(title, it.second) }
-            .sortedByDescending { it.second }
-            .take(2)
-            .filter { (card, _) -> year == null || card.second.contains(year) }
-        if (ranked.isEmpty()) throw CleanMissException("no match")
-        val out = mutableListOf<RawStream>()
-        for ((hitPair, _) in ranked) {
-            val permalink = hitPair.first
-            val post = withTimeoutOrNull(9_000L) {
-                catching { app.get(permalink, timeout = 9, headers = okHeaders(base)).text }.getOrNull()
-            } ?: continue
-            val anchors = episodeOrSeason(
-                olaFileAnchors(post), { "${it.first} ${it.second}" }, type, season, episode,
-            )
-            val firstSize = normalizeSizeToken(post)
-            val lang = releaseLanguageOf(Regex("""(?i)\b(hindi|english|tamil|telugu)\b""").find(post)?.value.orEmpty())
-            for ((href, label) in anchors.take(5)) {
-                if (out.size >= 6) break
-                val directUrls: List<Pair<String, String>> = when {
-                    olaDirectOf(href) != null -> listOf(olaDirectOf(href)!! to label)
-                    Regex("""hubcloud|hubdrive""", RegexOption.IGNORE_CASE).containsMatchIn(href) ->
-                        hubDriveFiles(href.trimEnd('/'), base)
-                    else -> emptyList()
-                }
-                for ((url, q) in directUrls) {
-                    val qText = Regex("""\b(2160p|1440p|1080p|720p|480p)\b""", RegexOption.IGNORE_CASE)
-                        .find("$label $q")?.value.orEmpty()
-                    out += RawStream(
-                        spec.id, "${spec.name} $qText".trim(), url,
-                        url.contains(".m3u8", ignoreCase = true),
-                        Regex("""^https?://[^/]+""").find(url)?.value ?: base,
-                        releaseHeightOf(qText.ifBlank { label }),
-                        audioPriority = if (lang == "Hindi") 4 else 2,
-                        audioLabel = lang,
-                        sizeLabel = normalizeSizeToken(label).ifBlank { firstSize },
-                    )
-                }
-            }
-            if (out.isNotEmpty()) break
-        }
-        if (out.isEmpty()) throw CleanMissException("no file links")
-        return out.distinctBy { it.url }
-    }
 
     private const val VOD_API = "https://api3.devcorp.me"
     private const val VOD_REFERER = "https://onetouchtv.xyz/"
@@ -4242,51 +4013,6 @@ object StreamEngine {
     }
 
 
-    private const val VIDSPARK_KEY = "3a67e8866ae1d2bb9e81fe7f73315a56eb3bdf5e3e755c7554c8be6910aa6b13"
-
-    private suspend fun resolveVidSpark(
-        spec: ServerSpec, tmdbId: Int, type: String, season: Int, episode: Int,
-    ): List<RawStream> {
-        if (type != "movie" && (season <= 0 || episode <= 0)) return emptyList()
-        val base = "https://vidspark.to"
-        val path = if (type == "movie") "/api/vidora/v1/movie/$tmdbId"
-        else "/api/vidora/v1/tv/$tmdbId/$season/$episode"
-        val headers = mapOf(
-            "User-Agent" to HttpKit.userAgent,
-            "Referer" to "$base/",
-            "Origin" to base,
-            "x-player-key" to VIDSPARK_KEY,
-        )
-        val text = withTimeoutOrNull(12_000L) {
-            catching { app.get("$base$path", timeout = 12, headers = headers).text }.getOrNull()
-        } ?: run { Log.w("VidSpark", "api no response"); return emptyList() }
-        val out = vidsparkSources(text).map { s ->
-            RawStream(
-                serverId = spec.id, serverName = spec.name,
-                url = s.url, isM3u8 = s.url.contains(".m3u8", true),
-                referer = "$base/", qualityHint = heightHintOf(s.quality),
-                extraHeaders = mapOf("User-Agent" to HttpKit.userAgent, "Referer" to "$base/"),
-            )
-        }
-        Log.d("VidSpark", "got ${out.size} streams for $type/$tmdbId")
-        return out
-    }
-
-    internal data class VidSparkSource(val url: String, val quality: String)
-
-    internal fun vidsparkSources(jsonText: String): List<VidSparkSource> {
-        val root = catching { org.json.JSONObject(jsonText) }.getOrNull() ?: return emptyList()
-        val arr = root.optJSONArray("sources") ?: return emptyList()
-        val out = ArrayList<VidSparkSource>(arr.length())
-        for (i in 0 until arr.length()) {
-            val o = arr.optJSONObject(i) ?: continue
-            val url = o.optString("url").takeIf { it.startsWith("http") } ?: continue
-            out += VidSparkSource(url, o.optString("quality", ""))
-        }
-        return out
-    }
-
-
     private suspend fun resolveBraflix(
         spec: ServerSpec, id: String, type: String, season: Int, episode: Int,
     ): List<RawStream> {
@@ -4321,121 +4047,6 @@ object StreamEngine {
             ?.takeIf { it.isNotBlank() } ?: return null
         val quality = result.optJSONObject("source")?.optString("quality").orEmpty()
         return BraflixSource(stream, quality)
-    }
-
-    internal fun normalizeShowboxToken(raw: String?): String? {
-        val t = raw?.trim().orEmpty()
-        if (t.isBlank()) return null
-        return if (t.startsWith("ui=", true)) t else "ui=$t"
-    }
-
-    internal fun showboxSearchHref(html: String): String? =
-        (Regex("""class="film-name[^"]*"[^>]*>\s*<a[^>]+href="([^"]+)"""", RegexOption.IGNORE_CASE).find(html)
-            ?: Regex("""<a[^>]+href="([^"]+)"[^>]*class="[^"]*film-name""", RegexOption.IGNORE_CASE).find(html))
-            ?.groupValues?.get(1)
-
-    internal fun showboxHeadingId(html: String): Int? =
-        Regex("""class="heading-name[^"]*"[^>]*>[\s\S]*?<a[^>]+href="([^"]+)"""", RegexOption.IGNORE_CASE)
-            .find(html)?.groupValues?.get(1)?.trimEnd('/')?.substringAfterLast('/')?.toIntOrNull()
-
-    internal fun showboxShareKey(jsonText: String): String? {
-        val root = catching { org.json.JSONObject(jsonText) }.getOrNull() ?: return null
-        val link = root.optJSONObject("data")?.optString("link").orEmpty()
-        return link.trimEnd('/').substringAfterLast('/').takeIf { it.isNotBlank() }
-    }
-
-    internal data class ShowboxFile(val fid: Long, val name: String, val isDir: Boolean)
-
-    internal fun showboxFiles(jsonText: String): List<ShowboxFile> {
-        val root = catching { org.json.JSONObject(jsonText) }.getOrNull() ?: return emptyList()
-        val arr = root.optJSONObject("data")?.optJSONArray("file_list") ?: return emptyList()
-        val out = ArrayList<ShowboxFile>(arr.length())
-        for (i in 0 until arr.length()) {
-            val o = arr.optJSONObject(i) ?: continue
-            val fid = o.optLong("fid", -1L)
-            if (fid <= 0) continue
-            out += ShowboxFile(fid, o.optString("file_name", ""), o.optInt("is_dir", 0) != 0)
-        }
-        return out
-    }
-
-    internal fun showboxSeasonFolder(files: List<ShowboxFile>, season: Int): ShowboxFile? {
-        val s2 = season.toString().padStart(2, '0')
-        return files.firstOrNull { it.isDir && (it.name.contains("season $season", true) || it.name.contains("s$s2", true)) }
-            ?: files.filter { it.isDir }.singleOrNull()
-    }
-
-    internal fun showboxEpisodeFile(files: List<ShowboxFile>, episode: Int): ShowboxFile? {
-        val e2 = episode.toString().padStart(2, '0')
-        return files.firstOrNull {
-            !it.isDir && (it.name.contains("e$e2", true) || it.name.contains("ep$e2", true) || it.name.contains("episode $episode", true))
-        } ?: files.filter { !it.isDir }.singleOrNull()
-    }
-
-    internal fun showboxQualities(html: String): List<Pair<String, Int>> {
-        val out = ArrayList<Pair<String, Int>>()
-        for (m in Regex("""<div[^>]*class="[^"]*file_quality[^"]*"[^>]*>""", RegexOption.IGNORE_CASE).findAll(html)) {
-            val tag = m.value
-            val url = Regex("""data-url="([^"]+)"""").find(tag)?.groupValues?.get(1)?.replace("\\/", "/") ?: continue
-            if (!url.startsWith("http")) continue
-            val quality = Regex("""data-quality="([^"]+)"""").find(tag)?.groupValues?.get(1).orEmpty()
-            out += url to heightHintOf(quality)
-        }
-        return out
-    }
-
-    private suspend fun resolveShowBox(
-        spec: ServerSpec, imdbId: String?, type: String, season: Int, episode: Int,
-    ): List<RawStream> {
-        val token = normalizeShowboxToken(Settings.showboxToken()) ?: return emptyList()
-        val imdb = imdbId?.takeIf { it.startsWith("tt") } ?: return emptyList()
-        val sb = "https://showbox.media"
-        val fb = "https://www.febbox.com"
-
-        suspend fun get(url: String, extra: Map<String, String> = emptyMap()): String? =
-            withTimeoutOrNull(8_000L) {
-                catching { app.get(url, timeout = 8, headers = okHeaders("$sb/") + extra).text }.getOrNull()
-            }
-
-        val searchHtml = get("$sb/search?keyword=$imdb") ?: return emptyList()
-        val detailPath = showboxSearchHref(searchHtml)
-            ?: run { Log.w("ShowBox", "no search hit for $imdb"); return emptyList() }
-        val detailUrl = if (detailPath.startsWith("http")) detailPath else "$sb$detailPath"
-        val detailHtml = get(detailUrl) ?: return emptyList()
-        val mediaId = showboxHeadingId(detailHtml)
-            ?: run { Log.w("ShowBox", "no media id for $imdb"); return emptyList() }
-
-        val kind = if (type == "tv") 2 else 1
-        val shareJson = get("$sb/index/share_link?id=$mediaId&type=$kind") ?: return emptyList()
-        val shareKey = showboxShareKey(shareJson)
-            ?: run { Log.w("ShowBox", "no share key for media=$mediaId"); return emptyList() }
-
-        val rootFiles = showboxFiles(get("$fb/file/file_share_list?share_key=$shareKey") ?: return emptyList())
-        val fid = if (type == "tv" && season > 0 && episode > 0) {
-            val folder = showboxSeasonFolder(rootFiles, season) ?: return emptyList()
-            val epFiles = showboxFiles(
-                get("$fb/file/file_share_list?share_key=$shareKey&parent_id=${folder.fid}&page=1") ?: return emptyList(),
-            )
-            showboxEpisodeFile(epFiles, episode)?.fid
-        } else {
-            rootFiles.firstOrNull { !it.isDir }?.fid
-        } ?: run { Log.w("ShowBox", "no playable file in share $shareKey"); return emptyList() }
-
-        val qHtml = get(
-            "$fb/console/video_quality_list?fid=$fid&share_key=$shareKey",
-            mapOf("Cookie" to token),
-        ) ?: run { Log.w("ShowBox", "quality list failed (token?)"); return emptyList() }
-        val qualities = showboxQualities(qHtml)
-        if (qualities.isEmpty()) { Log.w("ShowBox", "no qualities (token rejected?)"); return emptyList() }
-        Log.d("ShowBox", "got ${qualities.size} qualities for $type/$imdb")
-        return qualities.map { (url, height) ->
-            RawStream(
-                serverId = spec.id, serverName = spec.name,
-                url = url, isM3u8 = url.contains(".m3u8", true),
-                referer = "$fb/", qualityHint = height,
-                extraHeaders = mapOf("Referer" to "$fb/", "Range" to "bytes=0-"),
-            )
-        }
     }
 
     private suspend fun resolveVidem(

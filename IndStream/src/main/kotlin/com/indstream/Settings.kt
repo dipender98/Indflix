@@ -11,14 +11,9 @@ object Settings {
 
     const val TMDB_LINK = "https://www.themoviedb.org/settings/api"
 
-    const val SHOWBOX_LINK = "https://www.febbox.com/"
-
-    const val SHOWBOX_HOST = "https://www.febbox.com"
-
     private const val PREFS = "indstream_settings"
     private const val KEY = "wyzie_api_key"
     private const val TMDB_KEY = "tmdb_api_key"
-    private const val SHOWBOX_KEY = "showbox_token"
     private const val AI_KEY = "ai_api_key"
     private const val AI_KEY_PREFIX = "ai_api_key_"
     private const val AI_MODEL = "ai_model"
@@ -107,27 +102,6 @@ object Settings {
     fun clearTmdb(context: Context) {
         saveTmdb(context, "")
     }
-
-    fun showboxToken(): String? {
-        if (!showboxLoaded) loadShowbox()
-        return showboxCached?.takeIf { it.isNotBlank() }
-    }
-
-    fun saveShowbox(context: Context, raw: String) {
-        val token = raw.trim()
-        runCatching {
-            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-                .edit().putString(SHOWBOX_KEY, token).apply()
-        }
-        showboxCached = token
-        showboxLoaded = true
-        appContext = context.applicationContext
-    }
-
-    fun clearShowbox(context: Context) {
-        saveShowbox(context, "")
-    }
-
 
     private val aiKeys = java.util.concurrent.ConcurrentHashMap<String, String>()
 
@@ -300,6 +274,20 @@ object Settings {
         appContext = context.applicationContext
     }
 
+    fun saveAllServersEnabled(context: Context, ids: Collection<String>, on: Boolean) {
+        runCatching {
+            val edit = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            ids.forEach { id ->
+                if (on) edit.remove(SERVER_OFF_PREFIX + id)
+                else edit.putBoolean(SERVER_OFF_PREFIX + id, true)
+            }
+            edit.apply()
+        }
+        serverOff = if (on) serverOff - ids else serverOff + ids
+        serversLoaded = true
+        appContext = context.applicationContext
+    }
+
     private fun loadServers() {
         val ctx = appContext ?: return
         serverOff = runCatching {
@@ -332,29 +320,6 @@ object Settings {
         shuffleRowsCached = on
         appContext = context.applicationContext
     }
-
-    @Volatile
-    private var showboxCached: String? = null
-
-    @Volatile
-    private var showboxLoaded = false
-
-    private fun loadShowbox() {
-        val ctx = appContext ?: return
-        showboxCached = runCatching {
-            ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(SHOWBOX_KEY, "").orEmpty()
-        }.getOrDefault("")
-        showboxLoaded = true
-    }
-
-    internal fun uiTokenFromCookie(cookie: String?): String? =
-        cookie?.split(';')
-            ?.asSequence()
-            ?.map { it.trim() }
-            ?.firstOrNull { it.startsWith("ui=", ignoreCase = true) }
-            ?.substringAfter('=')
-            ?.trim()
-            ?.takeIf { it.isNotEmpty() }
 
     @Volatile
     private var tmdbCached: String? = null

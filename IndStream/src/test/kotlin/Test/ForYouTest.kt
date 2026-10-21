@@ -45,6 +45,7 @@ class ForYouTest {
         assertEquals(2019, show.year)
         assertTrue(show.watched)
         assertEquals(7.0, show.rating)
+        assertEquals("completed", show.status)
         assertTrue(show.lastActivityAt > 0)
         assertEquals("tv", out.first { it.title == "Some Anime" }.type)
         val movie = out.first { it.title == "Seen Movie" }
@@ -80,6 +81,29 @@ class ForYouTest {
         assertEquals(0L, SimklParser.parseTime("not-a-date"))
     }
 
+    @Test
+    fun dropped_and_low_rated_titles_carry_negative_weight() {
+        val now = System.currentTimeMillis()
+        val dropped = ProfileTitle(1, null, "Dropped", 2020, "movie", false, 8.0, now, "dropped")
+        val low = ProfileTitle(2, null, "Low", 2020, "movie", true, 2.0, now)
+        val loved = ProfileTitle(3, null, "Loved", 2020, "movie", true, 9.0, now)
+        val saved = ProfileTitle(4, null, "Saved", 2020, "movie", false, 0.0, 0L)
+        assertTrue(dropped.weight < 0.0)
+        assertTrue(low.weight < 0.0)
+        assertTrue(loved.weight > 1.0)
+        assertTrue(saved.weight > 0.0)
+    }
+
+    @Test
+    fun parser_preserves_dropped_status() {
+        val json = """{"movies": [{"status": "dropped", "user_rating": 8,
+            "movie": {"title": "Nope", "ids": {"tmdb": "7"}}}]}"""
+        val item = SimklParser.parse(json).single()
+        assertTrue(!item.watched)
+        assertTrue(item.dropped)
+        assertTrue(item.weight < 0.0)
+    }
+
 
     private fun candidate(id: Int, title: String, genres: String = "Action") =
         AiService.Candidate(id, title, "2020", 7.5, genres)
@@ -108,13 +132,50 @@ class ForYouTest {
     }
 
     @Test
+    fun prompt_adds_taste_metadata_and_candidate_overviews() {
+        val watched = listOf(
+            ProfileTitle(1, null, "Loved", 2019, "movie", true, 9.0, System.currentTimeMillis()),
+            ProfileTitle(2, null, "Dropped", 2021, "movie", false, 2.0, System.currentTimeMillis(), "dropped"),
+        )
+        val pool = listOf(
+            AiService.Candidate(
+                9, "Pool Title", "2024", 8.1, "Drama, Thriller", "hi",
+                "A slow-burn family drama set in Mumbai.", 1200,
+            ),
+        )
+        val taste = AiService.Taste(
+            genres = listOf("Drama", "Thriller"),
+            languages = listOf("hi"),
+            era = 2019,
+            avoidGenres = listOf("Horror"),
+        )
+        val prompt = AiService.buildPrompt(watched, pool, 10, taste)
+        assertTrue(prompt.contains("A slow-burn family drama"))
+        assertTrue(prompt.contains("Preferred genres: Drama, Thriller"))
+        assertTrue(prompt.contains("Preferred original languages: hi"))
+        assertTrue(prompt.contains("around 2019"))
+        assertTrue(prompt.contains("Genres to avoid: Horror"))
+        assertTrue(prompt.contains("dropped"))
+        assertTrue(prompt.contains("up to 10"))
+    }
+
+    @Test
     fun extract_ids_reads_json_array_from_prose() {
         assertEquals(listOf(5, 9), AiService.extractIds("Sure: [5, 9] as requested"))
         assertEquals(listOf(3, 4, 7), AiService.extractIds("[3, 4, \"7\", 3]"))
+        assertEquals(
+            listOf(5, 9),
+            AiService.extractIds("""The best matches are [{"id":5},{"id":9}] for this profile."""),
+        )
+        assertEquals(
+            listOf(5),
+            AiService.extractIds("""[{"id":5,"genres":[1,2]}]"""),
+        )
         assertTrue(AiService.extractIds("no array here").isEmpty())
         assertTrue(AiService.extractIds("[").isEmpty())
         assertTrue(AiService.extractIds("[0, -2]").isEmpty())
     }
+
 
     @Test
     fun extract_text_reads_both_provider_shapes() {
@@ -124,6 +185,8 @@ class ForYouTest {
         assertEquals("[7]", AiService.extractText(parts, gemini = false))
         val gemini = """{"candidates":[{"content":{"parts":[{"text":"[{\"id\":8}]"}]}}]}"""
         assertEquals("[{\"id\":8}]", AiService.extractText(gemini, gemini = true))
+        val reasoning = """{"choices":[{"message":{"content":null,"reasoning":"[4]"}}]}"""
+        assertEquals("[4]", AiService.extractText(reasoning, gemini = false))
         assertNull(AiService.extractText("""{"choices":[]}""", gemini = false))
         assertNull(AiService.extractText("junk", gemini = true))
     }
@@ -160,5 +223,33 @@ class ForYouTest {
             ForYouEngine.score(item(6, listOf(999), 5.0, 0.0), mapOf(28 to 5.0), 0),
             ForYouEngine.score(item(6, emptyList(), 5.0, 0.0), mapOf(28 to 5.0), 0),
         )
+    }
+
+    @Test
+    fun disliked_genres_and_languages_change_the_score() {
+        val plain = ForYouEngine.Taste(genres = mapOf(28 to 2.0))
+        val disliked = ForYouEngine.Taste(genres = mapOf(28 to 2.0), dislikes = mapOf(27 to 1.0))
+        val horror = item(10, listOf(27), 8.0, 10.0)
+        val action = item(11, listOf(28), 8.0, 10.0)
+        assertTrue(ForYouEngine.score(horror, plain, 0) > ForYouEngine.score(horror, disliked, 0))
+        assertEquals(ForYouEngine.score(action, plain, 0), ForYouEngine.score(action, disliked, 0))
+
+        val taste = ForYouEngine.Taste(languages = mapOf("hi" to 1.0), era = 2020)
+        val hindi = item(12, emptyList(), 7.0, 0.0).copy(originalLanguage = "hi", year = "2020")
+        val english = item(13, emptyList(), 7.0, 0.0).copy(originalLanguage = "en", year = "1995")
+        assertTrue(ForYouEngine.score(hindi, taste, 0) > ForYouEngine.score(english, taste, 0))
+    }
+
+    @Test
+    fun diversify_breaks_up_near_duplicates() {
+        val first = item(20, listOf(28), 8.0, 0.0).copy(originalLanguage = "en", year = "2020")
+        val duplicate = item(21, listOf(28), 8.0, 0.0).copy(originalLanguage = "en", year = "2020")
+        val different = item(22, listOf(35), 8.0, 0.0).copy(originalLanguage = "hi", year = "1995")
+        val picked = ForYouEngine.diversify(
+            listOf(first, duplicate, different),
+            2,
+            mapOf(20 to 1.0, 21 to 0.5, 22 to 0.45),
+        )
+        assertEquals(listOf(20, 22), picked.map { it.tmdbId })
     }
 }

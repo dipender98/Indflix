@@ -4,6 +4,8 @@ import com.indstream.HttpKit
 import com.indstream.Settings
 import com.lagradost.cloudstream3.app
 import java.net.URLEncoder
+import java.util.Locale
+import kotlinx.coroutines.CancellationException
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -24,17 +26,28 @@ object AiService {
         }
     }
 
+    data class Taste(
+        val genres: List<String> = emptyList(),
+        val languages: List<String> = emptyList(),
+        val era: Int? = null,
+        val avoidGenres: List<String> = emptyList(),
+    )
+
     data class Candidate(
         val id: Int,
         val title: String,
         val year: String?,
         val rating: Double,
         val genres: String,
+        val language: String = "",
+        val overview: String = "",
+        val votes: Int = 0,
     )
 
     private const val SYSTEM =
-        "You are a film and series recommendation engine. You pick only titles that closely match " +
-            "the user's taste. You answer only with a JSON array of integers."
+        "You are a film and series recommendation engine. You judge tone, theme, era, language " +
+            "and quality, not just popularity. You pick only titles that closely match the user's " +
+            "taste. You answer only with a JSON array of integers."
 
     fun isConfigured(): Boolean = !Settings.aiApiKey().isNullOrBlank()
 
@@ -42,13 +55,14 @@ object AiService {
         watched: List<ProfileTitle>,
         candidates: List<Candidate>,
         count: Int,
+        taste: Taste = Taste(),
     ): List<Int> {
         val provider = Provider.from(Settings.aiProviderId())
         val key = Settings.aiApiKey()?.takeIf { it.isNotBlank() } ?: return emptyList()
         val base = baseUrl(provider)
         val model = Settings.aiModel(provider.id).takeIf { it.isNotBlank() } ?: provider.defaultModel
         if (base.isBlank() || model.isBlank()) return emptyList()
-        val prompt = buildPrompt(watched, candidates, count)
+        val prompt = buildPrompt(watched, candidates, count, taste)
         val body = post(provider, base, model, key, prompt) ?: return emptyList()
         return extractIds(extractText(body, provider == Provider.GEMINI) ?: return emptyList())
     }
@@ -199,46 +213,124 @@ object AiService {
         watched: List<ProfileTitle>,
         candidates: List<Candidate>,
         count: Int,
+        taste: Taste = Taste(),
     ): String {
-        val seen = watched.take(40).joinToString("\n") { w ->
-            "- ${w.title.trim().take(48)} | ${w.year ?: "?"} | rating ${w.rating.toInt()} | " +
-                if (w.watched) "watched" else "on list"
-        }
-        val pool = candidates.take(50).joinToString("\n") { c ->
-            "- ${c.id} | ${c.title.trim().take(48)} | ${c.year ?: "?"} | ${c.rating} | ${c.genres.take(40)}"
-        }
+        val loved = watched.filter { it.rating >= 8.0 && it.weight > 0.0 }
+            .sortedByDescending { it.rating }.take(10)
+        val liked = watched.filter { it.rating >= 6.0 && it.rating < 8.0 && it.weight > 0.0 }
+            .sortedByDescending { it.rating }.take(10)
+        val disliked = watched.filter { it.weight < 0.0 }
+            .sortedBy { if (it.rating > 0) it.rating else 5.0 }.take(8)
+        val saved = watched.filter {
+            !it.watched && it.weight > 0.0 &&
+                it !in loved && it !in liked && it !in disliked
+        }.sortedByDescending { it.weight }.take(8)
+        val other = watched.filter {
+            it !in loved && it !in liked && it !in disliked && it !in saved
+        }.sortedByDescending { it.lastActivityAt }.take(8)
+        val sections = listOf(
+            "Strong positive signals (rated 8+):" to loved,
+            "Positive signals (rated 6-7.9):" to liked,
+            "Dropped or rated low - avoid this kind of title:" to disliked,
+            "On the watchlist:" to saved,
+            "Other library entries:" to other,
+        ).filter { it.second.isNotEmpty() }
+        val pool = candidates.take(45)
         return buildString {
-            appendLine("Titles the user already watched or wants to watch:")
-            appendLine(seen.ifBlank { "- (none)" })
-            appendLine()
+            if (sections.isNotEmpty()) {
+                appendLine("User library:")
+                sections.forEach { (label, titles) ->
+                    appendLine(label)
+                    titles.forEach { appendLine(it.promptLine()) }
+                }
+                appendLine()
+            }
+            if (taste.genres.isNotEmpty() || taste.languages.isNotEmpty() ||
+                taste.era != null || taste.avoidGenres.isNotEmpty()
+            ) {
+                appendLine("User taste summary:")
+                if (taste.genres.isNotEmpty()) {
+                    appendLine("- Preferred genres: ${taste.genres.joinToString(", ")}")
+                }
+                if (taste.languages.isNotEmpty()) {
+                    appendLine("- Preferred original languages: ${taste.languages.joinToString(", ")}")
+                }
+                taste.era?.let { appendLine("- Preferred release era: around $it") }
+                if (taste.avoidGenres.isNotEmpty()) {
+                    appendLine("- Genres to avoid: ${taste.avoidGenres.joinToString(", ")}")
+                }
+                appendLine()
+            }
             appendLine("Candidate titles:")
-            appendLine(pool.ifBlank { "- (none)" })
+            pool.forEach { appendLine(it.promptLine()) }
             appendLine()
             appendLine("Pick up to $count candidates the user is most likely to enjoy, best first.")
-            appendLine("Match on genre, tone, era and rating; prefer strong fits over popular titles.")
-            appendLine("Skip anything only loosely related - never pad the list with weak matches.")
-            appendLine("Only use ids from the candidate list, never repeat an id.")
-            appendLine("Answer with a JSON array of the tmdb ids only, for example [123, 456]. No other text.")
+            appendLine("Judge tone, theme, era, language and quality from the overview and metadata, not name recognition alone.")
+            appendLine("Prefer strong taste matches over blockbusters; a lesser-known fit beats a famous mismatch.")
+            appendLine("Skip anything only loosely related. Never include a title the user already watched, dropped or saved.")
+            appendLine("Keep the shortlist varied: avoid near-identical genres, eras and languages unless the taste is very narrow.")
+            appendLine("Only use ids from the candidate list and never repeat an id.")
+            appendLine("Think briefly if needed, then answer with a JSON array of the tmdb ids only, for example [123, 456]. No other text.")
         }
+    }
+
+    private fun ProfileTitle.promptLine(): String {
+        val status = when {
+            dropped -> "dropped"
+            watched -> "watched"
+            else -> "watchlist"
+        }
+        val rating = if (rating > 0) "rated ${rating.toInt()}/10" else "unrated"
+        return "- ${title.trim().take(48)} | ${year ?: "?"} | $rating | $status"
+    }
+
+    private fun Candidate.promptLine(): String {
+        val rating = if (rating > 0) String.format(Locale.US, "%.1f", rating) else "?"
+        val language = language.ifBlank { "?" }
+        val genres = genres.ifBlank { "?" }.take(48)
+        val synopsis = overview.replace(Regex("\\s+"), " ").trim().take(180)
+        return "- $id | ${title.trim().take(48)} | ${year ?: "?"} | " +
+            "$rating/10 (${votesLabel(votes)} votes) | $language | $genres | $synopsis"
+    }
+
+    private fun votesLabel(votes: Int): String = when {
+        votes >= 1_000_000 -> "${votes / 1_000_000}M"
+        votes >= 1_000 -> "${votes / 1_000}k"
+        else -> votes.toString()
     }
 
     internal fun extractIds(text: String): List<Int> {
         val start = text.indexOf('[')
         val end = text.lastIndexOf(']')
-        if (start < 0 || end <= start) return emptyList()
-        return try {
-            val arr = JSONArray(text.substring(start, end + 1))
-            (0 until arr.length()).mapNotNull { i ->
-                when (val v = arr.opt(i)) {
-                    is Int -> v
-                    is Number -> v.toInt()
-                    is String -> v.trim().toIntOrNull()
-                    else -> null
-                }
-            }.filter { it > 0 }.distinct()
-        } catch (e: Exception) {
-            emptyList()
+        if (start >= 0 && end > start) {
+            val whole = parseIds(text.substring(start, end + 1))
+            if (whole.isNotEmpty()) return whole
         }
+        val arrays = Regex("\\[[^\\[\\]]*]").findAll(text).map { it.value }
+        var best = emptyList<Int>()
+        for (raw in arrays) {
+            val ids = parseIds(raw)
+            if (ids.isNotEmpty() && ids.size >= best.size) best = ids
+        }
+        return best
+    }
+
+    private fun parseIds(raw: String): List<Int> = try {
+        val arr = JSONArray(raw)
+        (0 until arr.length()).mapNotNull { i ->
+            when (val value = arr.opt(i)) {
+                is Int -> value
+                is Number -> value.toInt()
+                is String -> value.trim().toIntOrNull()
+                is JSONObject -> value.optInt("id", 0).takeIf { it > 0 }
+                    ?: value.optString("id").toIntOrNull()
+                    ?: value.optString("tmdb_id").toIntOrNull()
+                    ?: value.optString("tmdbId").toIntOrNull()
+                else -> null
+            }
+        }.filter { it > 0 }.distinct()
+    } catch (e: Exception) {
+        emptyList()
     }
 
     internal fun extractText(body: String, gemini: Boolean): String? {
@@ -252,15 +344,17 @@ object AiService {
                         .joinToString("")
                 }?.takeIf { it.isNotBlank() }
             } else {
-                val content = root.optJSONArray("choices")?.optJSONObject(0)
-                    ?.optJSONObject("message")?.opt("content")
-                when (content) {
+                val message = root.optJSONArray("choices")?.optJSONObject(0)
+                    ?.optJSONObject("message")
+                val content = message?.opt("content")
+                val text = when (content) {
                     is String -> content.takeIf { it.isNotBlank() }
                     is JSONArray -> (0 until content.length())
                         .mapNotNull { content.optJSONObject(it)?.optString("text") }
                         .joinToString("").takeIf { it.isNotBlank() }
                     else -> null
                 }
+                text ?: message?.optString("reasoning")?.takeIf { it.isNotBlank() }
             }
         } catch (e: Exception) {
             null
@@ -297,8 +391,8 @@ object AiService {
                     mapOf("role" to "user", "parts" to listOf(mapOf("text" to prompt))),
                 ),
                 "generationConfig" to mapOf(
-                    "temperature" to 0.4,
-                    "maxOutputTokens" to 900,
+                    "temperature" to 0.25,
+                    "maxOutputTokens" to 1400,
                     "responseMimeType" to "application/json",
                 ),
             )
@@ -309,8 +403,8 @@ object AiService {
                     mapOf("role" to "system", "content" to SYSTEM),
                     mapOf("role" to "user", "content" to prompt),
                 ),
-                "temperature" to 0.4,
-                "max_tokens" to 900,
+                "temperature" to 0.25,
+                "max_tokens" to 1400,
             )
         }
 
@@ -320,12 +414,16 @@ object AiService {
         model: String,
         key: String,
         prompt: String,
-    ): String? = runCatching {
+    ): String? = try {
         app.post(
             endpoint(provider, base, model, key),
-            timeout = 25,
+            timeout = 22,
             headers = headers(provider, key),
             json = body(provider, model, prompt),
         ).text
-    }.getOrNull()
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        null
+    }
 }

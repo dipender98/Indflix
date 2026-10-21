@@ -55,6 +55,7 @@ object SimklParser {
                 watched = watched,
                 rating = rating,
                 lastActivityAt = parseTime(entry.optString("last_watched_at")),
+                status = status,
             )
         }
     }

@@ -119,9 +119,7 @@ class ServerAdditionsTest {
     @Test
     fun hubDisabledJsGateway() {
         assertNotNull(ServerFarm.allServers.firstOrNull { it.id == "4khdhub" })
-        for (id in setOf("fsl", "hdmovie2", "olamovies")) {
-            assertNotNull(ServerFarm.allServers.firstOrNull { it.id == id }, "$id must be present")
-        }
+        assertNotNull(ServerFarm.allServers.firstOrNull { it.id == "fsl" })
     }
 
     @Test
@@ -346,25 +344,6 @@ class ServerAdditionsTest {
             listOf("e1", "e2", "e5"),
             StreamEngine.episodeFirstOrder(listOf("e1", "e2", "e5"), "movie", 2, 5),
         )
-    }
-
-    @Test
-    fun hd2Anchors_downloadPaths() {
-        val html = "<a href=\"/download/tt1-film-480p/\">480p</a>" +
-            "<a href=\"/movies/tt1-film/\">post</a>" +
-            "<a href=\"/episode/s01e03-x/\">E</a>"
-        val anchors = StreamEngine.hd2Anchors(html, "https://idhost.example")
-        assertEquals(2, anchors.size)
-        assertTrue(anchors[0].first.contains("/download/"))
-    }
-
-    @Test
-    fun olaDirectOf_pixeldrainApi() {
-        assertEquals(
-            "https://pixeldrain.com/api/file/AbC123",
-            StreamEngine.olaDirectOf("https://pixeldrain.com/u/AbC123"),
-        )
-        assertNull(StreamEngine.olaDirectOf("https://gofile.io/d/AbC123"))
     }
 
     @Test
