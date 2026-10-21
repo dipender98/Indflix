@@ -73,20 +73,21 @@ object StreamEngine {
     )
 
     private fun selectServers(tmdbId: Int, type: String, season: Int, episode: Int): List<ServerSpec> {
-        val healthy = ServerFarm.allServers.filter { HealthMonitor.isHealthy(it.id) }
-        Log.d("IndStream", "healthy: ${healthy.size}/${ServerFarm.allServers.size}")
+        val enabled = ServerFarm.allServers.filter { Settings.serverEnabled(it.id) }
+        val healthy = enabled.filter { HealthMonitor.isHealthy(it.id) }
+        Log.d("IndStream", "healthy: ${healthy.size}/$enabled enabled")
         val candidates = if (healthy.isEmpty()) {
             val now = System.currentTimeMillis()
             val last = lastFarmProbeAt.get()
             val claimed = now - last >= FARM_REPROBE_COOLDOWN_MS && lastFarmProbeAt.compareAndSet(last, now)
             if (!claimed) {
-                Log.w("IndStream", "all servers tripped; re-probe cooldown active " +
+                Log.w("IndStream", "all enabled servers tripped; re-probe cooldown active " +
                     "(${(FARM_REPROBE_COOLDOWN_MS - (now - last)) / 1000}s left)")
                 emptyList()
             } else {
-                Log.w("IndStream", "all ${ServerFarm.allServers.size} servers tripped -- clearing trips, re-probing all")
+                Log.w("IndStream", "all ${enabled.size} enabled servers tripped -- clearing trips, re-probing enabled")
                 HealthMonitor.resetTrips()
-                ServerFarm.allServers
+                enabled
             }
         } else healthy
         val servers = candidates
@@ -391,7 +392,6 @@ object StreamEngine {
     }
 
     fun passesQualityFloor(isAdaptive: Boolean, height: Int): Boolean {
-        if (isAdaptive) return true
         if (height <= 0) return true
         return height >= 720
     }
@@ -1992,7 +1992,7 @@ object StreamEngine {
     }
 
     internal fun fileHostLinks(html: String, base: String): List<Pair<String, String>> {
-        val hostRe = Regex("""(?i)(hubcloud|hubdrive|gdflix|hubcdn|pixeldrain|workers\.dev/0:|\.mkv|\.mp4|\.m3u8)""")
+        val hostRe = Regex("""(?i)(hubcloud|hubdrive|gdflix|gdshine|hubcdn|pixeldrain|workers\.dev/0:|\.mkv|\.mp4|\.m3u8)""")
         return Jsoup.parse(html, base).select("a[href]").mapNotNull { a ->
             val href = a.attr("abs:href").trim()
             if (!href.startsWith("http") || !hostRe.containsMatchIn(href)) return@mapNotNull null
@@ -2144,14 +2144,26 @@ object StreamEngine {
     }
 
     private suspend fun hubDriveFiles(driveUrl: String, referer: String): List<Pair<String, String>> {
-        val url = when {
+        val healed = when {
             driveUrl.contains("vcloud.", ignoreCase = true) -> healHost(driveUrl, "vcloud")
             driveUrl.contains("hubcloud.", ignoreCase = true) -> healHost(driveUrl, "hubcloud")
             else -> driveUrl
         }
-        val drive = withTimeoutOrNull(8_000L) {
-            catching { app.get(url, timeout = 8, headers = okHeaders(referer)).text }.getOrNull()
-        } ?: return emptyList()
+        var url = driveUrl
+        var drive = ""
+        var finalUrl = driveUrl
+        for (candidate in listOf(driveUrl, healed).distinct()) {
+            val res = withTimeoutOrNull(8_000L) {
+                catching { app.get(candidate, timeout = 8, headers = okHeaders(referer)) }.getOrNull()
+            } ?: continue
+            if (res.text.isBlank()) continue
+            url = candidate
+            drive = res.text
+            finalUrl = res.url
+            break
+        }
+        if (drive.isBlank()) return emptyList()
+        googleVideoLink(drive, finalUrl)?.let { return listOf(it to qualityText(drive)) }
         val tokenUrl = Regex("""https?://[^"' ]*?(?:hubcloud|hubdrive)\.php\?[^"' ]+""").find(drive)?.value
             ?: Regex("""(?:hubcloud|hubdrive)\.php\?[^"' ]+""").find(drive)?.value?.let { tokenHref ->
                 val origin = Regex("""^https?://[^/]+""").find(url)?.value ?: return emptyList()
@@ -2161,6 +2173,16 @@ object StreamEngine {
             catching { app.get(tokenUrl, timeout = 10, headers = okHeaders(url)).text }.getOrNull()
         } ?: return emptyList()
         return hubFileButtons(page).take(4)
+    }
+
+    private fun googleVideoLink(html: String, finalUrl: String): String? {
+        val raw = Regex("""(https?://video-downloads\.googleusercontent\.com/[^"'\s<>]+)""")
+            .find(html)?.groupValues?.get(1)
+            ?: finalUrl.substringAfter("dl.php?link=", "")
+                .takeIf { it.startsWith("http") }
+            ?: return null
+        return java.net.URLDecoder.decode(raw.replace("&amp;", "&"), "UTF-8")
+            .takeIf { it.startsWith("http") }
     }
 
     private suspend fun fetchText(
@@ -2207,6 +2229,23 @@ object StreamEngine {
         )
     }
 
+    private suspend fun gdshineStream(host: String, referer: String): Pair<String, String>? {
+        val shortId = Regex("""gdshine\.[a-z.]+/s/([A-Za-z0-9_\-]+)""", RegexOption.IGNORE_CASE)
+            .find(host)?.groupValues?.get(1) ?: return null
+        val origin = Regex("""^https?://[^/]+""").find(host)?.value ?: return null
+        val info = fetchText("$origin/api/files/s/$shortId", referer) ?: return null
+        val id = catching { org.json.JSONObject(info) }.getOrNull()
+            ?.optJSONObject("data")?.optString("id").orEmpty()
+        if (id.isBlank()) return null
+        val mirror = fetchText("$origin/api/gp/mirror/$id", referer) ?: return null
+        val data = catching { org.json.JSONObject(mirror) }.getOrNull()
+            ?.optJSONObject("data") ?: return null
+        val stream = data.optString("url")
+        if (!stream.startsWith("http")) return null
+        val name = data.optString("filename")
+        return stream to qualityText(name)
+    }
+
     private suspend fun hostStreams(
         spec: ServerSpec,
         hosts: List<Pair<String, String>>,
@@ -2222,6 +2261,13 @@ object StreamEngine {
                 out += rawFile(spec, label.ifBlank { hostLabel }, pixeldrain, referer, language, size)
                 continue
             }
+            if (host.contains("gdshine.", ignoreCase = true)) {
+                val stream = gdshineStream(host, referer) ?: continue
+                out += rawFile(
+                    spec, label.ifBlank { stream.second }, stream.first, referer, language, size,
+                )
+                continue
+            }
             if (Regex("""(?i)\.(?:mkv|mp4|m3u8)(?:[?#]|$)""").containsMatchIn(host)) {
                 out += rawFile(spec, label.ifBlank { hostLabel }, host, referer, language, size)
                 continue
@@ -2235,8 +2281,16 @@ object StreamEngine {
         return out
     }
 
-    internal fun episodeMatches(text: String, season: Int, episode: Int): Boolean =
-        Regex("""(?i)\bS0?$season[\s._-]*E0?$episode\b""").containsMatchIn(text)
+    internal fun episodeMatches(text: String, season: Int, episode: Int): Boolean {
+        val ep = "0?$episode"
+        if (Regex("""(?i)\bS0?$season[\s._-]*(?:E|EP|EPISODE)[\s._-]*$ep\b""")
+                .containsMatchIn(text)
+        ) return true
+        if (Regex("""(?i)\b$season\s*x\s*$ep\b""").containsMatchIn(text)) return true
+        val taggedSeason = Regex("""(?i)\bS\d{1,2}\b|\bSeason\s*\d""").containsMatchIn(text)
+        return !taggedSeason && Regex("""(?i)\b(?:EP?|EPISODE)[\s._-]*$ep\b""")
+            .containsMatchIn(text)
+    }
 
     internal fun seasonPackMatches(text: String, season: Int): Boolean =
         Regex("""(?i)\bS0?$season(?!\s*[._-]?E\d)""").containsMatchIn(text) ||
@@ -2257,7 +2311,11 @@ object StreamEngine {
     private suspend fun healHost(url: String, key: String): String {
         val live = Domains.base(key) ?: return url
         val old = Regex("""^https?://[^/]+""").find(url)?.value ?: return url
-        return if (old.equals(live, ignoreCase = true)) url else live + url.removePrefix(old)
+        val oldHost = old.substringAfter("://").substringBefore('/')
+        val liveHost = live.substringAfter("://").substringBefore('/')
+        if (oldHost.equals(liveHost, ignoreCase = true)) return url
+        if (oldHost.count { it == '.' } > liveHost.count { it == '.' }) return url
+        return live + url.removePrefix(old)
     }
 
     private suspend fun resolveHub4k(
@@ -2389,25 +2447,40 @@ object StreamEngine {
         for (postUrl in posts) {
             val post = fetchText(postUrl, base) ?: continue
             val links = episodeOrSeason(
-                headingAnchorHits(post, postUrl, Regex("""links\.joshapp\.blog""", RegexOption.IGNORE_CASE)),
+                headingAnchorHits(
+                    post, postUrl,
+                    Regex("""links\.joshapp\.blog|mvlink\.blog""", RegexOption.IGNORE_CASE),
+                ),
                 { "${it.second} ${it.first}" }, type, season, episode,
             ).take(4)
             for ((href, label) in links) {
                 val linkPage = fetchText(href, postUrl) ?: continue
                 val name = Regex("""<title>([^<]+)</title>""", RegexOption.IGNORE_CASE)
                     .find(linkPage)?.groupValues?.get(1)?.trim().orEmpty()
-                val boldb = Jsoup.parse(linkPage, href).select("a[href]")
+                val doc = Jsoup.parse(linkPage, href)
+                val boldb = doc.select("a[href]")
                     .firstOrNull { it.attr("href").contains("boldb.site/?id=") }
-                    ?.attr("href") ?: continue
-                val rawId = java.net.URLDecoder.decode(boldb.substringAfter("id=", ""), "UTF-8")
-                val token = Base64Kit.encode(rawId.toByteArray(Charsets.UTF_8))
-                    .trimEnd('=').replace('+', '-').replace('/', '_')
-                val filePage = fetchText("https://boldb.site/dl/$token", "https://boldb.site/") ?: continue
-                val hosts = fileHostLinks(filePage, "https://boldb.site/")
+                    ?.attr("href")
+                val hshare = doc.select("a[href]")
+                    .firstOrNull { it.attr("href").contains("hshare.lol/?id=") }
+                    ?.attr("abs:href")
+                val hosts = if (boldb != null) {
+                    val rawId = java.net.URLDecoder.decode(boldb.substringAfter("id=", ""), "UTF-8")
+                    val token = Base64Kit.encode(rawId.toByteArray(Charsets.UTF_8))
+                        .trimEnd('=').replace('+', '-').replace('/', '_')
+                    val filePage = fetchText("https://boldb.site/dl/$token", "https://boldb.site/")
+                    filePage?.let { fileHostLinks(it, "https://boldb.site/") }.orEmpty()
+                } else if (hshare != null) {
+                    val mirror = fetchText(hshare, href) ?: continue
+                    fileHostLinks(mirror, hshare)
+                } else {
+                    fileHostLinks(linkPage, href)
+                }
                 if (hosts.isEmpty()) continue
                 val language = releaseLanguageOf(name.ifBlank { label })
                 val size = normalizeSizeToken(label).ifBlank { normalizeSizeToken(name) }
-                out += hostStreams(spec, hosts, label.ifBlank { name }, "https://boldb.site/", language, size)
+                val ref = if (boldb != null) "https://boldb.site/" else hshare ?: href
+                out += hostStreams(spec, hosts, label.ifBlank { name }, ref, language, size)
             }
             if (out.isNotEmpty()) return out.distinctBy { it.url }
         }
@@ -2775,6 +2848,13 @@ object StreamEngine {
                 out += abs to label.take(20)
             }
         }
+        for (gpdl in Regex("""https?://[^"' ]*gpdl[^"' ]*hubcloud[^"' ]+""", RegexOption.IGNORE_CASE)
+            .findAll(token).map { it.value }.distinct()
+        ) {
+            for ((direct, quality) in hubDriveFiles(gpdl, tokenUrl)) {
+                if (seen.add(direct)) out += direct to quality
+            }
+        }
         return out
     }
 
@@ -2826,7 +2906,7 @@ object StreamEngine {
                 }
                 .take(2)
             for ((hitPair, _) in ranked) {
-                val permalink = hitPair.first
+                val permalink = relUrl(base, hitPair.first)
                 val post = fslGet(permalink, 10)?.first ?: continue
                 val groups = episodeOrSeason(
                     fslGroups(post), { it.heading }, type, season, episode,

@@ -17,7 +17,6 @@ object AiService {
     ) {
         OPENROUTER("openrouter", "OpenRouter", "https://openrouter.ai/api/v1", "openrouter/free"),
         GEMINI("gemini", "Google Gemini", "https://generativelanguage.googleapis.com/v1beta", "gemini-2.5-flash"),
-        OPENAI("openai", "OpenAI", "https://api.openai.com/v1", "gpt-4o-mini"),
         OTHER("other", "Other (OpenAI-compatible)", "", "");
 
         companion object {
@@ -47,7 +46,7 @@ object AiService {
         val provider = Provider.from(Settings.aiProviderId())
         val key = Settings.aiApiKey()?.takeIf { it.isNotBlank() } ?: return emptyList()
         val base = baseUrl(provider)
-        val model = Settings.aiModel().takeIf { it.isNotBlank() } ?: provider.defaultModel
+        val model = Settings.aiModel(provider.id).takeIf { it.isNotBlank() } ?: provider.defaultModel
         if (base.isBlank() || model.isBlank()) return emptyList()
         val prompt = buildPrompt(watched, candidates, count)
         val body = post(provider, base, model, key, prompt) ?: return emptyList()
@@ -123,6 +122,56 @@ object AiService {
         }
     }
 
+    suspend fun fetchModels(
+        provider: Provider,
+        baseUrl: String,
+        key: String,
+    ): List<String> {
+        val base = baseUrl.trim().trimEnd('/').ifBlank { provider.baseUrl }
+        if (base.isBlank() || (provider == Provider.GEMINI && key.isBlank())) return emptyList()
+        val requestHeaders = headers(provider, key).let {
+            if (key.isBlank()) it - "Authorization" else it
+        }
+        val resp = runCatching {
+            app.get(
+                modelsEndpoint(provider, base, key),
+                timeout = 20,
+                headers = requestHeaders,
+            )
+        }.getOrNull() ?: return emptyList()
+        if (resp.code !in 200..299) return emptyList()
+        return freeModels(resp.text, provider == Provider.GEMINI)
+    }
+
+    internal fun freeModels(body: String, gemini: Boolean): List<String> = try {
+        val root = JSONObject(body)
+        val arr = root.optJSONArray("data") ?: root.optJSONArray("models") ?: JSONArray()
+        if (gemini) {
+            (0 until arr.length()).mapNotNull { i ->
+                val o = arr.optJSONObject(i) ?: return@mapNotNull null
+                val methods = o.optJSONArray("supportedGenerationMethods") ?: return@mapNotNull null
+                if ((0 until methods.length()).none {
+                        methods.optString(it).equals("generateContent", ignoreCase = true)
+                    }
+                ) return@mapNotNull null
+                o.optString("name").removePrefix("models/").takeIf { it.isNotBlank() }
+            }.distinct().take(5)
+        } else {
+            (0 until arr.length()).mapNotNull { i ->
+                val o = arr.optJSONObject(i) ?: return@mapNotNull null
+                val id = o.optString("id").takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                val pricing = o.optJSONObject("pricing")
+                val free = id.endsWith(":free", ignoreCase = true) ||
+                    (pricing != null && pricing.optString("prompt").toDoubleOrNull() == 0.0 &&
+                        pricing.optString("completion").toDoubleOrNull() == 0.0)
+                if (!free) return@mapNotNull null
+                o.optLong("created", 0L) to id
+            }.sortedByDescending { it.first }.map { it.second }.distinct().take(12)
+        }
+    } catch (e: Exception) {
+        emptyList()
+    }
+
     private fun modelsEndpoint(provider: Provider, base: String, key: String): String =
         if (provider == Provider.GEMINI) "$base/models?key=$key" else "$base/models"
 
@@ -141,7 +190,7 @@ object AiService {
     }
 
     fun baseUrl(provider: Provider): String {
-        val custom = Settings.aiBaseUrl().trim().trimEnd('/')
+        val custom = Settings.aiBaseUrl(provider.id).trim().trimEnd('/')
         if (custom.isNotBlank()) return custom
         return provider.baseUrl.trimEnd('/')
     }

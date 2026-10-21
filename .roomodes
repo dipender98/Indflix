@@ -19,6 +19,7 @@
 - Make the smallest correct change. Reuse existing logic and preserve unrelated functionality.
 - Avoid unnecessary refactoring, dependencies, and unrequested features.
 - When unsure, consult reliable technical references or ask for clarification instead of guessing.
+- Never emit a stream below 720p when its height is known.
 
 4. Verification
 

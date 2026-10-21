@@ -70,9 +70,9 @@ class NeutralOrderTest {
     }
 
     @Test
-    fun qualityFloor_adaptiveAlwaysPasses_evenSub720() {
-        assertTrue(StreamEngine.passesQualityFloor(isAdaptive = true, height = 360))
-        assertTrue(StreamEngine.passesQualityFloor(isAdaptive = true, height = 480))
+    fun qualityFloor_adaptiveDropsKnownSub720() {
+        assertFalse(StreamEngine.passesQualityFloor(isAdaptive = true, height = 360))
+        assertFalse(StreamEngine.passesQualityFloor(isAdaptive = true, height = 480))
         assertTrue(StreamEngine.passesQualityFloor(isAdaptive = true, height = 0))
     }
 
@@ -84,7 +84,7 @@ class NeutralOrderTest {
 
 
     @Test
-    fun emit_dropsSub720Progressive_keepsAdaptiveAndUnknown() = runBlocking {
+    fun emit_dropsSub720Progressive_keepsUnknown() = runBlocking {
         val out = mutableListOf<com.lagradost.cloudstream3.utils.ExtractorLink>()
         StreamEngine.emit(
             listOf(
@@ -102,7 +102,7 @@ class NeutralOrderTest {
         assertFalse(urls.contains("https://x.example/p360.mp4"))
         assertFalse(urls.contains("https://x.example/p480.mp4"))
         assertTrue(urls.contains("https://x.example/p720.mp4"))
-        assertTrue(urls.contains("https://x.example/m480.m3u8"))
+        assertFalse(urls.contains("https://x.example/m480.m3u8"))
         assertTrue(urls.contains("https://x.example/mUnknown.m3u8"))
         assertTrue(urls.contains("https://x.example/pUnknown.mp4"))
     }

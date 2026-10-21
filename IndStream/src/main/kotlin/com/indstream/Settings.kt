@@ -23,8 +23,12 @@ object Settings {
     private const val AI_KEY_PREFIX = "ai_api_key_"
     private const val AI_MODEL = "ai_model"
     private const val AI_BASE = "ai_base_url"
+    private const val AI_MODEL_PREFIX = "ai_model_"
+    private const val AI_BASE_PREFIX = "ai_base_"
     private const val AI_PROVIDER = "ai_provider"
     private const val FORYOU_MODE = "foryou_refresh_mode"
+    private const val SERVER_OFF_PREFIX = "server_off_"
+    private const val SHUFFLE_ROWS = "shuffle_rows"
 
     @Volatile
     private var appContext: Context? = null
@@ -125,13 +129,22 @@ object Settings {
     }
 
 
-    private val aiKeys = HashMap<String, String>()
+    private val aiKeys = java.util.concurrent.ConcurrentHashMap<String, String>()
 
     @Volatile
-    private var aiModelCached: String? = null
+    private var aiModels: Map<String, String> = emptyMap()
 
     @Volatile
-    private var aiBaseCached: String? = null
+    private var aiBases: Map<String, String> = emptyMap()
+
+    @Volatile
+    private var serverOff: Set<String> = emptySet()
+
+    @Volatile
+    private var serversLoaded = false
+
+    @Volatile
+    private var shuffleRowsCached: Boolean? = null
 
     @Volatile
     private var aiProviderCached: String? = null
@@ -151,14 +164,18 @@ object Settings {
         return aiProviderCached?.takeIf { it.isNotBlank() } ?: "openrouter"
     }
 
-    fun aiModel(): String {
+    fun aiModel(provider: String? = null): String {
         if (!aiLoaded) loadAi()
-        return aiModelCached.orEmpty()
+        val id = provider?.trim()?.takeIf { it.isNotBlank() }
+            ?: aiProviderCached?.takeIf { it.isNotBlank() } ?: "openrouter"
+        return aiModels[id].orEmpty()
     }
 
-    fun aiBaseUrl(): String {
+    fun aiBaseUrl(provider: String? = null): String {
         if (!aiLoaded) loadAi()
-        return aiBaseCached.orEmpty()
+        val id = provider?.trim()?.takeIf { it.isNotBlank() }
+            ?: aiProviderCached?.takeIf { it.isNotBlank() } ?: "openrouter"
+        return aiBases[id].orEmpty()
     }
 
     fun saveAi(context: Context, provider: String, rawKey: String, model: String, baseUrl: String) {
@@ -169,16 +186,18 @@ object Settings {
         runCatching {
             val edit = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 .edit()
-                .putString(AI_MODEL, cleanModel)
-                .putString(AI_BASE, cleanBase)
                 .putString(AI_PROVIDER, id)
                 .remove(AI_KEY)
             if (key.isBlank()) edit.remove(AI_KEY_PREFIX + id) else edit.putString(AI_KEY_PREFIX + id, key)
+            if (cleanModel.isBlank()) edit.remove(AI_MODEL_PREFIX + id)
+            else edit.putString(AI_MODEL_PREFIX + id, cleanModel)
+            if (cleanBase.isBlank()) edit.remove(AI_BASE_PREFIX + id)
+            else edit.putString(AI_BASE_PREFIX + id, cleanBase)
             edit.apply()
         }
         if (key.isBlank()) aiKeys.remove(id) else aiKeys[id] = key
-        aiModelCached = cleanModel
-        aiBaseCached = cleanBase
+        aiModels = aiModels + (id to cleanModel)
+        aiBases = aiBases + (id to cleanBase)
         aiProviderCached = id
         aiLoaded = true
         appContext = context.applicationContext
@@ -192,14 +211,16 @@ object Settings {
             context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 .edit()
                 .remove(AI_KEY_PREFIX + id)
+                .remove(AI_MODEL_PREFIX + id)
+                .remove(AI_BASE_PREFIX + id)
+                .remove(AI_MODEL)
+                .remove(AI_BASE)
                 .remove(AI_KEY)
-                .putString(AI_MODEL, "")
-                .putString(AI_BASE, "")
                 .apply()
         }
         aiKeys.remove(id)
-        aiModelCached = ""
-        aiBaseCached = ""
+        aiModels = aiModels - id
+        aiBases = aiBases - id
         aiLoaded = true
         appContext = context.applicationContext
     }
@@ -237,22 +258,79 @@ object Settings {
         val ctx = appContext ?: return
         runCatching {
             val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            aiModelCached = prefs.getString(AI_MODEL, "").orEmpty()
-            aiBaseCached = prefs.getString(AI_BASE, "").orEmpty()
             aiProviderCached = prefs.getString(AI_PROVIDER, "").orEmpty()
             aiKeys.clear()
+            val models = HashMap<String, String>()
+            val bases = HashMap<String, String>()
             prefs.all.forEach { (name, value) ->
-                if (name.startsWith(AI_KEY_PREFIX) && value is String && value.isNotBlank()) {
-                    aiKeys[name.removePrefix(AI_KEY_PREFIX)] = value
+                val text = (value as? String).orEmpty()
+                when {
+                    name.startsWith(AI_KEY_PREFIX) -> if (text.isNotBlank()) {
+                        aiKeys[name.removePrefix(AI_KEY_PREFIX)] = text
+                    }
+                    name.startsWith(AI_MODEL_PREFIX) -> models[name.removePrefix(AI_MODEL_PREFIX)] = text
+                    name.startsWith(AI_BASE_PREFIX) -> bases[name.removePrefix(AI_BASE_PREFIX)] = text
                 }
             }
+            val owner = aiProviderCached?.takeIf { it.isNotBlank() } ?: "openrouter"
+            if (!models.containsKey(owner)) models[owner] = prefs.getString(AI_MODEL, "").orEmpty()
+            if (!bases.containsKey(owner)) bases[owner] = prefs.getString(AI_BASE, "").orEmpty()
+            aiModels = models
+            aiBases = bases
             val legacy = prefs.getString(AI_KEY, "").orEmpty()
-            if (legacy.isNotBlank()) {
-                val owner = aiProviderCached?.takeIf { it.isNotBlank() } ?: "openrouter"
-                aiKeys.putIfAbsent(owner, legacy)
-            }
+            if (legacy.isNotBlank()) aiKeys.putIfAbsent(owner, legacy)
         }
         aiLoaded = true
+    }
+
+    fun serverEnabled(id: String): Boolean {
+        if (!serversLoaded) loadServers()
+        return !serverOff.contains(id)
+    }
+
+    fun saveServerEnabled(context: Context, id: String, on: Boolean) {
+        runCatching {
+            val edit = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            if (on) edit.remove(SERVER_OFF_PREFIX + id)
+            else edit.putBoolean(SERVER_OFF_PREFIX + id, true)
+            edit.apply()
+        }
+        serverOff = if (on) serverOff - id else serverOff + id
+        serversLoaded = true
+        appContext = context.applicationContext
+    }
+
+    private fun loadServers() {
+        val ctx = appContext ?: return
+        serverOff = runCatching {
+            ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).all
+                .filter { (name, value) -> name.startsWith(SERVER_OFF_PREFIX) && value == true }
+                .map { (name, _) -> name.removePrefix(SERVER_OFF_PREFIX) }
+                .toSet()
+        }.getOrDefault(emptySet())
+        serversLoaded = true
+    }
+
+    fun shuffleRows(): Boolean {
+        if (shuffleRowsCached == null) {
+            val ctx = appContext
+            shuffleRowsCached = ctx?.let {
+                runCatching {
+                    it.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                        .getBoolean(SHUFFLE_ROWS, false)
+                }.getOrDefault(false)
+            } ?: false
+        }
+        return shuffleRowsCached == true
+    }
+
+    fun saveShuffleRows(context: Context, on: Boolean) {
+        runCatching {
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit().putBoolean(SHUFFLE_ROWS, on).apply()
+        }
+        shuffleRowsCached = on
+        appContext = context.applicationContext
     }
 
     @Volatile

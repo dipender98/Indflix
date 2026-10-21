@@ -24,6 +24,8 @@ import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.widget.ArrayAdapter
+import android.widget.AutoCompleteTextView
 import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
@@ -44,8 +46,6 @@ import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
 object SettingsUi {
-
-    private const val VERSION = "69"
 
     private val BG = Color.parseColor("#0B0B10")
     private val SURFACE = Color.parseColor("#14141A")
@@ -71,7 +71,12 @@ object SettingsUi {
         val bar: View,
     )
 
-    private class Option(val root: LinearLayout, val dot: View)
+    private class Option(
+        val root: LinearLayout,
+        val dot: View,
+        val title: TextView,
+        val summary: TextView,
+    )
 
     private class Secret(val root: LinearLayout, val input: EditText, val toggle: View)
 
@@ -225,6 +230,28 @@ object SettingsUi {
             )
         }
 
+        fun modelField(value: String, hint: String): AutoCompleteTextView =
+            AutoCompleteTextView(context).apply {
+                setText(value)
+                setHint(hint)
+                setHintTextColor(TEXT_FAINT)
+                setTextColor(TEXT)
+                setSingleLine(true)
+                threshold = 0
+                inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+                typeface = Typeface.MONOSPACE
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                setPadding(dp(14), dp(12), dp(14), dp(12))
+                dropDownWidth = (context.resources.displayMetrics.widthPixels * 0.82f).toInt()
+                background = StateListDrawable().apply {
+                    addState(intArrayOf(android.R.attr.state_focused), rounded(SURFACE_2, 12, 1, ACCENT))
+                    addState(intArrayOf(), rounded(SURFACE_2, 12, 1))
+                }
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                )
+            }
+
         fun secret(value: String, hint: String): Secret {
             val input = field(value, hint).apply {
                 setPadding(dp(14), dp(12), dp(10), dp(12))
@@ -285,10 +312,12 @@ object SettingsUi {
                 orientation = LinearLayout.VERTICAL
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
             }
-            texts.addView(label(title, 13.5f, TEXT, medium = true))
-            texts.addView(
-                label(summary, 11.5f, TEXT_DIM).apply { setPadding(0, dp(3), 0, 0) },
-            )
+            val titleView = label(title, 13.5f, TEXT, medium = true)
+            val summaryView = label(summary, 11.5f, TEXT_DIM).apply {
+                setPadding(0, dp(3), 0, 0)
+            }
+            texts.addView(titleView)
+            texts.addView(summaryView)
             val root = LinearLayout(context).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
@@ -301,7 +330,7 @@ object SettingsUi {
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
                 ).apply { bottomMargin = dp(8) }
             }
-            return Option(root, dot)
+            return Option(root, dot, titleView, summaryView)
         }
 
         fun paintOption(opt: Option, on: Boolean) {
@@ -559,6 +588,49 @@ object SettingsUi {
         }
 
 
+        val allServers = ServerFarm.allServers
+        var offCount = allServers.count { !Settings.serverEnabled(it.id) }
+        val catalogueCard = card(
+            "Catalogue",
+            "Shuffle rows and turn off servers that do not work",
+            if (offCount == 0) "All on" else "$offCount off",
+            offCount < allServers.size,
+        )
+        val shuffleOn = Settings.shuffleRows()
+        val shuffleOpt = option(
+            "Shuffle all rows",
+            if (shuffleOn) "Every row is randomized" else "Rows keep their normal order",
+        )
+        paintOption(shuffleOpt, shuffleOn)
+        shuffleOpt.root.setOnClickListener {
+            val on = !Settings.shuffleRows()
+            Settings.saveShuffleRows(context, on)
+            paintOption(shuffleOpt, on)
+            shuffleOpt.summary.text = if (on) "Every row is randomized" else "Rows keep their normal order"
+        }
+        add(catalogueCard, shuffleOpt.root)
+        add(catalogueCard, sectionLabel("Servers", 18))
+        val serverList = optionList()
+        allServers.forEach { spec ->
+            val opt = option(spec.name, if (Settings.serverEnabled(spec.id)) "On" else "Off")
+            paintOption(opt, Settings.serverEnabled(spec.id))
+            opt.root.setOnClickListener {
+                val on = !Settings.serverEnabled(spec.id)
+                Settings.saveServerEnabled(context, spec.id, on)
+                opt.summary.text = if (on) "On" else "Off"
+                paintOption(opt, on)
+                offCount = allServers.count { !Settings.serverEnabled(it.id) }
+                setState(
+                    catalogueCard,
+                    if (offCount == 0) "All on" else "$offCount off",
+                    offCount < allServers.size,
+                )
+            }
+            serverList.addView(opt.root)
+        }
+        add(catalogueCard, serverList)
+
+
         val wyzieSaved = Settings.apiKey() != null
         val wyzieCard = card(
             "Subtitles Key",
@@ -755,9 +827,17 @@ object SettingsUi {
         )
         val aiKeySecret = secret(Settings.aiApiKey().orEmpty(), "provider api key...")
         val aiKeyInput = aiKeySecret.input
-        val aiModelInput = field(Settings.aiModel(), "model id...")
-        val aiBaseInput = field(Settings.aiBaseUrl(), "https://host/v1")
+        val aiModelInput = modelField(
+            Settings.aiModel(selectedProvider).ifBlank {
+                AiService.Provider.from(selectedProvider).defaultModel
+            },
+            "model id...",
+        )
+        val aiBaseInput = field(Settings.aiBaseUrl(selectedProvider), "https://host/v1")
         aiBaseInput.visibility = if (selectedProvider == "other") View.VISIBLE else View.GONE
+        aiModelInput.setOnClickListener {
+            if (aiModelInput.adapter != null) aiModelInput.showDropDown()
+        }
         val aiStatus = label("", 11.5f, TEXT_DIM).apply {
             setPadding(0, dp(10), 0, 0)
             visibility = View.GONE
@@ -780,7 +860,11 @@ object SettingsUi {
             target.setOnClickListener {
                 selectedProvider = id
                 aiKeyInput.setText(Settings.aiApiKey(id).orEmpty())
-                aiModelInput.setText(AiService.Provider.from(id).defaultModel)
+                aiModelInput.setAdapter(null)
+                aiModelInput.setText(
+                    Settings.aiModel(id).ifBlank { AiService.Provider.from(id).defaultModel },
+                )
+                aiBaseInput.setText(Settings.aiBaseUrl(id))
                 aiBaseInput.visibility = if (id == "other") View.VISIBLE else View.GONE
                 val saved = Settings.aiApiKey(id) != null
                 setState(aiCard, if (saved) "Saved" else "Not set", saved)
@@ -811,27 +895,40 @@ object SettingsUi {
         aiModelsChip.setOnClickListener {
             val provider = AiService.Provider.from(selectedProvider)
             aiStatus.visibility = View.VISIBLE
-            aiStatus.text = "Fetching model list..."
+            aiStatus.text = "Fetching free models..."
             Thread {
-                val msg = runCatching {
+                val models = runCatching {
                     kotlinx.coroutines.runBlocking {
-                        AiService.testModels(
+                        AiService.fetchModels(
                             provider,
                             aiBaseInput.text.toString(),
-                            aiModelInput.text.toString(),
                             aiKeyInput.text.toString(),
                         )
                     }
-                }.getOrDefault("List failed - no network?")
+                }.getOrDefault(emptyList())
                 aiKeyInput.post {
                     aiStatus.visibility = View.VISIBLE
-                    aiStatus.text = msg
+                    if (models.isEmpty()) {
+                        aiStatus.text = "No free models found - check the key or base url"
+                    } else {
+                        aiModelInput.setAdapter(
+                            ArrayAdapter(
+                                context,
+                                android.R.layout.simple_dropdown_item_1line,
+                                models,
+                            ),
+                        )
+                        aiModelInput.showDropDown()
+                        aiStatus.text = "${models.size} free models - pick one"
+                    }
                 }
             }.start()
         }
         aiClear.setOnClickListener {
             Settings.clearAi(context, selectedProvider)
             aiKeyInput.setText("")
+            aiModelInput.setAdapter(null)
+            aiModelInput.setText(AiService.Provider.from(selectedProvider).defaultModel)
             aiBaseInput.setText("")
             aiStatus.visibility = View.GONE
             setState(aiCard, "Not set", false)

@@ -237,7 +237,10 @@ class IndStreamProvider : MainAPI() {
         if (items.isEmpty()) return null
         val responses = items.mapNotNull { it.toSearchResponse() }
         if (responses.isEmpty()) return null
-        return newHomePageResponse(request.name, responses)
+        return newHomePageResponse(
+            request.name,
+            if (Settings.shuffleRows()) responses.shuffled() else responses,
+        )
     }
 
 
