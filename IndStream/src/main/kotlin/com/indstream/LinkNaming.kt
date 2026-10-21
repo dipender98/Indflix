@@ -5,7 +5,7 @@ import com.indstream.StreamEngine.RawStream
 object LinkNaming {
 
     private val RESOLUTION_TOKEN =
-        Regex("""\s*(?:\d{3,4}p|4K)\b""", RegexOption.IGNORE_CASE)
+        Regex("""\s*(?:\d{3,4}p|[24]K)\b""", RegexOption.IGNORE_CASE)
 
     fun languageTag(raw: String?): String {
         if (raw.isNullOrBlank()) return "Unknown"
@@ -68,25 +68,35 @@ object LinkNaming {
         duplicateIndex: Int = 0,
         originalLang: String? = null,
         sizeLabel: String? = null,
+        mediaLabel: String? = null,
     ): String {
-        val base = serverName.trim().ifBlank { "Server" }
+        val base = RESOLUTION_TOKEN.replace(serverName.trim(), "").trim().ifBlank { "Server" }
+        val composed = if (subIndicator.isNullOrBlank()) base else "$base ${subIndicator.trim()}".trim()
         val tag = languageTagFor(audioLabel, originalLang)
-        val nameWithSub = if (subIndicator.isNullOrBlank()) base else "$base $subIndicator".trim()
-        val serverPart = if (duplicateIndex > 0) "$nameWithSub-$duplicateIndex" else nameWithSub
+        val named = RESOLUTION_TOKEN.replace(composed, "").trim()
+            .replace(Regex("""\s+${Regex.escape(tag)}$""", RegexOption.IGNORE_CASE), "")
+            .trim().ifBlank { "Server" }
+        val numbered = if (duplicateIndex > 0) "$named-$duplicateIndex" else named
 
-        val tagPart = if (
-            tag != "Multi" &&
-            Regex("\\b${Regex.escape(tag)}\\b", RegexOption.IGNORE_CASE).containsMatchIn(nameWithSub)
-        ) "" else {
-            val f = languageFlag(tag)
+        val tagPart = languageFlag(tag).let { f ->
             if (f.isBlank()) "($tag)" else "($f $tag)"
         }
 
-        val serverDisplay = RESOLUTION_TOKEN.replace(serverPart, "").trim()
-        val tagDisplay = if (tagPart.isBlank()) "" else RESOLUTION_TOKEN.replace(tagPart, "").trim()
+        val tokens = renditionTokens(listOfNotNull(mediaLabel, serverName).joinToString(" "))
+            .filterNot {
+                Regex("""\b${Regex.escape(it)}\b""", RegexOption.IGNORE_CASE).containsMatchIn(named)
+            }
+            .joinToString(" ")
+        val qualityPart = when {
+            qualityHint > 0 -> qualityLabel(qualityHint)
+            else -> listOfNotNull(mediaLabel, serverName)
+                .firstNotNullOfOrNull { RESOLUTION_TOKEN.find(it)?.value }
+                ?.replace("4k", "4K", ignoreCase = true)
+                ?.replace("2k", "2K", ignoreCase = true)?.trim().orEmpty()
+        }
         val sizePart = sizeLabel?.trim().orEmpty()
-        val parts = listOf(serverDisplay, tagDisplay, sizePart).filter { it.isNotBlank() }
-        return parts.joinToString(" ")
+        return listOf(numbered, tokens, tagPart, qualityPart, sizePart)
+            .filter { it.isNotBlank() }.joinToString(" ")
     }
 
     fun displayName(base: String, audioLabel: String?, qualityHint: Int): String =
@@ -105,10 +115,7 @@ object LinkNaming {
     }
 
     fun dedupeNames(streams: List<RawStream>, originalLang: String? = null): List<Int> {
-        fun keyOf(s: RawStream): String {
-            val tag = languageTagFor(s.audioLabel, originalLang)
-            return "${s.serverName.trim().lowercase()}|$tag|${s.qualityHint}"
-        }
+        fun keyOf(s: RawStream): String = s.serverId.trim().lowercase()
         val totals = HashMap<String, Int>()
         for (s in streams) totals.merge(keyOf(s), 1) { a, b -> a + b }
         val running = HashMap<String, Int>()
@@ -117,11 +124,71 @@ object LinkNaming {
             if ((totals[key] ?: 0) <= 1) {
                 0
             } else {
-                val n = (running[key] ?: 0) + 1
-                running[key] = n
+                val n = running[key] ?: 0
+                running[key] = n + 1
                 n
             }
         }
+    }
+
+    private val SOURCE_TOKENS = listOf(
+        Regex("""\bWEB[ \-]?DL\b""", RegexOption.IGNORE_CASE) to "WEB-DL",
+        Regex("""\bWEB[ \-]?RIP\b""", RegexOption.IGNORE_CASE) to "WEBRip",
+        Regex("""\bBLU[ \-]?RAY\b""", RegexOption.IGNORE_CASE) to "BluRay",
+        Regex("""\bBR[ \-]?RIP\b""", RegexOption.IGNORE_CASE) to "BRRip",
+        Regex("""\bHD[ \-]?RIP\b""", RegexOption.IGNORE_CASE) to "HDRip",
+        Regex("""\bDVD[ \-]?RIP\b""", RegexOption.IGNORE_CASE) to "DVDRip",
+        Regex("""\bHDTV\b""", RegexOption.IGNORE_CASE) to "HDTV",
+        Regex("""\b(?:HD[ \-]?T[SCS]|HD[ \-]?CAM|CAM[ \-]?RIP|CAM|HDM)\b""", RegexOption.IGNORE_CASE) to "CAMRip",
+    )
+
+    private val AUDIO_TOKENS = listOf(
+        Regex("""\bDOLBY[ \-]?ATMOS\b|\bATMOS\b""", RegexOption.IGNORE_CASE) to "Dolby Atmos",
+        Regex("""\bTRUEHD\b""", RegexOption.IGNORE_CASE) to "TrueHD",
+        Regex("""\b(?:DOLBY[ \-]*(?:DIGITAL)?[ \-]*|DDP?[ \-]*|E[ \-]?AC[ \-]?3[ \-]*|AC[ \-]?3)[5]\.1\b""", RegexOption.IGNORE_CASE) to "Dolby 5.1",
+        Regex("""\b(?:DOLBY[ \-]*(?:DIGITAL)?[ \-]*|DDP?[ \-]*|E[ \-]?AC[ \-]?3[ \-]*|AC[ \-]?3)[7]\.1\b""", RegexOption.IGNORE_CASE) to "Dolby 7.1",
+        Regex("""\b(?:DDP|DD[ \-]?\+|E[ \-]?AC[ \-]?3|AC[ \-]?3|DD)\b""", RegexOption.IGNORE_CASE) to "Dolby Digital",
+        Regex("""\bDOLBY\b""", RegexOption.IGNORE_CASE) to "Dolby Digital",
+        Regex("""\bDTS[ \-]?H[DI]\b""", RegexOption.IGNORE_CASE) to "DTS-HD",
+        Regex("""\bDTS\b""", RegexOption.IGNORE_CASE) to "DTS",
+        Regex("""\bAAC\b""", RegexOption.IGNORE_CASE) to "AAC",
+    )
+
+    private val VISION_TOKENS = listOf(
+        Regex("""\bDOLBY[ \-]?VISION\b""", RegexOption.IGNORE_CASE) to "Dolby Vision",
+        Regex("""\bDV\b""", RegexOption.IGNORE_CASE) to "Dolby Vision",
+        Regex("""\bHDR10\+(?!\d)""", RegexOption.IGNORE_CASE) to "HDR10+",
+        Regex("""\bHDR10\b""", RegexOption.IGNORE_CASE) to "HDR10",
+        Regex("""\bHDR\b""", RegexOption.IGNORE_CASE) to "HDR",
+    )
+
+    private val VIDEO_TOKENS = listOf(
+        Regex("""\bHEVC\b|\bH\.?[ \-]?265\b|\bX\.?265\b""", RegexOption.IGNORE_CASE) to "HEVC",
+        Regex("""\bH\.?[ \-]?264\b|\bX\.?264\b|\bAVC\b|\bMPEG[ \-]?4\b""", RegexOption.IGNORE_CASE) to "H.264",
+        Regex("""\bAV1\b""", RegexOption.IGNORE_CASE) to "AV1",
+    )
+
+    private val DEPTH_TOKENS = listOf(
+        Regex("""\b10[ \-]?BIT\b""", RegexOption.IGNORE_CASE) to "10bit",
+        Regex("""\b8[ \-]?BIT\b""", RegexOption.IGNORE_CASE) to "8bit",
+    )
+
+    fun renditionTokens(text: String?): List<String> {
+        val s = text?.trim().orEmpty()
+        if (s.isBlank()) return emptyList()
+        val found = LinkedHashMap<String, String>()
+        for ((re, canon) in SOURCE_TOKENS + VIDEO_TOKENS + VISION_TOKENS + DEPTH_TOKENS + AUDIO_TOKENS) {
+            if (re.containsMatchIn(s) && !found.containsKey(canon.lowercase())) {
+                found[canon.lowercase()] = canon
+            }
+        }
+        if (found.containsKey("dolby 5.1") || found.containsKey("dolby 7.1") || found.containsKey("dolby atmos")) {
+            found.remove("dolby digital")
+        }
+        if (found.containsKey("dts-hd")) found.remove("dts")
+        if (found.containsKey("hdr10+")) found.remove("hdr10")
+        if (found.containsKey("hdr10+") || found.containsKey("hdr10")) found.remove("hdr")
+        return found.values.toList()
     }
 
     fun taggedSubtitleName(canonical: String, source: String?): String {

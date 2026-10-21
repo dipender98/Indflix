@@ -127,7 +127,7 @@ class NeutralOrderTest {
     }
 
     @Test
-    fun emit_realHeightOnlyOnQuality_NEVERonName() = runBlocking {
+    fun emit_realHeightOnQualityAndName() = runBlocking {
         val out = mutableListOf<com.lagradost.cloudstream3.utils.ExtractorLink>()
         StreamEngine.emit(
             listOf(stream("hd", url = "https://x.example/hd.mp4", isM3u8 = false, qualityHint = 1080)),
@@ -137,8 +137,9 @@ class NeutralOrderTest {
         assertEquals(1, out.size)
         val link = out[0]
         assertEquals(1080, link.quality)
-        assertEquals(0, Regex("""\d{3,4}p|4K""", RegexOption.IGNORE_CASE).findAll(link.name).count(),
-            "name must be resolution-free: ${link.name}")
+        assertEquals(1, Regex("""\d{3,4}p|4K""", RegexOption.IGNORE_CASE).findAll(link.name).count(),
+            "name must carry exactly one quality: ${link.name}")
+        assertTrue(link.name.contains("1080p"))
     }
 
     @Test
@@ -180,7 +181,7 @@ class NeutralOrderTest {
         )
         assertEquals(1, out.size)
         assertEquals(2160, out[0].quality)
-        assertFalse(out[0].name.contains("4K"), "name must NOT carry resolution: ${out[0].name}")
+        assertTrue(out[0].name.contains("4K"), "name must carry quality: ${out[0].name}")
         assertFalse(out[0].name.contains("Auto"), "name must NOT show Auto: ${out[0].name}")
     }
 
@@ -215,7 +216,7 @@ class NeutralOrderTest {
         )
         assertEquals(1, out.size)
         assertEquals(1080, out[0].quality)
-        assertFalse(out[0].name.contains("1080p"), "name must NOT carry resolution: ${out[0].name}")
+        assertTrue(out[0].name.contains("1080p"), "name must carry quality: ${out[0].name}")
         assertFalse(out[0].name.contains("Auto"), "name must NOT show Auto: ${out[0].name}")
     }
 

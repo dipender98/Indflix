@@ -52,6 +52,7 @@ object StreamEngine {
         val audioPriority: Int = 0,
         val audioLabel: String = "",
         val sizeLabel: String = "",
+        val mediaLabel: String = "",
         val inlineManifest: String? = null,
         val extraHeaders: Map<String, String> = emptyMap(),
         val isDash: Boolean = false,
@@ -358,6 +359,7 @@ object StreamEngine {
                 duplicateIndex = dupIdx,
                 originalLang = originalLang,
                 sizeLabel = raw.sizeLabel.takeIf { it.isNotBlank() },
+                mediaLabel = raw.mediaLabel.takeIf { it.isNotBlank() },
             )
 
             val linkType = if (raw.isDash) ExtractorLinkType.DASH
@@ -2195,6 +2197,7 @@ object StreamEngine {
             },
             audioLabel = lang,
             sizeLabel = size,
+            mediaLabel = label,
         )
     }
 
@@ -2373,6 +2376,7 @@ object StreamEngine {
                             releaseHeightOf(qText.ifBlank { item.title }),
                             audioPriority = priority, audioLabel = lang,
                             sizeLabel = item.size,
+                            mediaLabel = item.title,
                         )
                     }
                     if (out.size >= 6) break
@@ -2863,6 +2867,7 @@ object StreamEngine {
                                     releaseHeightOf(qText.ifBlank { group.heading }),
                                     audioPriority = priority, audioLabel = lang,
                                     sizeLabel = size,
+                                    mediaLabel = group.heading,
                                 )
                                 perGroup++
                                 if (perGroup >= 2) break
