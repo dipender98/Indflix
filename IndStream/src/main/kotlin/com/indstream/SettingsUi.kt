@@ -27,7 +27,6 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.ArrayAdapter
 import android.widget.AutoCompleteTextView
-import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
@@ -176,16 +175,26 @@ object SettingsUi {
             includeFontPadding = false
         }
 
-        fun chip(value: String): TextView = label(value, 12f, TEXT_DIM, medium = true).apply {
-            gravity = Gravity.CENTER
-            setPadding(dp(16), 0, dp(16), 0)
-            background = ripple(rounded(Color.TRANSPARENT, 12, 1))
-            isClickable = true
-            isFocusable = true
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, control,
-            ).apply { rightMargin = gap }
-        }
+        fun pill(value: String, primary: Boolean = false): TextView =
+            label(value, 12f, if (primary) Color.WHITE else TEXT_DIM, medium = true).apply {
+                gravity = Gravity.CENTER
+                setPadding(dp(16), 0, dp(16), 0)
+                background = ripple(
+                    rounded(
+                        if (primary) ACCENT else Color.TRANSPARENT,
+                        12,
+                        if (primary) 0 else 1,
+                        if (primary) ACCENT else BORDER,
+                    ),
+                )
+                isClickable = true
+                isFocusable = true
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, control,
+                ).apply { rightMargin = gap }
+            }
+
+        fun chip(value: String): TextView = pill(value)
 
         fun markChip(target: TextView, on: Boolean) {
             target.setTextColor(if (on) Color.WHITE else TEXT_DIM)
@@ -194,22 +203,8 @@ object SettingsUi {
             )
         }
 
-        fun action(value: String, primary: Boolean): Button = Button(context).apply {
-            text = value
-            isAllCaps = false
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+        fun action(value: String, primary: Boolean): TextView = pill(value, primary).apply {
             setTextColor(if (primary) Color.WHITE else TEXT)
-            background = ripple(
-                rounded(if (primary) ACCENT else Color.TRANSPARENT, 12, if (primary) 0 else 1),
-            )
-            minWidth = 0
-            minHeight = 0
-            stateListAnimator = null
-            setPadding(dp(18), 0, dp(18), 0)
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, control,
-            ).apply { leftMargin = gap }
         }
 
         fun field(value: String, hint: String): EditText = EditText(context).apply {
@@ -422,16 +417,14 @@ object SettingsUi {
         }
 
         fun addRow(card: Card, top: Int, vararg views: View) {
-            views.lastOrNull()?.let { last ->
-                (last.layoutParams as? LinearLayout.LayoutParams)?.let {
-                    it.rightMargin = 0
-                    last.layoutParams = it
-                }
-            }
             val row = LinearLayout(context).apply {
                 orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.END or Gravity.CENTER_VERTICAL
-                views.forEach { addView(it) }
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            views.forEachIndexed { index, view ->
+                val lp = LinearLayout.LayoutParams(0, control, 1f)
+                if (index > 0) lp.leftMargin = gap
+                row.addView(view, lp)
             }
             add(card, row, top)
         }
@@ -604,24 +597,20 @@ object SettingsUi {
 
 
         val allServers = ServerFarm.allServers
-        var offCount = allServers.count { !Settings.serverEnabled(it.id) }
-        fun providersStateText(): String = when (offCount) {
-            0 -> "All on"
-            allServers.size -> "All off"
-            else -> "$offCount off"
-        }
+        var enabledCount = allServers.count { Settings.serverEnabled(it.id) }
+        fun providersStateText(): String = "$enabledCount of ${allServers.size} enabled"
         val providersCard = card(
             "Servers/Providers",
             "Choose which providers supply streams",
             providersStateText(),
-            offCount < allServers.size,
+            enabledCount > 0,
         )
         fun refreshProvidersState() {
-            offCount = allServers.count { !Settings.serverEnabled(it.id) }
+            enabledCount = allServers.count { Settings.serverEnabled(it.id) }
             setState(
                 providersCard,
                 providersStateText(),
-                offCount < allServers.size,
+                enabledCount > 0,
             )
         }
 
@@ -700,7 +689,18 @@ object SettingsUi {
         add(providersCard, sectionLabel("All servers", 18))
         val enableAll = chip("Enable all")
         val disableAll = chip("Disable all")
-        addRow(providersCard, 0, enableAll, disableAll)
+        val quickRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.END or Gravity.CENTER_VERTICAL
+        }
+        listOf(enableAll, disableAll).forEachIndexed { index, view ->
+            view.setPadding(dp(14), 0, dp(14), 0)
+            view.layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, dp(36),
+            ).apply { if (index > 0) leftMargin = gap }
+            quickRow.addView(view)
+        }
+        add(providersCard, quickRow, 6)
         enableAll.setOnClickListener {
             Settings.saveAllServersEnabled(context, allServers.map { it.id }, true)
             paintServerTiles()
