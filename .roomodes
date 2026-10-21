@@ -1,35 +1,34 @@
 # Indflix Project Rules
 
-1. Code Style
+Use logic and judgment on every task. If two rules conflict, correctness wins.
 
-- Keep comments minimal; add them only when clarification is needed.
-- Avoid unnecessary developer, plugin, website, or content names in comments, logs, and user-facing messages. Preserve names and references required for functionality.
-- Prefer simple, readable solutions. Avoid unnecessary abstractions, wrappers, helpers, and duplicate logic.
-- Follow existing project and language conventions.
+## 1. Code Style
 
-2. Architecture
+- Add a comment only when it is necessary. Keep it short and generic.
+- Never put specific developer, plugin, website, or content names in comments, logs, or user-facing messages. Word such text generically instead (e.g. "the main site", "a title/a movie/a series","this provider"). Exception: keep any specific name the code itself needs to work (URLs, domains, identifiers, parameters, displayed plugin name).
+- Refactor or change code (even across the whole codebase) only when sure the result is correct and better for the long term with low maintenance and good performance.
 
-- Avoid unnecessary files. Check the existing codebase before creating new ones.
-- Keep related logic in the same file and object when practical. Separate them only when it improves maintainability.
+## 2. Architecture
+
+- Check the existing codebase first; create a new file only when it is necessary and use logic to decide.
+- Keep related logic in the same file and object. Split it out only when that clearly makes the code easier to maintain.
 - Use meaningful names and follow the existing project structure.
 
-3. Implementation
+## 3. Implementation
 
-- Understand the relevant code and execution flow before making changes.
-- Make the smallest correct change. Reuse existing logic and preserve unrelated functionality.
-- Avoid unnecessary refactoring, dependencies, and unrequested features.
-- When unsure, consult reliable technical references or ask for clarification instead of guessing.
-- Never emit a stream below 720p when its height is known.
+- IMPORTANT: Understand the relevant code and execution flow before making changes.
+- Take references from the internet.
+- Never emit a stream below 720p; filter out any stream whose height is known to be less than 720. Streams below 720p are not allowed in the server list.
 
-4. Verification
+## 4. Verification
 
-- Check that the actual problem is solved, not just its symptoms.
-- Run relevant tests or builds when possible.
-- Review changes for regressions, unnecessary files, and unrelated modifications.
-- Report unverified fixes or unresolved issues honestly.
+- Confirm that the root cause is fixed, not only the visible symptom.
+- Run the relevant tests or build whenever possible.
+- Before finishing, review your diff for regressions, unneeded files, and unrelated edits.
+- If you could not verify a fix, or something is still broken, say so plainly. Never claim success without evidence.
 
-5. Decision-Making
+## 5. Decision-Making
 
-- Prioritize correctness, simplicity, performance, and maintainability.
-- Choose the simplest solution that fits the existing architecture.
-- Implement clear requirements directly; ask questions only when a significant ambiguity affects correctness.
+- Think long-term: choose the solution that stays correct, fast, and maintainable over time, not only what works today.
+- Prefer correctness.
+- If you are in doubt about a decision, ask the user or check on internet.
