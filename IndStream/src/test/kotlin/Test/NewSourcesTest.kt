@@ -12,7 +12,7 @@ class NewSourcesTest {
 
     @Test
     fun farm_presentAndTmdbKeyed() {
-        for (id in listOf("vidrift", "rivestream", "movy", "braflix")) {
+        for (id in listOf("vidrift", "rivestream", "movy", "vidy", "braflix")) {
             val s = ServerFarm.allServers.firstOrNull { it.id == id }
             assertTrue(s != null, "$id must be in the farm")
             assertEquals(ServerIdType.TMDB, s!!.idType)

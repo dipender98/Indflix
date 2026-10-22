@@ -3,7 +3,7 @@ import java.util.Properties
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
-version = 73
+version = 74
 
 plugins {
     id("com.lagradost.cloudstream3.gradle")
@@ -24,6 +24,13 @@ android {
     namespace = "com.indstream"
     testOptions {
         unitTests.isReturnDefaultValues = true
+        unitTests.all { test ->
+            test.testClassesDirs = files(
+                layout.buildDirectory.dir(
+                    "intermediates/built_in_kotlinc/debugUnitTest/compileDebugUnitTestKotlin/classes"
+                )
+            )
+        }
     }
 }
 

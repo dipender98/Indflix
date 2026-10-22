@@ -73,11 +73,11 @@ object AiService {
         model: String,
         key: String,
     ): String {
+        val useModel = model.trim()
+        if (useModel.isBlank()) return "Select a model first"
         if (key.isBlank()) return "Enter a key first"
         val base = baseUrl.trim().trimEnd('/').ifBlank { provider.baseUrl }
         if (base.isBlank()) return "Enter the API base url first"
-        val useModel = model.trim().ifBlank { provider.defaultModel }
-        if (useModel.isBlank()) return "Enter a model first"
         val prompt = "Answer with the single word OK"
         return try {
             val resp = app.post(
@@ -154,7 +154,9 @@ object AiService {
             )
         }.getOrNull() ?: return emptyList()
         if (resp.code !in 200..299) return emptyList()
-        return freeModels(resp.text, provider == Provider.GEMINI)
+        val free = freeModels(resp.text, provider == Provider.GEMINI)
+        if (provider != Provider.OPENROUTER) return free
+        return (listOf(Provider.OPENROUTER.defaultModel) + free).distinct().take(12)
     }
 
     internal fun freeModels(body: String, gemini: Boolean): List<String> = try {

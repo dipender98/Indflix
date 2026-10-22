@@ -4,6 +4,8 @@ import kotlin.math.min
 
 enum class ServerIdType { TMDB, IMDB }
 
+enum class ServerSpeed { VERY_FAST, FAST, NORMAL, SLOW }
+
 data class ServerSpec(
     val id: String,
     val name: String,
@@ -19,6 +21,9 @@ data class ServerSpec(
     val timeoutSec: Int = 10,
     val declaredLanguages: Set<String> = emptySet(),
     val animeOnly: Boolean = false,
+    val speed: ServerSpeed = ServerSpeed.NORMAL,
+    val reliable: Boolean = false,
+    val downloadFriendly: Boolean = false,
 ) {
     fun supportsImdb(type: String): Boolean =
         if (type == "movie") supportsImdbMovie else supportsImdbTv
@@ -28,6 +33,14 @@ object ServerFarm {
 
     val allServers: List<ServerSpec> = listOf(
         ServerSpec(
+            id = "vidy", name = "Vidy",
+            idType = ServerIdType.TMDB,
+            movieUrl = "https://www.vidy.st/movie/{id}?color=DC2626",
+            tvUrl = "https://www.vidy.st/tv/{id}/{season}/{episode}?color=DC2626",
+            referer = "https://www.vidy.st/",
+            hasSubtitles = false, timeoutSec = 40,
+        ),
+        ServerSpec(
             id = "vidlink", name = "VidLink",
             idType = ServerIdType.TMDB,
             supportsImdbMovie = true,
@@ -36,6 +49,7 @@ object ServerFarm {
             isJsonApi = true, referer = "https://vidlink.pro/",
             hasSubtitles = true, timeoutSec = 15,
             declaredLanguages = emptySet(),
+            speed = ServerSpeed.VERY_FAST,
         ),
         ServerSpec(
             id = "vaplayer", name = "VaPlayer",
@@ -44,6 +58,7 @@ object ServerFarm {
             tvUrl = "https://streamdata.vaplayer.ru/api.php?imdb={id}&type=tv&season={season}&episode={episode}",
             isJsonApi = true, referer = "https://nextgencloudfabric.com/",
             hasSubtitles = true, timeoutSec = 12,
+            speed = ServerSpeed.VERY_FAST,
         ),
         ServerSpec(
             id = "moviebox", name = "MovieBox",
@@ -52,6 +67,7 @@ object ServerFarm {
             tvUrl = "https://h5-api.aoneroom.com/wefeed-h5api-bff/app/get-latest-app-pkgs?app_name=moviebox",
             isJsonApi = true, referer = "https://movieboxonline.net/",
             hasSubtitles = true, timeoutSec = 65,
+            speed = ServerSpeed.FAST, reliable = true, downloadFriendly = true,
         ),
         ServerSpec(
             id = "allmovieland", name = "Allmovieland",
@@ -70,6 +86,7 @@ object ServerFarm {
             isJsonApi = true, referer = "https://net27.cc/",
             hasSubtitles = true, timeoutSec = 50,
             declaredLanguages = emptySet(),
+            speed = ServerSpeed.FAST, reliable = true, downloadFriendly = true,
         ),
         ServerSpec(
             id = "castletv", name = "CastleTV",
@@ -79,6 +96,7 @@ object ServerFarm {
             referer = "https://api.hlowb.com/",
             hasSubtitles = false, timeoutSec = 30,
             declaredLanguages = setOf("Hindi", "Tamil", "Telugu"),
+            speed = ServerSpeed.FAST, reliable = true,
         ),
         ServerSpec(
             id = "streamflix", name = "StreamFlix",
@@ -87,6 +105,7 @@ object ServerFarm {
             movieUrl = "https://api.streamflix.app/data.json",
             tvUrl = "https://api.streamflix.app/data.json",
             hasSubtitles = false, timeoutSec = 25,
+            speed = ServerSpeed.FAST, downloadFriendly = true,
         ),
         ServerSpec(
             id = "onetouchtv", name = "OneTouchTV",
@@ -103,6 +122,7 @@ object ServerFarm {
             tvUrl = "https://vidrack.created.app/api/sources/movy?id={id}&season={season}&episode={episode}",
             isJsonApi = true, referer = "https://www.vidcore.org/",
             hasSubtitles = false, timeoutSec = 20,
+            speed = ServerSpeed.FAST,
         ),
         ServerSpec(
             id = "bingr", name = "Bingr",
@@ -111,6 +131,7 @@ object ServerFarm {
             tvUrl = "https://api.bingr.one/api/stream",
             referer = "https://bingr.one/",
             hasSubtitles = false, timeoutSec = 30,
+            speed = ServerSpeed.FAST,
         ),
         ServerSpec(
             id = "vidrift", name = "Vidrift",
@@ -119,6 +140,7 @@ object ServerFarm {
             tvUrl = "https://embed.vidrift.net/embed/tv/{id}/{season}/{episode}",
             referer = "https://embed.vidrift.net/",
             hasSubtitles = true, timeoutSec = 25,
+            speed = ServerSpeed.FAST,
         ),
         ServerSpec(
             id = "rivestream", name = "Rivestream",
@@ -127,6 +149,7 @@ object ServerFarm {
             tvUrl = "https://www.rivestream.app/api/backendfetch?requestID=tvVideoProvider&id={id}&season={season}&episode={episode}",
             referer = "https://www.rivestream.app/",
             hasSubtitles = true, timeoutSec = 25,
+            speed = ServerSpeed.SLOW,
         ),
         ServerSpec(
             id = "movy", name = "Movy",
@@ -135,6 +158,7 @@ object ServerFarm {
             tvUrl = "https://api.wecollege.net/seed?mediaId={id}",
             referer = "https://www.movy.sx/",
             hasSubtitles = true, timeoutSec = 25,
+            speed = ServerSpeed.FAST,
         ),
         ServerSpec(
             id = "braflix", name = "Braflix",
@@ -144,6 +168,7 @@ object ServerFarm {
             tvUrl = "https://braflix.dev/api/play/tv/{id}/{season}/{episode}",
             referer = "https://braflix.dev/",
             hasSubtitles = false, timeoutSec = 20,
+            speed = ServerSpeed.FAST,
         ),
         ServerSpec(
             id = "4khdhub", name = "4KHDHub",
@@ -152,6 +177,7 @@ object ServerFarm {
             tvUrl = "https://4khdhub.one/?s={id}",
             referer = "https://4khdhub.one/",
             hasSubtitles = false, timeoutSec = 40,
+            speed = ServerSpeed.SLOW, downloadFriendly = true,
         ),
         ServerSpec(
             id = "fsl", name = "FSL",
@@ -161,6 +187,7 @@ object ServerFarm {
             referer = "https://new1.vegamovies.lease/",
             hasSubtitles = false, timeoutSec = 60,
             declaredLanguages = setOf("Hindi", "Tamil", "Telugu"),
+            speed = ServerSpeed.SLOW, downloadFriendly = true,
         ),
         ServerSpec(
             id = "hindmoviez", name = "HindMoviez",
@@ -169,6 +196,7 @@ object ServerFarm {
             tvUrl = "https://hindmovie.one/",
             referer = "https://hindmovie.one/",
             hasSubtitles = false, timeoutSec = 60,
+            speed = ServerSpeed.SLOW, downloadFriendly = true,
         ),
         ServerSpec(
             id = "hdhub4u", name = "HDHub4u",
@@ -177,6 +205,7 @@ object ServerFarm {
             tvUrl = "https://new8.hdhub4u.cl/",
             referer = "https://new8.hdhub4u.cl/",
             hasSubtitles = false, timeoutSec = 60,
+            speed = ServerSpeed.SLOW, downloadFriendly = true,
         ),
         ServerSpec(
             id = "moviesdrive", name = "MoviesDrive",
@@ -185,6 +214,7 @@ object ServerFarm {
             tvUrl = "https://new3.moviesdrive.beer/",
             referer = "https://new3.moviesdrive.beer/",
             hasSubtitles = false, timeoutSec = 60,
+            speed = ServerSpeed.SLOW, downloadFriendly = true,
         ),
         ServerSpec(
             id = "dudefilms", name = "DudeFilms",
@@ -193,6 +223,7 @@ object ServerFarm {
             tvUrl = "https://dudefilms.events/",
             referer = "https://dudefilms.events/",
             hasSubtitles = false, timeoutSec = 60,
+            speed = ServerSpeed.SLOW, downloadFriendly = true,
         ),
         ServerSpec(
             id = "animeworld", name = "AnimeWorld",
@@ -275,6 +306,4 @@ object HealthMonitor {
         }
     }
 }
-
-
 

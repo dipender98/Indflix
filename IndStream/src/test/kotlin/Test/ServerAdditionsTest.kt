@@ -40,6 +40,24 @@ class ServerAdditionsTest {
     }
 
     @Test
+    fun vidy_usesDocumentedTmdbEmbedRoutes() {
+        val s = ServerFarm.allServers.first { it.id == "vidy" }
+        assertEquals("Vidy", s.name)
+        assertEquals(ServerIdType.TMDB, s.idType)
+        assertEquals(40, s.timeoutSec)
+        assertEquals(
+            "https://www.vidy.st/movie/315162?color=DC2626",
+            ServerFarm.buildMovieUrl(s, "315162"),
+        )
+        assertEquals(
+            "https://www.vidy.st/tv/1396/1/1?color=DC2626",
+            ServerFarm.buildTvUrl(s, "1396", 1, 1),
+        )
+        assertEquals("https://www.vidy.st/", s.referer)
+        assertNotNull(ServerFarm.allServers.firstOrNull { it.id == "vidlink" })
+    }
+
+    @Test
     fun embedBatch_removed_v63() {
         for (id in setOf(
             "twoembed", "vidfast", "autoembed", "vidphantom", "vsembed",

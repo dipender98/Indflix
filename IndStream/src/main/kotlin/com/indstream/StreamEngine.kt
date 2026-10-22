@@ -421,6 +421,17 @@ object StreamEngine {
             return emptyList()
         }
 
+        if (spec.id == "vidy") {
+            if (type != "movie" && (season <= 0 || episode <= 0)) {
+                Log.w("IndStream", "${spec.id}: tv request without season/episode (s=$season e=$episode), skipping")
+                return emptyList()
+            }
+            val result = resolveVidy(spec, tmdbId, type, season, episode)
+            if (result.isNotEmpty()) { okServer(spec, start, "vidy sources", result.size); return result }
+            failServer(spec, "vidy returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
+            return emptyList()
+        }
+
         if (spec.id == "vidlink") {
             if (type != "movie" && (season <= 0 || episode <= 0)) {
                 Log.w("IndStream", "${spec.id}: tv request without season/episode (s=$season e=$episode), skipping")
@@ -726,7 +737,7 @@ object StreamEngine {
     private val VIDLINK_NONCE = ByteArray(24)
     private const val VIDLINK_TIME_OFFSET_S = 480L
     internal val VIDLINK_TOKEN_OFFSETS = listOf(VIDLINK_TIME_OFFSET_S, 0L, 960L)
-    internal val VIDLINK_PLAYER_HEADERS = mapOf("User-Agent" to "ExoPlayer")
+    internal val VIDLINK_PLAYER_HEADERS = mapOf("User-Agent" to HttpKit.userAgent)
 
     internal fun vidlinkPlaybackHeaders(quality: org.json.JSONObject): Map<String, String> {
         val out = LinkedHashMap<String, String>(VIDLINK_PLAYER_HEADERS)
@@ -760,6 +771,20 @@ object StreamEngine {
 
     internal fun vidlinkTvApiUrlAt(tmdbId: String, season: Int, episode: Int, offsetSec: Long): String =
         "https://vidlink.pro/api/b/tv/${vidlinkTokenWithOffset(tmdbId, offsetSec)}/$season/$episode?multiLang=1"
+
+    internal suspend fun probeServer(spec: ServerSpec): Boolean {
+        val sampleId = if (spec.idType == ServerIdType.IMDB) "tt1375666" else "27205"
+        val url = if (spec.id == "vidlink") {
+            vidlinkMovieApiUrlAt(sampleId, 0)
+        } else {
+            ServerFarm.buildMovieUrl(spec, sampleId)
+        }
+        return HttpKit.aliveCheck(
+            url = url,
+            referer = spec.referer,
+            timeoutSec = spec.timeoutSec.coerceIn(2, 8).toLong(),
+        ) == true
+    }
 
     private fun hexToBytes(hex: String): ByteArray {
         val out = ByteArray(hex.length / 2)
@@ -3862,6 +3887,11 @@ object StreamEngine {
         "denver", "atlanta", "phoenix", "portland", "seattle", "miami", "boise", "paris",
         "cancun", "austin", "dallas", "delhi", "munich", "orlando", "tampa", "berlin",
     )
+    private val VIDY_LANES = listOf(
+        "miami", "boise", "vegas", "reno", "oakland", "seattle", "phoenix", "atlanta",
+        "portland", "austin", "dallas", "tampa", "orlando", "munich", "berlin", "paris",
+        "delhi", "cancun",
+    )
     private val MOVY_LANGS = setOf(
         "hindi", "tamil", "telugu", "english", "spanish", "french", "german",
         "italian", "portuguese", "korean", "japanese", "malayalam", "kannada",
@@ -3975,27 +4005,64 @@ object StreamEngine {
     private suspend fun resolveMovy(
         spec: ServerSpec, tmdbId: Int, type: String, season: Int, episode: Int,
     ): List<RawStream> {
+        return resolveWecollegeSources(
+            spec, tmdbId, type, season, episode,
+            referer = "https://www.movy.sx/",
+            lanes = MOVY_LANES,
+            laneTimeoutSec = 7,
+            logTag = "Movy",
+        )
+    }
+
+    private suspend fun resolveVidy(
+        spec: ServerSpec, tmdbId: Int, type: String, season: Int, episode: Int,
+    ): List<RawStream> {
+        return resolveWecollegeSources(
+            spec, tmdbId, type, season, episode,
+            referer = "https://www.vidy.st/",
+            lanes = VIDY_LANES,
+            laneTimeoutSec = 6,
+            logTag = "Vidy",
+        )
+    }
+
+    private suspend fun resolveWecollegeSources(
+        spec: ServerSpec,
+        tmdbId: Int,
+        type: String,
+        season: Int,
+        episode: Int,
+        referer: String,
+        lanes: List<String>,
+        laneTimeoutSec: Long,
+        logTag: String,
+    ): List<RawStream> {
         if (type != "movie" && (season <= 0 || episode <= 0)) return emptyList()
         val base = "https://api.wecollege.net"
-        val ref = "https://www.movy.sx/"
-        val h = mapOf("Referer" to ref, "Origin" to "https://www.movy.sx", "User-Agent" to HttpKit.userAgent)
+        val origin = referer.trimEnd('/')
+        val headers = mapOf(
+            "Referer" to referer,
+            "Origin" to origin,
+            "User-Agent" to HttpKit.userAgent,
+        )
         val seedText = withTimeoutOrNull(6_000L) {
-            catching { app.get("$base/seed?mediaId=$tmdbId", timeout = 6, headers = h).text }.getOrNull()
-        } ?: run { Log.w("Movy", "seed no response"); return emptyList() }
+            catching { app.get("$base/seed?mediaId=$tmdbId", timeout = 6, headers = headers).text }.getOrNull()
+        } ?: run { Log.w(logTag, "seed no response"); return emptyList() }
         val seed = catching { org.json.JSONObject(seedText).optString("seed") }.getOrNull()
-            ?.takeIf { it.isNotBlank() } ?: run { Log.w("Movy", "no seed in response"); return emptyList() }
+            ?.takeIf { it.isNotBlank() } ?: run { Log.w(logTag, "no seed in response"); return emptyList() }
         val meta = try {
             TmdbService.fetchMeta(tmdbId, type)
         } catch (c: kotlinx.coroutines.CancellationException) {
             throw c
         } catch (t: Throwable) {
+            Log.w(logTag, "metadata lookup failed: ${t.javaClass.simpleName}")
             null
         }
         val params = listOf(
             "title" to movyEncode(meta?.name.orEmpty()),
             "mediaType" to (if (type == "movie") "movie" else "tv"),
             "year" to meta?.year.orEmpty(),
-            "totalSeasons" to "1",
+            "totalSeasons" to (meta?.totalSeasons?.toString() ?: "1"),
             "seasonId" to (if (type == "movie") 1 else season).toString(),
             "episodeId" to (if (type == "movie") 1 else episode).toString(),
             "tmdbId" to tmdbId.toString(),
@@ -4003,25 +4070,29 @@ object StreamEngine {
         )
         val out = LinkedHashMap<String, RawStream>()
         val deadline = System.currentTimeMillis() + 18_000L
-        for (lane in MOVY_LANES) {
+        for (lane in lanes) {
             if (out.size >= 6 || System.currentTimeMillis() > deadline) break
             val query = params.joinToString("&") { "${it.first}=${it.second}" } + "&enc=2&seed=$seed"
-            val cipher = withTimeoutOrNull(7_000L) {
-                catching { app.get("$base/$lane/sources?$query", timeout = 7, headers = h).text }.getOrNull()
+            val cipher = withTimeoutOrNull(laneTimeoutSec * 1000L) {
+                catching {
+                    app.get("$base/$lane/sources?$query", timeout = laneTimeoutSec, headers = headers).text
+                }.getOrNull()
             } ?: continue
             val plain = movyDecrypt(cipher, seed, tmdbId) ?: continue
             for (s in movySources(plain)) {
                 if (out.containsKey(s.url)) continue
+                val isDash = s.url.contains(".mpd", ignoreCase = true)
                 out[s.url] = RawStream(
                     serverId = spec.id, serverName = spec.name,
-                    url = s.url, isM3u8 = s.url.contains(".m3u8", true),
-                    referer = ref, qualityHint = heightHintOf(s.quality),
+                    url = s.url, isM3u8 = s.url.contains(".m3u8", true) || isDash,
+                    referer = referer, qualityHint = heightHintOf(s.quality),
                     audioLabel = movyAudio(s.quality),
-                    extraHeaders = mapOf("User-Agent" to HttpKit.userAgent, "Referer" to ref, "Origin" to "https://www.movy.sx"),
+                    extraHeaders = headers,
+                    isDash = isDash,
                 )
             }
         }
-        Log.d("Movy", "cascade got ${out.size} sources for $type/$tmdbId")
+        Log.d(logTag, "cascade got ${out.size} sources for $type/$tmdbId")
         return out.values.toList()
     }
 
@@ -4684,8 +4755,3 @@ object StreamEngine {
 
     const val LIVE_FILL_MS: Long = 90_000L
 }
-
-
-
-
-

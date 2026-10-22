@@ -113,7 +113,7 @@ class IndStreamProvider : MainAPI() {
 
     private val prewarmed = java.util.Collections.synchronizedSet(HashSet<String>())
 
-    private val tmdbSearchGraceMs = 1_200L
+    private val tmdbSearchGraceMs = 2_500L
 
     private val warmFarms = java.util.concurrent.ConcurrentHashMap<String, kotlinx.coroutines.Job>()
 
@@ -177,8 +177,8 @@ class IndStreamProvider : MainAPI() {
     override suspend fun quickSearch(query: String): List<SearchResponse>? = search(query)
 
     private suspend fun imdbSearchFuzzy(query: String): List<ImdbService.ImdbHit> = coroutineScope {
-        val queries = (listOf(query) + SearchRank.queryVariants(query, max = 1)).distinct()
-        if (queries.size == 1) return@coroutineScope ImdbService.suggest(query)
+        val queries = SearchRank.recallQueries(query, max = 2)
+        if (queries.size <= 1) return@coroutineScope ImdbService.suggest(query)
         queries.map { q -> async { ImdbService.suggest(q) } }
             .awaitAll().flatten().distinctBy { it.imdbId }
     }

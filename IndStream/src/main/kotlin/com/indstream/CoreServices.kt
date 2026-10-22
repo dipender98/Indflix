@@ -431,6 +431,14 @@ object TmdbService {
     private const val SEARCH_CACHE_TTL_MS = 15 * 60 * 1000L
     private const val SEARCH_CACHE_MAX = 64
     private const val SEARCH_INFLIGHT_WAIT_MS = 11_000L
+    private const val SEARCH_MAX_PAGES = 3
+    private const val SEARCH_QUERY_VARIANTS = 3
+    private const val SEARCH_CANDIDATE_CAP = 60
+    private const val ALIAS_TOP = 4
+    private const val ALIAS_TIMEOUT_MS = 2500L
+    private const val ALIAS_CACHE_TTL_MS = 60 * 60 * 1000L
+    private const val ALIAS_CACHE_MAX = 128
+    private const val ALIAS_MAX_TITLES = 40
     private const val NEGATIVE_TTL_MS = 60_000L
     private const val CATALOG_TTL_MS = 10 * 60 * 1000L
     private const val DETAIL_CACHE_MAX = 128
@@ -471,6 +479,9 @@ object TmdbService {
         val voteCount: Int = 0,
         val originalLanguage: String? = null,
         val overview: String? = null,
+        val originalName: String? = null,
+        val aliases: List<String> = emptyList(),
+        val originCountry: List<String> = emptyList(),
     )
 
     data class TmdbDetail(
@@ -487,6 +498,7 @@ object TmdbService {
         val genreIds: List<Int> = emptyList(),
         val cast: List<ActorData>? = null,
         val runtime: Int? = null,
+        val totalSeasons: Int? = null,
     )
 
     data class TmdbEpisode(
@@ -502,7 +514,7 @@ object TmdbService {
 
     suspend fun search(query: String): List<TmdbItem> {
         if (query.isBlank()) return emptyList()
-        val key = query.trim().lowercase()
+        val key = SearchRank.canonical(query).ifBlank { query.trim().lowercase() }
         searchCache[key]?.let {
             if (System.currentTimeMillis() <= it.expiresAt) return it.items
             searchCache.remove(key)
@@ -510,31 +522,92 @@ object TmdbService {
         if (recentlyFailed("search:$key")) return emptyList()
         val hits = withTimeoutOrNull(SEARCH_INFLIGHT_WAIT_MS) {
             lead(key, searchInFlight) {
-                val (found, unreachable) = searchRemote(query)
-                if (found == null) {
-                    markFailedLookup("search:$key", unreachable)
+                val queries = SearchRank.recallQueries(query, SEARCH_QUERY_VARIANTS)
+                val replies = coroutineScope {
+                    queries.flatMapIndexed { index, variant ->
+                        val pages = if (index == 0) SEARCH_MAX_PAGES else 1
+                        (1..pages).map { page -> async { searchRemote(variant, page) } }
+                    }.awaitAll()
+                }
+                val found = replies.mapNotNull { it.first }.flatten()
+                if (found.isEmpty()) {
+                    if (replies.isNotEmpty() && replies.all { it.first == null }) {
+                        markFailedLookup("search:$key", replies.all { it.second })
+                    }
                     emptyList()
                 } else {
-                    if (found.isNotEmpty()) {
-                        if (searchCache.size >= SEARCH_CACHE_MAX) {
-                            val oldest = searchCache.entries.minByOrNull { e -> e.value.expiresAt }
-                            oldest?.let { e -> searchCache.remove(e.key) }
-                        }
-                        searchCache[key] = SearchEntry(found, System.currentTimeMillis() + SEARCH_CACHE_TTL_MS)
+                    val merged = found.dedupedByTitle().take(SEARCH_CANDIDATE_CAP)
+                    val final = rankCandidates(query, merged)
+                    if (searchCache.size >= SEARCH_CACHE_MAX) {
+                        val oldest = searchCache.entries.minByOrNull { e -> e.value.expiresAt }
+                        oldest?.let { e -> searchCache.remove(e.key) }
                     }
-                    found
+                    searchCache[key] = SearchEntry(final, System.currentTimeMillis() + SEARCH_CACHE_TTL_MS)
+                    final
                 }
             }
         }
         return hits ?: emptyList()
     }
 
-    private suspend fun searchRemote(query: String): Pair<List<TmdbItem>?, Boolean> {
+    private suspend fun rankCandidates(query: String, items: List<TmdbItem>): List<TmdbItem> {
+        val ranked = SearchRank.rank(query, items)
+        if (ranked.isEmpty()) return items.take(12)
+        if (SearchRank.score(query, ranked.first()).tier >= 98.0) return ranked
+        val aliases = aliasesFor(ranked.take(ALIAS_TOP))
+        if (aliases.isEmpty()) return ranked
+        return SearchRank.rank(
+            query,
+            ranked.map { item -> aliases[item.tmdbId]?.let { item.copy(aliases = it) } ?: item },
+        ).ifEmpty { ranked }
+    }
+
+    private suspend fun aliasesFor(items: List<TmdbItem>): Map<Int, List<String>> {
+        val byId = items.mapNotNull { item -> item.tmdbId?.let { it to item } }.toMap()
+        if (byId.isEmpty()) return emptyMap()
+        return withTimeoutOrNull(ALIAS_TIMEOUT_MS) {
+            coroutineScope {
+                byId.map { (id, item) ->
+                    async {
+                        val kind = if (item.type == "movie") "movie" else "tv"
+                        id to fetchAliases(kind, id)
+                    }
+                }.awaitAll().filter { it.second.isNotEmpty() }.toMap()
+            }
+        }.orEmpty()
+    }
+
+    private suspend fun fetchAliases(kind: String, id: Int): List<String> {
+        aliasCache[id]?.let {
+            if (System.currentTimeMillis() <= it.expiresAt) return it.titles
+            aliasCache.remove(id)
+        }
+        val reply = tmdbGet("alt titles $kind=$id", "/$kind/$id/alternative_titles", "language=en-US")
+        val titles = reply.body?.let { parseAlternativeTitles(it) }.orEmpty()
+        if (titles.isNotEmpty()) {
+            if (aliasCache.size >= ALIAS_CACHE_MAX) {
+                aliasCache.entries.minByOrNull { e -> e.value.expiresAt }?.let { e -> aliasCache.remove(e.key) }
+            }
+            aliasCache[id] = AliasEntry(titles, System.currentTimeMillis() + ALIAS_CACHE_TTL_MS)
+        }
+        return titles
+    }
+
+    internal fun parseAlternativeTitles(json: String): List<String> = try {
+        val root = JSONObject(json)
+        val arr = root.optJSONArray("titles") ?: root.optJSONArray("results") ?: return emptyList()
+        (0 until arr.length())
+            .mapNotNull { i -> arr.optJSONObject(i)?.let { str(it, "title") } }
+            .distinct()
+            .take(ALIAS_MAX_TITLES)
+    } catch (e: Exception) { emptyList() }
+
+    private suspend fun searchRemote(query: String, page: Int): Pair<List<TmdbItem>?, Boolean> {
         val encoded = URLEncoder.encode(query.trim(), "UTF-8")
         val reply = tmdbGet(
-            "search q='$query'",
+            "search q='$query' p=$page",
             "/search/multi",
-            "query=$encoded&language=en-US&include_adult=false&page=1",
+            "query=$encoded&language=en-US&include_adult=false&page=$page",
         )
         val json = reply.body ?: return null to reply.unreachable
         return parseTmdbMultiSearch(json) to false
@@ -663,8 +736,10 @@ object TmdbService {
     }
 
     private data class SearchEntry(val items: List<TmdbItem>, val expiresAt: Long)
+    private data class AliasEntry(val titles: List<String>, val expiresAt: Long)
 
     private val searchCache = ConcurrentHashMap<String, SearchEntry>()
+    private val aliasCache = ConcurrentHashMap<Int, AliasEntry>()
     private val searchScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private val searchInFlight = ConcurrentHashMap<String, Deferred<List<TmdbItem>>>()
@@ -975,7 +1050,7 @@ object TmdbService {
     internal fun List<TmdbItem>.dedupedByTitle(): List<TmdbItem> {
         val best = LinkedHashMap<String, TmdbItem>()
         for (item in this) {
-            val key = item.name.trim().lowercase() + "|" + (item.year ?: "")
+            val key = SearchRank.normalizeTitle(item.name) + "|" + (item.year ?: "")
             val current = best[key]
             if (current == null || (item.rating ?: 0.0) > (current.rating ?: 0.0)) {
                 best[key] = item
@@ -1007,6 +1082,8 @@ object TmdbService {
                     voteCount = r.optInt("vote_count", 0).coerceAtLeast(0),
                     originalLanguage = str(r, "original_language"),
                     overview = str(r, "overview"),
+                    originalName = str(r, "original_title") ?: str(r, "original_name"),
+                    originCountry = originCountriesOf(r),
                 )
             }.dedupedByTitle()
         } catch (e: Exception) {
@@ -1050,6 +1127,7 @@ object TmdbService {
                 cast = cast,
                 runtime = m.optInt("runtime", -1).takeIf { it > 0 }
                     ?: m.optJSONArray("episode_run_time")?.optInt(0, -1)?.takeIf { it > 0 },
+                totalSeasons = m.optInt("number_of_seasons", -1).takeIf { it > 0 },
             )
         } catch (e: Exception) {
             null
@@ -1106,7 +1184,14 @@ object TmdbService {
 
     private fun genreIdsOf(obj: JSONObject): List<Int> =
         obj.optJSONArray("genre_ids")?.let { arr ->
-            (0 until arr.length()).mapNotNull { i -> arr.optInt(i, -1).takeIf { it > 0 } }
+            (0 until arr.length()).mapNotNull { i ->
+                (arr.opt(i) as? Number)?.toInt()?.takeIf { it > 0 }
+            }
+        } ?: emptyList()
+
+    private fun originCountriesOf(obj: JSONObject): List<String> =
+        obj.optJSONArray("origin_country")?.let { arr ->
+            (0 until arr.length()).mapNotNull { i -> arr.optString(i).takeIf { it.isNotBlank() } }
         } ?: emptyList()
 
     private fun parseResults(json: String, type: String): List<TmdbItem> {
@@ -1130,6 +1215,8 @@ object TmdbService {
                     voteCount = r.optInt("vote_count", 0).coerceAtLeast(0),
                     originalLanguage = str(r, "original_language"),
                     overview = str(r, "overview"),
+                    originalName = str(r, "original_title") ?: str(r, "original_name"),
+                    originCountry = originCountriesOf(r),
                 )
             }
         } catch (e: Exception) { emptyList() }
@@ -1570,6 +1657,5 @@ object TitleMatch {
         return Regex("(19|20)\\d{2}").find(raw)?.value?.toIntOrNull()
     }
 }
-
 
 

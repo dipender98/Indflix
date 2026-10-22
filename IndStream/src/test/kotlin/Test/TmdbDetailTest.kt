@@ -17,8 +17,9 @@ class TmdbDetailTest {
     @Test
     fun detailTakesFirstEpisodeRuntimeForSeries() {
         val raw = """{"id":1396,"name":"Breaking Bad","first_air_date":"2008-01-20",
-            "episode_run_time":[49,51],"vote_average":9.0}"""
+            "episode_run_time":[49,51],"number_of_seasons":5,"vote_average":9.0}"""
         assertEquals(49, TmdbService.parseTmdbDetail(raw, "series")?.runtime)
+        assertEquals(5, TmdbService.parseTmdbDetail(raw, "series")?.totalSeasons)
     }
 
     @Test

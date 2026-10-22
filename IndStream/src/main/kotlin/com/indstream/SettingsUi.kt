@@ -39,10 +39,17 @@ import com.indstream.foryou.AiService
 import com.indstream.foryou.ForYouEngine
 import com.indstream.foryou.ForYouRefresh
 import com.indstream.foryou.SimklHistory
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
 
 object SettingsUi {
@@ -79,6 +86,8 @@ object SettingsUi {
     )
 
     private class Secret(val root: LinearLayout, val input: EditText, val toggle: View)
+
+    private enum class ProviderProbeState { NOT_TESTED, TESTING, UP, DOWN }
 
     fun open(context: Context) {
         val density = context.resources.displayMetrics.density
@@ -373,6 +382,7 @@ object SettingsUi {
         }
 
         var dialog: AlertDialog? = null
+        var providerProbeJob: Job? = null
 
         fun fitHeight() {
             val win = dialog?.window ?: return
@@ -582,6 +592,17 @@ object SettingsUi {
         }
         forYouCard.content.addView(refreshNow)
         refreshNow.setOnClickListener {
+            if (!AiService.isConfigured()) {
+                AlertDialog.Builder(context, android.R.style.Theme_Material_Dialog_Alert)
+                    .setTitle("Connect AI first")
+                    .setMessage(
+                        "Made for You needs an AI provider. Add a key under AI API Keys, " +
+                            "pick a model, then verify and save.",
+                    )
+                    .setPositiveButton("OK", null)
+                    .show()
+                return@setOnClickListener
+            }
             refreshNow.isEnabled = false
             refreshNow.text = "Rebuilding..."
             ForYouEngine.invalidate(context)
@@ -614,21 +635,33 @@ object SettingsUi {
             )
         }
 
-        class ProviderTile(val spec: ServerSpec, val root: LinearLayout, val dot: View)
+        class ProviderTile(
+            val spec: ServerSpec,
+            val root: LinearLayout,
+            val dot: View,
+            val probeStatus: TextView,
+        )
+
+        val providerProbeStates = allServers.associate {
+            it.id to ProviderProbeState.NOT_TESTED
+        }.toMutableMap()
 
         fun providerTags(spec: ServerSpec): String {
             val tags = ArrayList<String>()
             if (spec.animeOnly) tags += "Anime"
-            when {
-                spec.timeoutSec <= 15 -> tags += "Very fast"
-                spec.timeoutSec <= 25 -> tags += "Fast"
+            when (spec.speed) {
+                ServerSpeed.VERY_FAST -> tags += "Very fast"
+                ServerSpeed.FAST -> tags += "Fast"
+                ServerSpeed.SLOW -> tags += "Slow start"
+                ServerSpeed.NORMAL -> {}
             }
-            if (spec.isJsonApi) tags += "Reliable"
+            if (spec.reliable) tags += "Reliable"
+            tags += if (spec.downloadFriendly) "Download" else "Stream only"
             val multiAudio = spec.movieUrl.contains("multilang", true) ||
                 spec.tvUrl.contains("multilang", true) ||
                 spec.declaredLanguages.size >= 2
             if (multiAudio) tags += "Multi audio"
-            return tags.take(3).joinToString(" \u00B7 ")
+            return tags.take(4).joinToString(" \u00B7 ")
         }
 
         fun providerTile(spec: ServerSpec): ProviderTile {
@@ -640,14 +673,21 @@ object SettingsUi {
                 ellipsize = TextUtils.TruncateAt.END
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
             }
+            val probeStatus = label("Not tested", 8.5f, TEXT_FAINT, medium = true).apply {
+                maxLines = 1
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                ).apply { leftMargin = dp(4) }
+            }
             val titleRow = LinearLayout(context).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
                 addView(name)
+                addView(probeStatus)
                 addView(dot)
             }
             val tags = label(providerTags(spec), 9.5f, TEXT_FAINT).apply {
-                maxLines = 2
+                maxLines = 3
                 ellipsize = TextUtils.TruncateAt.END
                 setPadding(0, dp(4), 0, 0)
             }
@@ -659,17 +699,32 @@ object SettingsUi {
                 addView(titleRow)
                 addView(tags)
             }
-            return ProviderTile(spec, root, dot)
+            return ProviderTile(spec, root, dot, probeStatus)
         }
 
         fun paintProvider(tile: ProviderTile) {
             val on = Settings.serverEnabled(tile.spec.id)
+            val probeState = providerProbeStates.getValue(tile.spec.id)
             tile.root.background = ripple(
                 rounded(if (on) SURFACE_2 else Color.TRANSPARENT, 12, 1, if (on) ACCENT else BORDER),
             )
             tile.dot.background = if (on) circle(SUCCESS) else circle(Color.TRANSPARENT, 2, BORDER)
+            tile.probeStatus.text = when (probeState) {
+                ProviderProbeState.NOT_TESTED -> "Not tested"
+                ProviderProbeState.TESTING -> "Testing"
+                ProviderProbeState.UP -> "Up"
+                ProviderProbeState.DOWN -> "Down"
+            }
+            tile.probeStatus.setTextColor(
+                when (probeState) {
+                    ProviderProbeState.UP -> SUCCESS
+                    ProviderProbeState.DOWN -> Color.parseColor("#FF6B6B")
+                    ProviderProbeState.TESTING -> ACCENT
+                    ProviderProbeState.NOT_TESTED -> TEXT_FAINT
+                },
+            )
             tile.root.contentDescription =
-                "${tile.spec.name}, ${if (on) "enabled" else "disabled"}"
+                "${tile.spec.name}, ${if (on) "enabled" else "disabled"}, ${tile.probeStatus.text}"
         }
 
         val providerTiles = allServers.map { spec ->
@@ -712,12 +767,79 @@ object SettingsUi {
             refreshProvidersState()
         }
 
+        val testAllButton = chip("Test all servers")
+        val testSummary = label(
+            "Checks every endpoint, including disabled providers; stream playback is not verified.",
+            10.5f,
+            TEXT_DIM,
+        ).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(10), 0, 0, 0)
+        }
+        val testAllRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(
+                testAllButton,
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(38)),
+            )
+            addView(
+                testSummary,
+                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+            )
+        }
+        add(providersCard, testAllRow, 10)
+        testAllButton.setOnClickListener {
+            if (providerProbeJob?.isActive == true) return@setOnClickListener
+
+            testAllButton.isEnabled = false
+            testAllButton.text = "Testing..."
+            providerProbeStates.keys.forEach { providerProbeStates[it] = ProviderProbeState.TESTING }
+            paintServerTiles()
+            testSummary.text = "Testing 0 of ${allServers.size} providers..."
+
+            providerProbeJob = CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+                val completed = java.util.concurrent.atomic.AtomicInteger()
+                val results = coroutineScope {
+                    val semaphore = Semaphore(6)
+                    allServers.map { spec ->
+                        async {
+                            semaphore.withPermit {
+                                val isUp = StreamEngine.probeServer(spec)
+                                val tested = completed.incrementAndGet()
+                                withContext(Dispatchers.Main) {
+                                    providerProbeStates[spec.id] =
+                                        if (isUp) ProviderProbeState.UP else ProviderProbeState.DOWN
+                                    providerTiles.firstOrNull { it.spec.id == spec.id }?.let(::paintProvider)
+                                    testSummary.text =
+                                        "Testing $tested of ${allServers.size} providers..."
+                                }
+                                isUp
+                            }
+                        }
+                    }.awaitAll()
+                }
+                val upCount = results.count { it }
+                val downCount = results.size - upCount
+                withContext(Dispatchers.Main) {
+                    testAllButton.isEnabled = true
+                    testAllButton.text = "Test all servers"
+                    testSummary.text = "Complete: $upCount up, $downCount down"
+                    AlertDialog.Builder(context)
+                        .setTitle("Provider test complete")
+                        .setMessage("$upCount providers are up and $downCount are down.")
+                        .setPositiveButton("OK", null)
+                        .show()
+                }
+            }
+        }
+
         val providerGrid = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
         val providerRows = providerTiles.chunked(2)
         providerRows.forEachIndexed { rowIndex, rowTiles ->
             val row = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
             rowTiles.forEachIndexed { index, tile ->
-                val lp = LinearLayout.LayoutParams(0, dp(66), 1f)
+                val lp = LinearLayout.LayoutParams(0, dp(80), 1f)
                 if (index < rowTiles.lastIndex) lp.rightMargin = gap
                 row.addView(tile.root, lp)
             }
@@ -939,6 +1061,20 @@ object SettingsUi {
         }
         aiVerifyChip.setOnClickListener {
             val provider = AiService.Provider.from(selectedProvider)
+            if (aiKeyInput.text.toString().isBlank()) {
+                aiKeyInput.error = "Enter a key first"
+                aiStatus.visibility = View.VISIBLE
+                aiStatus.text = "Enter a key, select a model, then verify and save."
+                return@setOnClickListener
+            }
+            if (aiModelInput.text.toString().isBlank()) {
+                aiModelInput.error = "Select a model first"
+                aiStatus.visibility = View.VISIBLE
+                aiStatus.text = "Select a model first, then verify and save."
+                return@setOnClickListener
+            }
+            aiKeyInput.error = null
+            aiModelInput.error = null
             aiStatus.visibility = View.VISIBLE
             aiStatus.text = "Verifying key..."
             Thread {
@@ -1015,6 +1151,7 @@ object SettingsUi {
             .setView(sheet)
             .create()
         dialog = built
+        built.setOnDismissListener { providerProbeJob?.cancel() }
         close.setOnClickListener { built.dismiss() }
         built.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
         built.window?.setDimAmount(0.6f)
