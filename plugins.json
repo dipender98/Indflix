@@ -9,7 +9,7 @@
             "Indflix"
         ],
         "description": "Federated embed-server resolver keyed by TMDB/IMDB id. Races dozens of independent HLS/DASH servers, picks the fastest CDN per title, and exposes multi-language audio + per-quality links.",
-        "fileSize": 293777,
+        "fileSize": 294370,
         "repositoryUrl": "https://github.com/dipender98/Indflix",
         "language": "hi",
         "tvTypes": [
@@ -18,7 +18,7 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/dipender98/Indflix/main/IndStream/icon.png",
         "apiVersion": 1,
-        "fileHash": "sha256-d416fac7736b2d3ac5bf34e226049f77ed355209c04e68962f8c982cf25ee626"
+        "fileHash": "sha256-bca03258b8fb9a2b493c0176875f597fd696a935a3bb5fa208055f320f98b03b"
     },
     {
         "url": "https://raw.githubusercontent.com/dipender98/Indflix/builds/Multimovies.cs3",
@@ -42,7 +42,7 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/dipender98/Indflix/main/Multimovies/icon.png",
         "apiVersion": 1,
-        "fileHash": "sha256-132799ed39132bce8526e0ff144020e72e103c1fade305c525447fcb1bce2ca9"
+        "fileHash": "sha256-03d4c4726bfc7160d4ae4a7b8be59b4ccefb05242ebfeb86642e5edb561043ea"
     },
     {
         "url": "https://raw.githubusercontent.com/dipender98/Indflix/builds/Vegamovies.cs3",
@@ -54,7 +54,7 @@
             "Indflix"
         ],
         "description": "CloudStream provider that scrapes Vegamovies (Hollywood + Bollywood) with TMDB metadata and live-fill download servers.",
-        "fileSize": 60375,
+        "fileSize": 60364,
         "repositoryUrl": "https://github.com/dipender98/Indflix",
         "language": "hi",
         "tvTypes": [
@@ -63,6 +63,6 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/dipender98/Indflix/main/Vegamovies/icon.png",
         "apiVersion": 1,
-        "fileHash": "sha256-598b9f17ee7504e0b0a6ba2371163be9a57ff254e5e4c088459b0f7a2ec5eed1"
+        "fileHash": "sha256-25c01cbe5f7c4d5b07be33112454450153c711291e75d5cdc01b0caf2427a74c"
     }
 ]
