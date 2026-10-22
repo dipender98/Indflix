@@ -32,3 +32,8 @@ Use logic and judgment on every task. If two rules conflict, correctness wins.
 - Think long-term: choose the solution that stays correct, fast, and maintainable over time, not only what works today.
 - Prefer correctness.
 - If you are in doubt about a decision, ask the user or check on internet.
+
+## 6. Git & Releases
+
+- Commit only when asked. Never push or bump the version until the user explicitly says so.
+- Write commit messages that state what was done, fixed, or implemented, in one or two lines. Be descriptive but concise; no long, padded descriptions.

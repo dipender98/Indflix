@@ -261,6 +261,13 @@ class VegamoviesPluginTest {
     }
 
     @Test
+    fun tokens_2160pKeepsSingleQualityToken() {
+        val toks = LinkNaming.parseTokens("Movie (2019) {Hindi-English} 2160p 4K HDR x265 [7.7GB]")
+        assertEquals(1, toks.count { Regex("""2160p|4K""", RegexOption.IGNORE_CASE).matches(it) }, toks.toString())
+        assertTrue(toks.contains("2160p"), toks.toString())
+    }
+
+    @Test
     fun tokens_languageOnlyWhenPresent() {
         val noLang = LinkNaming.parseTokens("Movie (2019) 720p WEB-DL x265 [1.2GB]")
         assertTrue(noLang.none { it.startsWith("{") }, noLang.toString())

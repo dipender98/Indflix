@@ -70,7 +70,7 @@ internal object LinkNaming {
             out.add(
                 when {
                     q == "4k" -> "4K"
-                    q.startsWith("2160p") -> "2160p" + if (q.length > 5) " 4K" else ""
+                    q.startsWith("2160p") -> "2160p"
                     else -> q
                 }
             )

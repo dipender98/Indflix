@@ -7,13 +7,60 @@ object LinkNaming {
     private val RESOLUTION_TOKEN =
         Regex("""\s*(?:\d{3,4}p|[24]K)\b""", RegexOption.IGNORE_CASE)
 
+    private val MULTI_MARKER =
+        Regex("""\b(?:multi|dual|both)(?:\s*-?\s*audio)?\b""", RegexOption.IGNORE_CASE)
+
+    private val LANGUAGE_NAMES = setOf(
+        "Hindi", "Urdu", "Bengali", "Arabic", "Russian", "Chinese", "Japanese", "Korean",
+        "French", "Spanish", "Portuguese", "Filipino", "Indonesian", "Malaysian", "Vietnamese",
+        "English", "Tamil", "Telugu", "Malayalam", "Kannada", "Marathi", "Punjabi", "Gujarati",
+        "Nepali", "Sinhala", "Thai", "Turkish", "German", "Italian", "Dutch", "Polish",
+    )
+
+    private val LANGUAGE_SPLIT =
+        Regex("""[+,&/|.\-_]|\band\b|\bdual\b|\bmulti\b|\s+""", RegexOption.IGNORE_CASE)
+
+    private val LANGUAGE_MODIFIERS = setOf(
+        "audio", "dub", "dubbed", "version", "track", "sub", "subs", "subtitle", "subtitles",
+    )
+
+    private val TRAILING_LANGUAGE = Regex(
+        """(?i)(?:[\s,+/&\-]*\b(?:hindi|english|tamil|telugu|malayalam|kannada|bengali|bangla|marathi|punjabi|gujarati|urdu|nepali|sinhala|arabic|russian|chinese|mandarin|japanese|korean|french|spanish|portuguese|filipino|tagalog|indonesian|malaysian|vietnamese|thai|turkish|german|italian|dutch|polish|multi|dual)\b(?:\s*(?:audio|dub|dubbed))?)+$""",
+    )
+
+    fun languageNames(raw: String?): List<String> {
+        val s = raw?.trim().orEmpty()
+        if (s.isBlank()) return emptyList()
+        val out = LinkedHashSet<String>()
+        for (chunk in s.split(LANGUAGE_SPLIT)) {
+            val c = chunk.trim { it.isWhitespace() || it in "-.:;()[]{}" }
+            if (c.length < 2 || c.lowercase() in LANGUAGE_MODIFIERS) continue
+            val canonical = canonicalSubtitleName(c)
+            if (canonical in LANGUAGE_NAMES) out += canonical
+        }
+        return out.toList()
+    }
+
+    fun languageLabel(raw: String?, originalLang: String? = null): String {
+        val s = raw?.trim().orEmpty()
+        if (s.isEmpty()) return originalLang?.let { languageLabel(it) }.orEmpty()
+        if (s.equals("original", true) || s.equals("orig", true) || s.equals("org", true)) {
+            return originalLang?.let { languageLabel(it) }.orEmpty().ifBlank { "Original" }
+        }
+        val names = languageNames(s)
+        return when {
+            names.size == 1 -> names[0]
+            names.size == 2 -> "${names[0]}, ${names[1]}"
+            names.size > 2 -> "Multi"
+            MULTI_MARKER.containsMatchIn(s) -> "Multi"
+            else -> ""
+        }
+    }
+
     fun languageTag(raw: String?): String {
         if (raw.isNullOrBlank()) return "Unknown"
-        val s = raw.trim().lowercase()
-        if (s.contains("dual") || s.contains("multi") || s.contains("+") || s.contains("&") ||
-            s.contains("hindi+english") || s.contains("hindi & english") || s.contains("both")) return "Multi"
-        if (s == "original" || s == "orig" || s == "org") return "Original"
-        return canonicalSubtitleName(s)
+        val label = languageLabel(raw).ifBlank { return "Unknown" }
+        return if (label == "Multi" || languageNames(raw).size > 1) "Multi" else label
     }
 
     fun languageTagFor(raw: String?, originalLang: String? = null): String {
@@ -70,33 +117,76 @@ object LinkNaming {
         sizeLabel: String? = null,
         mediaLabel: String? = null,
     ): String {
-        val base = RESOLUTION_TOKEN.replace(serverName.trim(), "").trim().ifBlank { "Server" }
+        val rawName = serverName.trim().ifBlank { "Server" }
+        val base = RESOLUTION_TOKEN.replace(rawName, "").trim().ifBlank { "Server" }
         val composed = if (subIndicator.isNullOrBlank()) base else "$base ${subIndicator.trim()}".trim()
-        val tag = languageTagFor(audioLabel, originalLang)
-        val named = RESOLUTION_TOKEN.replace(composed, "").trim()
-            .replace(Regex("""\s+${Regex.escape(tag)}$""", RegexOption.IGNORE_CASE), "")
-            .trim().ifBlank { "Server" }
+        val named = TRAILING_LANGUAGE.replace(
+            RESOLUTION_TOKEN.replace(composed, "").trim().ifBlank { "Server" },
+            "",
+        ).trim().ifBlank { "Server" }
         val numbered = if (duplicateIndex > 0) "$named-$duplicateIndex" else named
 
-        val tagPart = languageFlag(tag).let { f ->
-            if (f.isBlank()) "($tag)" else "($f $tag)"
-        }
+        val names = displayLanguageNames(audioLabel, mediaLabel, rawName)
+        val tag = displayLanguageTag(names, audioLabel, mediaLabel, originalLang)
+        val tagPart = languageTagPart(tag, names)
 
-        val tokens = renditionTokens(listOfNotNull(mediaLabel, serverName).joinToString(" "))
+        val tokens = renditionTokens(listOfNotNull(mediaLabel, rawName).joinToString(" "))
             .filterNot {
                 Regex("""\b${Regex.escape(it)}\b""", RegexOption.IGNORE_CASE).containsMatchIn(named)
             }
             .joinToString(" ")
-        val qualityPart = when {
-            qualityHint > 0 -> qualityLabel(qualityHint)
-            else -> listOfNotNull(mediaLabel, serverName)
-                .firstNotNullOfOrNull { RESOLUTION_TOKEN.find(it)?.value }
-                ?.replace("4k", "4K", ignoreCase = true)
-                ?.replace("2k", "2K", ignoreCase = true)?.trim().orEmpty()
+        val qualityPart = (
+            if (qualityHint > 0) {
+                qualityLabel(qualityHint)
+            } else {
+                listOfNotNull(mediaLabel, rawName)
+                    .firstNotNullOfOrNull { RESOLUTION_TOKEN.find(it)?.value }
+                    ?.replace("4k", "4K", ignoreCase = true)
+                    ?.replace("2k", "2K", ignoreCase = true)?.trim().orEmpty()
+            }
+            ).let { quality ->
+            if (quality.isNotBlank() && named.contains(quality, ignoreCase = true)) "" else quality
         }
         val sizePart = sizeLabel?.trim().orEmpty()
         return listOf(numbered, tokens, tagPart, qualityPart, sizePart)
             .filter { it.isNotBlank() }.joinToString(" ")
+    }
+
+    private fun displayLanguageNames(audioLabel: String?, mediaLabel: String?, serverName: String): List<String> {
+        val audio = languageNames(audioLabel)
+        val media = languageNames(mediaLabel)
+        return when {
+            audio.size >= 2 -> audio
+            media.size > audio.size -> media
+            audio.isNotEmpty() -> audio
+            else -> languageNames(serverName)
+        }
+    }
+
+    private fun displayLanguageTag(
+        names: List<String>,
+        audioLabel: String?,
+        mediaLabel: String?,
+        originalLang: String?,
+    ): String = when {
+        names.size == 1 -> names[0]
+        names.size == 2 -> "${names[0]}, ${names[1]}"
+        names.size > 2 -> "Multi"
+        else -> languageLabel(audioLabel, originalLang)
+            .ifBlank { languageLabel(mediaLabel, originalLang) }
+            .ifBlank { "Unknown" }
+    }
+
+    private fun languageTagPart(label: String, names: List<String>): String {
+        if (names.size == 2 && label != "Multi" && label != "Unknown" && label != "Original") {
+            val first = languageFlag(names[0])
+            val second = languageFlag(names[1])
+            if (first.isNotBlank() && second.isNotBlank()) {
+                return "($first ${names[0]}, $second ${names[1]})"
+            }
+        }
+        val flag = names.singleOrNull()?.let { languageFlag(it) }.orEmpty()
+        return if (flag.isBlank()) "($label)" else "($flag $label)"
     }
 
     fun displayName(base: String, audioLabel: String?, qualityHint: Int): String =

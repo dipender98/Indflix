@@ -50,6 +50,54 @@ class LinkNamingTest {
     }
 
     @Test
+    fun languageLabel_twoLanguagesListsBoth() {
+        assertEquals("Hindi, English", LinkNaming.languageLabel("Hindi+English"))
+        assertEquals("Hindi, English", LinkNaming.languageLabel("Hindi-English"))
+        assertEquals("Hindi, English", LinkNaming.languageLabel("Dual Audio Hindi & English"))
+        assertEquals("Hindi", LinkNaming.languageLabel("Hindi Dubbed"))
+    }
+
+    @Test
+    fun languageLabel_moreThanTwoIsMulti_singleStaysSingle() {
+        assertEquals("Multi", LinkNaming.languageLabel("Hindi+English+Tamil"))
+        assertEquals("Multi", LinkNaming.languageLabel("Dual Audio"))
+        assertEquals("Tamil", LinkNaming.languageLabel("Tamil"))
+        assertEquals("", LinkNaming.languageLabel("Show 2024 1080p"))
+    }
+
+    @Test
+    fun displayName_twoLanguagesShowsBothFlags() {
+        val name = LinkNaming.displayName(
+            serverName = "VidLink", audioLabel = "Hindi+English", qualityHint = 1080,
+        )
+        assertEquals("VidLink ($IN Hindi, $GB English) 1080p", name)
+    }
+
+    @Test
+    fun displayName_threeLanguagesCollapseToMulti() {
+        val name = LinkNaming.displayName(
+            serverName = "VidLink", audioLabel = "Hindi+English+Tamil", qualityHint = 1080,
+        )
+        assertEquals("VidLink (Multi) 1080p", name)
+    }
+
+    @Test
+    fun displayName_conflictingServerLanguageIsDropped() {
+        val name = LinkNaming.displayName(
+            serverName = "AnimeWorld English", audioLabel = "Japanese", qualityHint = 1080,
+        )
+        assertEquals("AnimeWorld (\uD83C\uDDEF\uD83C\uDDF5 Japanese) 1080p", name)
+    }
+
+    @Test
+    fun displayName_qualityFromBrandIsNotRepeated() {
+        val name = LinkNaming.displayName(
+            serverName = "4KHDHub", audioLabel = "Hindi", qualityHint = 2160,
+        )
+        assertEquals("4KHDHub ($IN Hindi)", name)
+    }
+
+    @Test
     fun languageTagFor_explicitOverridesOriginal() {
         assertEquals("Hindi", LinkNaming.languageTagFor("Hindi", "ja"))
     }

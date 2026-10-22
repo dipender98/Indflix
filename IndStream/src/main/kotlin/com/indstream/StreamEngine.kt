@@ -2343,6 +2343,7 @@ object StreamEngine {
             val out = mutableListOf<RawStream>()
             for (item in items) {
                 val lang = hubLangOf(item.languages)
+                val audioLang = LinkNaming.languageLabel(item.languages).ifBlank { lang }
                 val priority = when (lang) {
                     "Hindi" -> 4
                     "Multi" -> 2
@@ -2374,7 +2375,7 @@ object StreamEngine {
                             spec.id, "${spec.name} $qText".trim(), url,
                             url.contains(".m3u8", ignoreCase = true), referer,
                             releaseHeightOf(qText.ifBlank { item.title }),
-                            audioPriority = priority, audioLabel = lang,
+                            audioPriority = priority, audioLabel = audioLang,
                             sizeLabel = item.size,
                             mediaLabel = item.title,
                         )
@@ -2713,6 +2714,15 @@ object StreamEngine {
     private fun downloadHeadingShaped(text: String): Boolean =
         Regex("""(?i)(\d{3,4}p\b|4K|\d+(?:\.\d+)?\s?(?:GB|MB)|/ZiP|/ZIP|\bZIP\b|Batch|Season\s*\d|\bPack\b|DUAL\s*[- ]?AUDIO|HINDI|TAMIL|TELUGU|\bEP(?:\.|ISODE)?\s*\d|S\d{1,2}[\s._-]?E\d{1,3})""").containsMatchIn(text)
 
+    internal fun fslServerLabel(tag: String?, fallback: String): String {
+        val label = tag?.trim().orEmpty()
+        if (label.isBlank()) return fallback
+        if (LinkNaming.languageLabel(label).isNotBlank()) return fallback
+        if (Regex("""(?i)^(?:download|file|watch|play|get|stream|online)\b""").containsMatchIn(label)) return fallback
+        if (Regex("""(?i)\b(?:2160p|1440p|1080p|720p|480p|4k)\b""").containsMatchIn(label)) return fallback
+        return label.replace(Regex("""(?i)\s*\bserver\b\s*$"""), "").trim().ifBlank { fallback }
+    }
+
     internal data class GatewayLinks(val fastdl: List<String>, val cloud: List<String>)
 
     internal fun gatewayLinksOf(html: String): GatewayLinks {
@@ -2817,11 +2827,6 @@ object StreamEngine {
         fun enc(s: String) = java.net.URLEncoder.encode(s, "UTF-8")
         val out = mutableListOf<RawStream>()
         val seen = HashSet<String>()
-        val epTag = if (type == "tv" && season > 0 && episode > 0) {
-            " S${season.toString().padStart(2, '0')}E${episode.toString().padStart(2, '0')}"
-        } else {
-            ""
-        }
         for ((family, seed, bootstrap) in fslSeeds()) {
             val base = fslBase(family, seed, bootstrap) ?: continue
             val json = fslGet("$base/ts-search.php?q=${enc(title)}&page=1", 8)?.first ?: continue
@@ -2841,8 +2846,9 @@ object StreamEngine {
                 )
                 for (group in groups.take(4)) {
                     val size = headingSizeOf(group.heading)
-                    val lang = releaseLanguageOf(group.heading)
-                    val priority = when (lang) {
+                    val priorityLang = releaseLanguageOf(group.heading)
+                    val lang = LinkNaming.languageLabel(group.heading).ifBlank { priorityLang }
+                    val priority = when (priorityLang) {
                         "Hindi" -> 4
                         "Multi" -> 2
                         else -> 1
@@ -2858,10 +2864,12 @@ object StreamEngine {
                             gatewayLinksOf(expanded).cloud
                         }
                         for (vcloud in episodeFirstOrder(cloudLinks, type, season, episode)) {
-                            for ((url, _) in vcloudR2Links(vcloud, gateway, type, season, episode)) {
+                            for ((url, sourceLabel) in vcloudR2Links(vcloud, gateway, type, season, episode)) {
                                 if (!seen.add(url)) continue
+                                val serverName = listOf(fslServerLabel(sourceLabel, spec.name), qText)
+                                    .filter { it.isNotBlank() }.joinToString(" ")
                                 out += RawStream(
-                                    spec.id, "${spec.name} $qText$epTag".trim(), url,
+                                    spec.id, serverName, url,
                                     url.contains(".m3u8", ignoreCase = true),
                                     Regex("""^https?://[^/]+""").find(url)?.value,
                                     releaseHeightOf(qText.ifBlank { group.heading }),

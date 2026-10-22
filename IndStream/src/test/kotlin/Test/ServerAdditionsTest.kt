@@ -358,6 +358,16 @@ class ServerAdditionsTest {
     }
 
     @Test
+    fun fslServerLabel_honorsSourceUniqueness() {
+        assertEquals("FSLv2", StreamEngine.fslServerLabel("FSLv2 Server", "FSL"))
+        assertEquals("FSL", StreamEngine.fslServerLabel("FSL Server", "FSL"))
+        assertEquals("FSL", StreamEngine.fslServerLabel("Download File", "FSL"))
+        assertEquals("FSL", StreamEngine.fslServerLabel("1080p", "FSL"))
+        assertEquals("FSL", StreamEngine.fslServerLabel("Hindi", "FSL"))
+        assertEquals("FSL", StreamEngine.fslServerLabel(null, "FSL"))
+    }
+
+    @Test
     fun hubFileButtons_pixeldrainConvert() {
         val html = "<div class=\"card-header\">Jawan 2023 720p</div><div class=\"card-body\">" +
             "<h2><a class=\"btn\" href=\"https://pixeldrain.dev/u/AbC123\">Download File</a></h2></div>"
