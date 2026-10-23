@@ -23,6 +23,9 @@ object Settings {
     private const val AI_PROVIDER = "ai_provider"
     private const val FORYOU_MODE = "foryou_refresh_mode"
     private const val SERVER_OFF_PREFIX = "server_off_"
+    private const val CATALOGUE_OFF_PREFIX = "catalogue_off_"
+    private const val STREMIO_NUVIO_ADDONS = "stremio_addons"
+    private const val STREMIO_NUVIO_OFF_PREFIX = "stremio_off_"
     private const val SHUFFLE_ROWS = "shuffle_rows"
 
     @Volatile
@@ -116,6 +119,21 @@ object Settings {
 
     @Volatile
     private var serversLoaded = false
+
+    @Volatile
+    private var catalogueOff: Set<String> = emptySet()
+
+    @Volatile
+    private var catalogueLoaded = false
+
+    @Volatile
+    private var stremioNuvioUrls: List<String>? = null
+
+    @Volatile
+    private var stremioNuvioOff: Set<String> = emptySet()
+
+    @Volatile
+    private var stremioNuvioLoaded = false
 
     @Volatile
     private var shuffleRowsCached: Boolean? = null
@@ -297,6 +315,125 @@ object Settings {
                 .toSet()
         }.getOrDefault(emptySet())
         serversLoaded = true
+    }
+
+    fun catalogueEnabled(id: String): Boolean {
+        if (!catalogueLoaded) loadCatalogue()
+        return !catalogueOff.contains(id)
+    }
+
+    fun saveCatalogueEnabled(context: Context, id: String, on: Boolean) {
+        runCatching {
+            val edit = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            if (on) edit.remove(CATALOGUE_OFF_PREFIX + id)
+            else edit.putBoolean(CATALOGUE_OFF_PREFIX + id, true)
+            edit.apply()
+        }
+        catalogueOff = if (on) catalogueOff - id else catalogueOff + id
+        catalogueLoaded = true
+        appContext = context.applicationContext
+    }
+
+    fun saveAllCatalogueEnabled(context: Context, ids: Collection<String>, on: Boolean) {
+        runCatching {
+            val edit = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            ids.forEach { id ->
+                if (on) edit.remove(CATALOGUE_OFF_PREFIX + id)
+                else edit.putBoolean(CATALOGUE_OFF_PREFIX + id, true)
+            }
+            edit.apply()
+        }
+        catalogueOff = if (on) catalogueOff - ids else catalogueOff + ids
+        catalogueLoaded = true
+        appContext = context.applicationContext
+    }
+
+    private fun loadCatalogue() {
+        val ctx = appContext
+        catalogueOff = if (ctx == null) emptySet() else runCatching {
+            ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).all
+                .filter { (name, value) -> name.startsWith(CATALOGUE_OFF_PREFIX) && value == true }
+                .map { (name, _) -> name.removePrefix(CATALOGUE_OFF_PREFIX) }
+                .toSet()
+        }.getOrDefault(emptySet())
+        catalogueLoaded = true
+    }
+
+    fun stremioNuvioAddonUrls(): List<String> {
+        if (!stremioNuvioLoaded) loadStremioNuvio()
+        return stremioNuvioUrls ?: StremioNuvioAddons.DEFAULT_URLS
+    }
+
+    fun stremioNuvioAddonEnabled(url: String): Boolean {
+        if (!stremioNuvioLoaded) loadStremioNuvio()
+        return !stremioNuvioOff.contains(url)
+    }
+
+    fun saveStremioNuvioAddons(context: Context, urls: Collection<String>) {
+        if (!stremioNuvioLoaded) loadStremioNuvio()
+        val clean = urls.map { it.trim() }.filter { it.isNotBlank() }.distinct()
+        val keep = clean.toSet()
+        val removedDisabled = stremioNuvioOff - keep
+        runCatching {
+            val edit = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit()
+                .putString(STREMIO_NUVIO_ADDONS, clean.joinToString("\n"))
+            removedDisabled.forEach { edit.remove(STREMIO_NUVIO_OFF_PREFIX + it) }
+            edit.apply()
+        }
+        stremioNuvioUrls = clean
+        stremioNuvioOff = stremioNuvioOff - removedDisabled
+        stremioNuvioLoaded = true
+        appContext = context.applicationContext
+    }
+
+    fun saveStremioNuvioAddonEnabled(context: Context, url: String, on: Boolean) {
+        if (!stremioNuvioLoaded) loadStremioNuvio()
+        runCatching {
+            val edit = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            if (on) edit.remove(STREMIO_NUVIO_OFF_PREFIX + url)
+            else edit.putBoolean(STREMIO_NUVIO_OFF_PREFIX + url, true)
+            edit.apply()
+        }
+        stremioNuvioOff = if (on) stremioNuvioOff - url else stremioNuvioOff + url
+        stremioNuvioLoaded = true
+        appContext = context.applicationContext
+    }
+
+    fun saveAllStremioNuvioEnabled(context: Context, urls: Collection<String>, on: Boolean) {
+        if (!stremioNuvioLoaded) loadStremioNuvio()
+        runCatching {
+            val edit = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            urls.forEach { url ->
+                if (on) edit.remove(STREMIO_NUVIO_OFF_PREFIX + url)
+                else edit.putBoolean(STREMIO_NUVIO_OFF_PREFIX + url, true)
+            }
+            edit.apply()
+        }
+        stremioNuvioOff = if (on) stremioNuvioOff - urls.toSet() else stremioNuvioOff + urls.toSet()
+        stremioNuvioLoaded = true
+        appContext = context.applicationContext
+    }
+
+    private fun loadStremioNuvio() {
+        val ctx = appContext ?: return
+        runCatching {
+            val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            stremioNuvioUrls = if (!prefs.contains(STREMIO_NUVIO_ADDONS)) {
+                StremioNuvioAddons.DEFAULT_URLS
+            } else {
+                prefs.getString(STREMIO_NUVIO_ADDONS, "").orEmpty()
+                    .split('\n')
+                    .map { it.trim() }
+                    .filter { it.isNotBlank() }
+                    .distinct()
+            }
+            stremioNuvioOff = prefs.all
+                .filter { (name, value) -> name.startsWith(STREMIO_NUVIO_OFF_PREFIX) && value == true }
+                .map { (name, _) -> name.removePrefix(STREMIO_NUVIO_OFF_PREFIX) }
+                .toSet()
+        }
+        stremioNuvioLoaded = true
     }
 
     fun shuffleRows(): Boolean {

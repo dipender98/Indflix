@@ -131,11 +131,7 @@ class IndStreamProvider : MainAPI() {
                 rows += Pair("foryou|movie", "Made for You: Movies")
                 rows += Pair("foryou|tv", "Made for You: Series")
             }
-            rows += Pair("trending|movie", "Trending Movies")
-            rows += Pair("trending|tv", "Trending Series")
-            rows += Pair("popular|movie", "Popular Movies")
-            rows += Pair("popular|tv", "Popular Series")
-            rows += TmdbService.genreRows()
+            rows += Catalogue.enabledRows()
             return mainPageOf(*rows.toTypedArray())
         }
 
@@ -220,18 +216,17 @@ class IndStreamProvider : MainAPI() {
         page: Int,
         request: MainPageRequest
     ): HomePageResponse? {
+        val row = Catalogue.parseRow(request.data)
         val parts = request.data.split("|")
-        val genre = TmdbService.parseGenreRow(request.data)
         val kind = parts[0].trim()
-        val tmdbType = genre?.second ?: if (parts.getOrNull(1)?.trim() == "tv") "tv" else "movie"
         val items = withTimeoutOrNull(if (kind == "foryou") 35_000L else 12_000L) {
-            when (kind) {
-                "popular" -> TmdbService.popular(tmdbType, page)
-                "foryou" -> ForYouEngine.row(tmdbType, page)
-                "genre" -> genre
-                    ?.let { (id, type) -> TmdbService.discover(type, listOf(id), page) }
-                    .orEmpty()
-                else -> TmdbService.trending(tmdbType, page)
+            if (row != null) {
+                Catalogue.fetch(row.first, row.second, page)
+            } else if (kind == "foryou") {
+                val tmdbType = if (parts.getOrNull(1)?.trim() == "tv") "tv" else "movie"
+                ForYouEngine.row(tmdbType, page)
+            } else {
+                emptyList()
             }
         }.orEmpty()
         if (items.isEmpty()) return null

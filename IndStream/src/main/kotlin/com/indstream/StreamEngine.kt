@@ -91,7 +91,7 @@ object StreamEngine {
                 enabled
             }
         } else healthy
-        val servers = candidates
+        val servers = candidates + listOfNotNull(StremioNuvioAddons.serverSpec())
         Log.d("IndStream", "selectServers tmdb=$tmdbId type=$type s=$season e=$episode -> ${servers.size} servers (neutral order)")
         return servers
     }
@@ -201,11 +201,11 @@ object StreamEngine {
                             val crash = crashed
                             if (crash != null) {
                                 Log.w("IndStream", "${spec.id}: crashed after ${ms}ms: " +
-                                    "${crash.javaClass.simpleName}: ${crash.message} (recording failure)")
-                                HealthMonitor.recordFailure(spec.id)
+                                    "${crash.javaClass.simpleName}: ${crash.message}")
+                                if (spec.recordHealth) HealthMonitor.recordFailure(spec.id)
                             } else {
-                                Log.w("IndStream", "${spec.id}: TIMEOUT � no result after ${spec.timeoutSec}s, recording failure")
-                                HealthMonitor.recordFailure(spec.id)
+                                Log.w("IndStream", "${spec.id}: TIMEOUT - no result after ${spec.timeoutSec}s")
+                                if (spec.recordHealth) HealthMonitor.recordFailure(spec.id)
                             }
                         }
                         val streams = outcome?.map { s ->
@@ -215,10 +215,10 @@ object StreamEngine {
                         }.orEmpty()
                         if (dual && streams.isEmpty() && crashed == null && !cleanMiss) {
                             Log.w("IndStream", "${spec.id}: no streams (recording failure)")
-                            HealthMonitor.recordFailure(spec.id)
+                            if (spec.recordHealth) HealthMonitor.recordFailure(spec.id)
                         }
                         if (streams.isNotEmpty()) {
-                            if (dual) HealthMonitor.recordSuccess(spec.id)
+                            if (dual && spec.recordHealth) HealthMonitor.recordSuccess(spec.id)
                             Log.i("IndStream", "${spec.id}: LANDED ${streams.size} streams at " +
                                 "${System.currentTimeMillis() - serverStart}ms")
                             onBatch(spec.id, streams)
@@ -410,8 +410,25 @@ object StreamEngine {
     ): List<RawStream> {
         val start = System.currentTimeMillis()
         val id = if (keyType == ServerIdType.IMDB)
-            (imdbId ?: throw CleanMissException("${spec.id}: IMDB id unavailable (TMDB lookup miss) � host stays in farm"))
+            (imdbId ?: throw CleanMissException("${spec.id}: IMDB id unavailable (TMDB lookup miss) - host stays in farm"))
         else tmdbId.toString()
+
+        if (spec.id == StremioNuvioAddons.SERVER_ID) {
+            if (type != "movie" && (season <= 0 || episode <= 0)) {
+                Log.w("IndStream", "${spec.id}: tv request without season/episode (s=$season e=$episode), skipping")
+                return emptyList()
+            }
+            val addonId = imdbId?.trim()?.takeIf { it.startsWith("tt") }
+            if (addonId == null) {
+                failServer(spec, "IMDB id unavailable for addon lookup (soft miss, no breaker trip)", isCleanMiss = true)
+                return emptyList()
+            }
+            val result = StremioNuvioAddons.resolve(addonId, type, season, episode)
+            if (result.isNotEmpty()) { okServer(spec, start, "addon manifests", result.size); return result }
+            failServer(spec, "addons returned no playable streams (soft miss, no breaker trip)", isCleanMiss = true)
+            return emptyList()
+        }
+
         val embedUrl = if (type == "movie") ServerFarm.buildMovieUrl(spec, id)
         else ServerFarm.buildTvUrl(spec, id, season, episode)
         val referer = spec.referer ?: embedUrl.substringBefore("?")

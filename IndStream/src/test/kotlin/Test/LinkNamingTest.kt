@@ -353,6 +353,46 @@ class LinkNamingTest {
         }
     }
 
+    @Test
+    fun displayName_qualityNeverRepeated() {
+        // serverName carries the same resolution as the qualityHint; must render once only.
+        val name = LinkNaming.displayName(
+            serverName = "FSL 1080p", audioLabel = "Hindi", qualityHint = 1080,
+        )
+        assertEquals("FSL ($IN Hindi) 1080p", name)
+        assertEquals(1, countToken(name, """\b1080p\b"""))
+
+        // qualityHint present but serverName names a different resolution; only hint quality shown.
+        val name2 = LinkNaming.displayName(
+            serverName = "FSL 720p", audioLabel = "English", qualityHint = 1080,
+        )
+        assertEquals("FSL ($GB English) 1080p", name2)
+        assertEquals(1, countToken(name2, """\b1080p\b"""))
+
+        // auto quality from mediaLabel does not duplicate a resolution already in the name.
+        val name3 = LinkNaming.displayName(
+            serverName = "MovieBox", audioLabel = "Tamil", qualityHint = 0,
+            mediaLabel = "Film 1080p WEB-DL HEVC",
+        )
+        assertEquals("MovieBox WEB-DL HEVC ($IN Tamil) 1080p", name3)
+        assertEquals(1, countToken(name3, """\b1080p\b"""))
+    }
+
+    @Test
+    fun displayName_explicitAudioLanguageWinsOverServerName() {
+        // English-only audio must not be relabeled Hindi just because the server name says Hindi.
+        val name = LinkNaming.displayName(
+            serverName = "MovieServer Hindi", audioLabel = "English", qualityHint = 1080,
+        )
+        assertEquals("MovieServer ($GB English) 1080p", name)
+
+        val name2 = LinkNaming.displayName(
+            serverName = "MovieServer Hindi", audioLabel = "English", qualityHint = 0,
+            mediaLabel = "Film 1080p",
+        )
+        assertEquals("MovieServer ($GB English) 1080p", name2)
+    }
+
 
     @Test
     fun canonicalSubtitle_nativeScript() {

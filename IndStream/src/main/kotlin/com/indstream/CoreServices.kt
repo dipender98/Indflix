@@ -829,43 +829,6 @@ object TmdbService {
         }
     }
 
-    data class Genre(val label: String, val movieId: Int, val tvId: Int = 0)
-
-    val genres = listOf(
-        Genre("Action", 28, 10759),
-        Genre("Comedy", 35, 35),
-        Genre("Crime", 80, 80),
-        Genre("Drama", 18, 18),
-        Genre("Mystery", 9648, 9648),
-        Genre("Sci-Fi & Fantasy", 878, 10765),
-    )
-
-    fun genreId(genre: Genre, type: String): Int =
-        if (type == "movie") genre.movieId else genre.tvId
-
-    fun genreRowKey(genre: Genre, type: String): String =
-        "genre|${genreId(genre, type)}|${if (type == "movie") "movie" else "tv"}"
-
-    fun genreRowTitle(genre: Genre, type: String): String =
-        "${genre.label} ${if (type == "movie") "Movies" else "Series"}"
-
-    fun genreRows(): List<Pair<String, String>> {
-        val out = ArrayList<Pair<String, String>>(genres.size * 2)
-        genres.forEach { genre ->
-            out += genreRowKey(genre, "movie") to genreRowTitle(genre, "movie")
-            if (genre.tvId > 0) out += genreRowKey(genre, "tv") to genreRowTitle(genre, "tv")
-        }
-        return out
-    }
-
-    fun parseGenreRow(data: String): Pair<Int, String>? {
-        val parts = data.split("|")
-        if (parts.size < 3 || parts[0].trim() != "genre") return null
-        val id = parts[1].trim().toIntOrNull()?.takeIf { it > 0 } ?: return null
-        val type = if (parts[2].trim() == "tv") "tv" else "movie"
-        return id to type
-    }
-
     suspend fun discover(
         type: String,
         genreIds: List<Int>,
@@ -873,16 +836,25 @@ object TmdbService {
         language: String? = null,
         sortBy: String = "popularity.desc",
         minVotes: Int = 0,
+        originCountry: String? = null,
+        keywordIds: List<Int> = emptyList(),
     ): List<TmdbItem> {
         val kind = if (type == "movie") "movie" else "tv"
         val genres = genreIds.take(3).joinToString("|")
-        if (genres.isBlank()) return emptyList()
+        val keywords = keywordIds.take(3).joinToString("|")
+        if (genres.isBlank() && keywords.isBlank() &&
+            language.isNullOrBlank() && originCountry.isNullOrBlank()
+        ) return emptyList()
         val query = buildString {
-            append("language=en-US&page=$page&sort_by=$sortBy&include_adult=false&with_genres=$genres")
+            append("language=en-US&page=$page&sort_by=$sortBy&include_adult=false")
+            if (genres.isNotBlank()) append("&with_genres=$genres")
+            if (keywords.isNotBlank()) append("&with_keywords=$keywords")
             if (!language.isNullOrBlank()) append("&with_original_language=$language")
+            if (!originCountry.isNullOrBlank()) append("&with_origin_country=$originCountry")
             if (minVotes > 0) append("&vote_count.gte=$minVotes")
         }
-        val key = "discover:$kind:$genres:$page:$sortBy:${language.orEmpty()}:$minVotes"
+        val key = "discover:$kind:$genres:$keywords:$page:$sortBy:${language.orEmpty()}:" +
+            "$minVotes:${originCountry.orEmpty()}"
         return catalog(key, kind) {
             tmdbGet("discover $kind", "/discover/$kind", query)
         }
@@ -1508,7 +1480,11 @@ object ManifestKit {
             url?.let { append(it.lowercase()); append(' ') }
         }
         if (hay.isBlank()) return null
-        return INDIAN_DUB_LANGUAGES.firstOrNull { spec -> spec.names.any { hay.contains(it) } }?.canonical
+        return INDIAN_DUB_LANGUAGES.firstOrNull { spec ->
+            spec.names.any { name ->
+                Regex("""(?i)\b${Regex.escape(name)}\b""").containsMatchIn(hay)
+            }
+        }?.canonical
     }
 
     fun audioLanguageLabel(master: MasterPlaylist): String? {

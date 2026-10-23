@@ -126,7 +126,7 @@ object LinkNaming {
         ).trim().ifBlank { "Server" }
         val numbered = if (duplicateIndex > 0) "$named-$duplicateIndex" else named
 
-        val names = displayLanguageNames(audioLabel, mediaLabel, rawName)
+        val names = displayLanguageNames(audioLabel, mediaLabel)
         val tag = displayLanguageTag(names, audioLabel, mediaLabel, originalLang)
         val tagPart = languageTagPart(tag, names)
 
@@ -135,6 +135,7 @@ object LinkNaming {
                 Regex("""\b${Regex.escape(it)}\b""", RegexOption.IGNORE_CASE).containsMatchIn(named)
             }
             .joinToString(" ")
+        val prefix = listOf(named, tokens, tagPart).filter { it.isNotBlank() }.joinToString(" ")
         val qualityPart = (
             if (qualityHint > 0) {
                 qualityLabel(qualityHint)
@@ -145,21 +146,22 @@ object LinkNaming {
                     ?.replace("2k", "2K", ignoreCase = true)?.trim().orEmpty()
             }
             ).let { quality ->
-            if (quality.isNotBlank() && named.contains(quality, ignoreCase = true)) "" else quality
+            if (quality.isNotBlank() && prefix.contains(quality, ignoreCase = true)) "" else quality
         }
         val sizePart = sizeLabel?.trim().orEmpty()
         return listOf(numbered, tokens, tagPart, qualityPart, sizePart)
             .filter { it.isNotBlank() }.joinToString(" ")
     }
 
-    private fun displayLanguageNames(audioLabel: String?, mediaLabel: String?, serverName: String): List<String> {
+    private fun displayLanguageNames(audioLabel: String?, mediaLabel: String?): List<String> {
         val audio = languageNames(audioLabel)
         val media = languageNames(mediaLabel)
         return when {
             audio.size >= 2 -> audio
             media.size > audio.size -> media
             audio.isNotEmpty() -> audio
-            else -> languageNames(serverName)
+            media.isNotEmpty() -> media
+            else -> emptyList()
         }
     }
 

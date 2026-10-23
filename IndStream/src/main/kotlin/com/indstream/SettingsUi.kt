@@ -538,6 +538,75 @@ object SettingsUi {
         )
 
 
+        fun buildCatalogueCard(group: Catalogue.Group): Card {
+            val rows = Catalogue.rowsFor(group)
+            fun enabledCount(): Int = rows.count { Settings.catalogueEnabled(it.first) }
+            fun stateText(): String = "${enabledCount()} of ${rows.size} enabled"
+
+            val groupCard = card(
+                "${group.label} Catalogue",
+                "Toggle each row or the whole group",
+                stateText(),
+                enabledCount() > 0,
+            )
+            val enableAll = chip("Enable all")
+            val disableAll = chip("Disable all")
+            val quick = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.END or Gravity.CENTER_VERTICAL
+            }
+            listOf(enableAll, disableAll).forEachIndexed { index, view ->
+                view.setPadding(dp(14), 0, dp(14), 0)
+                view.layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, dp(36),
+                ).apply { if (index > 0) leftMargin = gap }
+                quick.addView(view)
+            }
+            add(groupCard, quick, 6)
+
+            val options = LinkedHashMap<String, Option>()
+            val list = optionList()
+            rows.forEach { (key, title) ->
+                val opt = option(
+                    title.substringAfter(" \u00B7 ", title),
+                    if (title.endsWith(" Movies")) "Movie row" else "Series row",
+                )
+                options[key] = opt
+                list.addView(opt.root)
+            }
+            add(groupCard, list, 8)
+
+            fun paint() {
+                options.forEach { (key, opt) -> paintOption(opt, Settings.catalogueEnabled(key)) }
+                val on = enabledCount()
+                setState(groupCard, "$on of ${rows.size} enabled", on > 0)
+            }
+            paint()
+            options.forEach { (key, opt) ->
+                opt.root.setOnClickListener {
+                    Settings.saveCatalogueEnabled(context, key, !Settings.catalogueEnabled(key))
+                    paint()
+                }
+            }
+            enableAll.setOnClickListener {
+                Settings.saveAllCatalogueEnabled(context, rows.map { it.first }, true)
+                paint()
+            }
+            disableAll.setOnClickListener {
+                Settings.saveAllCatalogueEnabled(context, rows.map { it.first }, false)
+                paint()
+            }
+            return groupCard
+        }
+
+        content.addView(sectionLabel("Catalogue", 0))
+        content.addView(
+            label("Enable or disable individual home rows for each group.", 11.5f, TEXT_DIM)
+                .apply { setPadding(0, 0, 0, dp(10)) },
+        )
+        Catalogue.Group.entries.forEach { buildCatalogueCard(it) }
+
+
         val forYouCard = card(
             "Made for You - Recommendation",
             "Rows built from your watch history",
@@ -857,6 +926,196 @@ object SettingsUi {
             )
         }
         add(providersCard, providerGrid, 10)
+
+
+        var addonUrls = StremioNuvioAddons.urls()
+        val addonChecks = LinkedHashMap<String, String>()
+        fun addonEnabledCount(): Int = addonUrls.count { StremioNuvioAddons.enabled(it) }
+        fun addonStateText(): String = when {
+            addonUrls.isEmpty() -> "Not configured"
+            else -> "${addonEnabledCount()} of ${addonUrls.size} enabled"
+        }
+        val addonCard = card(
+            "Stremio/Nuvio Extension",
+            "Load streams from addon manifests",
+            addonStateText(),
+            addonEnabledCount() > 0,
+        )
+        fun refreshAddonState() {
+            setState(addonCard, addonStateText(), addonEnabledCount() > 0)
+        }
+
+        add(
+            addonCard,
+            label(
+                "Add a Stremio/Nuvio addon manifest URL. Only direct HTTP(S) streams are played.",
+                11.5f, TEXT_DIM,
+            ).apply { setPadding(0, dp(10), 0, 0) },
+        )
+
+        val addonList = optionList()
+        add(addonCard, addonList, 8)
+
+        fun addonTitle(url: String): String =
+            StremioNuvioAddons.cached(url)?.name ?: StremioNuvioAddons.hostOf(url)
+
+        fun addonSummary(url: String): String {
+            val status = addonChecks[url]
+            return if (status.isNullOrBlank()) url else "$url\n$status"
+        }
+
+        fun renderAddons() {
+            addonList.removeAllViews()
+            addonUrls.forEach { url ->
+                val opt = option(addonTitle(url), addonSummary(url))
+                paintOption(opt, StremioNuvioAddons.enabled(url))
+                opt.root.setOnClickListener {
+                    StremioNuvioAddons.setEnabled(context, url, !StremioNuvioAddons.enabled(url))
+                    paintOption(opt, StremioNuvioAddons.enabled(url))
+                    refreshAddonState()
+                }
+                val remove = label(GLYPH_CLOSE, 12f, TEXT_FAINT).apply {
+                    gravity = Gravity.CENTER
+                    setPadding(dp(8), dp(8), dp(8), dp(8))
+                    background = ripple(rounded(Color.TRANSPARENT, 999))
+                    isClickable = true
+                    isFocusable = true
+                    contentDescription = "Remove addon"
+                }
+                remove.setOnClickListener {
+                    StremioNuvioAddons.remove(context, url)
+                    addonUrls = StremioNuvioAddons.urls()
+                    addonChecks.remove(url)
+                    renderAddons()
+                    fitHeight()
+                }
+                opt.root.addView(
+                    remove,
+                    LinearLayout.LayoutParams(dp(32), dp(32)).apply { leftMargin = dp(4) },
+                )
+            }
+            if (addonUrls.isEmpty()) {
+                addonList.addView(label("No addons configured.", 12f, TEXT_DIM))
+            }
+            refreshAddonState()
+        }
+
+        val addonInput = field("", "https://addon.example/manifest.json")
+        val addonAdd = action("Add", true)
+        addRow(addonCard, 12, addonInput, addonAdd)
+
+        val addonCheck = chip("Check")
+        val addonDefaults = chip("Restore defaults")
+        val addonEnableAll = chip("Enable all")
+        val addonDisableAll = chip("Disable all")
+        addRow(addonCard, 10, addonCheck, addonDefaults)
+        addRow(addonCard, 8, addonEnableAll, addonDisableAll)
+
+        val addonStatus = label(
+            "Open defaults are preloaded. Torrent and external links are detected but skipped.",
+            11.5f, TEXT_DIM,
+        ).apply { setPadding(0, dp(10), 0, 0) }
+        add(addonCard, addonStatus)
+
+        renderAddons()
+
+        addonAdd.setOnClickListener {
+            val normalized = StremioNuvioAddons.normalizeUrl(addonInput.text.toString())
+            if (normalized == null) {
+                addonInput.error = "Enter a valid addon URL"
+                return@setOnClickListener
+            }
+            if (addonUrls.any { it.equals(normalized, ignoreCase = true) }) {
+                addonInput.error = "Addon already added"
+                return@setOnClickListener
+            }
+            addonInput.error = null
+            addonAdd.isEnabled = false
+            addonAdd.text = "Adding..."
+            addonStatus.text = "Checking manifest..."
+            CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+                val manifest = StremioNuvioAddons.manifest(normalized, force = true)
+                val added = if (manifest == null) null else StremioNuvioAddons.add(context, normalized)
+                addonInput.post {
+                    addonAdd.isEnabled = true
+                    addonAdd.text = "Add"
+                    when {
+                        manifest == null -> {
+                            addonInput.error = "Manifest not reachable"
+                            addonStatus.text = "Manifest could not be loaded."
+                        }
+                        added == null -> {
+                            addonInput.error = "Addon already added"
+                            addonStatus.text = "That addon is already in the list."
+                        }
+                        else -> {
+                            addonUrls = StremioNuvioAddons.urls()
+                            addonChecks[added] = "Manifest OK"
+                            addonInput.setText("")
+                            addonStatus.text = "Added ${manifest.name}."
+                            renderAddons()
+                            fitHeight()
+                        }
+                    }
+                }
+            }
+        }
+
+        addonCheck.setOnClickListener {
+            val targets = addonUrls.toList()
+            if (targets.isEmpty()) {
+                addonStatus.text = "Add an addon first."
+                return@setOnClickListener
+            }
+            addonCheck.isEnabled = false
+            addonCheck.text = "Checking..."
+            addonStatus.text = "Checking ${targets.size} addon(s)..."
+            CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+                val results = coroutineScope {
+                    targets.map { url ->
+                        async { url to StremioNuvioAddons.check(url) }
+                    }.awaitAll()
+                }
+                addonCheck.post {
+                    results.forEach { (url, result) ->
+                        addonChecks[url] =
+                            if (result.ok) result.detail else "Check failed - ${result.detail}"
+                    }
+                    addonCheck.isEnabled = true
+                    addonCheck.text = "Check"
+                    val reachable = results.count { it.second.ok }
+                    addonStatus.text = "$reachable of ${results.size} reachable"
+                    renderAddons()
+                    fitHeight()
+                }
+            }
+        }
+
+        addonDefaults.setOnClickListener {
+            AlertDialog.Builder(context, android.R.style.Theme_Material_Dialog_Alert)
+                .setTitle("Restore default addons?")
+                .setMessage("This replaces the current addon list with the open defaults.")
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Restore") { _, _ ->
+                    StremioNuvioAddons.resetDefaults(context)
+                    addonUrls = StremioNuvioAddons.urls()
+                    addonChecks.clear()
+                    addonStatus.text = "Open defaults restored."
+                    renderAddons()
+                    fitHeight()
+                }
+                .show()
+        }
+
+        addonEnableAll.setOnClickListener {
+            StremioNuvioAddons.setAllEnabled(context, addonUrls, true)
+            renderAddons()
+        }
+
+        addonDisableAll.setOnClickListener {
+            StremioNuvioAddons.setAllEnabled(context, addonUrls, false)
+            renderAddons()
+        }
 
 
         val wyzieSaved = Settings.apiKey() != null

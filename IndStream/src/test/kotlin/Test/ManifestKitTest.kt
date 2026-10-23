@@ -311,6 +311,17 @@ class ManifestKitTest {
     }
 
     @Test
+    fun languageFromName_wordBoundaryAvoidsFalsePositives() {
+        // Substring matches inside unrelated words must not force a dub language.
+        assertNull(ManifestKit.languageFromName("hindismith", null))
+        assertNull(ManifestKit.languageFromName(null, "https://cdn.x/hindiarchive/master.m3u8"))
+        assertNull(ManifestKit.languageFromName("tamilnadu", null))
+        // Whole-word matches still resolve.
+        assertEquals("Hindi", ManifestKit.languageFromName("MyFlixer Hindi", null))
+        assertEquals("Tamil", ManifestKit.languageFromName(null, "https://cdn.x/tamil/master.m3u8"))
+    }
+
+    @Test
     fun resolutionFromUrl_picksHeight() {
         assertEquals(1080, ManifestKit.resolutionFromUrl("https://cdn.x/foo/1080p/movie.m3u8"))
         assertEquals(720, ManifestKit.resolutionFromUrl("https://cdn.x/video_720p.mp4"))
