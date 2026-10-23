@@ -19,7 +19,11 @@ import org.json.JSONObject
 object ImdbService {
 
     private const val SUGGEST_API = "https://v3.sg.media-imdb.com/suggestion/x"
-    private const val CINEMETA_API = "https://v3-cinemeta.strem.io/meta"
+    private const val CINEMETA_HOST = "https://v3-cinemeta.strem.io"
+    private const val CINEMETA_API = "$CINEMETA_HOST/meta"
+    private const val CINEMETA_CATALOG = "$CINEMETA_HOST/catalog"
+    private const val CATALOG_PAGE = 100
+    private const val CATALOG_TTL_MS = 10 * 60 * 1000L
     private const val CACHE_TTL_MS = 15 * 60 * 1000L
     private const val CACHE_MAX = 64
     private const val WAIT_MS = 11_000L
@@ -48,7 +52,9 @@ object ImdbService {
     )
 
     private data class Entry(val hits: List<ImdbHit>, val expiresAt: Long)
+    private data class CatalogEntry(val items: List<TmdbService.TmdbItem>, val expiresAt: Long)
     private val cache = ConcurrentHashMap<String, Entry>()
+    private val catalogCache = ConcurrentHashMap<String, CatalogEntry>()
     private val inFlight = ConcurrentHashMap<String, kotlinx.coroutines.Deferred<List<ImdbHit>>>()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val metaCache = ConcurrentHashMap<String, MetaDetail>()
@@ -170,6 +176,71 @@ object ImdbService {
         metaCache[key] = detail
         return detail
     }
+
+    suspend fun cinemetaCatalog(
+        type: String,
+        catalogId: String,
+        genre: String? = null,
+        page: Int = 1,
+    ): List<TmdbService.TmdbItem> {
+        val kind = if (type == "movie") "movie" else "series"
+        val cleanGenre = genre?.trim().orEmpty()
+        val skip = ((page.coerceAtLeast(1) - 1) * CATALOG_PAGE).toString()
+        val key = "$kind|$catalogId|$cleanGenre|$skip"
+        catalogCache[key]?.let { entry ->
+            if (System.currentTimeMillis() <= entry.expiresAt) return entry.items
+            catalogCache.remove(key)
+        }
+        val extras = buildList {
+            if (cleanGenre.isNotEmpty()) {
+                add("genre=" + URLEncoder.encode(cleanGenre, "UTF-8").replace("+", "%20"))
+            }
+            add("skip=$skip")
+        }
+        val url = "$CINEMETA_CATALOG/$kind/$catalogId/${extras.joinToString("&")}.json"
+        val raw = withTimeoutOrNull(7000L) { getText(url, 7) } ?: return emptyList()
+        val items = parseCinemetaCatalog(raw)
+        if (items.isNotEmpty()) {
+            if (catalogCache.size >= CACHE_MAX) {
+                catalogCache.entries.minByOrNull { e -> e.value.expiresAt }?.let { e -> catalogCache.remove(e.key) }
+            }
+            catalogCache[key] = CatalogEntry(items, System.currentTimeMillis() + CATALOG_TTL_MS)
+        }
+        return items
+    }
+
+    fun parseCinemetaCatalog(raw: String?): List<TmdbService.TmdbItem> {
+        if (raw.isNullOrBlank()) return emptyList()
+        return try {
+            val metas = JSONObject(raw).optJSONArray("metas") ?: return emptyList()
+            (0 until metas.length()).mapNotNull { i ->
+                val m = metas.optJSONObject(i) ?: return@mapNotNull null
+                val id = m.optString("id").trim().takeIf { it.startsWith("tt") } ?: return@mapNotNull null
+                val name = m.optString("name").takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                val type = if (m.optString("type") == "series") "tv" else "movie"
+                val year = yearOf(m.optString("releaseInfo")) ?: yearOf(m.optString("year"))
+                TmdbService.TmdbItem(
+                    tmdbId = m.optInt("moviedb_id", -1).takeIf { it > 0 },
+                    imdbId = id,
+                    type = type,
+                    name = name,
+                    year = year,
+                    poster = m.optString("poster").takeIf { it.isNotBlank() }?.largerPoster(),
+                    rating = m.optString("imdbRating").toDoubleOrNull()?.takeIf { it > 0 },
+                    popularity = m.optDouble("popularity", 0.0),
+                    overview = m.optString("description").takeIf { it.isNotBlank() },
+                )
+            }
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    private fun yearOf(raw: String): String? =
+        raw.trim().takeIf { it.length >= 4 && it.take(4).all { c -> c.isDigit() } }?.take(4)
+
+    private fun String.largerPoster(): String =
+        replace("/poster/small/", "/poster/medium/")
 
     private suspend fun MetaDetail.withCastPhotos(): MetaDetail {
         val names = cast.orEmpty().map { it.actor.name }.filter { it.isNotBlank() }.distinct()

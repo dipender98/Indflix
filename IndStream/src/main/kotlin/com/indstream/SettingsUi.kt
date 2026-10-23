@@ -25,6 +25,7 @@ import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.inputmethod.EditorInfo
 import android.widget.ArrayAdapter
 import android.widget.AutoCompleteTextView
 import android.widget.EditText
@@ -65,6 +66,7 @@ object SettingsUi {
     private val ACCENT = Color.parseColor("#4C8DFF")
     private val SUCCESS = Color.parseColor("#3FD37A")
     private val SUCCESS_SOFT = Color.parseColor("#122E1F")
+    private val WARNING = Color.parseColor("#FF7A6B")
 
     private const val GLYPH_CHEVRON = "\u203A"
     private const val GLYPH_CLOSE = "\u2715"
@@ -351,6 +353,114 @@ object SettingsUi {
             }
         }
 
+        fun smallToggle(initial: Boolean, onChange: (Boolean) -> Unit): View {
+            val root = FrameLayout(context).apply {
+                layoutParams = LinearLayout.LayoutParams(dp(46), dp(28))
+                isClickable = true
+                isFocusable = true
+                contentDescription = if (initial) "Disable" else "Enable"
+            }
+            val track = View(context).apply {
+                layoutParams = FrameLayout.LayoutParams(dp(46), dp(28))
+            }
+            val thumb = View(context).apply {
+                layoutParams = FrameLayout.LayoutParams(dp(22), dp(22), Gravity.START or Gravity.CENTER_VERTICAL)
+                    .apply { leftMargin = dp(3) }
+            }
+            root.addView(track)
+            root.addView(thumb)
+            var checked = initial
+            fun paint() {
+                track.background = rounded(
+                    if (checked) ACCENT else SURFACE_2, 999, 1, if (checked) ACCENT else BORDER,
+                )
+                thumb.background = circle(if (checked) Color.WHITE else TEXT_DIM)
+                thumb.translationX = if (checked) dp(18).toFloat() else 0f
+                root.contentDescription = if (checked) "Disable" else "Enable"
+            }
+            paint()
+            root.setOnClickListener {
+                checked = !checked
+                paint()
+                onChange(checked)
+            }
+            return root
+        }
+
+        fun reportDialog(
+            title: String,
+            subtitle: String,
+            rows: List<Triple<String, String, Int>> = emptyList(),
+            accent: Int = ACCENT,
+            actionLabel: String = "Done",
+            onAction: (() -> Unit)? = null,
+        ) {
+            val panel = LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(20), dp(18), dp(20), dp(16))
+                background = rounded(BG, 24)
+            }
+            val head = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            head.addView(
+                View(context).apply {
+                    background = circle(accent)
+                    layoutParams = LinearLayout.LayoutParams(dp(9), dp(9)).apply { rightMargin = dp(9) }
+                },
+            )
+            head.addView(label(title, 17f, TEXT, medium = true))
+            panel.addView(head)
+            panel.addView(
+                label(subtitle, 11.5f, TEXT_DIM).apply { setPadding(0, dp(6), 0, 0) },
+            )
+            if (rows.isNotEmpty()) {
+                val list = LinearLayout(context).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(0, dp(14), 0, 0)
+                }
+                rows.forEachIndexed { index, (name, value, tone) ->
+                    list.addView(
+                        LinearLayout(context).apply {
+                            orientation = LinearLayout.HORIZONTAL
+                            gravity = Gravity.CENTER_VERTICAL
+                            setPadding(dp(12), dp(11), dp(12), dp(11))
+                            background = rounded(SURFACE_2, 12, 1, BORDER)
+                            addView(
+                                label(name, 12.5f, TEXT_DIM),
+                                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+                            )
+                            addView(label(value, 13f, tone, medium = true))
+                        },
+                        LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ).apply { if (index > 0) topMargin = dp(8) },
+                    )
+                }
+                panel.addView(list)
+            }
+            val done = action(actionLabel, primary = true).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, dp(44),
+                ).apply { topMargin = dp(16) }
+            }
+            panel.addView(done)
+
+            val report = AlertDialog.Builder(context, android.R.style.Theme_Material_Dialog)
+                .setView(panel)
+                .create()
+            report.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            report.window?.setDimAmount(0.6f)
+            done.setOnClickListener {
+                report.dismiss()
+                onAction?.invoke()
+            }
+            report.show()
+            val width = (context.resources.displayMetrics.widthPixels * 0.86f).roundToInt()
+            report.window?.setLayout(width, ViewGroup.LayoutParams.WRAP_CONTENT)
+        }
+
         val content = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(18), dp(18), dp(18), dp(12))
@@ -538,17 +648,70 @@ object SettingsUi {
         )
 
 
-        fun buildCatalogueCard(group: Catalogue.Group): Card {
-            val rows = Catalogue.rowsFor(group)
-            fun enabledCount(): Int = rows.count { Settings.catalogueEnabled(it.first) }
-            fun stateText(): String = "${enabledCount()} of ${rows.size} enabled"
+        fun buildProviderCard(): Card {
+            val title = "Catalogue Provider"
+            val subtitle = "Pick one source at a time — selecting another turns off the current one."
+            val groupCard = card(title, subtitle, Catalogue.activeProvider().label, true)
+            val options = LinkedHashMap<String, Option>()
+            val list = optionList()
+            Catalogue.Provider.entries.forEach { provider ->
+                val opt = option(
+                    provider.label,
+                    if (provider == Catalogue.Provider.TMDB) "Preferred" else "IMDB backed catalog",
+                )
+                options[provider.id] = opt
+                list.addView(opt.root)
+            }
+            add(groupCard, list, 8)
+
+            fun paint() {
+                val current = Catalogue.activeProvider()
+                options.forEach { (id, opt) ->
+                    paintOption(opt, id == current.id)
+                }
+                setState(groupCard, current.label, true)
+            }
+            paint()
+            options.forEach { (id, opt) ->
+                opt.root.setOnClickListener {
+                    val picked = Catalogue.Provider.from(id)
+                    if (picked != Catalogue.activeProvider()) {
+                        Catalogue.setProvider(context, picked)
+                        paint()
+                    }
+                }
+            }
+            return groupCard
+        }
+
+        fun buildCatalogueCard(): Card {
+            var selected = Catalogue.Group.GLOBAL
+            fun rowsOf(group: Catalogue.Group): List<Pair<String, String>> = Catalogue.rowsFor(group)
+            fun enabledCount(group: Catalogue.Group): Int =
+                rowsOf(group).count { Settings.catalogueEnabled(it.first) }
 
             val groupCard = card(
-                "${group.label} Catalogue",
-                "Toggle each row or the whole group",
-                stateText(),
-                enabledCount() > 0,
+                "Catalogue",
+                "Select a group, then toggle its home rows",
+                "${enabledCount(selected)} of ${rowsOf(selected).size} enabled",
+                enabledCount(selected) > 0,
             )
+            val groupChips = LinkedHashMap<Catalogue.Group, TextView>()
+            val chipRow = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            Catalogue.Group.entries.forEach { group ->
+                val groupChip = chip(group.label)
+                groupChips[group] = groupChip
+                chipRow.addView(groupChip)
+            }
+            val chipScroll = HorizontalScrollView(context).apply {
+                isHorizontalScrollBarEnabled = false
+                addView(chipRow)
+            }
+            add(groupCard, chipScroll, 6)
+
             val enableAll = chip("Enable all")
             val disableAll = chip("Disable all")
             val quick = LinearLayout(context).apply {
@@ -564,47 +727,71 @@ object SettingsUi {
             }
             add(groupCard, quick, 6)
 
-            val options = LinkedHashMap<String, Option>()
             val list = optionList()
-            rows.forEach { (key, title) ->
-                val opt = option(
-                    title.substringAfter(" \u00B7 ", title),
-                    if (title.endsWith(" Movies")) "Movie row" else "Series row",
-                )
-                options[key] = opt
-                list.addView(opt.root)
-            }
             add(groupCard, list, 8)
 
-            fun paint() {
-                options.forEach { (key, opt) -> paintOption(opt, Settings.catalogueEnabled(key)) }
-                val on = enabledCount()
-                setState(groupCard, "$on of ${rows.size} enabled", on > 0)
+            fun paintChips() {
+                groupChips.forEach { (group, view) -> markChip(view, group == selected) }
             }
-            paint()
-            options.forEach { (key, opt) ->
-                opt.root.setOnClickListener {
-                    Settings.saveCatalogueEnabled(context, key, !Settings.catalogueEnabled(key))
-                    paint()
+
+            fun refreshState() {
+                val total = rowsOf(selected).size
+                val on = enabledCount(selected)
+                setState(groupCard, "$on of $total enabled", on > 0)
+            }
+
+            fun renderRows() {
+                list.removeAllViews()
+                val options = LinkedHashMap<String, Option>()
+                rowsOf(selected).forEach { (key, title) ->
+                    val opt = option(
+                        title.substringAfter(" \u00B7 ", title),
+                        if (title.endsWith(" Movies")) "Movie row" else "Series row",
+                    )
+                    options[key] = opt
+                    list.addView(opt.root)
+                }
+                fun paintRows() {
+                    options.forEach { (key, opt) -> paintOption(opt, Settings.catalogueEnabled(key)) }
+                    refreshState()
+                }
+                paintRows()
+                options.forEach { (key, opt) ->
+                    opt.root.setOnClickListener {
+                        Settings.saveCatalogueEnabled(context, key, !Settings.catalogueEnabled(key))
+                        paintRows()
+                    }
+                }
+                paintChips()
+                refreshState()
+                fitHeight()
+            }
+
+            groupChips.forEach { (group, view) ->
+                view.setOnClickListener {
+                    selected = group
+                    renderRows()
                 }
             }
             enableAll.setOnClickListener {
-                Settings.saveAllCatalogueEnabled(context, rows.map { it.first }, true)
-                paint()
+                Settings.saveAllCatalogueEnabled(context, rowsOf(selected).map { it.first }, true)
+                renderRows()
             }
             disableAll.setOnClickListener {
-                Settings.saveAllCatalogueEnabled(context, rows.map { it.first }, false)
-                paint()
+                Settings.saveAllCatalogueEnabled(context, rowsOf(selected).map { it.first }, false)
+                renderRows()
             }
+            renderRows()
             return groupCard
         }
 
         content.addView(sectionLabel("Catalogue", 0))
         content.addView(
-            label("Enable or disable individual home rows for each group.", 11.5f, TEXT_DIM)
+            label("Pick one catalogue source, then enable or disable home rows.", 11.5f, TEXT_DIM)
                 .apply { setPadding(0, 0, 0, dp(10)) },
         )
-        Catalogue.Group.entries.forEach { buildCatalogueCard(it) }
+        buildProviderCard()
+        buildCatalogueCard()
 
 
         val forYouCard = card(
@@ -662,25 +849,43 @@ object SettingsUi {
         forYouCard.content.addView(refreshNow)
         refreshNow.setOnClickListener {
             if (!AiService.isConfigured()) {
-                AlertDialog.Builder(context, android.R.style.Theme_Material_Dialog_Alert)
-                    .setTitle("Connect AI first")
-                    .setMessage(
-                        "Made for You needs an AI provider. Add a key under AI API Keys, " +
-                            "pick a model, then verify and save.",
-                    )
-                    .setPositiveButton("OK", null)
-                    .show()
+                reportDialog(
+                    title = "Connect an AI provider",
+                    subtitle = "Made for You needs a key under AI API Keys, then pick a model and verify.",
+                    rows = listOf(
+                        Triple("AI API key", "Not connected", WARNING),
+                    ),
+                    accent = WARNING,
+                    actionLabel = "Got it",
+                )
                 return@setOnClickListener
             }
             refreshNow.isEnabled = false
             refreshNow.text = "Rebuilding..."
             ForYouEngine.invalidate(context)
             CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
-                val total = ForYouEngine.row("movie", 1).size + ForYouEngine.row("tv", 1).size
+                val movieCount = ForYouEngine.row("movie", 1).size
+                val tvCount = ForYouEngine.row("tv", 1).size
+                val total = movieCount + tvCount
                 refreshNow.post {
                     refreshNow.text = "Refresh now"
                     refreshNow.isEnabled = true
                     setState(forYouCard, if (total > 0) "On" else "Off", total > 0)
+                    if (dialog?.isShowing == true) {
+                        reportDialog(
+                            title = "Made for You",
+                            subtitle = if (total > 0) {
+                                "Recommendations rebuilt from your watch history."
+                            } else {
+                                "No picks were built. Watch a few titles, then try again."
+                            },
+                            rows = listOf(
+                                Triple("Movies", "$movieCount picks", if (movieCount > 0) SUCCESS else TEXT_DIM),
+                                Triple("Series", "$tvCount picks", if (tvCount > 0) SUCCESS else TEXT_DIM),
+                            ),
+                            accent = if (total > 0) SUCCESS else WARNING,
+                        )
+                    }
                 }
             }
         }
@@ -894,11 +1099,15 @@ object SettingsUi {
                     testAllButton.isEnabled = true
                     testAllButton.text = "Test all servers"
                     testSummary.text = "Complete: $upCount up, $downCount down"
-                    AlertDialog.Builder(context)
-                        .setTitle("Provider test complete")
-                        .setMessage("$upCount providers are up and $downCount are down.")
-                        .setPositiveButton("OK", null)
-                        .show()
+                    reportDialog(
+                        title = "Server test complete",
+                        subtitle = "Checked ${results.size} providers just now.",
+                        rows = listOf(
+                            Triple("Working", "$upCount", SUCCESS),
+                            Triple("Down", "$downCount", if (downCount > 0) WARNING else TEXT_DIM),
+                        ),
+                        accent = if (downCount == 0) SUCCESS else WARNING,
+                    )
                 }
             }
         }
@@ -930,6 +1139,12 @@ object SettingsUi {
 
         var addonUrls = StremioNuvioAddons.urls()
         val addonChecks = LinkedHashMap<String, String>()
+        var draftVisible = false
+        var draftEnabled = true
+        var draftAdding = false
+        var draftText = ""
+        var draftField: EditText? = null
+
         fun addonEnabledCount(): Int = addonUrls.count { StremioNuvioAddons.enabled(it) }
         fun addonStateText(): String = when {
             addonUrls.isEmpty() -> "Not configured"
@@ -945,13 +1160,12 @@ object SettingsUi {
             setState(addonCard, addonStateText(), addonEnabledCount() > 0)
         }
 
-        add(
-            addonCard,
-            label(
-                "Add a Stremio/Nuvio addon manifest URL. Only direct HTTP(S) streams are played.",
-                11.5f, TEXT_DIM,
-            ).apply { setPadding(0, dp(10), 0, 0) },
-        )
+        val addonStatus = label(
+            "Only direct HTTP(S) streams are played. Torrent and external links are detected but skipped.",
+            11.5f, TEXT_DIM,
+        ).apply { setPadding(0, dp(10), 0, 0) }
+        val addonMore = chip("Add More")
+        val addonCheck = chip("Check")
 
         val addonList = optionList()
         add(addonCard, addonList, 8)
@@ -964,108 +1178,159 @@ object SettingsUi {
             return if (status.isNullOrBlank()) url else "$url\n$status"
         }
 
-        fun renderAddons() {
-            addonList.removeAllViews()
-            addonUrls.forEach { url ->
-                val opt = option(addonTitle(url), addonSummary(url))
-                paintOption(opt, StremioNuvioAddons.enabled(url))
-                opt.root.setOnClickListener {
-                    StremioNuvioAddons.setEnabled(context, url, !StremioNuvioAddons.enabled(url))
-                    paintOption(opt, StremioNuvioAddons.enabled(url))
-                    refreshAddonState()
-                }
-                val remove = label(GLYPH_CLOSE, 12f, TEXT_FAINT).apply {
-                    gravity = Gravity.CENTER
-                    setPadding(dp(8), dp(8), dp(8), dp(8))
-                    background = ripple(rounded(Color.TRANSPARENT, 999))
-                    isClickable = true
-                    isFocusable = true
-                    contentDescription = "Remove addon"
-                }
-                remove.setOnClickListener {
-                    StremioNuvioAddons.remove(context, url)
-                    addonUrls = StremioNuvioAddons.urls()
-                    addonChecks.remove(url)
-                    renderAddons()
-                    fitHeight()
-                }
-                opt.root.addView(
-                    remove,
-                    LinearLayout.LayoutParams(dp(32), dp(32)).apply { leftMargin = dp(4) },
-                )
+        fun deleteIcon(onClick: () -> Unit): TextView =
+            label(GLYPH_CLOSE, 12f, TEXT_FAINT).apply {
+                gravity = Gravity.CENTER
+                setPadding(dp(8), dp(8), dp(8), dp(8))
+                background = ripple(rounded(Color.TRANSPARENT, 999))
+                isClickable = true
+                isFocusable = true
+                contentDescription = "Delete addon"
+                setOnClickListener { onClick() }
             }
-            if (addonUrls.isEmpty()) {
-                addonList.addView(label("No addons configured.", 12f, TEXT_DIM))
+
+        var refreshAddonList: () -> Unit = {}
+
+        fun addonRow(url: String): View {
+            val opt = option(addonTitle(url), addonSummary(url))
+            opt.dot.visibility = View.GONE
+            opt.root.isClickable = false
+            paintOption(opt, StremioNuvioAddons.enabled(url))
+            val remove = deleteIcon {
+                StremioNuvioAddons.remove(context, url)
+                addonUrls = StremioNuvioAddons.urls()
+                addonChecks.remove(url)
+                refreshAddonList()
+                fitHeight()
             }
-            refreshAddonState()
+            val enabled = smallToggle(StremioNuvioAddons.enabled(url)) { on ->
+                StremioNuvioAddons.setEnabled(context, url, on)
+                paintOption(opt, on)
+                refreshAddonState()
+            }
+            opt.root.addView(
+                remove,
+                LinearLayout.LayoutParams(dp(32), dp(32)).apply { leftMargin = dp(4) },
+            )
+            opt.root.addView(
+                enabled,
+                LinearLayout.LayoutParams(dp(46), dp(28)).apply { leftMargin = dp(6) },
+            )
+            return opt.root
         }
 
-        val addonInput = field("", "https://addon.example/manifest.json")
-        val addonAdd = action("Add", true)
-        addRow(addonCard, 12, addonInput, addonAdd)
-
-        val addonCheck = chip("Check")
-        val addonDefaults = chip("Restore defaults")
-        val addonEnableAll = chip("Enable all")
-        val addonDisableAll = chip("Disable all")
-        addRow(addonCard, 10, addonCheck, addonDefaults)
-        addRow(addonCard, 8, addonEnableAll, addonDisableAll)
-
-        val addonStatus = label(
-            "Open defaults are preloaded. Torrent and external links are detected but skipped.",
-            11.5f, TEXT_DIM,
-        ).apply { setPadding(0, dp(10), 0, 0) }
-        add(addonCard, addonStatus)
-
-        renderAddons()
-
-        addonAdd.setOnClickListener {
-            val normalized = StremioNuvioAddons.normalizeUrl(addonInput.text.toString())
+        fun commitDraft(input: EditText, afterAdd: (() -> Unit)? = null) {
+            if (draftAdding) return
+            val normalized = StremioNuvioAddons.normalizeUrl(input.text.toString())
             if (normalized == null) {
-                addonInput.error = "Enter a valid addon URL"
-                return@setOnClickListener
+                input.error = "Enter a valid addon URL"
+                return
             }
             if (addonUrls.any { it.equals(normalized, ignoreCase = true) }) {
-                addonInput.error = "Addon already added"
-                return@setOnClickListener
+                input.error = "Addon already added"
+                return
             }
-            addonInput.error = null
-            addonAdd.isEnabled = false
-            addonAdd.text = "Adding..."
+            input.error = null
+            draftAdding = true
+            addonCheck.isEnabled = false
+            input.isEnabled = false
             addonStatus.text = "Checking manifest..."
             CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
                 val manifest = StremioNuvioAddons.manifest(normalized, force = true)
                 val added = if (manifest == null) null else StremioNuvioAddons.add(context, normalized)
-                addonInput.post {
-                    addonAdd.isEnabled = true
-                    addonAdd.text = "Add"
-                    when {
-                        manifest == null -> {
-                            addonInput.error = "Manifest not reachable"
-                            addonStatus.text = "Manifest could not be loaded."
-                        }
-                        added == null -> {
-                            addonInput.error = "Addon already added"
-                            addonStatus.text = "That addon is already in the list."
-                        }
-                        else -> {
-                            addonUrls = StremioNuvioAddons.urls()
-                            addonChecks[added] = "Manifest OK"
-                            addonInput.setText("")
-                            addonStatus.text = "Added ${manifest.name}."
-                            renderAddons()
-                            fitHeight()
-                        }
+                input.post {
+                    draftAdding = false
+                    addonCheck.isEnabled = true
+                    if (manifest == null) {
+                        input.isEnabled = true
+                        input.error = "Manifest not reachable"
+                        addonStatus.text = "Manifest could not be loaded."
+                    } else if (added == null) {
+                        input.isEnabled = true
+                        input.error = "Addon already added"
+                        addonStatus.text = "That addon is already in the list."
+                    } else {
+                        StremioNuvioAddons.setEnabled(context, added, draftEnabled)
+                        addonUrls = StremioNuvioAddons.urls()
+                        addonChecks[added] = "Manifest OK"
+                        draftVisible = false
+                        draftField = null
+                        draftText = ""
+                        draftEnabled = true
+                        addonStatus.text = "Added ${manifest.name}."
+                        refreshAddonList()
+                        fitHeight()
+                        afterAdd?.invoke()
                     }
                 }
             }
         }
 
-        addonCheck.setOnClickListener {
+        fun renderAddons() {
+            if (!draftVisible) {
+                draftField = null
+                draftText = ""
+            } else {
+                draftField?.let { draftText = it.text.toString() }
+            }
+            addonList.removeAllViews()
+            addonUrls.forEach { url -> addonList.addView(addonRow(url)) }
+            if (draftVisible) {
+                val input = field(draftText, "Paste addon URL, then press Done").apply {
+                    layoutParams = LinearLayout.LayoutParams(
+                        0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f,
+                    )
+                    imeOptions = EditorInfo.IME_ACTION_DONE
+                }
+                draftField = input
+                input.setSelection(input.text.length)
+                val remove = deleteIcon {
+                    draftVisible = false
+                    draftField = null
+                    draftText = ""
+                    renderAddons()
+                    fitHeight()
+                }
+                val enabled = smallToggle(draftEnabled) { on -> draftEnabled = on }
+                val row = LinearLayout(context).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(dp(12), dp(10), dp(10), dp(10))
+                    background = rounded(SURFACE_2, 12, 1, BORDER)
+                    addView(input)
+                    addView(
+                        remove,
+                        LinearLayout.LayoutParams(dp(32), dp(32)).apply { leftMargin = dp(4) },
+                    )
+                    addView(
+                        enabled,
+                        LinearLayout.LayoutParams(dp(46), dp(28)).apply { leftMargin = dp(6) },
+                    )
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ).apply { bottomMargin = dp(8) }
+                }
+                input.setOnEditorActionListener { _, actionId, _ ->
+                    if (actionId == EditorInfo.IME_ACTION_DONE) {
+                        commitDraft(input)
+                        true
+                    } else false
+                }
+                addonList.addView(row)
+                input.post { input.requestFocus() }
+            }
+            if (addonUrls.isEmpty() && !draftVisible) {
+                addonList.addView(label("No addons configured.", 12f, TEXT_DIM))
+            }
+            refreshAddonState()
+        }
+        refreshAddonList = { renderAddons() }
+
+        fun runAddonCheck() {
             val targets = addonUrls.toList()
             if (targets.isEmpty()) {
                 addonStatus.text = "Add an addon first."
-                return@setOnClickListener
+                return
             }
             addonCheck.isEnabled = false
             addonCheck.text = "Checking..."
@@ -1091,31 +1356,35 @@ object SettingsUi {
             }
         }
 
-        addonDefaults.setOnClickListener {
-            AlertDialog.Builder(context, android.R.style.Theme_Material_Dialog_Alert)
-                .setTitle("Restore default addons?")
-                .setMessage("This replaces the current addon list with the open defaults.")
-                .setNegativeButton("Cancel", null)
-                .setPositiveButton("Restore") { _, _ ->
-                    StremioNuvioAddons.resetDefaults(context)
-                    addonUrls = StremioNuvioAddons.urls()
-                    addonChecks.clear()
-                    addonStatus.text = "Open defaults restored."
-                    renderAddons()
-                    fitHeight()
+        addRow(addonCard, 12, addonMore, addonCheck)
+        add(addonCard, addonStatus)
+
+        addonMore.setOnClickListener {
+            if (draftVisible) {
+                draftField?.requestFocus()
+            } else {
+                draftVisible = true
+                renderAddons()
+                fitHeight()
+            }
+        }
+
+        addonCheck.setOnClickListener {
+            if (draftVisible) {
+                val input = draftField
+                if (input != null && input.text.isNotBlank()) {
+                    commitDraft(input) { runAddonCheck() }
+                    return@setOnClickListener
                 }
-                .show()
+                draftVisible = false
+                draftField = null
+                draftText = ""
+                renderAddons()
+            }
+            runAddonCheck()
         }
 
-        addonEnableAll.setOnClickListener {
-            StremioNuvioAddons.setAllEnabled(context, addonUrls, true)
-            renderAddons()
-        }
-
-        addonDisableAll.setOnClickListener {
-            StremioNuvioAddons.setAllEnabled(context, addonUrls, false)
-            renderAddons()
-        }
+        renderAddons()
 
 
         val wyzieSaved = Settings.apiKey() != null

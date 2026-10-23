@@ -5,7 +5,10 @@ import com.indstream.StreamEngine.RawStream
 object LinkNaming {
 
     private val RESOLUTION_TOKEN =
-        Regex("""\s*(?:\d{3,4}p|[24]K)\b""", RegexOption.IGNORE_CASE)
+        Regex("""\s*(?:\d{3,4}\s*p(?:\d{2,3})?|[24]\s*k)\b""", RegexOption.IGNORE_CASE)
+
+    private val QUALITY_ALIAS =
+        Regex("""(?:\s*\b(?:FHD|UHD|QHD)\b)|(?:\s+\bHD\b(?=\s*$))""", RegexOption.IGNORE_CASE)
 
     private val MULTI_MARKER =
         Regex("""\b(?:multi|dual|both)(?:\s*-?\s*audio)?\b""", RegexOption.IGNORE_CASE)
@@ -25,7 +28,7 @@ object LinkNaming {
     )
 
     private val TRAILING_LANGUAGE = Regex(
-        """(?i)(?:[\s,+/&\-]*\b(?:hindi|english|tamil|telugu|malayalam|kannada|bengali|bangla|marathi|punjabi|gujarati|urdu|nepali|sinhala|arabic|russian|chinese|mandarin|japanese|korean|french|spanish|portuguese|filipino|tagalog|indonesian|malaysian|vietnamese|thai|turkish|german|italian|dutch|polish|multi|dual)\b(?:\s*(?:audio|dub|dubbed))?)+$""",
+        """(?i)(?:[\s,+/&()\[\]{}-]*\b(?:hindi|english|tamil|telugu|malayalam|kannada|bengali|bangla|marathi|punjabi|gujarati|urdu|nepali|sinhala|arabic|russian|chinese|mandarin|japanese|korean|french|spanish|portuguese|filipino|tagalog|indonesian|malaysian|vietnamese|thai|turkish|german|italian|dutch|polish|multi|dual)\b(?:\s*[(\[]?\s*(?:audio|dub|dubbed)\s*[)\]]?)?[\s)\]}]*)+$""",
     )
 
     fun languageNames(raw: String?): List<String> {
@@ -118,16 +121,14 @@ object LinkNaming {
         mediaLabel: String? = null,
     ): String {
         val rawName = serverName.trim().ifBlank { "Server" }
-        val base = RESOLUTION_TOKEN.replace(rawName, "").trim().ifBlank { "Server" }
-        val composed = if (subIndicator.isNullOrBlank()) base else "$base ${subIndicator.trim()}".trim()
-        val named = TRAILING_LANGUAGE.replace(
-            RESOLUTION_TOKEN.replace(composed, "").trim().ifBlank { "Server" },
-            "",
-        ).trim().ifBlank { "Server" }
+        val cleanName = stripQuality(rawName).ifBlank { "Server" }
+        val composed = if (subIndicator.isNullOrBlank()) cleanName else "$cleanName ${subIndicator.trim()}".trim()
+        val named = stripQuality(TRAILING_LANGUAGE.replace(stripQuality(composed), ""))
+            .trim().ifBlank { "Server" }
         val numbered = if (duplicateIndex > 0) "$named-$duplicateIndex" else named
 
-        val names = displayLanguageNames(audioLabel, mediaLabel)
-        val tag = displayLanguageTag(names, audioLabel, mediaLabel, originalLang)
+        val names = displayLanguageNames(audioLabel, mediaLabel, cleanName)
+        val tag = displayLanguageTag(names, audioLabel, mediaLabel, originalLang, cleanName)
         val tagPart = languageTagPart(tag, names)
 
         val tokens = renditionTokens(listOfNotNull(mediaLabel, rawName).joinToString(" "))
@@ -140,20 +141,63 @@ object LinkNaming {
             if (qualityHint > 0) {
                 qualityLabel(qualityHint)
             } else {
-                listOfNotNull(mediaLabel, rawName)
-                    .firstNotNullOfOrNull { RESOLUTION_TOKEN.find(it)?.value }
-                    ?.replace("4k", "4K", ignoreCase = true)
-                    ?.replace("2k", "2K", ignoreCase = true)?.trim().orEmpty()
+                qualityFromText(mediaLabel).ifBlank { qualityFromText(rawName) }
             }
             ).let { quality ->
-            if (quality.isNotBlank() && prefix.contains(quality, ignoreCase = true)) "" else quality
+            if (quality.isNotBlank() && containsQuality(prefix, quality)) "" else quality
         }
         val sizePart = sizeLabel?.trim().orEmpty()
         return listOf(numbered, tokens, tagPart, qualityPart, sizePart)
             .filter { it.isNotBlank() }.joinToString(" ")
     }
 
-    private fun displayLanguageNames(audioLabel: String?, mediaLabel: String?): List<String> {
+    private fun stripQuality(text: String): String =
+        QUALITY_ALIAS.replace(RESOLUTION_TOKEN.replace(text, " "), " ")
+            .replace(Regex("""\s+"""), " ")
+            .trim()
+
+    private fun qualityFromText(text: String?): String {
+        val s = text?.trim().orEmpty()
+        if (s.isBlank()) return ""
+        val numeric = RESOLUTION_TOKEN.find(s)?.value?.trim()
+        if (!numeric.isNullOrBlank()) {
+            return numeric.replace(Regex("""\s+"""), "")
+                .lowercase()
+                .replace("4k", "4K")
+                .replace("2k", "2K")
+        }
+        val alias = QUALITY_ALIAS.find(s)?.value?.trim()?.uppercase()
+        return when (alias) {
+            "UHD" -> "4K"
+            "QHD" -> "1440p"
+            "FHD" -> "1080p"
+            "HD" -> "HD"
+            else -> ""
+        }
+    }
+
+    private fun containsQuality(prefix: String, quality: String): Boolean {
+        val key = qualityKey(quality)
+        if (key.isBlank()) return false
+        return qualityKey(prefix).contains(key)
+    }
+
+    private fun qualityKey(text: String): String {
+        val compact = text.lowercase().replace(Regex("""[^a-z0-9]"""), "")
+        return when {
+            compact.contains("4k") || compact.contains("2160p") || compact.contains("uhd") -> "4k"
+            compact.contains("1440p") || compact.contains("2k") || compact.contains("qhd") -> "1440p"
+            compact.contains("1080p") || compact.contains("fhd") -> "1080p"
+            compact.contains("720p") -> "720p"
+            else -> compact
+        }
+    }
+
+    private fun displayLanguageNames(
+        audioLabel: String?,
+        mediaLabel: String?,
+        serverName: String,
+    ): List<String> {
         val audio = languageNames(audioLabel)
         val media = languageNames(mediaLabel)
         return when {
@@ -161,7 +205,8 @@ object LinkNaming {
             media.size > audio.size -> media
             audio.isNotEmpty() -> audio
             media.isNotEmpty() -> media
-            else -> emptyList()
+            languageLabel(audioLabel).isNotBlank() || languageLabel(mediaLabel).isNotBlank() -> emptyList()
+            else -> trailingLanguageNames(serverName)
         }
     }
 
@@ -170,13 +215,25 @@ object LinkNaming {
         audioLabel: String?,
         mediaLabel: String?,
         originalLang: String?,
+        serverName: String,
     ): String = when {
         names.size == 1 -> names[0]
         names.size == 2 -> "${names[0]}, ${names[1]}"
         names.size > 2 -> "Multi"
         else -> languageLabel(audioLabel, originalLang)
             .ifBlank { languageLabel(mediaLabel, originalLang) }
+            .ifBlank { trailingLanguageLabel(serverName, originalLang) }
             .ifBlank { "Unknown" }
+    }
+
+    private fun trailingLanguageNames(serverName: String): List<String> {
+        val tail = TRAILING_LANGUAGE.find(serverName)?.value ?: return emptyList()
+        return languageNames(tail)
+    }
+
+    private fun trailingLanguageLabel(serverName: String, originalLang: String?): String {
+        val tail = TRAILING_LANGUAGE.find(serverName)?.value ?: return ""
+        return languageLabel(tail, originalLang)
     }
 
     private fun languageTagPart(label: String, names: List<String>): String {

@@ -60,10 +60,10 @@ class CatalogueRowsTest {
     @Test
     fun rows_are_grouped_in_the_row_title() {
         val rows = Catalogue.allRows().map { it.second }
-        assertEquals(14, rows.count { it.startsWith("Global \u00B7 ") })
-        assertEquals(14, rows.count { it.startsWith("Pan India \u00B7 ") })
+        assertEquals(14, rows.count { it.startsWith("Global: ") })
+        assertEquals(14, rows.count { it.startsWith("Pan India: ") })
         listOf("Hindi", "Tamil", "Telugu", "Malayalam", "Kannada", "Gujarati", "Bengali").forEach { language ->
-            assertTrue(rows.any { it.startsWith("$language \u00B7 Trending ") }, language)
+            assertTrue(rows.any { it.startsWith("$language: Trending ") }, language)
         }
     }
 
@@ -91,5 +91,28 @@ class CatalogueRowsTest {
         assertNull(Catalogue.parseRow("cat|missing|movie"))
         assertNull(Catalogue.parseRow("cat|global.trending|episode"))
         assertNull(Catalogue.parseRow(""))
+    }
+
+    @Test
+    fun providers_have_distinct_ids_and_default_to_tmdb() {
+        val ids = Catalogue.Provider.entries.map { it.id }
+        assertEquals(ids.size, ids.toSet().size)
+        assertEquals(Catalogue.Provider.PREFERRED, Catalogue.Provider.TMDB.id)
+        Catalogue.Provider.entries.forEach { provider ->
+            assertEquals(provider, Catalogue.Provider.from(provider.id))
+            assertEquals(provider, Catalogue.Provider.from(" ${provider.id.uppercase()} "))
+        }
+        assertEquals(Catalogue.Provider.TMDB, Catalogue.Provider.from(null))
+        assertEquals(Catalogue.Provider.TMDB, Catalogue.Provider.from(""))
+        assertEquals(Catalogue.Provider.TMDB, Catalogue.Provider.from("unknown"))
+    }
+
+    @Test
+    fun genre_rows_expose_a_cinemeta_genre() {
+        Catalogue.categories.forEach { category ->
+            if (category.source is Catalogue.Source.Genre) {
+                assertNotNull(category.cinemetaGenre, category.label)
+            }
+        }
     }
 }

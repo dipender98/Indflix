@@ -104,9 +104,9 @@ class PlaybackTokenTest {
     }
 
     @Test
-    fun vidlinkPlayerHeaders_useBrowserAgent() {
+    fun vidlinkPlayerHeaders_useNativeAgent() {
         val ua = StreamEngine.VIDLINK_PLAYER_HEADERS["User-Agent"]
-        assertEquals(HttpKit.userAgent, ua, "vidlink playback must use the browser UA")
+        assertEquals("ExoPlayer", ua, "mwVault CDN 428-rejects browser UAs; playback must use a native UA")
     }
 
     @Test
@@ -121,8 +121,8 @@ class PlaybackTokenTest {
     fun vidlinkQualityHeaders_emptyApiHeaders_yieldsUaOnly() {
         val q = org.json.JSONObject("""{"type":"mp4","url":"https://bcdn.hakunaymatata.com/x.mp4","headers":{},"requiresProxy":true}""")
         val h = StreamEngine.vidlinkPlaybackHeaders(q)
-        assertEquals(mapOf("User-Agent" to HttpKit.userAgent), h,
-            "fallback playback headers must preserve the browser UA")
+        assertEquals(mapOf("User-Agent" to "ExoPlayer"), h,
+            "fallback playback headers must stay UA-only for mwVault")
     }
 
     @Test
@@ -132,7 +132,7 @@ class PlaybackTokenTest {
                "headers":{"referer":"https://filmboom.top/","origin":"https://filmboom.top"},
                "requiresProxy":true}""")
         val h = StreamEngine.vidlinkPlaybackHeaders(q)
-        assertEquals(HttpKit.userAgent, h["User-Agent"], "browser UA kept")
+        assertEquals(HttpKit.userAgent, h["User-Agent"], "mbVault requires a browser UA")
         assertEquals("https://filmboom.top/", h["Referer"], "API referer must be forwarded")
         assertEquals("https://filmboom.top", h["Origin"], "API origin must be forwarded")
     }

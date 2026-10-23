@@ -205,10 +205,14 @@ class IndStreamProvider : MainAPI() {
     }
 
     private fun TmdbService.TmdbItem.toSearchResponse(): SearchResponse? {
-        val id = tmdbId ?: return null
         if (name.isBlank()) return null
-        val type = TmdbUrlParser.normType(type)
-        return newCard(name, TmdbUrlParser.tmdbUrl(id, type, imdbId), type, year?.toIntOrNull(), poster, rating)
+        val type = TmdbUrlParser.normType(this.type)
+        val url = if (tmdbId != null) {
+            TmdbUrlParser.tmdbUrl(tmdbId, type, imdbId)
+        } else {
+            imdbId?.let { TmdbUrlParser.imdbUrl(it, type, null) } ?: return null
+        }
+        return newCard(name, url, type, year?.toIntOrNull(), poster, rating)
     }
 
 

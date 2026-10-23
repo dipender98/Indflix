@@ -1,11 +1,26 @@
 package com.indstream
 
+import android.content.Context
+
 object Catalogue {
 
     enum class Group(val id: String, val label: String) {
         GLOBAL("global", "Global"),
         PAN_INDIA("pan-india", "Pan India"),
-        LANGUAGES("languages", "Languages"),
+        LANGUAGES("languages", "Language Wise"),
+    }
+
+    enum class Provider(val id: String, val label: String) {
+        TMDB("tmdb", "TMDB"),
+        CINEMETA("cinemeta", "IMDB / Cinemeta"),
+        ;
+
+        companion object {
+            const val PREFERRED = "tmdb"
+
+            fun from(id: String?): Provider =
+                entries.firstOrNull { it.id == id?.trim()?.lowercase() } ?: TMDB
+        }
     }
 
     sealed interface Source {
@@ -25,6 +40,7 @@ object Catalogue {
         val group: Group,
         val label: String,
         val source: Source,
+        val cinemetaGenre: String? = null,
     )
 
     private const val ORIGIN = "IN"
@@ -46,7 +62,8 @@ object Catalogue {
         slug: String,
         label: String,
         source: Source,
-    ): Category = Category("${group.id}.$slug", group, label, source)
+        cinemetaGenre: String? = null,
+    ): Category = Category("${group.id}.$slug", group, label, source, cinemetaGenre)
 
     private fun genre(
         group: Group,
@@ -56,25 +73,77 @@ object Catalogue {
         tvIds: List<Int>,
         movieKeywords: List<Int> = emptyList(),
         tvKeywords: List<Int> = emptyList(),
+        cinemetaGenre: String,
     ): Category =
-        category(group, slug, label, Source.Genre(movieIds, tvIds, movieKeywords, tvKeywords))
+        category(group, slug, label, Source.Genre(movieIds, tvIds, movieKeywords, tvKeywords), cinemetaGenre)
 
     val categories: List<Category> = buildList {
         add(category(Group.GLOBAL, "trending", "Trending", Source.Trending))
         add(category(Group.GLOBAL, "popular", "Popular", Source.Popular))
-        add(genre(Group.GLOBAL, "drama", "Drama", listOf(18), listOf(18)))
-        add(genre(Group.GLOBAL, "action", "Action", listOf(28), listOf(10759)))
-        add(genre(Group.GLOBAL, "comedy", "Comedy", listOf(35), listOf(35)))
-        add(genre(Group.GLOBAL, "thriller-crime", "Thriller/Crime", listOf(53, 80), listOf(80, 9648)))
-        add(genre(Group.GLOBAL, "sci-fi-fantasy", "Sci-Fi & Fantasy", listOf(878), listOf(10765)))
+        add(
+            genre(
+                Group.GLOBAL, "drama", "Drama", listOf(18), listOf(18),
+                cinemetaGenre = "Drama",
+            ),
+        )
+        add(
+            genre(
+                Group.GLOBAL, "action", "Action", listOf(28), listOf(10759),
+                cinemetaGenre = "Action",
+            ),
+        )
+        add(
+            genre(
+                Group.GLOBAL, "comedy", "Comedy", listOf(35), listOf(35),
+                cinemetaGenre = "Comedy",
+            ),
+        )
+        add(
+            genre(
+                Group.GLOBAL, "thriller-crime", "Thriller/Crime", listOf(53, 80), listOf(80, 9648),
+                cinemetaGenre = "Thriller",
+            ),
+        )
+        add(
+            genre(
+                Group.GLOBAL, "sci-fi-fantasy", "Sci-Fi & Fantasy", listOf(878), listOf(10765),
+                cinemetaGenre = "Sci-Fi",
+            ),
+        )
 
         add(category(Group.PAN_INDIA, "trending", "Trending", Source.Trending))
         add(category(Group.PAN_INDIA, "popular", "Popular", Source.Popular))
-        add(genre(Group.PAN_INDIA, "drama", "Drama", listOf(18), listOf(18)))
-        add(genre(Group.PAN_INDIA, "action", "Action", listOf(28), listOf(10759)))
-        add(genre(Group.PAN_INDIA, "comedy", "Comedy", listOf(35), listOf(35)))
-        add(genre(Group.PAN_INDIA, "thriller-crime", "Thriller/Crime", listOf(53, 80), listOf(80, 9648)))
-        add(genre(Group.PAN_INDIA, "romance", "Romance", listOf(10749), emptyList(), tvKeywords = listOf(9840)))
+        add(
+            genre(
+                Group.PAN_INDIA, "drama", "Drama", listOf(18), listOf(18),
+                cinemetaGenre = "Drama",
+            ),
+        )
+        add(
+            genre(
+                Group.PAN_INDIA, "action", "Action", listOf(28), listOf(10759),
+                cinemetaGenre = "Action",
+            ),
+        )
+        add(
+            genre(
+                Group.PAN_INDIA, "comedy", "Comedy", listOf(35), listOf(35),
+                cinemetaGenre = "Comedy",
+            ),
+        )
+        add(
+            genre(
+                Group.PAN_INDIA, "thriller-crime", "Thriller/Crime", listOf(53, 80), listOf(80, 9648),
+                cinemetaGenre = "Thriller",
+            ),
+        )
+        add(
+            genre(
+                Group.PAN_INDIA, "romance", "Romance", listOf(10749), emptyList(),
+                tvKeywords = listOf(9840),
+                cinemetaGenre = "Romance",
+            ),
+        )
 
         languages.forEach { language ->
             add(
@@ -125,10 +194,38 @@ object Catalogue {
             is Source.Genre -> category.label
         }
         val media = if (normalizeType(type) == "movie") "Movies" else "Series"
-        return "$prefix \u00B7 $kind $media"
+        return "$prefix: $kind $media"
     }
 
-    suspend fun fetch(category: Category, type: String, page: Int): List<TmdbService.TmdbItem> {
+    fun activeProvider(): Provider = Provider.from(Settings.catalogueProvider())
+
+    fun setProvider(context: Context, provider: Provider) {
+        Settings.saveCatalogueProvider(context, provider)
+    }
+
+    suspend fun fetch(category: Category, type: String, page: Int): List<TmdbService.TmdbItem> =
+        when (activeProvider()) {
+            Provider.TMDB -> fetchFromTmdb(category, type, page)
+            Provider.CINEMETA ->
+                if (category.group == Group.GLOBAL) fetchFromCinemeta(category, type, page)
+                else fetchFromTmdb(category, type, page)
+        }
+
+    private suspend fun fetchFromCinemeta(
+        category: Category,
+        type: String,
+        page: Int,
+    ): List<TmdbService.TmdbItem> {
+        val kind = normalizeType(type)
+        return when (val source = category.source) {
+            Source.Trending -> ImdbService.cinemetaCatalog(kind, "top", page = page)
+            Source.Popular -> ImdbService.cinemetaCatalog(kind, "imdbRating", page = page)
+            is Source.Genre -> ImdbService.cinemetaCatalog(kind, "top", category.cinemetaGenre, page)
+            is Source.LanguageTrending -> emptyList()
+        }
+    }
+
+    private suspend fun fetchFromTmdb(category: Category, type: String, page: Int): List<TmdbService.TmdbItem> {
         val kind = normalizeType(type)
         return when (val source = category.source) {
             Source.Trending -> if (category.group == Group.GLOBAL) {

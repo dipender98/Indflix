@@ -15,6 +15,7 @@ data class ServerSpec(
     val recordHealth: Boolean = true,
     val movieUrl: String,
     val tvUrl: String,
+    val probeUrl: String? = null,
     val isJsonApi: Boolean = false,
     val referer: String? = null,
     val hasSubtitles: Boolean = false,
@@ -81,7 +82,7 @@ object ServerFarm {
         ServerSpec(
             id = "netmirror", name = "NetMirror",
             idType = ServerIdType.TMDB,
-            movieUrl = "https://net27.cc/api/embed-tmdb/{id}",
+            movieUrl = "https://net27.cc/api/embed-tmdb/{id}?type=movie",
             tvUrl = "https://net27.cc/api/embed-tmdb/{id}?type=tv&se={season}&ep={episode}",
             isJsonApi = true, referer = "https://net27.cc/",
             hasSubtitles = true, timeoutSec = 50,
@@ -112,6 +113,7 @@ object ServerFarm {
             idType = ServerIdType.TMDB,
             movieUrl = "https://api3.devcorp.me/vod/search?keyword={id}",
             tvUrl = "https://api3.devcorp.me/vod/search?keyword={id}",
+            probeUrl = "https://api3.devcorp.me/vod/search?keyword={title}",
             referer = "https://onetouchtv.xyz/",
             hasSubtitles = true, timeoutSec = 30,
         ),
@@ -147,6 +149,7 @@ object ServerFarm {
             idType = ServerIdType.TMDB,
             movieUrl = "https://www.rivestream.app/api/backendfetch?requestID=movieVideoProvider&id={id}",
             tvUrl = "https://www.rivestream.app/api/backendfetch?requestID=tvVideoProvider&id={id}&season={season}&episode={episode}",
+            probeUrl = "https://www.rivestream.app/api/backendfetch?requestID=VideoProviderServices&secretKey=rive&proxyMode=undefined",
             referer = "https://www.rivestream.app/",
             hasSubtitles = true, timeoutSec = 25,
             speed = ServerSpeed.SLOW,
@@ -248,6 +251,12 @@ object ServerFarm {
 
     fun buildMovieUrl(spec: ServerSpec, id: String): String =
         spec.movieUrl.replace("{id}", id)
+
+    fun buildProbeUrl(spec: ServerSpec, id: String, title: String, year: String): String =
+        (spec.probeUrl ?: spec.movieUrl)
+            .replace("{id}", id)
+            .replace("{title}", java.net.URLEncoder.encode(title, "UTF-8"))
+            .replace("{year}", year)
 
     fun buildTvUrl(spec: ServerSpec, id: String, season: Int, episode: Int): String =
         spec.tvUrl

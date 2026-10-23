@@ -393,6 +393,60 @@ class LinkNamingTest {
         assertEquals("MovieServer ($GB English) 1080p", name2)
     }
 
+    @Test
+    fun displayName_qualityVariantsNeverRepeat() {
+        val cases = listOf(
+            Triple("FSL 1080 P", 1080, "FSL ($IN Hindi) 1080p"),
+            Triple("FSL HD", 1080, "FSL ($IN Hindi) 1080p"),
+            Triple("FSL 1080p60", 1080, "FSL ($IN Hindi) 1080p"),
+            Triple("FSL UHD", 2160, "FSL ($IN Hindi) 4K"),
+            Triple("FSL 4K HD", 2160, "FSL ($IN Hindi) 4K"),
+        )
+        cases.forEach { (server, height, expected) ->
+            val name = LinkNaming.displayName(server, "Hindi", height)
+            assertEquals(expected, name)
+            assertEquals(1, countToken(name, """(?i)\b(?:720p|1080p|1440p|2160p|4k|uhd|fhd)\b"""))
+        }
+    }
+
+    @Test
+    fun displayName_languageFromServerSuffixAddsFlag() {
+        listOf(
+            "MovieServer Hindi",
+            "MovieServer (Hindi)",
+            "MovieServer [Hindi]",
+            "MovieServer Hindi 1080p",
+            "MovieServer Hindi Dubbed",
+        ).forEach { server ->
+            assertEquals(
+                "MovieServer ($IN Hindi) 1080p",
+                LinkNaming.displayName(server, audioLabel = "", qualityHint = 1080),
+            )
+        }
+        assertEquals(
+            "MovieServer ($GB English) 1080p",
+            LinkNaming.displayName("MovieServer English", audioLabel = "", qualityHint = 1080),
+        )
+    }
+
+    @Test
+    fun displayName_titleLanguageIsNotTreatedAsAudio() {
+        val name = LinkNaming.displayName("Hindi Medium", audioLabel = "", qualityHint = 1080)
+        assertEquals("Hindi Medium (Unknown) 1080p", name)
+    }
+
+    @Test
+    fun displayName_explicitMultiOrOriginalIsNotOverriddenByServerName() {
+        assertEquals(
+            "MovieServer (Multi) 1080p",
+            LinkNaming.displayName("MovieServer Hindi", audioLabel = "Multi", qualityHint = 1080),
+        )
+        assertEquals(
+            "MovieServer (Original) 1080p",
+            LinkNaming.displayName("MovieServer Hindi", audioLabel = "Original", qualityHint = 1080),
+        )
+    }
+
 
     @Test
     fun canonicalSubtitle_nativeScript() {

@@ -24,6 +24,7 @@ object Settings {
     private const val FORYOU_MODE = "foryou_refresh_mode"
     private const val SERVER_OFF_PREFIX = "server_off_"
     private const val CATALOGUE_OFF_PREFIX = "catalogue_off_"
+    private const val CATALOGUE_PROVIDER = "catalogue_provider"
     private const val STREMIO_NUVIO_ADDONS = "stremio_addons"
     private const val STREMIO_NUVIO_OFF_PREFIX = "stremio_off_"
     private const val SHUFFLE_ROWS = "shuffle_rows"
@@ -125,6 +126,12 @@ object Settings {
 
     @Volatile
     private var catalogueLoaded = false
+
+    @Volatile
+    private var catalogueProviderCached: String? = null
+
+    @Volatile
+    private var catalogueProviderLoaded = false
 
     @Volatile
     private var stremioNuvioUrls: List<String>? = null
@@ -359,6 +366,31 @@ object Settings {
         catalogueLoaded = true
     }
 
+    fun catalogueProvider(): String {
+        if (!catalogueProviderLoaded) loadCatalogueProvider()
+        return catalogueProviderCached?.takeIf { it.isNotBlank() } ?: Catalogue.Provider.PREFERRED
+    }
+
+    fun saveCatalogueProvider(context: Context, provider: Catalogue.Provider) {
+        val id = provider.id
+        runCatching {
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit().putString(CATALOGUE_PROVIDER, id).apply()
+        }
+        catalogueProviderCached = id
+        catalogueProviderLoaded = true
+        appContext = context.applicationContext
+    }
+
+    private fun loadCatalogueProvider() {
+        val ctx = appContext
+        catalogueProviderCached = if (ctx == null) "" else runCatching {
+            ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .getString(CATALOGUE_PROVIDER, "").orEmpty()
+        }.getOrDefault("")
+        catalogueProviderLoaded = true
+    }
+
     fun stremioNuvioAddonUrls(): List<String> {
         if (!stremioNuvioLoaded) loadStremioNuvio()
         return stremioNuvioUrls ?: StremioNuvioAddons.DEFAULT_URLS
@@ -396,21 +428,6 @@ object Settings {
             edit.apply()
         }
         stremioNuvioOff = if (on) stremioNuvioOff - url else stremioNuvioOff + url
-        stremioNuvioLoaded = true
-        appContext = context.applicationContext
-    }
-
-    fun saveAllStremioNuvioEnabled(context: Context, urls: Collection<String>, on: Boolean) {
-        if (!stremioNuvioLoaded) loadStremioNuvio()
-        runCatching {
-            val edit = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            urls.forEach { url ->
-                if (on) edit.remove(STREMIO_NUVIO_OFF_PREFIX + url)
-                else edit.putBoolean(STREMIO_NUVIO_OFF_PREFIX + url, true)
-            }
-            edit.apply()
-        }
-        stremioNuvioOff = if (on) stremioNuvioOff - urls.toSet() else stremioNuvioOff + urls.toSet()
         stremioNuvioLoaded = true
         appContext = context.applicationContext
     }

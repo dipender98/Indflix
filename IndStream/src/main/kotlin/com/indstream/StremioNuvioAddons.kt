@@ -105,15 +105,6 @@ object StremioNuvioAddons {
         Settings.saveStremioNuvioAddonEnabled(context, url, on)
     }
 
-    fun setAllEnabled(context: Context, urls: Collection<String>, on: Boolean) {
-        Settings.saveAllStremioNuvioEnabled(context, urls, on)
-    }
-
-    fun resetDefaults(context: Context) {
-        Settings.saveStremioNuvioAddons(context, DEFAULT_URLS)
-        Settings.saveAllStremioNuvioEnabled(context, DEFAULT_URLS, true)
-    }
-
     fun normalizeUrl(raw: String?): String? {
         var value = raw?.trim().orEmpty()
         if (value.isEmpty()) return null
