@@ -36,4 +36,4 @@ Use logic and judgment on every task. If two rules conflict, correctness wins.
 ## 6. Git & Releases
 
 - Commit only when asked. Never push or bump the version until the user explicitly says so.
-- Describe the change, implementation etc. in commit message.
+- Describe the change, implementation etc. in commit message; scale its length to the change: one or two small edits get a short message, a large change gets a detailed one.
