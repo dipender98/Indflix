@@ -12,7 +12,7 @@ class ServerProbeUrlTest {
     fun probe_url_falls_back_to_movie_endpoint() {
         val spec = ServerFarm.allServers.first { it.id == "netmirror" }
         assertEquals(
-            "https://net27.cc/api/embed-tmdb/27205?type=movie",
+            "https://net79.cc/api/embed-tmdb/27205?type=movie",
             ServerFarm.buildProbeUrl(spec, "27205", "Inception", "2010"),
         )
     }

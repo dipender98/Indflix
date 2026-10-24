@@ -27,12 +27,6 @@ object StreamEngine {
     @Volatile private var movieBoxTokenAt: Long = 0L
     private const val MOVIEBOX_TOKEN_TTL_MS = 6 * 60 * 60 * 1000L
     private const val MOVIEBOX_THROTTLE_RETRY_MS = 2_000L
-    @Volatile private var newtvApi: String? = null
-    @Volatile private var newtvApiAt: Long = 0L
-    @Volatile private var newtvApiMissAt: Long = 0L
-    private const val NEWTV_API_TTL_MS = 6 * 60 * 60 * 1000L
-    private const val NEWTV_API_MISS_TTL_MS = 10 * 60 * 1000L
-    private val newtvLock = Mutex()
     private val STREAM_REGEX = listOf(
         Regex("""https?://[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*"""),
         Regex("""https?://[^\s"'<>\\]+\.mp4[^\s"'<>\\]*"""),
@@ -377,7 +371,7 @@ object StreamEngine {
                 url = raw.url, type = linkType,
             ) {
                 referer = raw.referer ?: ""
-                this.quality = quality ?: 0
+                this.quality = quality
                 this.headers = linkHeaders
             })
         }
@@ -876,23 +870,14 @@ object StreamEngine {
     } ?: false
 
     private suspend fun probeNetmirror(spec: ServerSpec): Boolean = withTimeoutOrNull(12_000L) {
-        coroutineScope {
-            val direct = async {
-                runCatching {
-                    val text = app.get(
-                        ServerFarm.buildMovieUrl(spec, PROBE_TMDB_ID),
-                        timeout = 6,
-                        headers = okHeaders(spec.referer),
-                    ).text
-                    catching { org.json.JSONObject(text) }.getOrNull() != null
-                }.getOrDefault(false)
-            }
-            val alternate = async { newtvApiBase() != null }
-            if (direct.await()) {
-                alternate.cancel()
-                true
-            } else alternate.await()
-        }
+        runCatching {
+            val text = app.get(
+                ServerFarm.buildMovieUrl(spec, PROBE_TMDB_ID),
+                timeout = 6,
+                headers = okHeaders(spec.referer),
+            ).text
+            catching { org.json.JSONObject(text) }.getOrNull() != null
+        }.getOrDefault(false)
     } ?: false
 
     private suspend fun probeDudefilms(spec: ServerSpec): Boolean = withTimeoutOrNull(10_000L) {
@@ -1501,51 +1486,15 @@ object StreamEngine {
         season: Int,
         episode: Int,
     ): List<RawStream> {
-        val id = tmdbId ?: return emptyList()
+        if (tmdbId == null) return emptyList()
         if (type != "movie" && (season <= 0 || episode <= 0)) return emptyList()
-        return coroutineScope {
-            val direct = async {
-                catching { resolveNetmirrorDirect(spec, tmdbId, type, season, episode) }
-                    .fold({ NetmirrorAttempt(false, it) }, { NetmirrorAttempt(false, emptyList(), it) })
-            }
-            // Only start the alternate feed when the primary is slow or empty.
-            val alternate = async {
-                delay(2_500L)
-                catching { resolveNewtvHits(spec, id, type, season, episode) }
-                    .fold(
-                        { hits -> NetmirrorAttempt(true, hits.take(1).map { it.stream }) },
-                        { NetmirrorAttempt(true, emptyList(), it) },
-                    )
-            }
-            var directResult: NetmirrorAttempt? = null
-            var alternateResult: NetmirrorAttempt? = null
-            var winner: NetmirrorAttempt? = null
-            while (winner == null && (directResult == null || alternateResult == null)) {
-                val attempt = select<NetmirrorAttempt> {
-                    if (directResult == null) direct.onAwait { it }
-                    if (alternateResult == null) alternate.onAwait { it }
-                }
-                if (attempt.alternate) alternateResult = attempt else directResult = attempt
-                if (attempt.streams.isNotEmpty()) winner = attempt
-            }
-            if (winner != null) {
-                if (winner.alternate) direct.cancel() else alternate.cancel()
-                return@coroutineScope winner.streams
-            }
-            directResult?.error?.let { err ->
+        return catching { resolveNetmirrorDirect(spec, tmdbId, type, season, episode) }
+            .getOrElse { err ->
                 if (err is CleanMissException) throw err
                 Log.w("NetMirror", "primary failed: ${err.javaClass.simpleName}")
+                emptyList()
             }
-            alternateResult?.error?.let { Log.w("NetMirror", "alternate failed: ${it.javaClass.simpleName}") }
-            emptyList()
-        }
     }
-
-    private data class NetmirrorAttempt(
-        val alternate: Boolean,
-        val streams: List<RawStream> = emptyList(),
-        val error: Throwable? = null,
-    )
 
     private suspend fun resolveNetmirrorDirect(
         spec: ServerSpec,
@@ -1556,7 +1505,8 @@ object StreamEngine {
     ): List<RawStream> {
         val id = tmdbId?.toString() ?: return emptyList()
         val playReferer = "https://videodownloader.site/"
-        val headers = okHeaders("https://net27.cc/")
+        val base = spec.referer?.trimEnd('/')?.takeIf { it.startsWith("http") } ?: return emptyList()
+        val headers = okHeaders("$base/")
         val tvParams = if (type == "tv") "&se=$season&ep=$episode" else ""
 
         suspend fun fetchEmbed(dub: String?, dubdp: String?): org.json.JSONObject? {
@@ -1567,7 +1517,7 @@ object StreamEngine {
             }
             val jsonText = withTimeoutOrNull(12_000L) {
                 catching {
-                    app.get("https://net27.cc/api/embed-tmdb/$id$query",
+                    app.get("$base/api/embed-tmdb/$id$query",
                         timeout = 12, headers = headers).text
                 }.getOrNull()
             } ?: return null
@@ -1609,7 +1559,7 @@ object StreamEngine {
                 withTimeoutOrNull(6_000L) {
                     catching {
                         val vQuery = if (type == "tv") "?se=$season&ep=$episode" else ""
-                        app.get("https://net27.cc/api/variants-tmdb/$type/$id$vQuery",
+                        app.get("$base/api/variants-tmdb/$type/$id$vQuery",
                             timeout = 6, headers = headers).text
                     }.getOrNull()
                 }
@@ -1667,242 +1617,6 @@ object StreamEngine {
         out.sortByDescending { it.qualityHint }
         return out
     }
-
-    private data class NewtvHit(val platform: String, val stream: RawStream)
-
-    private val NEWTV_PLATFORMS = listOf("nf", "pv", "hs")
-    private val NEWTV_DISCOVERY = listOf(
-        "https://mobiledetects.com",
-        "https://mobiledetect.app",
-        "https://mobidetect.art",
-        "https://mobidetect.cc",
-        "https://mobidetect.click",
-        "https://mobidetect.ink",
-        "https://mobidetect.live",
-        "https://mobidetect.pro",
-        "https://mobidetect.shop",
-        "https://mobidetect.site",
-        "https://mobidetect.space",
-        "https://mobidetect.store",
-        "https://mobidetect.vip",
-        "https://mobidetect.wiki",
-        "https://mobidetect.xyz",
-    )
-    private const val NEWTV_UA =
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
-
-    private suspend fun resolveNewtvHits(
-        spec: ServerSpec,
-        tmdbId: Int,
-        type: String,
-        season: Int,
-        episode: Int,
-    ): List<NewtvHit> {
-        val meta = catching { TmdbService.fetchMeta(tmdbId, type) }.getOrNull()
-            ?: throw CleanMissException("netmirror: no metadata for tmdb=$tmdbId (title-keyed fallback)")
-        val title = meta.name?.takeIf { it.isNotBlank() }
-            ?: throw CleanMissException("netmirror: no title for tmdb=$tmdbId (title-keyed fallback)")
-        val year = meta.year?.take(4)?.toIntOrNull()
-        val api = newtvApiBase()
-            ?: throw CleanMissException("netmirror: alternate discovery unavailable")
-        val hits = coroutineScope {
-            NEWTV_PLATFORMS.map { platform ->
-                async {
-                    catching { newtvPlatformStream(spec, api, platform, title, year, type, season, episode) }
-                        .getOrNull()?.let { NewtvHit(platform, it) }
-                }
-            }.awaitAll().filterNotNull()
-        }
-        return hits.sortedBy { NEWTV_PLATFORMS.indexOf(it.platform) }
-    }
-
-    private suspend fun newtvApiBase(): String? {
-        val now = System.currentTimeMillis()
-        val cached = newtvApi
-        if (cached != null && now - newtvApiAt < NEWTV_API_TTL_MS) return cached
-        if (cached == null && now - newtvApiMissAt < NEWTV_API_MISS_TTL_MS) return null
-        return newtvLock.withLock {
-            val current = newtvApi
-            val stamp = System.currentTimeMillis()
-            if (current != null && stamp - newtvApiAt < NEWTV_API_TTL_MS) {
-                return@withLock current
-            }
-            if (current == null && stamp - newtvApiMissAt < NEWTV_API_MISS_TTL_MS) {
-                return@withLock null
-            }
-            val found = withTimeoutOrNull(15_000L) {
-                NEWTV_DISCOVERY.firstNotNullOfOrNull { domain ->
-                    withTimeoutOrNull(5_000L) {
-                        catching {
-                            val text = app.get(
-                                "$domain/checknewtv.php",
-                                timeout = 5,
-                                headers = newtvHeaders("nf"),
-                            ).text
-                            val token = org.json.JSONObject(text).optString("token_hash")
-                            if (token.isBlank()) null else newtvDecodeToken(token)
-                        }.getOrNull()
-                    }
-                }
-            }
-            if (!found.isNullOrBlank() && found.startsWith("http")) {
-                newtvApi = found
-                newtvApiAt = System.currentTimeMillis()
-                newtvApiMissAt = 0L
-                found
-            } else {
-                newtvApiMissAt = System.currentTimeMillis()
-                null
-            }
-        }
-    }
-
-    private fun newtvDecodeToken(token: String): String? = catching {
-        String(android.util.Base64.decode(token, android.util.Base64.DEFAULT), Charsets.UTF_8)
-            .trim()
-            .trimEnd('/')
-    }.getOrNull()
-
-    private fun newtvHeaders(platform: String): Map<String, String> = linkedMapOf(
-        "User-Agent" to NEWTV_UA,
-        "X-Requested-With" to "NetmirrorNewTV v1.0",
-        "Ott" to platform,
-        "Accept" to "application/json, text/plain, */*",
-        "Accept-Language" to "en-US,en;q=0.9",
-    )
-
-    private suspend fun newtvJson(
-        api: String,
-        path: String,
-        platform: String,
-        extra: Map<String, String> = emptyMap(),
-    ): org.json.JSONObject? = withTimeoutOrNull(10_000L) {
-        catching {
-            val headers = newtvHeaders(platform).toMutableMap().apply { putAll(extra) }
-            org.json.JSONObject(app.get(api + path, timeout = 9, headers = headers).text)
-        }.getOrNull()
-    }
-
-    private suspend fun newtvPlatformStream(
-        spec: ServerSpec,
-        api: String,
-        platform: String,
-        title: String,
-        year: Int?,
-        type: String,
-        season: Int,
-        episode: Int,
-    ): RawStream? {
-        val search = newtvJson(api, "/newtv/search.php?s=" + newtvEnc(title), platform) ?: return null
-        val rows = search.optJSONArray("searchResult") ?: return null
-        val ranked = (0 until rows.length()).mapNotNull { i ->
-            val row = rows.optJSONObject(i) ?: return@mapNotNull null
-            val rowId = row.optString("id").takeIf { it.isNotBlank() } ?: return@mapNotNull null
-            val rank = newtvTitleRank(title, row.optString("t")) ?: return@mapNotNull null
-            rowId to rank
-        }.sortedBy { it.second }.take(3)
-        for ((candidateId, _) in ranked) {
-            val post = newtvJson(
-                api,
-                "/newtv/post.php?id=" + newtvEnc(candidateId),
-                platform,
-                mapOf("Lastep" to "", "Usertoken" to ""),
-            ) ?: continue
-            if (!newtvMatches(post, type, year)) continue
-            val targetId = if (type == "movie") {
-                post.optString("main_id").ifBlank { candidateId }
-            } else {
-                val seasonId = newtvSeasonId(post, season) ?: continue
-                newtvEpisodeId(api, platform, seasonId, episode) ?: continue
-            }
-            val player = newtvJson(
-                api,
-                "/newtv/player.php?id=" + newtvEnc(targetId),
-                platform,
-                mapOf("Usertoken" to ""),
-            ) ?: continue
-            val link = player.optString("video_link").takeIf { it.startsWith("http") } ?: continue
-            val referer = player.optString("referer").takeIf { it.startsWith("http") } ?: api
-            return RawStream(
-                serverId = spec.id,
-                serverName = spec.name,
-                url = link,
-                isM3u8 = !link.contains(".mp4", ignoreCase = true),
-                referer = referer,
-                extraHeaders = mapOf(
-                    "User-Agent" to NEWTV_UA,
-                    "Accept-Language" to "en-US,en;q=0.9",
-                ),
-            )
-        }
-        return null
-    }
-
-    private fun newtvMatches(post: org.json.JSONObject, type: String, year: Int?): Boolean {
-        val kind = post.optString("type")
-        val episodes = post.optJSONArray("episodes")
-        val hasEpisodes = (0 until (episodes?.length() ?: 0)).any { episodes?.optJSONObject(it) != null }
-        if (type == "movie") {
-            if (kind == "t" || hasEpisodes) return false
-            if (kind.isNotBlank() && kind != "m") return false
-        } else if (kind != "t" && !hasEpisodes) {
-            return false
-        }
-        val postYear = post.optString("year").take(4).toIntOrNull() ?: return true
-        val want = year ?: return true
-        return postYear in (want - 1)..(want + 1)
-    }
-
-    private fun newtvSeasonId(post: org.json.JSONObject, season: Int): String? {
-        if (season <= 0) return null
-        val seasons = post.optJSONArray("season") ?: return null
-        val ids = (0 until seasons.length()).mapNotNull { i ->
-            seasons.optJSONObject(i)?.optString("id")?.takeIf { it.isNotBlank() }
-        }
-        return ids.getOrNull(season - 1)
-    }
-
-    private suspend fun newtvEpisodeId(
-        api: String,
-        platform: String,
-        seasonId: String,
-        episode: Int,
-    ): String? {
-        var page = 1
-        repeat(4) {
-            val data = newtvJson(
-                api,
-                "/newtv/episodes.php?id=" + newtvEnc(seasonId) + "&page=$page",
-                platform,
-            ) ?: return null
-            val rows = data.optJSONArray("episodes")
-            for (i in 0 until (rows?.length() ?: 0)) {
-                val row = rows?.optJSONObject(i) ?: continue
-                val number = row.optString("ep").filter { ch -> ch.isDigit() }.toIntOrNull() ?: continue
-                if (number == episode) return row.optString("id").takeIf { it.isNotBlank() }
-            }
-            if (data.optInt("nextPageShow", 0) != 1) return null
-            page = data.optInt("nextPage", page + 1).coerceAtLeast(page + 1)
-        }
-        return null
-    }
-
-    private fun newtvNorm(text: String?): String = (text ?: "")
-        .lowercase()
-        .replace(Regex("""\([^)]*\)|\[[^\]]*]"""), " ")
-        .replace(Regex("""[^a-z0-9]+"""), " ")
-        .trim()
-
-    internal fun newtvTitleRank(query: String, candidate: String?): Int? {
-        val want = newtvNorm(query)
-        val have = newtvNorm(candidate)
-        if (want.isEmpty() || have.isEmpty()) return null
-        if (have == want) return 0
-        if (!have.startsWith("$want ")) return null
-        return have.removePrefix(want).trim().split(' ').count { it.isNotEmpty() }
-    }
-
-    private fun newtvEnc(text: String): String = java.net.URLEncoder.encode(text, "UTF-8")
 
     internal fun netmirrorDubLabel(language: String?, isOriginal: Boolean): String? {
         if (isOriginal) return "Original"

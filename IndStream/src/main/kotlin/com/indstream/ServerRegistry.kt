@@ -82,9 +82,9 @@ object ServerFarm {
         ServerSpec(
             id = "netmirror", name = "NetMirror",
             idType = ServerIdType.TMDB,
-            movieUrl = "https://net27.cc/api/embed-tmdb/{id}?type=movie",
-            tvUrl = "https://net27.cc/api/embed-tmdb/{id}?type=tv&se={season}&ep={episode}",
-            isJsonApi = true, referer = "https://net27.cc/",
+            movieUrl = "https://net79.cc/api/embed-tmdb/{id}?type=movie",
+            tvUrl = "https://net79.cc/api/embed-tmdb/{id}?type=tv&se={season}&ep={episode}",
+            isJsonApi = true, referer = "https://net79.cc/",
             hasSubtitles = true, timeoutSec = 50,
             declaredLanguages = emptySet(),
             speed = ServerSpeed.FAST, reliable = true, downloadFriendly = true,

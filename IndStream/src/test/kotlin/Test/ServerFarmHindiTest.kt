@@ -110,12 +110,12 @@ class ServerFarmHindiTest {
         assertTrue(s.declaredLanguages.isEmpty(), "default-ladder audio undeclared — never guessed")
         assertTrue(s.isJsonApi, "embed-tmdb JSON API")
         assertTrue(s.hasSubtitles, "API captions carry language (incl. Bengali/Punjabi)")
-        assertEquals("https://net27.cc/", s.referer)
+        assertEquals("https://net79.cc/", s.referer)
         assertEquals(50, s.timeoutSec, "netmirror farm kill must sit above the 24s dub fan-out chain")
         val m = ServerFarm.buildMovieUrl(s, "27205")
-        assertEquals("https://net27.cc/api/embed-tmdb/27205", m)
+        assertEquals("https://net79.cc/api/embed-tmdb/27205?type=movie", m)
         val tv = ServerFarm.buildTvUrl(s, "1399", 1, 1)
-        assertEquals("https://net27.cc/api/embed-tmdb/1399?type=tv&se=1&ep=1", tv)
+        assertEquals("https://net79.cc/api/embed-tmdb/1399?type=tv&se=1&ep=1", tv)
     }
 
     @Test
