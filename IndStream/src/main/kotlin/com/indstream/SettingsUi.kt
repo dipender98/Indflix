@@ -89,7 +89,7 @@ object SettingsUi {
 
     private class Secret(val root: LinearLayout, val input: EditText, val toggle: View)
 
-    private class RankedRow(val key: String, val title: String, var position: Int)
+    private class RankedRow(val key: String, val title: String)
 
     private enum class ProviderProbeState { NOT_TESTED, TESTING, UP, DOWN }
 
@@ -464,8 +464,8 @@ object SettingsUi {
         }
 
         fun showRowOrderEditor() {
-            val rows = Catalogue.homeRows().mapIndexed { index, (key, title) ->
-                RankedRow(key, title, index + 1)
+            val rows = Catalogue.homeRows().map { (key, title) ->
+                RankedRow(key, title)
             }.toMutableList()
 
             if (rows.isEmpty()) {
@@ -483,20 +483,6 @@ object SettingsUi {
                 background = rounded(BG, 24)
             }
             panel.addView(label("Home Row Order", 18f, TEXT, medium = true))
-            panel.addView(
-                label(
-                    "Row 1 appears first on Home. Use - and + to change a position.",
-                    11.5f,
-                    TEXT_DIM,
-                ).apply { setPadding(0, dp(5), 0, 0) },
-            )
-            panel.addView(
-                label(
-                    "Only rows that can appear on Home are listed. Disabled rows return at the end.",
-                    11.5f,
-                    TEXT_FAINT,
-                ).apply { setPadding(0, dp(4), 0, 0) },
-            )
 
             val list = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
             val listScroll = ScrollView(context).apply {
@@ -541,17 +527,10 @@ object SettingsUi {
 
             fun savedKeys(): List<String> = Catalogue.homeRows().map { it.first }
 
-            fun currentKeys(): List<String> = rows.sortedBy { it.position }.map { it.key }
-
-            fun duplicates(): Map<Int, List<RankedRow>> =
-                rows.groupBy { it.position }.filterValues { it.size > 1 }
+            fun currentKeys(): List<String> = rows.map { it.key }
 
             fun paintStatus() {
-                if (duplicates().isNotEmpty()) {
-                    status.visibility = View.VISIBLE
-                    status.setTextColor(WARNING)
-                    status.text = "Numbers must be unique. Fix the highlighted rows before saving."
-                } else if (currentKeys() != savedKeys()) {
+                if (currentKeys() != savedKeys()) {
                     status.visibility = View.VISIBLE
                     status.setTextColor(ACCENT)
                     status.text = "Unsaved changes"
@@ -577,10 +556,9 @@ object SettingsUi {
             fun render() {
                 val scrollY = listScroll.scrollY
                 list.removeAllViews()
-                val dups = duplicates()
 
                 fun step(glyph: String, description: String, enabled: Boolean, onClick: () -> Unit): TextView =
-                    label(glyph, 18f, if (enabled) TEXT else TEXT_FAINT, medium = true).apply {
+                    label(glyph, 13f, if (enabled) TEXT else TEXT_FAINT, medium = true).apply {
                         gravity = Gravity.CENTER
                         background = ripple(rounded(SURFACE_2, 10, 1, if (enabled) BORDER else DIVIDER))
                         layoutParams = LinearLayout.LayoutParams(dp(36), dp(36)).apply { leftMargin = dp(6) }
@@ -591,47 +569,40 @@ object SettingsUi {
                         setOnClickListener { if (enabled) onClick() }
                     }
 
-                rows.sortedBy { it.position }.forEach { row ->
-                    val conflict = (dups[row.position]?.size ?: 0) > 1
+                rows.forEachIndexed { index, row ->
                     val item = LinearLayout(context).apply {
                         orientation = LinearLayout.HORIZONTAL
                         gravity = Gravity.CENTER_VERTICAL
                         setPadding(dp(10), dp(8), dp(8), dp(8))
-                        background = ripple(
-                            rounded(SURFACE_2, 12, 1, if (conflict) WARNING else BORDER),
-                        )
+                        background = ripple(rounded(SURFACE_2, 12, 1, BORDER))
                         layoutParams = LinearLayout.LayoutParams(
                             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
                         ).apply { bottomMargin = dp(6) }
                     }
                     val number = label(
-                        "${row.position}",
+                        "${index + 1}",
                         12.5f,
-                        if (conflict) WARNING else ACCENT,
+                        ACCENT,
                         medium = true,
                     ).apply {
                         gravity = Gravity.CENTER
-                        background = rounded(Color.TRANSPARENT, 9, 1, if (conflict) WARNING else BORDER)
+                        background = rounded(Color.TRANSPARENT, 9, 1, BORDER)
                         layoutParams = LinearLayout.LayoutParams(dp(32), dp(32))
-                        contentDescription = "Position ${row.position}"
+                        contentDescription = "Position ${index + 1}"
                     }
                     val title = label(row.title, 13f, TEXT, medium = true).apply {
                         setPadding(dp(10), 0, dp(8), 0)
                         maxLines = 2
                         ellipsize = TextUtils.TruncateAt.END
                     }
-                    val up = step("\u2212", "Move ${row.title} up", row.position > 1) {
-                        val target = row.position - 1
-                        val other = rows.firstOrNull { it !== row && it.position == target }
-                        if (other != null) other.position = row.position
-                        row.position = target
+                    val up = step("\u25B2", "Move ${row.title} up", index > 0) {
+                        rows.removeAt(index)
+                        rows.add(index - 1, row)
                         render()
                     }
-                    val down = step("+", "Move ${row.title} down", row.position < rows.size) {
-                        val target = row.position + 1
-                        val other = rows.firstOrNull { it !== row && it.position == target }
-                        if (other != null) other.position = row.position
-                        row.position = target
+                    val down = step("\u25BC", "Move ${row.title} down", index < rows.lastIndex) {
+                        rows.removeAt(index)
+                        rows.add(index + 1, row)
                         render()
                     }
                     item.addView(number)
@@ -651,26 +622,13 @@ object SettingsUi {
             cancel.setOnClickListener { editor.dismiss() }
             reset.setOnClickListener {
                 rows.clear()
-                Catalogue.defaultHomeRows().forEachIndexed { index, (key, title) ->
-                    rows += RankedRow(key, title, index + 1)
+                Catalogue.defaultHomeRows().forEach { (key, title) ->
+                    rows += RankedRow(key, title)
                 }
                 render()
             }
             save.setOnClickListener {
-                val dups = duplicates()
-                if (dups.isNotEmpty()) {
-                    reportDialog(
-                        title = "Duplicate positions",
-                        subtitle = "Each row needs its own number. Change one of these rows, then save again.",
-                        rows = dups.toSortedMap().flatMap { (position, group) ->
-                            group.map { Triple("#$position", it.title, WARNING) }
-                        },
-                        accent = WARNING,
-                        actionLabel = "Fix positions",
-                    )
-                    return@setOnClickListener
-                }
-                val visible = rows.sortedBy { it.position }.map { it.key }
+                val visible = rows.map { it.key }
                 val previous = Settings.catalogueOrder().ifEmpty {
                     Catalogue.forYouRowKeys + Catalogue.enabledRows().map { it.first }
                 }
@@ -1044,10 +1002,6 @@ object SettingsUi {
         }
 
         content.addView(sectionLabel("Catalogue", 0))
-        content.addView(
-            label("Pick one catalogue source, then enable, disable, or reorder home rows.", 11.5f, TEXT_DIM)
-                .apply { setPadding(0, 0, 0, dp(10)) },
-        )
         buildProviderCard()
         buildCatalogueCard()
 
