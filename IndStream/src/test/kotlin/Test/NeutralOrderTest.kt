@@ -137,9 +137,8 @@ class NeutralOrderTest {
         assertEquals(1, out.size)
         val link = out[0]
         assertEquals(1080, link.quality)
-        assertEquals(1, Regex("""\d{3,4}p|4K""", RegexOption.IGNORE_CASE).findAll(link.name).count(),
-            "name must carry exactly one quality: ${link.name}")
-        assertTrue(link.name.contains("1080p"))
+        assertEquals(0, Regex("""\d{3,4}p|4K""", RegexOption.IGNORE_CASE).findAll(link.name).count(),
+            "quality must live on the link only: ${link.name}")
     }
 
     @Test
@@ -181,7 +180,8 @@ class NeutralOrderTest {
         )
         assertEquals(1, out.size)
         assertEquals(2160, out[0].quality)
-        assertTrue(out[0].name.contains("4K"), "name must carry quality: ${out[0].name}")
+        assertEquals(0, Regex("""\d{3,4}p|4K""", RegexOption.IGNORE_CASE).findAll(out[0].name).count(),
+            "quality must live on the link only: ${out[0].name}")
         assertFalse(out[0].name.contains("Auto"), "name must NOT show Auto: ${out[0].name}")
     }
 
@@ -216,7 +216,8 @@ class NeutralOrderTest {
         )
         assertEquals(1, out.size)
         assertEquals(1080, out[0].quality)
-        assertTrue(out[0].name.contains("1080p"), "name must carry quality: ${out[0].name}")
+        assertEquals(0, Regex("""\d{3,4}p|4K""", RegexOption.IGNORE_CASE).findAll(out[0].name).count(),
+            "quality must live on the link only: ${out[0].name}")
         assertFalse(out[0].name.contains("Auto"), "name must NOT show Auto: ${out[0].name}")
     }
 

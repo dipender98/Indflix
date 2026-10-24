@@ -358,11 +358,11 @@ object StreamEngine {
             }
 
             val isAdaptive = raw.isM3u8
-            val quality = r.fullHeight.coerceAtLeast(0)
+            val quality = r.fullHeight.takeIf { it > 0 }
+                ?: LinkNaming.qualityHeight(raw.mediaLabel, raw.serverName)
             val label = LinkNaming.displayName(
                 serverName = raw.serverName,
                 audioLabel = r.tagLabel,
-                qualityHint = r.fullHeight,
                 duplicateIndex = dupIdx,
                 originalLang = originalLang,
                 sizeLabel = raw.sizeLabel.takeIf { it.isNotBlank() },
@@ -377,7 +377,7 @@ object StreamEngine {
                 url = raw.url, type = linkType,
             ) {
                 referer = raw.referer ?: ""
-                this.quality = quality
+                this.quality = quality ?: 0
                 this.headers = linkHeaders
             })
         }

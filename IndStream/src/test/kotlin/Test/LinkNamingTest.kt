@@ -9,6 +9,7 @@ class LinkNamingTest {
 
     private val IN = "\uD83C\uDDEE\uD83C\uDDF3"
     private val GB = "\uD83C\uDDEC\uD83C\uDDE7"
+    private val JP = "\uD83C\uDDEF\uD83C\uDDF5"
 
 
     @Test
@@ -68,31 +69,31 @@ class LinkNamingTest {
     @Test
     fun displayName_twoLanguagesShowsBothFlags() {
         val name = LinkNaming.displayName(
-            serverName = "VidLink", audioLabel = "Hindi+English", qualityHint = 1080,
+            serverName = "VidLink", audioLabel = "Hindi+English",
         )
-        assertEquals("VidLink ($IN Hindi, $GB English) 1080p", name)
+        assertEquals("VidLink ($IN Hindi, $GB English)", name)
     }
 
     @Test
     fun displayName_threeLanguagesCollapseToMulti() {
         val name = LinkNaming.displayName(
-            serverName = "VidLink", audioLabel = "Hindi+English+Tamil", qualityHint = 1080,
+            serverName = "VidLink", audioLabel = "Hindi+English+Tamil",
         )
-        assertEquals("VidLink (Multi) 1080p", name)
+        assertEquals("VidLink (Multi)", name)
     }
 
     @Test
     fun displayName_conflictingServerLanguageIsDropped() {
         val name = LinkNaming.displayName(
-            serverName = "AnimeWorld English", audioLabel = "Japanese", qualityHint = 1080,
+            serverName = "AnimeWorld English", audioLabel = "Japanese",
         )
-        assertEquals("AnimeWorld (\uD83C\uDDEF\uD83C\uDDF5 Japanese) 1080p", name)
+        assertEquals("AnimeWorld (\uD83C\uDDEF\uD83C\uDDF5 Japanese)", name)
     }
 
     @Test
     fun displayName_qualityFromBrandIsNotRepeated() {
         val name = LinkNaming.displayName(
-            serverName = "4KHDHub", audioLabel = "Hindi", qualityHint = 2160,
+            serverName = "4KHDHub", audioLabel = "Hindi",
         )
         assertEquals("4KHDHub ($IN Hindi)", name)
     }
@@ -106,16 +107,16 @@ class LinkNamingTest {
     @Test
     fun displayName_firstRenditionKeepsLanguageFlagAndSize() {
         val name = LinkNaming.displayName(
-            serverName = "VidLink", audioLabel = "Hindi", qualityHint = 1080,
+            serverName = "VidLink", audioLabel = "Hindi",
             sizeLabel = "1.7GB",
         )
-        assertEquals("VidLink ($IN Hindi) 1080p 1.7GB", name)
+        assertEquals("VidLink ($IN Hindi) 1.7GB", name)
     }
 
     @Test
     fun displayName_englishNoResolution() {
         val name = LinkNaming.displayName(
-            serverName = "VaPlayer", audioLabel = "English", qualityHint = 0,
+            serverName = "VaPlayer", audioLabel = "English",
         )
         assertEquals("VaPlayer ($GB English)", name)
     }
@@ -123,72 +124,72 @@ class LinkNamingTest {
     @Test
     fun displayName_multiAudio() {
         val name = LinkNaming.displayName(
-            serverName = "VidLink", audioLabel = "Multi", qualityHint = 1080,
+            serverName = "VidLink", audioLabel = "Multi",
         )
-        assertEquals("VidLink (Multi) 1080p", name)
+        assertEquals("VidLink (Multi)", name)
     }
 
     @Test
     fun displayName_hindiBrand_noRedundantTag() {
         val name = LinkNaming.displayName(
-            serverName = "MyFlixer Hindi", audioLabel = "Hindi", qualityHint = 1080,
+            serverName = "MyFlixer Hindi", audioLabel = "Hindi",
             duplicateIndex = 1,
         )
-        assertEquals("MyFlixer-1 ($IN Hindi) 1080p", name)
+        assertEquals("MyFlixer-1 ($IN Hindi)", name)
     }
 
     @Test
     fun displayName_englishSuffix_strippedFlagKept() {
         val name = LinkNaming.displayName(
-            serverName = "AnimeWorld English", audioLabel = "English", qualityHint = 1080,
+            serverName = "AnimeWorld English", audioLabel = "English",
         )
-        assertEquals("AnimeWorld ($GB English) 1080p", name)
+        assertEquals("AnimeWorld ($GB English)", name)
     }
 
     @Test
     fun displayName_resolutionInName_strippedNotAppended() {
         val name = LinkNaming.displayName(
-            serverName = "PrimeSrc", audioLabel = "Original", qualityHint = 1080,
+            serverName = "PrimeSrc", audioLabel = "Original",
             subIndicator = "Nova 1080p",
         )
-        assertEquals("PrimeSrc Nova (Original) 1080p", name)
+        assertEquals("PrimeSrc Nova (Original)", name)
     }
 
     @Test
     fun displayName_resolutionGluedStripped() {
         val name = LinkNaming.displayName(
-            serverName = "Server1080p", audioLabel = "Hindi", qualityHint = 1080,
+            serverName = "Server1080p", audioLabel = "Hindi",
             duplicateIndex = 1,
         )
-        assertEquals("Server-1 ($IN Hindi) 1080p", name)
+        assertEquals("Server-1 ($IN Hindi)", name)
     }
 
     @Test
     fun displayName_fourKStrippedFromName() {
         val name = LinkNaming.displayName(
-            serverName = "MovieBox 4K", audioLabel = "English", qualityHint = 2160,
+            serverName = "MovieBox 4K", audioLabel = "English",
             duplicateIndex = 1,
         )
-        assertEquals("MovieBox-1 ($GB English) 4K", name)
+        assertEquals("MovieBox-1 ($GB English)", name)
     }
 
     @Test
     fun displayName_numbered_fullAttributes() {
         val name = LinkNaming.displayName(
-            serverName = "MovieBox", audioLabel = "Hindi", qualityHint = 1080,
+            serverName = "MovieBox", audioLabel = "Hindi",
             duplicateIndex = 1, sizeLabel = "1.7GB",
             mediaLabel = "Film 2024 1080p WEB-DL HEVC 10bit Dolby 5.1",
         )
-        assertEquals("MovieBox-1 WEB-DL HEVC 10bit Dolby 5.1 ($IN Hindi) 1080p 1.7GB", name)
+        assertEquals("MovieBox-1 WEB-DL HEVC 10bit Dolby 5.1 ($IN Hindi) 1.7GB", name)
     }
 
     @Test
     fun displayName_firstRenditionCarriesTokens() {
         val name = LinkNaming.displayName(
-            serverName = "MovieBox", audioLabel = "Hindi", qualityHint = 1080,
+            serverName = "MovieBox", audioLabel = "Hindi",
             mediaLabel = "HEVC DDP5.1", sizeLabel = "1.7GB",
         )
-        assertEquals("MovieBox HEVC Dolby 5.1 ($IN Hindi) 1080p 1.7GB", name)
+        assertEquals("MovieBox HEVC Dolby 5.1 ($IN Hindi) 1.7GB", name)
     }
 
     @Test
@@ -208,7 +209,7 @@ class LinkNamingTest {
     @Test
     fun displayName_numbered_noAttributesAtAll() {
         val name = LinkNaming.displayName(
-            serverName = "PrimeSrc", audioLabel = "", qualityHint = 0,
+            serverName = "PrimeSrc", audioLabel = "",
             duplicateIndex = 2,
         )
         assertEquals("PrimeSrc-2 (Unknown)", name)
@@ -217,20 +218,20 @@ class LinkNamingTest {
     @Test
     fun displayName_numbered_multiNoFlag() {
         val name = LinkNaming.displayName(
-            serverName = "VidLink", audioLabel = "Multi", qualityHint = 1080,
+            serverName = "VidLink", audioLabel = "Multi",
             duplicateIndex = 1,
         )
-        assertEquals("VidLink-1 (Multi) 1080p", name)
+        assertEquals("VidLink-1 (Multi)", name)
     }
 
     @Test
     fun displayName_numbered_camripVisionTokens() {
         val name = LinkNaming.displayName(
-            serverName = "NetMirror", audioLabel = "Hindi", qualityHint = 720,
+            serverName = "NetMirror", audioLabel = "Hindi",
             duplicateIndex = 1,
             mediaLabel = "HDCAM DDP5.1 DV X264",
         )
-        assertEquals("NetMirror-1 CAMRip H.264 Dolby Vision Dolby 5.1 ($IN Hindi) 720p", name)
+        assertEquals("NetMirror-1 CAMRip H.264 Dolby Vision Dolby 5.1 ($IN Hindi)", name)
     }
 
 
@@ -299,25 +300,27 @@ class LinkNamingTest {
     @Test
     fun displayName_autoQualityFromServerName() {
         val name = LinkNaming.displayName(
-            serverName = "BrandNewServer 1440p", audioLabel = "Tamil", qualityHint = 0,
+            serverName = "BrandNewServer 1440p", audioLabel = "Tamil",
         )
-        assertEquals("BrandNewServer ($IN Tamil) 1440p", name)
+        assertEquals("BrandNewServer ($IN Tamil)", name)
+        assertEquals(1440, LinkNaming.qualityHeight("BrandNewServer 1440p"))
     }
 
     @Test
     fun displayName_autoTokensFromServerName_noDuplicates() {
         val name = LinkNaming.displayName(
-            serverName = "BrandNewServer WEB-DL HEVC", audioLabel = "Tamil", qualityHint = 1080,
+            serverName = "BrandNewServer WEB-DL HEVC", audioLabel = "Tamil",
         )
-        assertEquals("BrandNewServer WEB-DL HEVC ($IN Tamil) 1080p", name)
+        assertEquals("BrandNewServer WEB-DL HEVC ($IN Tamil)", name)
     }
 
     @Test
     fun displayName_autoQuality2KFromServerName() {
         val name = LinkNaming.displayName(
-            serverName = "BrandNewServer 2K", audioLabel = "Tamil", qualityHint = 0,
+            serverName = "BrandNewServer 2K", audioLabel = "Tamil",
         )
-        assertEquals("BrandNewServer ($IN Tamil) 2K", name)
+        assertEquals("BrandNewServer ($IN Tamil)", name)
+        assertEquals(1440, LinkNaming.qualityHeight("BrandNewServer 2K"))
     }
 
     @Test
@@ -330,11 +333,11 @@ class LinkNamingTest {
         val names = streams.mapIndexed { i, s ->
             LinkNaming.displayName(
                 serverName = s.serverName, audioLabel = s.audioLabel,
-                qualityHint = s.qualityHint, duplicateIndex = nums[i],
+                duplicateIndex = nums[i],
             )
         }
-        assertEquals("VidLink ($IN Hindi) 1080p", names[0])
-        assertEquals("VidLink-1 ($IN Hindi) 1080p", names[1])
+        assertEquals("VidLink ($IN Hindi)", names[0])
+        assertEquals("VidLink-1 ($IN Hindi)", names[1])
     }
 
     @Test
@@ -344,10 +347,10 @@ class LinkNamingTest {
         streams.forEachIndexed { i, s ->
             val name = LinkNaming.displayName(
                 serverName = s.serverName, audioLabel = s.audioLabel,
-                qualityHint = s.qualityHint, duplicateIndex = nums[i],
+                duplicateIndex = nums[i],
             )
             assertEquals(
-                if (i == 0) "PrimeSrc ($GB English) 720p" else "PrimeSrc-$i ($GB English) 720p",
+                if (i == 0) "PrimeSrc ($GB English)" else "PrimeSrc-$i ($GB English)",
                 name,
             )
         }
@@ -355,58 +358,59 @@ class LinkNamingTest {
 
     @Test
     fun displayName_qualityNeverRepeated() {
-        // serverName carries the same resolution as the qualityHint; must render once only.
+        // the resolution is never embedded in the label, so it cannot be rendered twice.
         val name = LinkNaming.displayName(
-            serverName = "FSL 1080p", audioLabel = "Hindi", qualityHint = 1080,
+            serverName = "FSL 1080p", audioLabel = "Hindi",
         )
-        assertEquals("FSL ($IN Hindi) 1080p", name)
-        assertEquals(1, countToken(name, """\b1080p\b"""))
+        assertEquals("FSL ($IN Hindi)", name)
+        assertEquals(0, countToken(name, """(?i)\b(?:720p|1080p|1440p|2160p|4k)\b"""))
 
-        // qualityHint present but serverName names a different resolution; only hint quality shown.
         val name2 = LinkNaming.displayName(
-            serverName = "FSL 720p", audioLabel = "English", qualityHint = 1080,
+            serverName = "FSL 720p", audioLabel = "English",
         )
-        assertEquals("FSL ($GB English) 1080p", name2)
-        assertEquals(1, countToken(name2, """\b1080p\b"""))
+        assertEquals("FSL ($GB English)", name2)
+        assertEquals(0, countToken(name2, """(?i)\b(?:720p|1080p|1440p|2160p|4k)\b"""))
 
-        // auto quality from mediaLabel does not duplicate a resolution already in the name.
         val name3 = LinkNaming.displayName(
-            serverName = "MovieBox", audioLabel = "Tamil", qualityHint = 0,
+            serverName = "MovieBox", audioLabel = "Tamil",
             mediaLabel = "Film 1080p WEB-DL HEVC",
         )
-        assertEquals("MovieBox WEB-DL HEVC ($IN Tamil) 1080p", name3)
-        assertEquals(1, countToken(name3, """\b1080p\b"""))
+        assertEquals("MovieBox WEB-DL HEVC ($IN Tamil)", name3)
+        assertEquals(0, countToken(name3, """(?i)\b(?:720p|1080p|1440p|2160p|4k)\b"""))
     }
 
     @Test
     fun displayName_explicitAudioLanguageWinsOverServerName() {
         // English-only audio must not be relabeled Hindi just because the server name says Hindi.
         val name = LinkNaming.displayName(
-            serverName = "MovieServer Hindi", audioLabel = "English", qualityHint = 1080,
+            serverName = "MovieServer Hindi", audioLabel = "English",
         )
-        assertEquals("MovieServer ($GB English) 1080p", name)
+        assertEquals("MovieServer ($GB English)", name)
 
         val name2 = LinkNaming.displayName(
-            serverName = "MovieServer Hindi", audioLabel = "English", qualityHint = 0,
+            serverName = "MovieServer Hindi", audioLabel = "English",
             mediaLabel = "Film 1080p",
         )
-        assertEquals("MovieServer ($GB English) 1080p", name2)
+        assertEquals("MovieServer ($GB English)", name2)
+        assertEquals(1080, LinkNaming.qualityHeight("Film 1080p"))
     }
 
     @Test
     fun displayName_qualityVariantsNeverRepeat() {
-        val cases = listOf(
-            Triple("FSL 1080 P", 1080, "FSL ($IN Hindi) 1080p"),
-            Triple("FSL HD", 1080, "FSL ($IN Hindi) 1080p"),
-            Triple("FSL 1080p60", 1080, "FSL ($IN Hindi) 1080p"),
-            Triple("FSL UHD", 2160, "FSL ($IN Hindi) 4K"),
-            Triple("FSL 4K HD", 2160, "FSL ($IN Hindi) 4K"),
-        )
-        cases.forEach { (server, height, expected) ->
-            val name = LinkNaming.displayName(server, "Hindi", height)
-            assertEquals(expected, name)
-            assertEquals(1, countToken(name, """(?i)\b(?:720p|1080p|1440p|2160p|4k|uhd|fhd)\b"""))
+        listOf(
+            "FSL 1080 P",
+            "FSL HD",
+            "FSL 1080p60",
+            "FSL UHD",
+            "FSL 4K HD",
+        ).forEach { server ->
+            val name = LinkNaming.displayName(server, "Hindi")
+            assertEquals("FSL ($IN Hindi)", name)
+            assertEquals(0, countToken(name, """(?i)\b(?:720p|1080p|1440p|2160p|4k|uhd|fhd)\b"""))
         }
+        assertEquals(1080, LinkNaming.qualityHeight("FSL 1080 P"))
+        assertEquals(2160, LinkNaming.qualityHeight("FSL UHD"))
+        assertEquals(2160, LinkNaming.qualityHeight("FSL 4K HD"))
     }
 
     @Test
@@ -419,32 +423,56 @@ class LinkNamingTest {
             "MovieServer Hindi Dubbed",
         ).forEach { server ->
             assertEquals(
-                "MovieServer ($IN Hindi) 1080p",
-                LinkNaming.displayName(server, audioLabel = "", qualityHint = 1080),
+                "MovieServer ($IN Hindi)",
+                LinkNaming.displayName(server, audioLabel = ""),
             )
         }
         assertEquals(
-            "MovieServer ($GB English) 1080p",
-            LinkNaming.displayName("MovieServer English", audioLabel = "", qualityHint = 1080),
+            "MovieServer ($GB English)",
+            LinkNaming.displayName("MovieServer English", audioLabel = ""),
+        )
+    }
+
+    @Test
+    fun displayName_originalLangLabelGetsFlag() {
+        // Original-language fallback resolves to the audio language and must still carry its flag.
+        assertEquals(
+            "AnimeWorld ($JP Japanese)",
+            LinkNaming.displayName(
+                "AnimeWorld", audioLabel = "", originalLang = "ja",
+            ),
         )
     }
 
     @Test
     fun displayName_titleLanguageIsNotTreatedAsAudio() {
-        val name = LinkNaming.displayName("Hindi Medium", audioLabel = "", qualityHint = 1080)
-        assertEquals("Hindi Medium (Unknown) 1080p", name)
+        val name = LinkNaming.displayName("Hindi Medium", audioLabel = "")
+        assertEquals("Hindi Medium (Unknown)", name)
     }
 
     @Test
     fun displayName_explicitMultiOrOriginalIsNotOverriddenByServerName() {
         assertEquals(
-            "MovieServer (Multi) 1080p",
-            LinkNaming.displayName("MovieServer Hindi", audioLabel = "Multi", qualityHint = 1080),
+            "MovieServer (Multi)",
+            LinkNaming.displayName("MovieServer Hindi", audioLabel = "Multi"),
         )
         assertEquals(
-            "MovieServer (Original) 1080p",
-            LinkNaming.displayName("MovieServer Hindi", audioLabel = "Original", qualityHint = 1080),
+            "MovieServer (Original)",
+            LinkNaming.displayName("MovieServer Hindi", audioLabel = "Original"),
         )
+    }
+
+    @Test
+    fun qualityHeight_parsesTextIntoNumericHeight() {
+        assertEquals(2160, LinkNaming.qualityHeight("Movie 4K UHD"))
+        assertEquals(2160, LinkNaming.qualityHeight("Movie 2160p"))
+        assertEquals(1440, LinkNaming.qualityHeight("Movie 2K"))
+        assertEquals(1440, LinkNaming.qualityHeight("Movie 1440p"))
+        assertEquals(1080, LinkNaming.qualityHeight("Movie 1080p"))
+        assertEquals(720, LinkNaming.qualityHeight("Movie 720p"))
+        assertEquals(0, LinkNaming.qualityHeight("Movie"))
+        assertEquals(0, LinkNaming.qualityHeight(null))
+        assertEquals(1080, LinkNaming.qualityHeight("Movie", "1080p"))
     }
 
 
@@ -480,17 +508,8 @@ class LinkNamingTest {
 
 
     @Test
-    fun qualityLabel_commonHeights() {
-        assertEquals("4K", LinkNaming.qualityLabel(2160))
-        assertEquals("1080p", LinkNaming.qualityLabel(1080))
-        assertEquals("720p", LinkNaming.qualityLabel(720))
-        assertEquals("", LinkNaming.qualityLabel(0))
-        assertEquals("Auto", LinkNaming.qualityLabel(-1))
-    }
-
-    @Test
     fun displayName_directUnknownShowsNoResolution() {
-        val name = LinkNaming.displayName("VidRock", "Hindi", qualityHint = -1)
+        val name = LinkNaming.displayName("VidRock", "Hindi")
         assertEquals("VidRock ($IN Hindi)", name)
     }
 

@@ -113,7 +113,6 @@ object LinkNaming {
     fun displayName(
         serverName: String,
         audioLabel: String? = "",
-        qualityHint: Int = 0,
         subIndicator: String? = null,
         duplicateIndex: Int = 0,
         originalLang: String? = null,
@@ -136,18 +135,8 @@ object LinkNaming {
                 Regex("""\b${Regex.escape(it)}\b""", RegexOption.IGNORE_CASE).containsMatchIn(named)
             }
             .joinToString(" ")
-        val prefix = listOf(named, tokens, tagPart).filter { it.isNotBlank() }.joinToString(" ")
-        val qualityPart = (
-            if (qualityHint > 0) {
-                qualityLabel(qualityHint)
-            } else {
-                qualityFromText(mediaLabel).ifBlank { qualityFromText(rawName) }
-            }
-            ).let { quality ->
-            if (quality.isNotBlank() && containsQuality(prefix, quality)) "" else quality
-        }
         val sizePart = sizeLabel?.trim().orEmpty()
-        return listOf(numbered, tokens, tagPart, qualityPart, sizePart)
+        return listOf(numbered, tokens, tagPart, sizePart)
             .filter { it.isNotBlank() }.joinToString(" ")
     }
 
@@ -176,20 +165,15 @@ object LinkNaming {
         }
     }
 
-    private fun containsQuality(prefix: String, quality: String): Boolean {
-        val key = qualityKey(quality)
-        if (key.isBlank()) return false
-        return qualityKey(prefix).contains(key)
-    }
-
-    private fun qualityKey(text: String): String {
-        val compact = text.lowercase().replace(Regex("""[^a-z0-9]"""), "")
-        return when {
-            compact.contains("4k") || compact.contains("2160p") || compact.contains("uhd") -> "4k"
-            compact.contains("1440p") || compact.contains("2k") || compact.contains("qhd") -> "1440p"
-            compact.contains("1080p") || compact.contains("fhd") -> "1080p"
-            compact.contains("720p") -> "720p"
-            else -> compact
+    // Numeric height for the link's quality value; the player renders the quality label itself.
+    fun qualityHeight(text: String?, fallback: String? = null): Int {
+        val label = qualityFromText(text).ifBlank { qualityFromText(fallback) }
+        if (label.isBlank()) return 0
+        return when (label) {
+            "4K" -> 2160
+            "2K" -> 1440
+            "HD" -> 0
+            else -> label.removeSuffix("p").toIntOrNull() ?: 0
         }
     }
 
@@ -237,30 +221,19 @@ object LinkNaming {
     }
 
     private fun languageTagPart(label: String, names: List<String>): String {
-        if (names.size == 2 && label != "Multi" && label != "Unknown" && label != "Original") {
-            val first = languageFlag(names[0])
-            val second = languageFlag(names[1])
-            if (first.isNotBlank() && second.isNotBlank()) {
-                return "($first ${names[0]}, $second ${names[1]})"
+        val parts = if (names.isNotEmpty()) names else label.split(',').map { it.trim() }.filter { it.isNotEmpty() }
+        if (parts.size == 2 && parts.none { it == "Multi" || it == "Unknown" || it == "Original" }) {
+            val first = languageFlag(parts[0])
+            val second = languageFlag(parts[1])
+            if (first.isNotBlank() || second.isNotBlank()) {
+                val a = if (first.isBlank()) parts[0] else "$first ${parts[0]}"
+                val b = if (second.isBlank()) parts[1] else "$second ${parts[1]}"
+                return "($a, $b)"
             }
         }
-        val flag = names.singleOrNull()?.let { languageFlag(it) }.orEmpty()
-        return if (flag.isBlank()) "($label)" else "($flag $label)"
-    }
-
-    fun displayName(base: String, audioLabel: String?, qualityHint: Int): String =
-        displayName(base, audioLabel, qualityHint, subIndicator = null, duplicateIndex = 0)
-
-    fun qualityLabel(height: Int): String = when {
-        height >= 2160 -> "4K"
-        height >= 1440 -> "1440p"
-        height >= 1080 -> "1080p"
-        height >= 720 -> "720p"
-        height >= 480 -> "480p"
-        height >= 360 -> "360p"
-        height > 0 -> "${height}p"
-        height < 0 -> "Auto"
-        else -> ""
+        val single = parts.singleOrNull()
+        val flag = single?.let { languageFlag(it) }.orEmpty()
+        return if (flag.isBlank()) "($label)" else "($flag $single)"
     }
 
     fun dedupeNames(streams: List<RawStream>, originalLang: String? = null): List<Int> {

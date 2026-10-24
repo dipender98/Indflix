@@ -687,24 +687,44 @@ object SettingsUi {
         fun buildCatalogueCard(): Card {
             var selected = Catalogue.Group.GLOBAL
             fun rowsOf(group: Catalogue.Group): List<Pair<String, String>> = Catalogue.rowsFor(group)
-            fun enabledCount(group: Catalogue.Group): Int =
-                rowsOf(group).count { Settings.catalogueEnabled(it.first) }
+            // the card reports totals across every group, not just the selected one
+            fun enabledCount(): Int = Catalogue.enabledRows().size
+            fun totalCount(): Int = Catalogue.allRows().size
 
             val groupCard = card(
                 "Catalogue",
                 "Select a group, then toggle its home rows",
-                "${enabledCount(selected)} of ${rowsOf(selected).size} enabled",
-                enabledCount(selected) > 0,
+                "${enabledCount()} of ${totalCount()} enabled",
+                enabledCount() > 0,
             )
             val groupChips = LinkedHashMap<Catalogue.Group, TextView>()
             val chipRow = LinearLayout(context).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
             }
-            Catalogue.Group.entries.forEach { group ->
+            val groupEntries = Catalogue.Group.entries
+            groupEntries.forEach { group ->
                 val groupChip = chip(group.label)
                 groupChips[group] = groupChip
                 chipRow.addView(groupChip)
+            }
+            // pills share the card width evenly; natural width is the floor on narrow screens
+            val sheetWidth = (context.resources.displayMetrics.widthPixels * 0.92f).roundToInt()
+            val rowWidth = (sheetWidth - dp(18) * 2 - dp(16) * 2 - dp(2)).coerceAtLeast(0)
+            val naturalWidths = groupEntries.map { group ->
+                val chipView = groupChips.getValue(group)
+                chipView.measure(
+                    View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
+                    View.MeasureSpec.makeMeasureSpec(control, View.MeasureSpec.EXACTLY),
+                )
+                chipView.measuredWidth
+            }
+            val naturalTotal = naturalWidths.sum() + gap * groupEntries.size
+            val extra = ((rowWidth - naturalTotal) / groupEntries.size).coerceAtLeast(0)
+            groupEntries.forEachIndexed { index, group ->
+                groupChips.getValue(group).layoutParams = LinearLayout.LayoutParams(
+                    naturalWidths[index] + extra, control,
+                ).apply { rightMargin = gap }
             }
             val chipScroll = HorizontalScrollView(context).apply {
                 isHorizontalScrollBarEnabled = false
@@ -735,8 +755,8 @@ object SettingsUi {
             }
 
             fun refreshState() {
-                val total = rowsOf(selected).size
-                val on = enabledCount(selected)
+                val total = totalCount()
+                val on = enabledCount()
                 setState(groupCard, "$on of $total enabled", on > 0)
             }
 
@@ -961,7 +981,7 @@ object SettingsUi {
                 addView(dot)
             }
             val tags = label(providerTags(spec), 9.5f, TEXT_FAINT).apply {
-                maxLines = 3
+                maxLines = 2
                 ellipsize = TextUtils.TruncateAt.END
                 setPadding(0, dp(4), 0, 0)
             }
@@ -1117,7 +1137,7 @@ object SettingsUi {
         providerRows.forEachIndexed { rowIndex, rowTiles ->
             val row = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
             rowTiles.forEachIndexed { index, tile ->
-                val lp = LinearLayout.LayoutParams(0, dp(80), 1f)
+                val lp = LinearLayout.LayoutParams(0, dp(60), 1f)
                 if (index < rowTiles.lastIndex) lp.rightMargin = gap
                 row.addView(tile.root, lp)
             }
