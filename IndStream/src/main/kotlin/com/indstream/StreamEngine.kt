@@ -328,20 +328,17 @@ object StreamEngine {
             }.awaitAll()
         }
         val ordered = preResolved.sortedBy { speedRankMs(it.fetchMs, it.tagLabel) }
-        val resolvedForKey = ordered.map { it.raw.copy(qualityHint = it.fullHeight) }
-        val numbers = LinkNaming.dedupeNames(resolvedForKey, originalLang)
 
         val floorDroppedByServer = HashMap<String, Int>()
         val emittedByServer = HashMap<String, Int>()
 
-        ordered.forEachIndexed { index, r ->
+        ordered.forEach { r ->
             val raw = r.raw
-            val dupIdx = numbers.getOrElse(index) { 0 }
-            if (!emitted.add(raw.url)) return@forEachIndexed
+            if (!emitted.add(raw.url)) return@forEach
 
             if (!passesQualityFloor(raw.isM3u8, r.fullHeight)) {
                 floorDroppedByServer.merge(raw.serverId, 1, Int::plus)
-                return@forEachIndexed
+                return@forEach
             }
             emittedByServer.merge(raw.serverId, 1, Int::plus)
 
@@ -357,7 +354,6 @@ object StreamEngine {
             val label = LinkNaming.displayName(
                 serverName = raw.serverName,
                 audioLabel = r.tagLabel,
-                duplicateIndex = dupIdx,
                 originalLang = originalLang,
                 sizeLabel = raw.sizeLabel.takeIf { it.isNotBlank() },
                 mediaLabel = raw.mediaLabel.takeIf { it.isNotBlank() },

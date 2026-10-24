@@ -114,7 +114,6 @@ object LinkNaming {
         serverName: String,
         audioLabel: String? = "",
         subIndicator: String? = null,
-        duplicateIndex: Int = 0,
         originalLang: String? = null,
         sizeLabel: String? = null,
         mediaLabel: String? = null,
@@ -124,7 +123,6 @@ object LinkNaming {
         val composed = if (subIndicator.isNullOrBlank()) cleanName else "$cleanName ${subIndicator.trim()}".trim()
         val named = stripQuality(TRAILING_LANGUAGE.replace(stripQuality(composed), ""))
             .trim().ifBlank { "Server" }
-        val numbered = if (duplicateIndex > 0) "$named-$duplicateIndex" else named
 
         val names = displayLanguageNames(audioLabel, mediaLabel, cleanName)
         val tag = displayLanguageTag(names, audioLabel, mediaLabel, originalLang, cleanName)
@@ -136,7 +134,7 @@ object LinkNaming {
             }
             .joinToString(" ")
         val sizePart = sizeLabel?.trim().orEmpty()
-        return listOf(numbered, tokens, tagPart, sizePart)
+        return listOf(named, tokens, tagPart, sizePart)
             .filter { it.isNotBlank() }.joinToString(" ")
     }
 
@@ -234,23 +232,6 @@ object LinkNaming {
         val single = parts.singleOrNull()
         val flag = single?.let { languageFlag(it) }.orEmpty()
         return if (flag.isBlank()) "($label)" else "($flag $single)"
-    }
-
-    fun dedupeNames(streams: List<RawStream>, originalLang: String? = null): List<Int> {
-        fun keyOf(s: RawStream): String = s.serverId.trim().lowercase()
-        val totals = HashMap<String, Int>()
-        for (s in streams) totals.merge(keyOf(s), 1) { a, b -> a + b }
-        val running = HashMap<String, Int>()
-        return streams.map { s ->
-            val key = keyOf(s)
-            if ((totals[key] ?: 0) <= 1) {
-                0
-            } else {
-                val n = running[key] ?: 0
-                running[key] = n + 1
-                n
-            }
-        }
     }
 
     private val SOURCE_TOKENS = listOf(

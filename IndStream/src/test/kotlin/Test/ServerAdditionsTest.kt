@@ -299,8 +299,8 @@ class ServerAdditionsTest {
             com.indstream.LinkNaming.displayName("VidLink", "Multi"),
         )
         assertEquals(
-            "4KHDHub-1 (\uD83C\uDDEE\uD83C\uDDF3 Hindi) 1.4GB",
-            com.indstream.LinkNaming.displayName("4KHDHub", "Hindi", sizeLabel = "1.4GB", duplicateIndex = 1),
+            "4KHDHub (\uD83C\uDDEE\uD83C\uDDF3 Hindi) 1.4GB",
+            com.indstream.LinkNaming.displayName("4KHDHub", "Hindi", sizeLabel = "1.4GB"),
         )
     }
 

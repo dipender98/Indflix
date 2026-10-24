@@ -133,9 +133,8 @@ class LinkNamingTest {
     fun displayName_hindiBrand_noRedundantTag() {
         val name = LinkNaming.displayName(
             serverName = "MyFlixer Hindi", audioLabel = "Hindi",
-            duplicateIndex = 1,
         )
-        assertEquals("MyFlixer-1 ($IN Hindi)", name)
+        assertEquals("MyFlixer ($IN Hindi)", name)
     }
 
     @Test
@@ -159,28 +158,26 @@ class LinkNamingTest {
     fun displayName_resolutionGluedStripped() {
         val name = LinkNaming.displayName(
             serverName = "Server1080p", audioLabel = "Hindi",
-            duplicateIndex = 1,
         )
-        assertEquals("Server-1 ($IN Hindi)", name)
+        assertEquals("Server ($IN Hindi)", name)
     }
 
     @Test
     fun displayName_fourKStrippedFromName() {
         val name = LinkNaming.displayName(
             serverName = "MovieBox 4K", audioLabel = "English",
-            duplicateIndex = 1,
         )
-        assertEquals("MovieBox-1 ($GB English)", name)
+        assertEquals("MovieBox ($GB English)", name)
     }
 
     @Test
-    fun displayName_numbered_fullAttributes() {
+    fun displayName_fullAttributes() {
         val name = LinkNaming.displayName(
             serverName = "MovieBox", audioLabel = "Hindi",
-            duplicateIndex = 1, sizeLabel = "1.7GB",
+            sizeLabel = "1.7GB",
             mediaLabel = "Film 2024 1080p WEB-DL HEVC 10bit Dolby 5.1",
         )
-        assertEquals("MovieBox-1 WEB-DL HEVC 10bit Dolby 5.1 ($IN Hindi) 1.7GB", name)
+        assertEquals("MovieBox WEB-DL HEVC 10bit Dolby 5.1 ($IN Hindi) 1.7GB", name)
     }
 
     @Test
@@ -196,104 +193,39 @@ class LinkNamingTest {
     fun displayName_unknownTokensStayBlank() {
         val name = LinkNaming.displayName(
             serverName = "MovieBox", audioLabel = "English",
-            duplicateIndex = 2, sizeLabel = "1.1GB",
+            sizeLabel = "1.1GB",
             mediaLabel = "CAMRip",
         )
-        assertEquals("MovieBox-2 CAMRip ($GB English) 1.1GB", name)
+        assertEquals("MovieBox CAMRip ($GB English) 1.1GB", name)
         assertEquals(
-            "MovieBox-2 ($GB English) 1.1GB",
-            LinkNaming.displayName("MovieBox", "English", duplicateIndex = 2, sizeLabel = "1.1GB"),
+            "MovieBox ($GB English) 1.1GB",
+            LinkNaming.displayName("MovieBox", "English", sizeLabel = "1.1GB"),
         )
     }
 
     @Test
-    fun displayName_numbered_noAttributesAtAll() {
+    fun displayName_noAttributesAtAll() {
         val name = LinkNaming.displayName(
             serverName = "PrimeSrc", audioLabel = "",
-            duplicateIndex = 2,
         )
-        assertEquals("PrimeSrc-2 (Unknown)", name)
+        assertEquals("PrimeSrc (Unknown)", name)
     }
 
     @Test
-    fun displayName_numbered_multiNoFlag() {
+    fun displayName_multiNoFlag() {
         val name = LinkNaming.displayName(
             serverName = "VidLink", audioLabel = "Multi",
-            duplicateIndex = 1,
         )
-        assertEquals("VidLink-1 (Multi)", name)
+        assertEquals("VidLink (Multi)", name)
     }
 
     @Test
-    fun displayName_numbered_camripVisionTokens() {
+    fun displayName_camripVisionTokens() {
         val name = LinkNaming.displayName(
             serverName = "NetMirror", audioLabel = "Hindi",
-            duplicateIndex = 1,
             mediaLabel = "HDCAM DDP5.1 DV X264",
         )
-        assertEquals("NetMirror-1 CAMRip H.264 Dolby Vision Dolby 5.1 ($IN Hindi)", name)
-    }
-
-
-    @Test
-    fun dedupe_uniqueKeepsNoNumber() {
-        val s = listOf(raw("VidLink", "Hindi", 1080))
-        val nums = LinkNaming.dedupeNames(s)
-        assertEquals(0, nums[0], "unique stream must get index 0 (no number)")
-    }
-
-
-    @Test
-    fun dedupe_sameServer_numbered0Onward() {
-        val streams = listOf(
-            raw("VidLink", "Hindi", 1080),
-            raw("VidLink", "Hindi", 1080),
-        )
-        val nums = LinkNaming.dedupeNames(streams)
-        assertEquals(0, nums[0])
-        assertEquals(1, nums[1])
-    }
-
-
-    @Test
-    fun dedupe_fiveIdentical_numbered0to4() {
-        val streams = (1..5).map { raw("PrimeSrc", "eng", 720) }
-        val nums = LinkNaming.dedupeNames(streams)
-        streams.forEachIndexed { i, _ -> assertEquals(i, nums[i]) }
-    }
-
-
-    @Test
-    fun dedupe_twentyIdentical_numbered0to19() {
-        val streams = (1..20).map { raw("Server", "eng", 720) }
-        val nums = LinkNaming.dedupeNames(streams)
-        streams.forEachIndexed { i, _ -> assertEquals(i, nums[i]) }
-    }
-
-
-    @Test
-    fun dedupe_sameServerAcrossQualityAndLanguage_groupedTogether() {
-        val streams = listOf(
-            raw("MovieBox 1080p", "Hindi", 1080, serverId = "moviebox"),
-            raw("MovieBox 720p", "English", 720, serverId = "moviebox"),
-        )
-        val nums = LinkNaming.dedupeNames(streams)
-        assertEquals(0, nums[0])
-        assertEquals(1, nums[1])
-    }
-
-
-    @Test
-    fun dedupe_mixedServers_independent() {
-        val streams = listOf(
-            raw("VidLink", "Hindi", 1080),
-            raw("VidLink", "Hindi", 1080),
-            raw("VaPlayer", "English", 1080),
-        )
-        val nums = LinkNaming.dedupeNames(streams)
-        assertEquals(0, nums[0])
-        assertEquals(1, nums[1])
-        assertEquals(0, nums[2], "different server is independent")
+        assertEquals("NetMirror CAMRip H.264 Dolby Vision Dolby 5.1 ($IN Hindi)", name)
     }
 
 
@@ -324,34 +256,27 @@ class LinkNamingTest {
     }
 
     @Test
-    fun displayName_withNumbering_firstPlainRestNumbered() {
+    fun displayName_duplicatesIdentical_noNumbering() {
         val streams = listOf(
             raw("VidLink", "Hindi", 1080),
             raw("VidLink", "Hindi", 1080),
         )
-        val nums = LinkNaming.dedupeNames(streams)
-        val names = streams.mapIndexed { i, s ->
-            LinkNaming.displayName(
-                serverName = s.serverName, audioLabel = s.audioLabel,
-                duplicateIndex = nums[i],
+        streams.forEach { s ->
+            assertEquals(
+                "VidLink ($IN Hindi)",
+                LinkNaming.displayName(serverName = s.serverName, audioLabel = s.audioLabel),
             )
         }
-        assertEquals("VidLink ($IN Hindi)", names[0])
-        assertEquals("VidLink-1 ($IN Hindi)", names[1])
     }
 
     @Test
-    fun displayName_withNumbering_fiveMembers() {
-        val streams = (1..5).map { raw("PrimeSrc", "eng", 720) }
-        val nums = LinkNaming.dedupeNames(streams)
-        streams.forEachIndexed { i, s ->
-            val name = LinkNaming.displayName(
-                serverName = s.serverName, audioLabel = s.audioLabel,
-                duplicateIndex = nums[i],
-            )
+    fun displayName_fiveSameServer_allShareTheSameLabel() {
+        val expected = "PrimeSrc ($GB English)"
+        (1..5).forEach {
+            val s = raw("PrimeSrc", "eng", 720)
             assertEquals(
-                if (i == 0) "PrimeSrc ($GB English)" else "PrimeSrc-$i ($GB English)",
-                name,
+                expected,
+                LinkNaming.displayName(serverName = s.serverName, audioLabel = s.audioLabel),
             )
         }
     }
