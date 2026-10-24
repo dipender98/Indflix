@@ -1,6 +1,7 @@
 package com.indstream
 
 import android.content.Context
+import com.indstream.foryou.SimklHistory
 
 object Catalogue {
 
@@ -44,6 +45,11 @@ object Catalogue {
     )
 
     private const val ORIGIN = "IN"
+
+    private const val FOR_YOU_MOVIE = "foryou|movie"
+    private const val FOR_YOU_TV = "foryou|tv"
+
+    val forYouRowKeys: List<String> = listOf(FOR_YOU_MOVIE, FOR_YOU_TV)
 
     private data class Language(val code: String, val label: String)
 
@@ -180,6 +186,57 @@ object Catalogue {
 
     fun enabledRows(): List<Pair<String, String>> =
         allRows().filter { (key, _) -> Settings.catalogueEnabled(key) }
+
+    fun orderedRows(): List<Pair<String, String>> =
+        arrange(enabledRows(), Settings.catalogueOrder())
+
+    fun forYouRows(): List<Pair<String, String>> =
+        if (SimklHistory.isSignedIn()) {
+            listOf(
+                FOR_YOU_MOVIE to "Made for You: Movies",
+                FOR_YOU_TV to "Made for You: Series",
+            )
+        } else {
+            emptyList()
+        }
+
+    fun defaultHomeRows(): List<Pair<String, String>> = forYouRows() + enabledRows()
+
+    fun homeRows(): List<Pair<String, String>> =
+        arrange(defaultHomeRows(), Settings.catalogueOrder())
+
+    // Ranked rows come first in the saved sequence; unknown rows keep their default spot after them.
+    fun arrange(
+        rows: List<Pair<String, String>>,
+        order: List<String>,
+    ): List<Pair<String, String>> {
+        if (rows.size < 2 || order.isEmpty()) return rows
+        val rank = HashMap<String, Int>(order.size)
+        order.forEachIndexed { index, key ->
+            val clean = key.trim()
+            if (clean.isNotEmpty() && !rank.containsKey(clean)) rank[clean] = index
+        }
+        if (rank.isEmpty()) return rows
+        return rows.sortedBy { rank[it.first] ?: Int.MAX_VALUE }
+    }
+
+    // Rows hidden by the current state (for example sign-in-only rows) keep their previous slots.
+    fun mergeOrder(
+        visible: List<String>,
+        previous: List<String>,
+        hidden: Set<String>,
+    ): List<String> {
+        if (hidden.isEmpty()) return visible
+        val result = ArrayList<String>(visible.size + hidden.size)
+        var next = 0
+        previous.forEach { key ->
+            if (key in hidden) result += key
+            else if (next < visible.size) result += visible[next++]
+        }
+        while (next < visible.size) result += visible[next++]
+        hidden.forEach { if (it !in result) result += it }
+        return result
+    }
 
     private fun rowsFor(category: Category): List<Pair<String, String>> = listOf(
         rowKey(category, "movie") to rowTitle(category, "movie"),

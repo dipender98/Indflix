@@ -125,15 +125,7 @@ class IndStreamProvider : MainAPI() {
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
 
     override val mainPage: List<MainPageData>
-        get() {
-            val rows = ArrayList<Pair<String, String>>()
-            if (SimklHistory.isSignedIn()) {
-                rows += Pair("foryou|movie", "Made for You: Movies")
-                rows += Pair("foryou|tv", "Made for You: Series")
-            }
-            rows += Catalogue.enabledRows()
-            return mainPageOf(*rows.toTypedArray())
-        }
+        get() = mainPageOf(*Catalogue.homeRows().toTypedArray())
 
 
     override suspend fun search(query: String): List<SearchResponse>? = coroutineScope {
@@ -498,6 +490,7 @@ class IndStreamProvider : MainAPI() {
             metaDeferred.await()?.imdbId
         }
         val emitted = java.util.concurrent.atomic.AtomicInteger(0)
+        val subtitleSink = SubtitleSink(subtitleCallback)
 
         fun releaseMeta() {
             metaDeferred.cancel()
@@ -518,10 +511,11 @@ class IndStreamProvider : MainAPI() {
                 { emitted.incrementAndGet(); callback(it) },
                 originalLangNow(),
                 probeManifests = false,
+                onSubtitle = subtitleSink::emit,
             )
             val subsJob = fastStartScope.async {
                 val imdb = imdbWithRetry({ metaDeferred.await()?.imdbId }, tmdbId, type, urlImdb)
-                runCatching { topUpSubtitles(imdb, season, episode, originalLangNow(), subtitleCallback) }
+                runCatching { topUpSubtitles(imdb, season, episode, originalLangNow(), subtitleSink) }
                     .onFailure { android.util.Log.w("IndStream", "fallback subs failed: ${it.message}") }
             }
             if (warm != null) {
@@ -535,6 +529,7 @@ class IndStreamProvider : MainAPI() {
                         { emitted.incrementAndGet(); callback(it) },
                         originalLangNow(),
                         probeManifests = false,
+                        onSubtitle = subtitleSink::emit,
                     )
                 }
                 val grown = StreamEngine.FastStartCache.get(cacheKey)
@@ -544,6 +539,7 @@ class IndStreamProvider : MainAPI() {
                     { emitted.incrementAndGet(); callback(it) },
                     originalLangNow(),
                     probeManifests = false,
+                    onSubtitle = subtitleSink::emit,
                 )
             }
             android.util.Log.i("IndStream", "TAP#$tap replay done (+live tail: ${if (warm != null) "yes" else "no"}), " +
@@ -565,7 +561,7 @@ class IndStreamProvider : MainAPI() {
                 android.util.Log.i("IndStream", "TAP#$tap joining in-flight farm for $cacheKey (no second launch)")
                 val subsJob = fastStartScope.async {
                     val imdb = imdbWithRetry({ imdbDeferred.await() }, tmdbId, type, urlImdb)
-                    runCatching { topUpSubtitles(imdb, season, episode, originalLangNow(), subtitleCallback) }
+                    runCatching { topUpSubtitles(imdb, season, episode, originalLangNow(), subtitleSink) }
                         .onFailure { android.util.Log.w("IndStream", "fallback subs failed: ${it.message}") }
                 }
                 val joined = Collections.synchronizedSet(HashSet<String>())
@@ -578,6 +574,7 @@ class IndStreamProvider : MainAPI() {
                         { emitted.incrementAndGet(); callback(it) },
                         originalLangNow(),
                         probeManifests = false,
+                        onSubtitle = subtitleSink::emit,
                     )
                     return true
                 }
@@ -616,6 +613,7 @@ class IndStreamProvider : MainAPI() {
                 fresh,
                 { emitted.incrementAndGet(); callback(it) },
                 originalLangNow(),
+                onSubtitle = subtitleSink::emit,
             )
         }
 
@@ -655,7 +653,7 @@ class IndStreamProvider : MainAPI() {
 
         val subsJob = fastStartScope.async {
             val imdb = imdbWithRetry({ imdbDeferred.await() }, tmdbId, type, urlImdb)
-            runCatching { topUpSubtitles(imdb, season, episode, originalLangNow(), subtitleCallback) }
+            runCatching { topUpSubtitles(imdb, season, episode, originalLangNow(), subtitleSink) }
                 .onFailure { android.util.Log.w("IndStream", "fallback subs failed: ${it.message}") }
         }
 
@@ -693,14 +691,20 @@ class IndStreamProvider : MainAPI() {
         val job = fastStartScope.launch {
             runCatching {
                 StreamEngine.resolveRealtime(tmdbId, type, -1, -1, imdbId, imdbIdProvider = { imdbId }) { _, streams ->
-                    if (streams.isNotEmpty()) StreamEngine.FastStartCache.put(key, streams)
+                    if (streams.isNotEmpty()) {
+                        StreamEngine.FastStartCache.put(key, streams)
+                        StreamEngine.cacheSubtitles(streams)
+                    }
                 }
                 if (tmdbId <= 0 && imdbId != null) {
                     val id2 = runCatching { withTimeoutOrNull(6000L) { TmdbService.findByImdb(imdbId) } }
                         .getOrNull()?.first?.takeIf { it > 0 }
                     if (id2 != null) {
                         StreamEngine.resolveRealtime(id2, type, -1, -1, imdbId, tmdbOnly = true) { _, streams ->
-                            if (streams.isNotEmpty()) StreamEngine.FastStartCache.put(key, streams)
+                            if (streams.isNotEmpty()) {
+                                StreamEngine.FastStartCache.put(key, streams)
+                                StreamEngine.cacheSubtitles(streams)
+                            }
                         }
                     }
                 }
@@ -710,31 +714,36 @@ class IndStreamProvider : MainAPI() {
         job.invokeOnCompletion { warmFarms.remove(key, job) }
     }
 
+    private class SubtitleSink(private val callback: (SubtitleFile) -> Unit) {
+        private val seen = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
+        private val lock = Mutex()
+
+        suspend fun emit(file: SubtitleFile) {
+            val url = file.url.trim()
+            if (url.isBlank() || !seen.add(url)) return
+            lock.withLock { runCatching { callback(file) } }
+        }
+    }
+
     private suspend fun topUpSubtitles(
         imdbId: String?,
         season: Int,
         episode: Int,
         originalLang: String?,
-        subtitleCallback: (SubtitleFile) -> Unit,
+        sink: SubtitleSink,
     ) {
         val wanted = SubtilesProvider.desiredLanguages(originalLang)
-        val seen = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
-        val emitLock = Mutex()
-        suspend fun emit(t: SubtitleFile) {
-            if (!seen.add(t.url)) return
-            emitLock.withLock { runCatching { subtitleCallback(t) } }
-        }
         coroutineScope {
             Settings.apiKey()?.let { key ->
                 launch {
                     runCatching {
-                        WyzieSubs.fetchAndDeliver(imdbId, season, episode, wanted, key) { emit(it) }
+                        WyzieSubs.fetchAndDeliver(imdbId, season, episode, wanted, key) { sink.emit(it) }
                     }
                 }
             }
             launch {
                 runCatching {
-                    SubtilesProvider.fetchAndDeliver(imdbId, season, episode, wanted, originalLang) { emit(it) }
+                    SubtilesProvider.fetchAndDeliver(imdbId, season, episode, wanted, originalLang) { sink.emit(it) }
                 }
             }
         }

@@ -2,6 +2,7 @@ package com.indstream
 
 
 import android.util.Log
+import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.CompletableDeferred
@@ -22,6 +23,8 @@ object StreamEngine {
     private const val MAX_CONCURRENT = 32
     private const val MAX_UNWRAP = 4
     private const val ANIMATION_GENRE_ID = 16
+    private const val SUBTITLE_PROBE_CONCURRENCY = 6
+    private const val SUBTITLE_PROBE_TIMEOUT_MS = 2_500L
 
     @Volatile private var movieBoxToken: String? = null
     @Volatile private var movieBoxTokenAt: Long = 0L
@@ -57,6 +60,7 @@ object StreamEngine {
         val inlineManifest: String? = null,
         val extraHeaders: Map<String, String> = emptyMap(),
         val isDash: Boolean = false,
+        val subtitles: List<SubtitleKit.Track> = emptyList(),
     )
 
     private data class SubjectRef(
@@ -235,6 +239,7 @@ object StreamEngine {
         onLink: (ExtractorLink) -> Unit,
         originalLang: String? = null,
         probeManifests: Boolean = true,
+        onSubtitle: (suspend (SubtitleFile) -> Unit)? = null,
     ): Set<String> {
         val emitted = java.util.Collections.synchronizedSet(HashSet<String>())
         if (streams.isEmpty()) return emitted
@@ -272,6 +277,7 @@ object StreamEngine {
             val fullHeight: Int,
             val tagLabel: String,
             val fetchMs: Long? = null,
+            val masterText: String? = null,
         )
         val preResolved = coroutineScope {
             ranked.map { raw ->
@@ -298,7 +304,7 @@ object StreamEngine {
                                 else if (master != null) ManifestKit.audioLanguageLabel(master).orEmpty()
                                 else raw.audioLabel)
                                     .ifBlank { declaredLanguageHint(raw) ?: "" }
-                                ResolvedEmit(raw, h, tag, fetchMs)
+                                ResolvedEmit(raw, h, tag, fetchMs, masterText)
                             }
                         }
                         !raw.isM3u8 && probeManifests -> {
@@ -376,7 +382,104 @@ object StreamEngine {
                 Log.i("IndStream", "$sid streams dropped by 720p floor ($n candidates, none =720p)")
             }
         }
+        if (onSubtitle != null) {
+            emitSubtitles(liveSet, ordered.associate { it.raw.url to it.masterText }, onSubtitle)
+        }
         return emitted
+    }
+
+    /** Warms the subtitle cache without emitting anything, used by background preloads. */
+    suspend fun cacheSubtitles(streams: List<RawStream>) {
+        emitSubtitles(streams, emptyMap(), null)
+    }
+
+    private suspend fun emitSubtitles(
+        streams: List<RawStream>,
+        masterTexts: Map<String, String?>,
+        onSubtitle: (suspend (SubtitleFile) -> Unit)?,
+    ) {
+        if (streams.isEmpty()) return
+        val seen = java.util.Collections.synchronizedSet(HashSet<String>())
+        val pending = mutableListOf<RawStream>()
+
+        suspend fun deliver(raw: RawStream, tracks: List<SubtitleKit.Track>) {
+            if (onSubtitle == null) return
+            val headers = subtitleProbeHeaders(raw)
+            for (track in tracks) {
+                val url = track.url.trim()
+                if (url.isEmpty() || !seen.add(url)) continue
+                onSubtitle(subtitleFileOf(raw.serverName, track, headers))
+            }
+        }
+
+        for (raw in streams) {
+            val inline = raw.inlineManifest ?: masterTexts[raw.url]
+            val fromMaster = SubtitleKit.fromMaster(ManifestKit.parseMaster(inline, raw.url), raw.url)
+            val known = SubtitleKit.merge(
+                SubtitleKit.merge(raw.subtitles, FastStartCache.subtitlesFor(raw.url)),
+                fromMaster,
+            )
+            if (known.isEmpty() && raw.isM3u8 && !raw.isDash && !FastStartCache.subtitlesProbed(raw.url)) {
+                pending += raw
+                continue
+            }
+            deliver(raw, known)
+        }
+        if (pending.isEmpty()) return
+
+        coroutineScope {
+            val gate = Semaphore(SUBTITLE_PROBE_CONCURRENCY)
+            pending.map { raw ->
+                async {
+                    gate.acquire()
+                    try {
+                        val text = withTimeoutOrNull(SUBTITLE_PROBE_TIMEOUT_MS) {
+                            catching { app.get(raw.url, timeout = 3, headers = subtitleProbeHeaders(raw)).text }
+                                .getOrNull()
+                        }
+                        if (text.isNullOrBlank()) return@async
+                        val tracks = SubtitleKit.fromMaster(ManifestKit.parseMaster(text, raw.url), raw.url)
+                        FastStartCache.markSubtitlesProbed(raw.url)
+                        if (tracks.isEmpty()) return@async
+                        FastStartCache.putSubtitles(raw.url, tracks)
+                        deliver(raw, tracks)
+                    } finally {
+                        gate.release()
+                    }
+                }
+            }.awaitAll()
+        }
+    }
+
+    private fun subtitleProbeHeaders(raw: RawStream): Map<String, String> {
+        val headers = LinkedHashMap(raw.extraHeaders)
+        if (!headers.containsKey("Referer") && !raw.referer.isNullOrBlank()) {
+            headers["Referer"] = raw.referer!!
+        }
+        return headers
+    }
+
+    internal fun subtitleFileOf(
+        serverName: String,
+        track: SubtitleKit.Track,
+        headers: Map<String, String> = emptyMap(),
+    ): SubtitleFile {
+        val canonical = LinkNaming.canonicalSubtitleName(track.language)
+        val file = SubtitleFile(LinkNaming.taggedSubtitleName(canonical, serverName), track.url)
+        if (headers.isNotEmpty()) file.headers = headers
+        return file
+    }
+
+    /** Attaches subtitle tracks found anywhere in a provider payload to every stream of that provider. */
+    internal fun withJsonSubtitles(
+        streams: List<RawStream>,
+        payload: Any?,
+        baseUrl: String,
+    ): List<RawStream> {
+        if (streams.isEmpty() || payload == null) return streams
+        val tracks = SubtitleKit.fromJson(payload, baseUrl)
+        if (tracks.isEmpty()) return streams
+        return streams.map { it.copy(subtitles = SubtitleKit.merge(it.subtitles, tracks)) }
     }
 
     internal fun speedRankMs(fetchMs: Long?, tagLabel: String): Double {
@@ -651,23 +754,27 @@ object StreamEngine {
         }
 
         val regLinks = mutableListOf<ExtractorLink>()
+        val regSubs = java.util.Collections.synchronizedList(mutableListOf<SubtitleFile>())
         val regOk = catching {
-            loadExtractor(url = embedUrl, referer = referer, subtitleCallback = { }, callback = { regLinks.add(it) })
+            loadExtractor(url = embedUrl, referer = referer, subtitleCallback = { regSubs.add(it) }, callback = { regLinks.add(it) })
         }.getOrDefault(false)
         if (unwrappedUrl != embedUrl) {
             catching {
-                loadExtractor(url = unwrappedUrl, referer = embedUrl, subtitleCallback = { }, callback = { regLinks.add(it) })
+                loadExtractor(url = unwrappedUrl, referer = embedUrl, subtitleCallback = { regSubs.add(it) }, callback = { regLinks.add(it) })
             }
         }
         if (regLinks.isNotEmpty()) {
             Log.d("IndStream", "${spec.id}: extractor registry returned ${regLinks.size} links (outerOk=$regOk unwrapped=$unwrappedUrl)")
+            val regTracks = regSubs.mapNotNull { file ->
+                file.url.trim().takeIf { it.isNotBlank() }?.let { SubtitleKit.Track(file.lang, it) }
+            }.distinctBy { it.url }
             val result = regLinks.map { link ->
                 val probed = HttpKit.probeSpeed(link.url, link.referer)
                 val (label, h) = probeAudioHeight(link.url, link.referer)
                 val dash = link.type == ExtractorLinkType.DASH || link.url.contains(".mpd", ignoreCase = true)
                 RawStream(spec.id, spec.name, link.url, link.type == ExtractorLinkType.M3U8 || dash, link.referer,
                     ManifestKit.maxQuality(link.quality, h), probed,
-                    audioLabel = label, isDash = dash)
+                    audioLabel = label, isDash = dash, subtitles = regTracks)
             }
             okServer(spec, start, "extractor registry", result.size)
             return result
@@ -734,6 +841,9 @@ object StreamEngine {
         } ?: return "" to 0
         val height = ManifestKit.bestHeightOf(text, url)
         val master = ManifestKit.parseMaster(text, url)
+        val tracks = SubtitleKit.fromMaster(master, url)
+        if (tracks.isNotEmpty()) FastStartCache.putSubtitles(url, tracks)
+        FastStartCache.markSubtitlesProbed(url)
         val label = master?.let { ManifestKit.audioLanguageLabel(it) }.orEmpty()
         val langs = master?.audio?.map { r -> "lang=${r.language ?: "none"} name=${r.name}" }.orEmpty()
         Log.d("IndStream", "probeAudioHeight url=${url.take(80)} label=$label height=$height renditions=$langs")
@@ -802,98 +912,27 @@ object StreamEngine {
             episode,
         )
 
-    internal suspend fun probeServer(spec: ServerSpec): Boolean = when (spec.id) {
-        "bingr" -> probeBingr(spec)
-        "rivestream" -> probeRivestream(spec)
-        "netmirror" -> probeNetmirror(spec)
-        "dudefilms" -> probeDudefilms(spec)
-        "onetouchtv" -> probeOneTouchTv(spec)
-        else -> {
-            val sampleId = if (spec.idType == ServerIdType.IMDB) PROBE_IMDB_ID else PROBE_TMDB_ID
-            val url = if (spec.id == "vidlink") {
-                vidlinkMovieApiUrlAt(sampleId, 0)
-            } else {
-                ServerFarm.buildProbeUrl(spec, sampleId, PROBE_TITLE, PROBE_YEAR)
-            }
-            HttpKit.aliveCheck(
-                url = url,
-                referer = spec.referer,
-                timeoutSec = spec.timeoutSec.coerceIn(2, 8).toLong(),
-            ) == true
-        }
+    internal suspend fun probeServer(spec: ServerSpec): Boolean {
+        val sampleId = if (spec.animeOnly) PROBE_ANIME_TMDB_ID else PROBE_TMDB_ID
+        val budget = spec.timeoutSec.coerceIn(20, 70).toLong() * 1000L
+        return withTimeoutOrNull(budget) {
+            val streams = catching {
+                resolveOne(
+                    spec.copy(recordHealth = false),
+                    sampleId.toInt(),
+                    PROBE_IMDB_ID,
+                    "movie",
+                    0,
+                    0,
+                )
+            }.getOrNull()
+            !streams.isNullOrEmpty()
+        } ?: false
     }
 
     private const val PROBE_TMDB_ID = "27205"
     private const val PROBE_IMDB_ID = "tt1375666"
-    private const val PROBE_TITLE = "Inception"
-    private const val PROBE_YEAR = "2010"
-
-    private suspend fun probeBingr(spec: ServerSpec): Boolean = withTimeoutOrNull(9_000L) {
-        val endpoint = ServerFarm.buildMovieUrl(spec, PROBE_TMDB_ID)
-        val posted = runCatching {
-            app.post(
-                endpoint,
-                timeout = 7,
-                headers = mapOf(
-                    "Content-Type" to "application/json",
-                    "Origin" to (spec.referer?.trimEnd('/') ?: "https://bingr.one"),
-                    "Referer" to (spec.referer ?: "https://bingr.one/"),
-                    "User-Agent" to HttpKit.userAgent,
-                ),
-                json = bingrBody("s40", "movie", PROBE_TMDB_ID, PROBE_TITLE, PROBE_YEAR, 0, 0),
-            ).code in 200..399
-        }.getOrDefault(false)
-        if (posted) return@withTimeoutOrNull true
-        runCatching {
-            val text = app.get(
-                "$endpoint/aphelion-tv/$PROBE_TMDB_ID/1/1",
-                timeout = 7,
-                headers = okHeaders(spec.referer),
-            ).text
-            catching { org.json.JSONObject(text) }.getOrNull() != null
-        }.getOrDefault(false)
-    } ?: false
-
-    private suspend fun probeRivestream(spec: ServerSpec): Boolean = withTimeoutOrNull(9_000L) {
-        runCatching {
-            val text = app.get(
-                ServerFarm.buildProbeUrl(spec, PROBE_TMDB_ID, PROBE_TITLE, PROBE_YEAR),
-                timeout = 8,
-                headers = okHeaders(spec.referer),
-            ).text
-            catching { org.json.JSONObject(text) }.getOrNull() != null
-        }.getOrDefault(false)
-    } ?: false
-
-    private suspend fun probeNetmirror(spec: ServerSpec): Boolean = withTimeoutOrNull(12_000L) {
-        runCatching {
-            val text = app.get(
-                ServerFarm.buildMovieUrl(spec, PROBE_TMDB_ID),
-                timeout = 6,
-                headers = okHeaders(spec.referer),
-            ).text
-            catching { org.json.JSONObject(text) }.getOrNull() != null
-        }.getOrDefault(false)
-    } ?: false
-
-    private suspend fun probeDudefilms(spec: ServerSpec): Boolean = withTimeoutOrNull(10_000L) {
-        val base = Domains.base("dudefilms")
-            ?: ServerFarm.buildMovieUrl(spec, PROBE_TMDB_ID).trimEnd('/')
-        val keyword = java.net.URLEncoder.encode(PROBE_TITLE, "UTF-8")
-        val html = fetchText("$base/?s=$keyword", base, timeoutSec = 8)
-        !html.isNullOrBlank() && titleHits(html, base).isNotEmpty()
-    } ?: false
-
-    private suspend fun probeOneTouchTv(spec: ServerSpec): Boolean = withTimeoutOrNull(9_000L) {
-        val text = catching {
-            app.get(
-                ServerFarm.buildProbeUrl(spec, PROBE_TMDB_ID, PROBE_TITLE, PROBE_YEAR),
-                timeout = 8,
-                headers = vodHeaders(),
-            ).text
-        }.getOrNull() ?: return@withTimeoutOrNull false
-        decryptVodJson(text) != null
-    } ?: false
+    private const val PROBE_ANIME_TMDB_ID = "129"
 
     private fun hexToBytes(hex: String): ByteArray {
         val out = ByteArray(hex.length / 2)
@@ -1005,7 +1044,7 @@ object StreamEngine {
             }.orEmpty().sortedByDescending { it.first }
             if (entries.isNotEmpty()) {
                 Log.d("VidLink", "qualities shape: ${entries.map { it.first }}p for $mediaPage")
-                return entries.map { (height, url, q) ->
+                return withJsonSubtitles(entries.map { (height, url, q) ->
                     RawStream(
                         serverId = spec.id,
                         serverName = spec.name,
@@ -1015,7 +1054,7 @@ object StreamEngine {
                         qualityHint = height,
                         extraHeaders = vidlinkPlaybackHeaders(q),
                     )
-                }
+                }, resolved, mediaPage)
             }
             Log.w("VidLink", "qualities present but no usable urls (keys=${namesOf(qualities)})")
         }
@@ -1036,7 +1075,7 @@ object StreamEngine {
         val height = master?.let { ManifestKit.bestHeight(it.variants) } ?: 0
         val label = master?.let { ManifestKit.audioLanguageLabel(it) }.orEmpty()
 
-        return listOf(
+        return withJsonSubtitles(listOf(
             RawStream(
                 serverId = spec.id,
                 serverName = spec.name,
@@ -1048,7 +1087,7 @@ object StreamEngine {
                 inlineManifest = masterText?.takeIf { master != null },
                 extraHeaders = VIDLINK_PLAYER_HEADERS,
             )
-        )
+        ), resolved, mediaPage)
     }
 
     private suspend fun fetchMovieBoxBearer(forceRefresh: Boolean): String? {
@@ -1472,7 +1511,7 @@ object StreamEngine {
             )
         }
         Log.d("VaPlayer", "got ${out.size} master playlists")
-        return out
+        return withJsonSubtitles(out, root, apiUrl)
     }
 
     private suspend fun resolveNetmirror(
@@ -2267,6 +2306,20 @@ object StreamEngine {
     }
 
     private suspend fun hubDriveFiles(driveUrl: String, referer: String): List<Pair<String, String>> {
+        if (driveUrl.contains("hubdrive.", ignoreCase = true) || driveUrl.contains("hubcdn.", ignoreCase = true)) {
+            val index = fetchText(driveUrl, referer) ?: return emptyList()
+            val reurl = Regex("""var\s+reurl\s*=\s*"([^"]+)"""")
+                .find(index)?.groupValues?.get(1)
+            val direct = reurl?.substringAfter("r=", "")
+                ?.replace('-', '+')?.replace('_', '/')
+                ?.let { b64Text(it) }
+                ?.substringAfter("link=", "")
+                ?.takeIf { it.startsWith("http") }
+            if (direct != null) return listOf(direct to qualityText(direct))
+            val next = Regex("""https?://hubcloud\.[a-z.]+/drive/[A-Za-z0-9]+""")
+                .find(index)?.value ?: return emptyList()
+            return hubDriveFiles(next, driveUrl)
+        }
         val healed = when {
             driveUrl.contains("vcloud.", ignoreCase = true) -> healHost(driveUrl, "vcloud")
             driveUrl.contains("hubcloud.", ignoreCase = true) -> healHost(driveUrl, "hubcloud")
@@ -2396,7 +2449,10 @@ object StreamEngine {
                 out += rawFile(spec, label.ifBlank { hostLabel }, host, referer, language, size)
                 continue
             }
-            if (host.contains("hubcloud.", ignoreCase = true) || host.contains("hubdrive.", ignoreCase = true)) {
+            if (host.contains("hubcloud.", ignoreCase = true) ||
+                host.contains("hubdrive.", ignoreCase = true) ||
+                host.contains("hubcdn.", ignoreCase = true)
+            ) {
                 for ((url, quality) in hubDriveFiles(host, referer)) {
                     out += rawFile(spec, quality.ifBlank { label }, url, referer, language, size)
                 }
@@ -2638,7 +2694,9 @@ object StreamEngine {
                 }
                 href to a.text().trim()
             }.filter { !it.second.contains("watch", ignoreCase = true) }.distinctBy { it.first }
-            val links = episodeOrSeason(anchors, { "${it.second} ${it.first}" }, type, season, episode).take(6)
+            val links = episodeOrSeason(anchors, { "${it.second} ${it.first}" }, type, season, episode)
+                .sortedByDescending { releaseHeightOf(it.second) }
+                .take(8)
             val language = releaseLanguageOf(post)
             for ((href, label) in links) {
                 val hosts = if (href.contains("greenmotors", ignoreCase = true)) {
@@ -3183,8 +3241,9 @@ object StreamEngine {
         }
         val ep = eps.firstOrNull { it.number == wantEp }
             ?: throw CleanMissException("episode $wantEp missing")
-        val (sources, _) = vodStreams(hit.id, ep.playId)
+        val (sources, subtitleRows) = vodStreams(hit.id, ep.playId)
         if (sources.isEmpty()) throw CleanMissException("no sources for '${hit.title}' ep ${ep.number}")
+        val tracks = subtitleRows.map { (language, url) -> SubtitleKit.Track(language, url) }
         return sources.map { source ->
             RawStream(
                 serverId = spec.id, serverName = spec.name,
@@ -3193,6 +3252,7 @@ object StreamEngine {
                 referer = vodPlaybackReferer(),
                 qualityHint = releaseHeightOf(source.quality),
                 extraHeaders = vodPlaybackHeaders(),
+                subtitles = tracks,
             )
         }.distinctBy { it.url }
     }
@@ -3628,7 +3688,7 @@ object StreamEngine {
             val src = cfg.optString("src").takeIf { it.isNotBlank() } ?: continue
             val dub = s.type.equals("dub", ignoreCase = true)
             val label = if (dub) "English" else "Japanese"
-            out += RawStream(
+            out += withJsonSubtitles(listOf(RawStream(
                 serverId = spec.id, serverName = "${spec.name} $label",
                 url = src, isM3u8 = src.contains(".m3u8", true),
                 referer = ANIME_EMBED_REFERER,
@@ -3638,7 +3698,7 @@ object StreamEngine {
                     "Referer" to ANIME_EMBED_REFERER,
                     "User-Agent" to HttpKit.userAgent,
                 ),
-            )
+            )), cfg, ANIME_EMBED_REFERER)
         }
         if (out.isEmpty()) throw CleanMissException("player config carried no source for '${hit.title}' ep ${ep.first}")
         return out.distinctBy { it.url }
@@ -3689,7 +3749,7 @@ object StreamEngine {
             )
         }
         Log.d("VidCore", "parsed ${out.size} sources")
-        return out
+        return withJsonSubtitles(out, root, url)
     }
 
     internal val BINGR_SRVS = listOf("s40", "s70", "s80", "s81", "s62", "s63", "s30", "s60", "s61", "s31", "s3")
@@ -4757,7 +4817,7 @@ object StreamEngine {
         if (out.isEmpty()) {
             Log.w("IndStream", "${spec.id}: source present but carried no url/manifest/qualities; source keys=${namesOf(source)}")
         }
-        return out
+        return withJsonSubtitles(out, root, apiUrl)
     }
 
     private suspend fun unwrapPages(html: String, baseUrl: String, timeoutSec: Int): Pair<String, String> {
@@ -4843,8 +4903,11 @@ object StreamEngine {
     object FastStartCache {
         private const val TTL_MS = 5 * 60 * 1000L
         private const val MAX_ENTRIES = 64
+        private const val MAX_SUBTITLE_ENTRIES = 256
         private data class Entry(val streams: List<RawStream>, val expiresAt: Long)
         private val map = java.util.concurrent.ConcurrentHashMap<String, Entry>()
+        private val subtitles = java.util.concurrent.ConcurrentHashMap<String, List<SubtitleKit.Track>>()
+        private val subtitleProbes = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
         fun key(tmdbId: Int, type: String, season: Int, episode: Int) = "$tmdbId|$type|$season|$episode"
 
@@ -4875,7 +4938,40 @@ object StreamEngine {
             }
         }
 
-        fun clear() = map.clear()
+        fun subtitlesFor(url: String): List<SubtitleKit.Track> = subtitles[url].orEmpty()
+
+        fun subtitlesProbed(url: String): Boolean {
+            val at = subtitleProbes[url] ?: return false
+            if (System.currentTimeMillis() - at > TTL_MS) {
+                subtitleProbes.remove(url)
+                return false
+            }
+            return true
+        }
+
+        fun markSubtitlesProbed(url: String) {
+            if (url.isBlank()) return
+            subtitleProbes[url] = System.currentTimeMillis()
+            while (subtitleProbes.size > MAX_SUBTITLE_ENTRIES * 2) {
+                val oldest = subtitleProbes.minByOrNull { it.value }?.key ?: break
+                subtitleProbes.remove(oldest)
+            }
+        }
+
+        fun putSubtitles(url: String, tracks: List<SubtitleKit.Track>) {
+            if (url.isBlank() || tracks.isEmpty()) return
+            subtitles[url] = tracks
+            while (subtitles.size > MAX_SUBTITLE_ENTRIES) {
+                val oldest = subtitles.keys.firstOrNull() ?: break
+                subtitles.remove(oldest)
+            }
+        }
+
+        fun clear() {
+            map.clear()
+            subtitles.clear()
+            subtitleProbes.clear()
+        }
     }
 
     const val FAST_START_MAX_MS: Long = 45_000L

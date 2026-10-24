@@ -1544,6 +1544,122 @@ object ManifestKit {
     }
 }
 
+/**
+ * Finds subtitle tracks in provider payloads without knowing the provider.
+ * Covers HLS master renditions and any nested JSON list whose entries carry a subtitle URL.
+ */
+object SubtitleKit {
+
+    data class Track(
+        val language: String,
+        val url: String,
+        val name: String = "",
+    )
+
+    private const val MAX_JSON_DEPTH = 8
+
+    private val SUBTITLE_EXTENSIONS = listOf(
+        ".srt", ".vtt", ".ass", ".ssa", ".ttml", ".dfxp", ".sub", ".sbv",
+    )
+    private val URL_FIELDS = listOf(
+        "url", "file", "src", "link", "path", "source", "subtitleUrl", "subtitle_url", "sub_url",
+    )
+    private val LANGUAGE_FIELDS = listOf(
+        "language", "lang", "srclang", "locale", "languageName", "language_name", "label", "name", "title",
+    )
+    private val NAME_FIELDS = listOf("name", "label", "title")
+
+    fun fromMaster(master: ManifestKit.MasterPlaylist?, baseUrl: String): List<Track> {
+        if (master == null) return emptyList()
+        return master.subtitles.mapNotNull { rendition ->
+            val uri = rendition.uri?.trim()?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            val language = rendition.language?.trim()?.takeIf { it.isNotBlank() }
+                ?: rendition.name.trim().takeIf { it.isNotBlank() }
+                ?: "Subtitle"
+            Track(language, ManifestKit.resolveUrl(baseUrl, uri), rendition.name)
+        }.distinctBy { it.url }
+    }
+
+    fun fromJson(root: Any?, baseUrl: String): List<Track> {
+        if (root == null) return emptyList()
+        val found = LinkedHashMap<String, Track>()
+
+        fun add(urlRaw: String?, language: String?, name: String?) {
+            val raw = urlRaw?.trim()?.replace("\\/", "/")?.takeIf { it.isNotBlank() } ?: return
+            if (!looksLikeSubtitle(raw)) return
+            val url = ManifestKit.resolveUrl(baseUrl, raw)
+            if (found.containsKey(url)) return
+            val lang = language?.trim().orEmpty().ifBlank { name?.trim().orEmpty() }.ifBlank { "Subtitle" }
+            found[url] = Track(lang, url, name?.trim().orEmpty())
+        }
+
+        fun walk(node: Any?, depth: Int) {
+            if (depth > MAX_JSON_DEPTH) return
+            when (node) {
+                is org.json.JSONObject -> {
+                    val names = node.names() ?: return
+                    for (i in 0 until names.length()) {
+                        val key = names.optString(i)
+                        val value = node.opt(key) ?: continue
+                        if (value == org.json.JSONObject.NULL) continue
+                        when (value) {
+                            is org.json.JSONArray -> {
+                                val subtitleList = isSubtitleKey(key)
+                                for (j in 0 until value.length()) {
+                                    when (val entry = value.opt(j)) {
+                                        is org.json.JSONObject -> {
+                                            if (subtitleList) add(entry.urlField(), entry.languageField(), entry.nameField())
+                                            walk(entry, depth + 1)
+                                        }
+                                        is String -> if (subtitleList) add(entry, null, null)
+                                        is org.json.JSONArray -> walk(entry, depth + 1)
+                                    }
+                                }
+                            }
+                            is org.json.JSONObject -> {
+                                if (isSubtitleKey(key)) add(value.urlField(), value.languageField(), value.nameField())
+                                walk(value, depth + 1)
+                            }
+                            is String -> if (isSubtitleKey(key)) add(value, null, null)
+                        }
+                    }
+                }
+                is org.json.JSONArray -> for (i in 0 until node.length()) walk(node.opt(i), depth + 1)
+            }
+        }
+
+        walk(root, 0)
+        return found.values.toList()
+    }
+
+    fun merge(existing: List<Track>, extra: List<Track>): List<Track> {
+        if (extra.isEmpty()) return existing
+        if (existing.isEmpty()) return extra
+        return (existing + extra).distinctBy { it.url }
+    }
+
+    private fun org.json.JSONObject.urlField(): String? =
+        URL_FIELDS.firstNotNullOfOrNull { key -> optString(key).trim().takeIf { it.isNotBlank() } }
+
+    private fun org.json.JSONObject.languageField(): String? =
+        LANGUAGE_FIELDS.firstNotNullOfOrNull { key -> optString(key).trim().takeIf { it.isNotBlank() } }
+
+    private fun org.json.JSONObject.nameField(): String? =
+        NAME_FIELDS.firstNotNullOfOrNull { key -> optString(key).trim().takeIf { it.isNotBlank() } }
+
+    private fun isSubtitleKey(key: String): Boolean {
+        val k = key.lowercase().replace("_", "").replace("-", "")
+        return k == "sub" || k.endsWith("subs") || k.contains("subtitle") ||
+            k.contains("caption") || k == "track" || k == "tracks" || k == "texttracks"
+    }
+
+    private fun looksLikeSubtitle(raw: String): Boolean {
+        val path = raw.substringBefore('?').substringBefore('#').lowercase()
+        if (SUBTITLE_EXTENSIONS.any { path.endsWith(it) }) return true
+        return path.contains("/subtitle") || path.contains("/caption") || path.contains("/subs/")
+    }
+}
+
 object TitleMatch {
 
     fun normalizeTitle(title: String?): String {

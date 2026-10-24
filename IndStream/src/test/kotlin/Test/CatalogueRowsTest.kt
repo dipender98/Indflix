@@ -85,6 +85,61 @@ class CatalogueRowsTest {
     }
 
     @Test
+    fun a_saved_order_moves_rows_to_the_front_and_keeps_the_rest_stable() {
+        val rows = Catalogue.allRows()
+        val first = rows[5].first
+        val second = rows[9].first
+        val arranged = Catalogue.arrange(rows, listOf(second, first))
+        assertEquals(second, arranged[0].first)
+        assertEquals(first, arranged[1].first)
+        val untouched = rows.filterNot { it.first == first || it.first == second }.map { it.first }
+        assertEquals(untouched, arranged.drop(2).map { it.first })
+    }
+
+    @Test
+    fun a_saved_order_ignores_duplicates_and_unknown_keys() {
+        val rows = Catalogue.allRows()
+        val key = rows[3].first
+        val arranged = Catalogue.arrange(rows, listOf(key, key, "cat|missing|movie"))
+        assertEquals(rows.size, arranged.size)
+        assertEquals(rows.map { it.first }.toSet(), arranged.map { it.first }.toSet())
+        assertEquals(key, arranged.first().first)
+    }
+
+    @Test
+    fun an_empty_saved_order_keeps_the_default_order() {
+        val rows = Catalogue.allRows()
+        assertEquals(rows, Catalogue.arrange(rows, emptyList()))
+        assertEquals(rows, Catalogue.orderedRows())
+    }
+
+    @Test
+    fun hidden_rows_keep_their_previous_slots_when_the_visible_order_changes() {
+        val movie = Catalogue.forYouRowKeys[0]
+        val series = Catalogue.forYouRowKeys[1]
+        assertEquals(
+            listOf(movie, series, "b", "a"),
+            Catalogue.mergeOrder(
+                visible = listOf("b", "a"),
+                previous = listOf(movie, series, "a", "b"),
+                hidden = setOf(movie, series),
+            ),
+        )
+        assertEquals(
+            listOf("b", movie, "a", series),
+            Catalogue.mergeOrder(
+                visible = listOf("b", "a"),
+                previous = listOf("a", movie, "b", series),
+                hidden = setOf(movie, series),
+            ),
+        )
+        assertEquals(
+            listOf("b", "a"),
+            Catalogue.mergeOrder(listOf("b", "a"), emptyList(), emptySet()),
+        )
+    }
+
+    @Test
     fun other_row_keys_are_not_mistaken_for_catalogue_rows() {
         assertNull(Catalogue.parseRow("trending|movie"))
         assertNull(Catalogue.parseRow("foryou|tv"))

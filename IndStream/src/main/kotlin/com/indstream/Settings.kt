@@ -25,6 +25,7 @@ object Settings {
     private const val SERVER_OFF_PREFIX = "server_off_"
     private const val CATALOGUE_OFF_PREFIX = "catalogue_off_"
     private const val CATALOGUE_PROVIDER = "catalogue_provider"
+    private const val CATALOGUE_ORDER = "catalogue_order"
     private const val STREMIO_NUVIO_ADDONS = "stremio_addons"
     private const val STREMIO_NUVIO_OFF_PREFIX = "stremio_off_"
     private const val SHUFFLE_ROWS = "shuffle_rows"
@@ -132,6 +133,12 @@ object Settings {
 
     @Volatile
     private var catalogueProviderLoaded = false
+
+    @Volatile
+    private var catalogueOrderCached: List<String> = emptyList()
+
+    @Volatile
+    private var catalogueOrderLoaded = false
 
     @Volatile
     private var stremioNuvioUrls: List<String>? = null
@@ -339,6 +346,7 @@ object Settings {
         catalogueOff = if (on) catalogueOff - id else catalogueOff + id
         catalogueLoaded = true
         appContext = context.applicationContext
+        if (!on) dropCatalogueOrder(context, setOf(id))
     }
 
     fun saveAllCatalogueEnabled(context: Context, ids: Collection<String>, on: Boolean) {
@@ -353,6 +361,7 @@ object Settings {
         catalogueOff = if (on) catalogueOff - ids else catalogueOff + ids
         catalogueLoaded = true
         appContext = context.applicationContext
+        if (!on) dropCatalogueOrder(context, ids.toSet())
     }
 
     private fun loadCatalogue() {
@@ -364,6 +373,43 @@ object Settings {
                 .toSet()
         }.getOrDefault(emptySet())
         catalogueLoaded = true
+    }
+
+    fun catalogueOrder(): List<String> {
+        if (!catalogueOrderLoaded) loadCatalogueOrder()
+        return catalogueOrderCached
+    }
+
+    fun saveCatalogueOrder(context: Context, keys: Collection<String>) {
+        val clean = keys.map { it.trim() }.filter { it.isNotBlank() }.distinct()
+        runCatching {
+            val edit = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            if (clean.isEmpty()) edit.remove(CATALOGUE_ORDER)
+            else edit.putString(CATALOGUE_ORDER, clean.joinToString("\n"))
+            edit.apply()
+        }
+        catalogueOrderCached = clean
+        catalogueOrderLoaded = true
+        appContext = context.applicationContext
+    }
+
+    private fun dropCatalogueOrder(context: Context, ids: Set<String>) {
+        if (!catalogueOrderLoaded) loadCatalogueOrder()
+        val next = catalogueOrderCached.filterNot { it in ids }
+        if (next.size != catalogueOrderCached.size) saveCatalogueOrder(context, next)
+    }
+
+    private fun loadCatalogueOrder() {
+        val ctx = appContext
+        catalogueOrderCached = if (ctx == null) emptyList() else runCatching {
+            ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .getString(CATALOGUE_ORDER, "").orEmpty()
+                .split('\n')
+                .map { it.trim() }
+                .filter { it.isNotBlank() }
+                .distinct()
+        }.getOrDefault(emptyList())
+        catalogueOrderLoaded = true
     }
 
     fun catalogueProvider(): String {

@@ -89,6 +89,8 @@ object SettingsUi {
 
     private class Secret(val root: LinearLayout, val input: EditText, val toggle: View)
 
+    private class RankedRow(val key: String, val title: String, var position: Int)
+
     private enum class ProviderProbeState { NOT_TESTED, TESTING, UP, DOWN }
 
     fun open(context: Context) {
@@ -461,6 +463,235 @@ object SettingsUi {
             report.window?.setLayout(width, ViewGroup.LayoutParams.WRAP_CONTENT)
         }
 
+        fun showRowOrderEditor() {
+            val rows = Catalogue.homeRows().mapIndexed { index, (key, title) ->
+                RankedRow(key, title, index + 1)
+            }.toMutableList()
+
+            if (rows.isEmpty()) {
+                reportDialog(
+                    title = "Home Row Order",
+                    subtitle = "No catalogue rows are enabled. Enable rows first, then set their order.",
+                    accent = WARNING,
+                )
+                return
+            }
+
+            val panel = LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(18), dp(16), dp(18), dp(14))
+                background = rounded(BG, 24)
+            }
+            panel.addView(label("Home Row Order", 18f, TEXT, medium = true))
+            panel.addView(
+                label(
+                    "Row 1 appears first on Home. Use - and + to change a position.",
+                    11.5f,
+                    TEXT_DIM,
+                ).apply { setPadding(0, dp(5), 0, 0) },
+            )
+            panel.addView(
+                label(
+                    "Only rows that can appear on Home are listed. Disabled rows return at the end.",
+                    11.5f,
+                    TEXT_FAINT,
+                ).apply { setPadding(0, dp(4), 0, 0) },
+            )
+
+            val list = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+            val listScroll = ScrollView(context).apply {
+                overScrollMode = View.OVER_SCROLL_NEVER
+                isFillViewport = false
+                addView(list)
+            }
+            panel.addView(
+                listScroll,
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                ).apply { topMargin = dp(10) },
+            )
+
+            val status = label("", 11.5f, TEXT_DIM, medium = true).apply {
+                setPadding(0, dp(8), 0, 0)
+                visibility = View.GONE
+            }
+            panel.addView(status)
+
+            val cancel = action("Cancel", primary = false)
+            val reset = action("Reset", primary = false)
+            val save = action("Save", primary = true)
+            val actions = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, dp(12), 0, 0)
+            }
+            listOf(cancel, reset, save).forEachIndexed { index, view ->
+                view.layoutParams = LinearLayout.LayoutParams(0, control, 1f).apply {
+                    if (index > 0) leftMargin = gap
+                }
+                actions.addView(view)
+            }
+            panel.addView(actions)
+
+            val editor = AlertDialog.Builder(context, android.R.style.Theme_Material_Dialog)
+                .setView(panel)
+                .create()
+            editor.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            editor.window?.setDimAmount(0.65f)
+
+            fun savedKeys(): List<String> = Catalogue.homeRows().map { it.first }
+
+            fun currentKeys(): List<String> = rows.sortedBy { it.position }.map { it.key }
+
+            fun duplicates(): Map<Int, List<RankedRow>> =
+                rows.groupBy { it.position }.filterValues { it.size > 1 }
+
+            fun paintStatus() {
+                if (duplicates().isNotEmpty()) {
+                    status.visibility = View.VISIBLE
+                    status.setTextColor(WARNING)
+                    status.text = "Numbers must be unique. Fix the highlighted rows before saving."
+                } else if (currentKeys() != savedKeys()) {
+                    status.visibility = View.VISIBLE
+                    status.setTextColor(ACCENT)
+                    status.text = "Unsaved changes"
+                } else {
+                    status.visibility = View.GONE
+                }
+            }
+
+            fun measureList() {
+                val metrics = context.resources.displayMetrics
+                val width = ((metrics.widthPixels * 0.9f).roundToInt() - dp(36)).coerceAtLeast(dp(180))
+                list.measure(
+                    View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+                    View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
+                )
+                val maxHeight = (metrics.heightPixels * 0.52f).roundToInt()
+                listScroll.layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    list.measuredHeight.coerceAtMost(maxHeight).coerceAtLeast(dp(80)),
+                ).apply { topMargin = dp(10) }
+            }
+
+            fun render() {
+                val scrollY = listScroll.scrollY
+                list.removeAllViews()
+                val dups = duplicates()
+
+                fun step(glyph: String, description: String, enabled: Boolean, onClick: () -> Unit): TextView =
+                    label(glyph, 18f, if (enabled) TEXT else TEXT_FAINT, medium = true).apply {
+                        gravity = Gravity.CENTER
+                        background = ripple(rounded(SURFACE_2, 10, 1, if (enabled) BORDER else DIVIDER))
+                        layoutParams = LinearLayout.LayoutParams(dp(36), dp(36)).apply { leftMargin = dp(6) }
+                        isClickable = enabled
+                        isFocusable = enabled
+                        alpha = if (enabled) 1f else 0.4f
+                        contentDescription = description
+                        setOnClickListener { if (enabled) onClick() }
+                    }
+
+                rows.sortedBy { it.position }.forEach { row ->
+                    val conflict = (dups[row.position]?.size ?: 0) > 1
+                    val item = LinearLayout(context).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                        setPadding(dp(10), dp(8), dp(8), dp(8))
+                        background = ripple(
+                            rounded(SURFACE_2, 12, 1, if (conflict) WARNING else BORDER),
+                        )
+                        layoutParams = LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ).apply { bottomMargin = dp(6) }
+                    }
+                    val number = label(
+                        "${row.position}",
+                        12.5f,
+                        if (conflict) WARNING else ACCENT,
+                        medium = true,
+                    ).apply {
+                        gravity = Gravity.CENTER
+                        background = rounded(Color.TRANSPARENT, 9, 1, if (conflict) WARNING else BORDER)
+                        layoutParams = LinearLayout.LayoutParams(dp(32), dp(32))
+                        contentDescription = "Position ${row.position}"
+                    }
+                    val title = label(row.title, 13f, TEXT, medium = true).apply {
+                        setPadding(dp(10), 0, dp(8), 0)
+                        maxLines = 2
+                        ellipsize = TextUtils.TruncateAt.END
+                    }
+                    val up = step("\u2212", "Move ${row.title} up", row.position > 1) {
+                        val target = row.position - 1
+                        val other = rows.firstOrNull { it !== row && it.position == target }
+                        if (other != null) other.position = row.position
+                        row.position = target
+                        render()
+                    }
+                    val down = step("+", "Move ${row.title} down", row.position < rows.size) {
+                        val target = row.position + 1
+                        val other = rows.firstOrNull { it !== row && it.position == target }
+                        if (other != null) other.position = row.position
+                        row.position = target
+                        render()
+                    }
+                    item.addView(number)
+                    item.addView(
+                        title,
+                        LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+                    )
+                    item.addView(up)
+                    item.addView(down)
+                    list.addView(item)
+                }
+                paintStatus()
+                measureList()
+                listScroll.post { listScroll.scrollTo(0, scrollY) }
+            }
+
+            cancel.setOnClickListener { editor.dismiss() }
+            reset.setOnClickListener {
+                rows.clear()
+                Catalogue.defaultHomeRows().forEachIndexed { index, (key, title) ->
+                    rows += RankedRow(key, title, index + 1)
+                }
+                render()
+            }
+            save.setOnClickListener {
+                val dups = duplicates()
+                if (dups.isNotEmpty()) {
+                    reportDialog(
+                        title = "Duplicate positions",
+                        subtitle = "Each row needs its own number. Change one of these rows, then save again.",
+                        rows = dups.toSortedMap().flatMap { (position, group) ->
+                            group.map { Triple("#$position", it.title, WARNING) }
+                        },
+                        accent = WARNING,
+                        actionLabel = "Fix positions",
+                    )
+                    return@setOnClickListener
+                }
+                val visible = rows.sortedBy { it.position }.map { it.key }
+                val previous = Settings.catalogueOrder().ifEmpty {
+                    Catalogue.forYouRowKeys + Catalogue.enabledRows().map { it.first }
+                }
+                val hidden = Catalogue.forYouRowKeys.toSet() - visible.toSet()
+                Settings.saveCatalogueOrder(
+                    context,
+                    Catalogue.mergeOrder(visible, previous, hidden),
+                )
+                editor.dismiss()
+                Toast.makeText(context, "Home row order saved", Toast.LENGTH_SHORT).show()
+            }
+
+            render()
+            editor.show()
+            val metrics = context.resources.displayMetrics
+            editor.window?.setLayout(
+                (metrics.widthPixels * 0.9f).roundToInt(),
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            )
+        }
+
         val content = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(18), dp(18), dp(18), dp(12))
@@ -693,7 +924,7 @@ object SettingsUi {
 
             val groupCard = card(
                 "Catalogue",
-                "Select a group, then toggle its home rows",
+                "Toggle rows by group, or reorder every row at once",
                 "${enabledCount()} of ${totalCount()} enabled",
                 enabledCount() > 0,
             )
@@ -731,6 +962,12 @@ object SettingsUi {
                 addView(chipRow)
             }
             add(groupCard, chipScroll, 6)
+
+            val reorder = action("Reorder home rows", primary = false)
+            add(groupCard, reorder, 8)
+            reorder.layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(42),
+            ).apply { topMargin = dp(8) }
 
             val enableAll = chip("Enable all")
             val disableAll = chip("Disable all")
@@ -793,6 +1030,7 @@ object SettingsUi {
                     renderRows()
                 }
             }
+            reorder.setOnClickListener { showRowOrderEditor() }
             enableAll.setOnClickListener {
                 Settings.saveAllCatalogueEnabled(context, rowsOf(selected).map { it.first }, true)
                 renderRows()
@@ -807,7 +1045,7 @@ object SettingsUi {
 
         content.addView(sectionLabel("Catalogue", 0))
         content.addView(
-            label("Pick one catalogue source, then enable or disable home rows.", 11.5f, TEXT_DIM)
+            label("Pick one catalogue source, then enable, disable, or reorder home rows.", 11.5f, TEXT_DIM)
                 .apply { setPadding(0, 0, 0, dp(10)) },
         )
         buildProviderCard()
@@ -1063,7 +1301,7 @@ object SettingsUi {
 
         val testAllButton = chip("Test all servers")
         val testSummary = label(
-            "Checks every endpoint, including disabled providers; stream playback is not verified.",
+            "Resolves a sample title on every provider, including disabled ones. Up means a stream was returned.",
             10.5f,
             TEXT_DIM,
         ).apply {
