@@ -1,9 +1,10 @@
 import com.android.build.api.dsl.LibraryExtension
 import java.util.Properties
+import java.util.zip.Deflater
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
-version = 80
+version = 81
 
 plugins {
     id("com.lagradost.cloudstream3.gradle")
@@ -139,6 +140,7 @@ tasks.register("shrinkCs3") {
         val target = layout.buildDirectory.file("IndStream.cs3").get().asFile
         val tmp = File(target.parentFile, target.name + ".tmp")
         ZipOutputStream(tmp.outputStream()).use { zos ->
+            zos.setLevel(Deflater.BEST_COMPRESSION)
             fun put(name: String, data: ByteArray) {
                 zos.putNextEntry(ZipEntry(name))
                 zos.write(data)

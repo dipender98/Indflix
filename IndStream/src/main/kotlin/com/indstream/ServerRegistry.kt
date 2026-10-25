@@ -1,7 +1,5 @@
 package com.indstream
 
-import kotlin.math.min
-
 enum class ServerIdType { TMDB, IMDB }
 
 enum class ServerSpeed { VERY_FAST, FAST, NORMAL, SLOW }
@@ -174,12 +172,22 @@ object ServerFarm {
             speed = ServerSpeed.FAST,
         ),
         ServerSpec(
+            id = "atlantic", name = "Atlantic",
+            idType = ServerIdType.TMDB,
+            movieUrl = "https://zcdn.bluevelvet.space/cdn?tmdb={id}&type=movie",
+            tvUrl = "https://zcdn.bluevelvet.space/cdn?tmdb={id}&type=tv&season={season}&episode={episode}",
+            isJsonApi = true, referer = "https://atlantic.st/",
+            hasSubtitles = false, timeoutSec = 30,
+            declaredLanguages = emptySet(),
+            speed = ServerSpeed.VERY_FAST, reliable = true,
+        ),
+        ServerSpec(
             id = "4khdhub", name = "4KHDHub",
             idType = ServerIdType.TMDB,
             movieUrl = "https://4khdhub.one/?s={id}",
             tvUrl = "https://4khdhub.one/?s={id}",
             referer = "https://4khdhub.one/",
-            hasSubtitles = false, timeoutSec = 40,
+            hasSubtitles = false, timeoutSec = 70,
             speed = ServerSpeed.SLOW, downloadFriendly = true,
         ),
         ServerSpec(

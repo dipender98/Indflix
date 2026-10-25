@@ -9,10 +9,10 @@ object SearchRank {
 
     private val NON_ALNUM = Regex("""[^\p{L}\p{M}\p{N}]+""")
     private val LATIN_MARKS = Regex("""[\u0300-\u036F\u1AB0-\u1AFF\u1DC0-\u1DFF\u20D0-\u20F0\uFE20-\uFE2F]""")
-    private val SPACES = Regex("""\s+""")
     private val YEAR_TOKEN = Regex("""^[12]\d{3}$""")
     private val YEAR_IN_TEXT = Regex("""\b[12]\d{3}\b""")
     private val REPEATED_LETTER = Regex("""(\p{L})\1+""")
+    private val WHITESPACE = Regex("""\s+""")
 
     internal val STOPWORDS = setOf(
         "the", "a", "an", "and", "or", "of", "for", "in", "on", "at", "to", "with",
@@ -60,6 +60,12 @@ object SearchRank {
         "britain" to "GB", "england" to "GB", "america" to "US", "italy" to "IT",
     )
 
+    private val LANGUAGE_REGIONS = mapOf(
+        "hi" to "IN", "mr" to "IN", "ta" to "IN", "te" to "IN", "kn" to "IN",
+        "ml" to "IN", "bn" to "IN", "gu" to "IN", "pa" to "IN", "or" to "IN",
+        "as" to "IN", "bho" to "IN", "ur" to "PK", "ne" to "NP", "si" to "LK",
+    )
+
     internal data class QueryLocale(val language: String?, val country: String?)
 
     internal fun queryLocale(query: String): QueryLocale? {
@@ -70,6 +76,7 @@ object SearchRank {
         if (tokens.isEmpty()) return null
         val language = LANGUAGE_KEYWORDS.entries.firstOrNull { it.key in tokens }?.value
         val country = REGION_KEYWORDS.entries.firstOrNull { it.key in tokens }?.value
+            ?: language?.let { LANGUAGE_REGIONS[it] }
         return if (language == null && country == null) null else QueryLocale(language, country)
     }
 
@@ -256,7 +263,7 @@ object SearchRank {
 
     internal fun normalizeBase(t: String): String = normalize(t, inherentVowel = false, collapse = false)
 
-    internal fun normalizeKey(t: String, inherentVowel: Boolean = false): String =
+    internal fun normalizeKey(t: String, inherentVowel: Boolean = true): String =
         normalize(t, inherentVowel, collapse = true)
 
     internal fun normalizeTitle(t: String): String = normalizeKey(t)
@@ -553,31 +560,56 @@ object SearchRank {
     }
 
     internal fun relevance(query: String, title: String): Double {
-        val qKeys = scoringKeys(query)
         val tKeys = scoringKeys(title)
-        if (qKeys.isEmpty() || tKeys.isEmpty()) return 0.0
-        var best = 0.0
-        for (q in qKeys) {
-            for (t in tKeys) {
-                val match = matchKeys(q, t) ?: continue
-                if (match.relevance > best) best = match.relevance
+        if (tKeys.isEmpty()) return 0.0
+        fun bestFor(qKeys: List<String>): Double {
+            var best = 0.0
+            for (q in qKeys) {
+                for (t in tKeys) {
+                    val match = matchKeys(q, t) ?: continue
+                    if (match.relevance > best) best = match.relevance
+                }
             }
+            return best
         }
-        return best
+        val full = bestFor(scoringKeys(query))
+        if (full > 0.0) return full
+        return bestFor(scoringKeys(matchQuery(query)))
     }
 
-    internal fun score(
-        query: String,
+    private fun matchQuery(query: String): String {
+        val tokens = query.split(WHITESPACE).filter { it.isNotBlank() }
+        val kept = tokens.filterNot { token ->
+            val key = normalizeKey(token).trim()
+            key in LANGUAGE_KEYWORDS || key in REGION_KEYWORDS
+        }
+        return kept.joinToString(" ").ifBlank { query }
+    }
+
+    private fun queryKeys(query: String, withYear: Boolean): List<String> {
+        val keys = scoringKeys(query).toMutableList()
+        if (withYear) {
+            val raw = normalizeKey(query, inherentVowel = true)
+            if (raw.isNotBlank() && raw !in keys) keys.add(raw)
+        }
+        return keys
+    }
+
+    private fun bestMatch(
+        qKeys: List<String>,
         titles: List<String?>,
-        meta: Meta = Meta(),
-    ): Score {
-        val qKeys = scoringKeys(query)
-        if (qKeys.isEmpty()) return Score(0.0, emptyList())
+        withYear: Boolean,
+    ): Pair<Match, String?>? {
         var best: Match? = null
         var bestTitle: String? = null
         for (title in titles) {
             if (title.isNullOrBlank()) continue
-            for (tKey in scoringKeys(title)) {
+            val tKeys = scoringKeys(title).toMutableList()
+            if (withYear) {
+                val raw = normalizeKey(title, inherentVowel = true)
+                if (raw.isNotBlank() && raw !in tKeys) tKeys.add(raw)
+            }
+            for (tKey in tKeys) {
                 for (qKey in qKeys) {
                     val match = matchKeys(qKey, tKey) ?: continue
                     if (best == null || match.base > best.base) {
@@ -587,17 +619,33 @@ object SearchRank {
                 }
             }
         }
-        val match = best ?: return Score(0.0, emptyList())
+        val found = best ?: return null
+        return found to bestTitle
+    }
+
+    internal fun score(
+        query: String,
+        titles: List<String?>,
+        meta: Meta = Meta(),
+    ): Score {
+        val qYear = queryYear(query)
+        val withYear = qYear != null
+        val fullKeys = queryKeys(query, withYear)
+        if (fullKeys.isEmpty()) return Score(0.0, emptyList())
+        val matched = bestMatch(fullKeys, titles, withYear)
+            ?: bestMatch(queryKeys(matchQuery(query), withYear), titles, withYear)
+            ?: return Score(0.0, emptyList())
+        val match = matched.first
+        val bestTitle = matched.second
         val parts = ArrayList<ScorePart>(8)
         parts += ScorePart("match", match.tier)
         parts += ScorePart("query", match.queryCoverage * 20.0)
         parts += ScorePart("title", match.titleCoverage * 20.0)
 
-        val queryYear = queryYear(query)
-        if (queryYear != null && meta.year != null) {
+        if (qYear != null && meta.year != null) {
             parts += ScorePart(
                 "year",
-                when (abs(queryYear - meta.year)) {
+                when (abs(qYear - meta.year)) {
                     0, 1 -> YEAR_MATCH_POINTS
                     2, 3 -> YEAR_NEAR_POINTS
                     else -> YEAR_MISS_PENALTY
@@ -622,11 +670,13 @@ object SearchRank {
         if (metadataPenalty != 0.0) parts += ScorePart("meta", metadataPenalty)
 
         if (bestTitle != null) {
-            val queryTokens = qKeys.first().split(' ').toSet()
+            val queryTokens = normalizeKey(query, false).split(' ').filter { it.isNotEmpty() }.toSet()
             val titleTokens = normalizeKey(bestTitle, false).split(' ').filter { it.isNotEmpty() }
-            val qualifiers = titleTokens.count { it in VARIANT_QUALIFIERS && it !in queryTokens }
+            val missing = queryTokens.count { it in VARIANT_QUALIFIERS && it !in titleTokens }
+            val extra = titleTokens.count { it in VARIANT_QUALIFIERS && it !in queryTokens }
+            val qualifiers = min(missing + extra, 2)
             if (qualifiers > 0) {
-                parts += ScorePart("variant", QUALIFIER_PENALTY * min(qualifiers, 2))
+                parts += ScorePart("variant", QUALIFIER_PENALTY * qualifiers)
             }
         }
         return Score(parts.sumOf { it.points }, parts)
@@ -679,9 +729,4 @@ object SearchRank {
     }
 
     fun dedupeKey(name: String, year: Int?): String = normalizeTitle(name) + "|" + (year ?: 0)
-
-    internal fun probeTokens(title: String): List<String> =
-        normalizeTitle(title).split(' ')
-            .filter { it.length >= 2 && it !in STOPWORDS && !YEAR_TOKEN.matches(it) }
-            .distinct()
 }

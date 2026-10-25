@@ -4,15 +4,20 @@
 # IndStreamPlugin is kept automatically by R8's reachability analysis.
 -keep class com.indstream.IndStream { *; }
 
+# R8 size rules: access relaxation and package flattening.
+-allowaccessmodification
+-repackageclasses ''
+
+# Generated R class is unused (requiresResources = false); let it shrink.
+-keep,allowshrinking class **.R
+-keep,allowshrinking class **.R$*
+
 # Annotations + generics info needed by CloudStream's dex inspection and the
 # gradle plugin's repo.json generation.
 -keepattributes *Annotation*
 -keepattributes Signature
 -keepattributes InnerClasses
 -keepattributes EnclosingMethod
-
-# Runtime-visible Kotlin metadata (cheap insurance for annotation scanning).
--keep class kotlin.Metadata { *; }
 
 # Dependencies below are provided by the CloudStream app at runtime and are not
 # packaged into the .cs3; just silence missing-reference warnings.

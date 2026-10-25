@@ -23,72 +23,32 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.withTimeoutOrNull
-import org.json.JSONArray
 import org.json.JSONObject
-import org.jsoup.nodes.Document
 
 object HttpKit {
 
     const val DEFAULT_TIMEOUT = 12L
-    const val SHORT_TIMEOUT = 6L
-    const val PLAYBACK_TIMEOUT = 15L
 
     val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
     val commonHeaders = mapOf("User-Agent" to userAgent)
 
+    /** Runs [block], returning null on failure. Cancellation always propagates. */
+    suspend fun <T> attempt(block: suspend () -> T): T? =
+        try {
+            block()
+        } catch (c: CancellationException) {
+            throw c
+        } catch (_: Exception) {
+            null
+        }
+
     suspend fun get(url: String, timeout: Long = DEFAULT_TIMEOUT): String? {
         return withTimeoutOrNull(timeout * 1000L) {
-            runCatching { app.get(url, timeout = timeout, headers = commonHeaders).text }.getOrNull()
+            attempt { app.get(url, timeout = timeout, headers = commonHeaders).text }
         }
     }
 
-    suspend fun getWithReferer(url: String, referer: String, timeout: Long = DEFAULT_TIMEOUT): String? {
-        return withTimeoutOrNull(timeout * 1000L) {
-            runCatching {
-                app.get(url, timeout = timeout, headers = commonHeaders + mapOf("Referer" to referer)).text
-            }.getOrNull()
-        }
-    }
-
-    suspend fun getDocument(url: String, timeout: Long = DEFAULT_TIMEOUT): Document? {
-        return withTimeoutOrNull(timeout * 1000L) {
-            runCatching { app.get(url, timeout = timeout, headers = commonHeaders).document }.getOrNull()
-        }
-    }
-
-    suspend fun getJson(url: String, timeout: Long = DEFAULT_TIMEOUT): JSONObject? {
-        val text = get(url, timeout) ?: return null
-        return runCatching { JSONObject(text) }.getOrNull()
-    }
-
-    suspend fun getJsonArray(url: String, timeout: Long = DEFAULT_TIMEOUT): JSONArray? {
-        val text = get(url, timeout) ?: return null
-        return runCatching { JSONArray(text) }.getOrNull()
-    }
-
-    fun resolveUrl(base: String, path: String): String {
-        if (path.startsWith("http", ignoreCase = true)) return path
-        if (path.startsWith("//")) return "https:$path"
-        val schemeHost = Regex("""^https?://[^/]+""").find(base)?.value ?: return path
-        val resolved = runCatching { java.net.URI(base).resolve(path).toString() }.getOrNull()
-        return resolved?.takeIf { it.startsWith("http") }
-            ?: if (path.startsWith("/")) "$schemeHost$path" else "$schemeHost/$path"
-    }
-
-    suspend fun probeSpeed(url: String, referer: String? = null): Long? {
-        return withTimeoutOrNull(5000L) {
-            runCatching {
-                val start = System.currentTimeMillis()
-                val headers = mutableMapOf("User-Agent" to userAgent, "Range" to "bytes=0-131071")
-                if (!referer.isNullOrBlank()) headers["Referer"] = referer
-                val resp = app.get(url, timeout = 5, headers = headers)
-                val elapsed = System.currentTimeMillis() - start
-                if (elapsed < 1) return@runCatching null
-                val bytes = resp.body.contentLength().takeIf { it > 0 } ?: resp.body.bytes().size.toLong()
-                (bytes * 1000L) / (elapsed * 1024L)
-            }.getOrNull()
-        }
-    }
+    fun resolveUrl(base: String, path: String): String = ManifestKit.resolveUrl(base, path)
 
     suspend fun aliveCheck(
         url: String,
@@ -96,7 +56,7 @@ object HttpKit {
         extraHeaders: Map<String, String> = emptyMap(),
         timeoutSec: Long = 2,
     ): Boolean? = withTimeoutOrNull((timeoutSec + 1) * 1000L) {
-        runCatching {
+        attempt {
             val headers = LinkedHashMap<String, String>().apply {
                 put("User-Agent", userAgent)
                 putAll(extraHeaders)
@@ -104,9 +64,12 @@ object HttpKit {
                 put("Range", "bytes=0-0")
             }
             val code = app.get(url, timeout = timeoutSec, headers = headers).code
-            if (code == 429) return@runCatching null
-            code in 200..399 || code == 416
-        }.getOrNull()
+            when {
+                code == 429 -> null
+                code in 200..399 || code == 416 -> true
+                else -> false
+            }
+        }
     }
 
     suspend fun resolveHeight(
@@ -132,31 +95,43 @@ object HttpKit {
 
     private suspend fun fetchRange(url: String, range: String, hdrs: Map<String, String>): ByteArray? {
         return withTimeoutOrNull(3000L) {
-            runCatching {
+            attempt {
                 app.get(url, timeout = 3, headers = hdrs + mapOf("Range" to "bytes=$range"))
                     .body.bytes()
-            }.getOrNull()
+            }
         }
     }
 
     private suspend fun contentLength(url: String, hdrs: Map<String, String>): Long? {
         return withTimeoutOrNull(3000L) {
-            runCatching {
+            attempt {
                 val r = app.get(url, timeout = 3, headers = hdrs + mapOf("Range" to "bytes=0-0"))
                 val cr = r.headers["Content-Range"]
                 cr?.substringAfterLast('/')?.toLongOrNull()
                     ?: r.headers["Content-Length"]?.toLongOrNull()
-            }.getOrNull()
+            }
         }
     }
 
     private fun findMoov(data: ByteArray): ByteArray? {
-        var i = 0
-        while (i + 8 <= data.size) {
-            val size = read32(data, i)
-            if (size < 8 || i + size > data.size) return null
-            if (String(data, i + 4, 4, Charsets.ISO_8859_1) == "moov") return data.copyOfRange(i, i + size)
-            i += size
+        var i = 4
+        while (i + 4 <= data.size) {
+            val isMoov = data[i] == 'm'.code.toByte() && data[i + 1] == 'o'.code.toByte() &&
+                data[i + 2] == 'o'.code.toByte() && data[i + 3] == 'v'.code.toByte()
+            if (isMoov) {
+                val start = i - 4
+                val size = read32(data, start).toLong() and 0xFFFFFFFFL
+                val end = when {
+                    size == 0L -> data.size.toLong()
+                    size == 1L -> if (i + 12 <= data.size) read64(data, i + 4) else -1L
+                    size >= 8L -> start + size
+                    else -> -1L
+                }
+                if (end in (start + 8L)..data.size.toLong()) {
+                    return data.copyOfRange(start, end.toInt())
+                }
+            }
+            i++
         }
         return null
     }
@@ -197,17 +172,22 @@ object HttpKit {
     private fun read32(b: ByteArray, off: Int): Int =
         ((b[off].toInt() and 0xFF) shl 24) or ((b[off + 1].toInt() and 0xFF) shl 16) or
             ((b[off + 2].toInt() and 0xFF) shl 8) or (b[off + 3].toInt() and 0xFF)
+
+    private fun read64(b: ByteArray, off: Int): Long =
+        ((read32(b, off).toLong() and 0xFFFFFFFFL) shl 32) or
+            (read32(b, off + 4).toLong() and 0xFFFFFFFFL)
 }
 
 object Base64Kit {
 
     private const val ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    private val WHITESPACE = Regex("""\s+""")
 
     fun fromCustom(input: String): String =
         input.replace("-_.", "/").replace("@", "+")
 
     fun decode(input: String): ByteArray {
-        val clean = input.trim().replace(Regex("\\s+"), "").trimEnd('=')
+        val clean = input.trim().replace(WHITESPACE, "").trimEnd('=')
         val out = ByteArray((clean.length * 6) / 8)
         var bits = 0
         var acc = 0
@@ -705,14 +685,14 @@ object TmdbService {
         if (key.isEmpty()) return "Enter a key first"
         if (key.startsWith("eyJ")) return "That's the Read Access Token - paste the API Key (v3)"
         for (host in API_HOSTS) {
-            val result = runCatching {
+            val result = HttpKit.attempt {
                 val r = app.get("$host/configuration?api_key=$key", timeout = 8, headers = HttpKit.commonHeaders)
                 when (r.code) {
                     in 200..299 -> "Key works - TMDB connected"
                     401 -> "Key rejected (401) - check the API Key (v3)"
                     else -> "TMDB error (${r.code})"
                 }
-            }.getOrNull()
+            }
             if (result != null) return result
         }
         return "Verify failed - no network?"
@@ -900,10 +880,12 @@ object TmdbService {
             return emptyList()
         }
         val items = parseResults(json, type)
-        if (catalogCache.size >= CATALOG_CACHE_MAX) {
-            catalogCache.entries.minByOrNull { it.value.second }?.let { catalogCache.remove(it.key) }
+        if (items.isNotEmpty()) {
+            if (catalogCache.size >= CATALOG_CACHE_MAX) {
+                catalogCache.entries.minByOrNull { it.value.second }?.let { catalogCache.remove(it.key) }
+            }
+            catalogCache[key] = items to (System.currentTimeMillis() + CATALOG_TTL_MS)
         }
-        catalogCache[key] = items to (System.currentTimeMillis() + CATALOG_TTL_MS)
         return items
     }
 
@@ -920,10 +902,12 @@ object TmdbService {
                 emptyList()
             } else {
                 val seasons = parseSeasons(json)
-                if (seasonListCache.size >= SEASON_LIST_CACHE_MAX) {
-                    seasonListCache.keys.firstOrNull()?.let { seasonListCache.remove(it) }
+                if (seasons.isNotEmpty()) {
+                    if (seasonListCache.size >= SEASON_LIST_CACHE_MAX) {
+                        seasonListCache.keys.firstOrNull()?.let { seasonListCache.remove(it) }
+                    }
+                    seasonListCache[cacheKey] = seasons
                 }
-                seasonListCache[cacheKey] = seasons
                 seasons
             }
         }
@@ -992,12 +976,6 @@ object TmdbService {
         }
     } catch (e: Exception) { null }
 
-    suspend fun fetchEpisodes(tmdbId: Int, seasons: Set<Int>): Map<Pair<Int, Int>, TmdbEpisode> {
-        if (tmdbId <= 0 || seasons.isEmpty()) return emptyMap()
-        return fetchSeasons(tmdbId, seasons.sorted())
-            .associate { ep -> (ep.seasonNumber to ep.episodeNumber) to ep }
-    }
-
     suspend fun fetchSeasons(tmdbId: Int, seasons: List<Int>): List<TmdbEpisode> {
         if (tmdbId <= 0 || seasons.isEmpty()) return emptyList()
         val gate = Semaphore(SEASON_CONCURRENCY)
@@ -1013,10 +991,6 @@ object TmdbService {
                 }
             }.awaitAll().flatten().sortedWith(compareBy({ it.seasonNumber }, { it.episodeNumber }))
         }
-    }
-
-    suspend fun fetchSeasonPublic(tmdbId: Int, season: Int): List<TmdbEpisode> {
-        return fetchSeason(tmdbId, season).orEmpty()
     }
 
     internal fun List<TmdbItem>.dedupedByTitle(): List<TmdbItem> {
@@ -1119,10 +1093,12 @@ object TmdbService {
             } else {
                 val episodes = parseSeasonEpisodes(json, season)
                 if (episodes != null) {
-                    if (seasonCache.size >= SEASON_CACHE_MAX) {
-                        seasonCache.keys.firstOrNull()?.let { seasonCache.remove(it) }
+                    if (episodes.isNotEmpty()) {
+                        if (seasonCache.size >= SEASON_CACHE_MAX) {
+                            seasonCache.keys.firstOrNull()?.let { seasonCache.remove(it) }
+                        }
+                        seasonCache[cacheKey] = episodes
                     }
-                    seasonCache[cacheKey] = episodes
                 }
                 episodes
             }
@@ -1197,10 +1173,19 @@ object TmdbService {
 
 object ManifestKit {
 
+    private val SCHEME_HOST = Regex("""^https?://[^/]+""")
+    private val SCHEME_PREFIX = Regex("https?://")
+    private val ATTR_RE = Regex("""([A-Za-z0-9-]+)=("([^"]*)"|[^,\s]*)""")
+    private val MPD_SET_RE = Regex("""<AdaptationSet\b([^>]*)>(.*?)</AdaptationSet>""", RegexOption.DOT_MATCHES_ALL)
+    private val MPD_REP_RE = Regex("""<Representation\b([^>]*?)/?>""")
+    private val XML_ATTR_RE = Regex("""([\w:.-]+)\s*=\s*"([^"]*)"""")
+    private val DIGITS_RE = Regex("""\d+""")
+    private val URL_HEIGHT_RE = Regex("""(?<!\d)(\d{3,4})p(?!\d)""", RegexOption.IGNORE_CASE)
+
     fun resolveUrl(base: String, path: String): String {
         if (path.startsWith("http", ignoreCase = true)) return path
         if (path.startsWith("//")) return "https:$path"
-        val schemeHost = Regex("""^https?://[^/]+""").find(base)?.value ?: return path
+        val schemeHost = SCHEME_HOST.find(base)?.value ?: return path
         val resolved = runCatching { java.net.URI(base).resolve(path).toString() }.getOrNull()
         return resolved?.takeIf { it.startsWith("http") }
             ?: if (path.startsWith("/")) "$schemeHost$path" else "$schemeHost/$path"
@@ -1299,8 +1284,7 @@ object ManifestKit {
     fun parseAttrs(raw: String?): Map<String, String> {
         if (raw.isNullOrBlank()) return emptyMap()
         val out = LinkedHashMap<String, String>()
-        val regex = Regex("""([A-Za-z0-9-]+)=("([^"]*)"|[^,\s]*)""")
-        regex.findAll(raw).forEach { m ->
+        ATTR_RE.findAll(raw).forEach { m ->
             val key = m.groupValues[1]
             val value = m.groupValues[3].ifEmpty { m.groupValues[2] }
             out[key] = value
@@ -1322,14 +1306,15 @@ object ManifestKit {
         if (text.isNullOrBlank()) return emptyList()
         val reps = mutableListOf<Representation>()
 
-        val setRegex = Regex("""<AdaptationSet\b([^>]*)>(.*?)</AdaptationSet>""", RegexOption.DOT_MATCHES_ALL)
-        setRegex.findAll(text).forEach { setMatch ->
+        MPD_SET_RE.findAll(text).forEach { setMatch ->
             val setAttrs = parseXmlAttrs(setMatch.groupValues[1])
-            val setMime = setAttrs["mimeType"] ?: ""
-            if (!setMime.contains("video", ignoreCase = true)) return@forEach
-            val repRegex = Regex("""<Representation\b([^>]*?)/?>""")
-            repRegex.findAll(setMatch.groupValues[2]).forEach { repMatch ->
+            val setVideo = setAttrs["mimeType"]?.contains("video", ignoreCase = true) == true ||
+                setAttrs["contentType"]?.contains("video", ignoreCase = true) == true
+            MPD_REP_RE.findAll(setMatch.groupValues[2]).forEach { repMatch ->
                 val attrs = parseXmlAttrs(repMatch.groupValues[1])
+                val repMime = attrs["mimeType"]
+                val isVideo = if (repMime != null) repMime.contains("video", ignoreCase = true) else setVideo
+                if (!isVideo) return@forEach
                 val height = attrs["height"]?.toIntOrNull() ?: 0
                 reps.add(
                     Representation(
@@ -1347,15 +1332,14 @@ object ManifestKit {
 
     private fun parseXmlAttrs(raw: String): Map<String, String> {
         val out = LinkedHashMap<String, String>()
-        val regex = Regex("""([\w:.-]+)\s*=\s*"([^"]*)"""")
-        regex.findAll(raw).forEach { m -> out[m.groupValues[1]] = m.groupValues[2] }
+        XML_ATTR_RE.findAll(raw).forEach { m -> out[m.groupValues[1]] = m.groupValues[2] }
         return out
     }
 
     fun urlKey(url: String): String {
         return url
             .lowercase()
-            .replace(Regex("https?://"), "")
+            .replace(SCHEME_PREFIX, "")
             .substringBefore("?")
             .trimEnd('/')
     }
@@ -1365,7 +1349,7 @@ object ManifestKit {
 
     fun parseResolution(raw: String?): Pair<Int, Int> {
         if (raw.isNullOrBlank()) return 0 to 0
-        val nums = Regex("""\d+""").findAll(raw).mapNotNull { it.value.toIntOrNull() }.toList()
+        val nums = DIGITS_RE.findAll(raw).mapNotNull { it.value.toIntOrNull() }.toList()
         if (nums.size < 2) return 0 to 0
         return nums[0] to nums[1]
     }
@@ -1400,7 +1384,7 @@ object ManifestKit {
 
     fun resolutionFromUrl(url: String?): Int {
         if (url.isNullOrBlank()) return 0
-        return Regex("""(?<!\d)(\d{3,4})p(?!\d)""", RegexOption.IGNORE_CASE).findAll(url).maxOfOrNull {
+        return URL_HEIGHT_RE.findAll(url).maxOfOrNull {
             it.groupValues[1].toIntOrNull() ?: 0
         } ?: 0
     }
@@ -1429,27 +1413,16 @@ object ManifestKit {
         return hasHindi && hasEnglish
     }
 
-    fun isHindiFromName(name: String?, url: String?): Boolean {
-        val hay = buildString {
-            name?.let { append(it.lowercase()); append(' ') }
-            url?.let { append(it.lowercase()); append(' ') }
-        }
-        return hay.contains("hindi") || hay.contains("हिन्दी") || hay.contains("हिंदी")
-    }
-
-    fun isEnglishFromName(name: String?, url: String?): Boolean {
-        val hay = buildString {
-            name?.let { append(it.lowercase()); append(' ') }
-            url?.let { append(it.lowercase()); append(' ') }
-        }
-        return Regex("""\beng(lish)?\b""").containsMatchIn(hay)
-    }
-
     fun isOriginal(rendition: MediaRendition): Boolean =
         rendition.default ||
             rendition.name.contains("original", ignoreCase = true)
 
-    data class DubLanguage(val canonical: String, val codes: Set<String>, val names: Set<String>)
+    data class DubLanguage(val canonical: String, val codes: Set<String>, val names: Set<String>) {
+        val asciiPatterns: List<Regex> = names
+            .filter { name -> name.all { it.code < 128 } }
+            .map { name -> Regex("""(?i)\b${Regex.escape(name)}\b""") }
+        val nonAsciiNames: List<String> = names.filter { name -> name.any { it.code >= 128 } }
+    }
 
     val INDIAN_DUB_LANGUAGES = listOf(
         DubLanguage("Hindi", setOf("hi", "hin"), setOf("hindi", "हिन्दी", "हिंदी")),
@@ -1481,9 +1454,8 @@ object ManifestKit {
         }
         if (hay.isBlank()) return null
         return INDIAN_DUB_LANGUAGES.firstOrNull { spec ->
-            spec.names.any { name ->
-                Regex("""(?i)\b${Regex.escape(name)}\b""").containsMatchIn(hay)
-            }
+            spec.asciiPatterns.any { it.containsMatchIn(hay) } ||
+                spec.nonAsciiNames.any { hay.contains(it) }
         }?.canonical
     }
 
@@ -1662,14 +1634,23 @@ object SubtitleKit {
 
 object TitleMatch {
 
+    private val NON_WORD = Regex("""[^\p{L}\p{N}]+""")
+    private val WHITESPACE = Regex("""\s+""")
+    private val AND_WORD = Regex("""\band\b""", RegexOption.IGNORE_CASE)
+    private val ROMAN_IV = Regex("""\biv\b""")
+    private val ROMAN_III = Regex("""\biii\b""")
+    private val ROMAN_II = Regex("""\bii\b""")
+    private val ROMAN_I = Regex("""\bi\b""")
+    private val YEAR_TOKEN = Regex("""(19|20)\d{2}""")
+
     fun normalizeTitle(title: String?): String {
         if (title.isNullOrBlank()) return ""
         return title
             .lowercase()
             .trim()
-            .replace(Regex("[^\\p{L}\\p{N}]+"), " ")
+            .replace(NON_WORD, " ")
             .trim()
-            .replace(Regex("\\s+"), " ")
+            .replace(WHITESPACE, " ")
     }
 
     fun titleVariants(title: String?): List<String> {
@@ -1678,14 +1659,14 @@ object TitleMatch {
         val variants = linkedSetOf(n)
         if (title != null) {
             variants += normalizeTitle(title.replace("&", " and "))
-            variants += normalizeTitle(title.replace(Regex("\\band\\b", RegexOption.IGNORE_CASE), "&"))
+            variants += normalizeTitle(title.replace(AND_WORD, "&"))
         }
         variants += n.replace("'", "")
         variants += n.replace("’", "")
-        variants += n.replace(Regex("\\biv\\b"), "4")
-        variants += n.replace(Regex("\\biii\\b"), "3")
-        variants += n.replace(Regex("\\bii\\b"), "2")
-        variants += n.replace(Regex("\\bi\\b"), "1")
+        variants += n.replace(ROMAN_IV, "4")
+        variants += n.replace(ROMAN_III, "3")
+        variants += n.replace(ROMAN_II, "2")
+        variants += n.replace(ROMAN_I, "1")
         return variants.filter { it.isNotBlank() }.distinct()
     }
 
@@ -1738,7 +1719,7 @@ object TitleMatch {
     private fun stripYearTokens(normalized: String): String {
         if (normalized.isBlank()) return normalized
         val stripped = normalized.split(" ")
-            .filterNot { it.matches(Regex("(19|20)\\d{2}")) }
+            .filterNot { YEAR_TOKEN.matches(it) }
             .joinToString(" ")
             .trim()
         return stripped.ifBlank { normalized }
@@ -1746,7 +1727,7 @@ object TitleMatch {
 
     fun parseYear(raw: String?): Int? {
         if (raw.isNullOrBlank()) return null
-        return Regex("(19|20)\\d{2}").find(raw)?.value?.toIntOrNull()
+        return YEAR_TOKEN.find(raw)?.value?.toIntOrNull()
     }
 }
 

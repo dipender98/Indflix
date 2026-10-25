@@ -51,11 +51,18 @@ object ForYouEngine {
         return items
     }
 
-    fun invalidate(context: Context) {
-        runCatching {
-            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-                .edit().remove("movie").remove("tv").apply()
-        }
+    data class RebuildResult(val movies: Int, val series: Int, val rebuilt: Boolean)
+
+    suspend fun rebuildAll(): RebuildResult {
+        SimklHistory.refresh()
+        if (!SimklHistory.isSignedIn()) return RebuildResult(0, 0, false)
+        val profile = SimklHistory.fetch()
+        if (profile.isEmpty()) return RebuildResult(0, 0, false)
+        val movie = build("movie", profile, buildCount("movie"))
+        val tv = build("tv", profile, buildCount("tv"))
+        if (movie.isNotEmpty()) store("movie", movie)
+        if (tv.isNotEmpty()) store("tv", tv)
+        return RebuildResult(movie.size, tv.size, movie.isNotEmpty() || tv.isNotEmpty())
     }
 
     private suspend fun build(

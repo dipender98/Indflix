@@ -56,9 +56,6 @@ object SubtilesProvider {
         return wanted
     }
 
-    fun missingLanguages(covered: Set<String>, desired: Set<String>): Set<String> =
-        desired - covered
-
     internal fun codesFromLangs(langs: Set<String>): Set<String> =
         langs.mapNotNull { lang ->
             if (lang.length == 2) lang.lowercase() else codeForLang(lang)
@@ -69,8 +66,6 @@ object SubtilesProvider {
     private val INDIAN_LANG_CODES: Set<String> = linkedSetOf(
         "hi", "ta", "te", "ml", "bn", "ur", "mr", "kn", "pa", "gu", "ne", "si",
     )
-
-    internal val PRIORITY_CODES: Set<String> = linkedSetOf("en") + INDIAN_LANG_CODES
 
     internal fun groupRequests(codes: Set<String>, originalCode: String? = null): List<Set<String>> {
         if (codes.isEmpty()) return emptyList()
@@ -96,7 +91,9 @@ object SubtilesProvider {
         wanted - tracks.map { it.lang }.toSet()
 
     internal fun subSenseLanguages(names: Set<String>): Set<String> {
-        val mapped = names.mapNotNull { SENSE_ISO3[it] }.toCollection(LinkedHashSet())
+        val mapped = names.mapNotNull { name ->
+            if (name.length == 2) name.lowercase() else SENSE_ISO3[name]
+        }.toCollection(LinkedHashSet())
         return mapped.ifEmpty { linkedSetOf("eng") }
     }
 
@@ -183,18 +180,6 @@ object SubtilesProvider {
         return capped
     }
 
-    suspend fun fetch(
-        imdbId: String?,
-        season: Int,
-        episode: Int,
-        missing: Set<String>,
-        originalLang: String? = null,
-    ): List<SubtitleFile> {
-        val out = mutableListOf<SubtitleFile>()
-        fetchAndDeliver(imdbId, season, episode, missing, originalLang) { out.add(it) }
-        return out
-    }
-
     suspend fun fetchAndDeliver(
         imdbId: String?,
         season: Int,
@@ -276,9 +261,9 @@ object SubtilesProvider {
     private suspend fun fetchGroup(url: String, codes: Set<String>, budgetMs: Long): List<SubTrack> {
         Log.d("SubtilesProvider", "GET $url")
         val text = withTimeoutOrNull(budgetMs) {
-            runCatching {
+            HttpKit.attempt {
                 com.lagradost.cloudstream3.app.get(url, timeout = (budgetMs / 1000L).coerceAtLeast(1L)).text
-            }.getOrNull()
+            }
         }
         if (text.isNullOrBlank()) {
             Log.w("SubtilesProvider", "no response within budget — dropped (streams unaffected)")
@@ -303,9 +288,9 @@ object SubtilesProvider {
         val url = subSenseUrl(imdb, season, episode, gaps)
         Log.d("SubtilesProvider", "GET(sense) $url")
         val text = withTimeoutOrNull(budget) {
-            runCatching {
+            HttpKit.attempt {
                 com.lagradost.cloudstream3.app.get(url, timeout = (budget / 1000L).coerceAtLeast(1L)).text
-            }.getOrNull()
+            }
         }
         if (text.isNullOrBlank()) {
             Log.w("SubtilesProvider", "subsense: no response — top-up skipped")

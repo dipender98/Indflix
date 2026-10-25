@@ -79,60 +79,19 @@ object AiService {
         val base = baseUrl.trim().trimEnd('/').ifBlank { provider.baseUrl }
         if (base.isBlank()) return "Enter the API base url first"
         val prompt = "Answer with the single word OK"
-        return try {
-            val resp = app.post(
+        val resp = HttpKit.attempt {
+            app.post(
                 endpoint(provider, base, useModel, key),
                 timeout = 20,
                 headers = headers(provider, key),
                 json = body(provider, useModel, prompt),
             )
-            when {
-                resp.code in 200..299 -> "Key works - provider connected"
-                resp.code == 401 || resp.code == 403 -> "Key rejected (${resp.code}) - check the key"
-                resp.code == 429 -> "Rate limited (429) - the key is probably valid"
-                else -> "Provider error (${resp.code})"
-            }
-        } catch (e: Exception) {
-            "Verify failed - no network?"
-        }
-    }
-
-    suspend fun testModels(
-        provider: Provider,
-        baseUrl: String,
-        model: String,
-        key: String,
-    ): String {
-        if (key.isBlank()) return "Enter a key first"
-        val base = baseUrl.trim().trimEnd('/').ifBlank { provider.baseUrl }
-        if (base.isBlank()) return "Enter the API base url first"
-        val useModel = model.trim().ifBlank { provider.defaultModel }
-        if (useModel.isBlank()) return "Enter a model first"
-        return try {
-            val resp = app.get(
-                modelsEndpoint(provider, base, key),
-                timeout = 20,
-                headers = headers(provider, key),
-            )
-            when {
-                resp.code in 200..299 -> {
-                    val ids = parseModels(resp.text, provider == Provider.GEMINI)
-                    when {
-                        ids.isEmpty() -> "List fetched but no models found (${resp.code})"
-                        ids.any { it.equals(useModel, ignoreCase = true) } ->
-                            "Model ok - $useModel exists (${ids.size} total)"
-                        else -> {
-                            val sample = ids.take(5).joinToString(", ")
-                            "List ok (${ids.size} models) - '$useModel' not in it. Try: $sample"
-                        }
-                    }
-                }
-                resp.code == 401 || resp.code == 403 -> "Key rejected (${resp.code}) - check the key"
-                resp.code == 429 -> "Rate limited (429) - the key is probably valid"
-                else -> "Provider error (${resp.code})"
-            }
-        } catch (e: Exception) {
-            "List failed - no network?"
+        } ?: return "Verify failed - no network?"
+        return when {
+            resp.code in 200..299 -> "Key works - provider connected"
+            resp.code == 401 || resp.code == 403 -> "Key rejected (${resp.code}) - check the key"
+            resp.code == 429 -> "Rate limited (429) - the key is probably valid"
+            else -> "Provider error (${resp.code})"
         }
     }
 
@@ -146,13 +105,13 @@ object AiService {
         val requestHeaders = headers(provider, key).let {
             if (key.isBlank()) it - "Authorization" else it
         }
-        val resp = runCatching {
+        val resp = HttpKit.attempt {
             app.get(
                 modelsEndpoint(provider, base, key),
                 timeout = 20,
                 headers = requestHeaders,
             )
-        }.getOrNull() ?: return emptyList()
+        } ?: return emptyList()
         if (resp.code !in 200..299) return emptyList()
         val free = freeModels(resp.text, provider == Provider.GEMINI)
         if (provider != Provider.OPENROUTER) return free

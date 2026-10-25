@@ -83,11 +83,10 @@ object SettingsUi {
     private class Option(
         val root: LinearLayout,
         val dot: View,
-        val title: TextView,
         val summary: TextView,
     )
 
-    private class Secret(val root: LinearLayout, val input: EditText, val toggle: View)
+    private class Secret(val root: LinearLayout, val input: EditText)
 
     private class RankedRow(val key: String, val title: String)
 
@@ -298,7 +297,7 @@ object SettingsUi {
                 visible = !visible
                 paint(visible)
             }
-            return Secret(root, input, toggle)
+            return Secret(root, input)
         }
 
         fun dividerRow(): View = View(context).apply {
@@ -339,7 +338,7 @@ object SettingsUi {
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
                 ).apply { bottomMargin = dp(8) }
             }
-            return Option(root, dot, titleView, summaryView)
+            return Option(root, dot, summaryView)
         }
 
         fun paintOption(opt: Option, on: Boolean) {
@@ -819,10 +818,6 @@ object SettingsUi {
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
         heading.addView(label("IndStream Settings", 20f, TEXT, medium = true))
-        heading.addView(
-            label("Keys are optional - built-ins apply while a field is empty.", 11.5f, TEXT_DIM)
-                .apply { setPadding(0, dp(5), 0, 0) },
-        )
         content.addView(
             LinearLayout(context).apply {
                 orientation = LinearLayout.HORIZONTAL
@@ -846,7 +841,7 @@ object SettingsUi {
             Catalogue.Provider.entries.forEach { provider ->
                 val opt = option(
                     provider.label,
-                    if (provider == Catalogue.Provider.TMDB) "Preferred" else "IMDB backed catalog",
+                    if (provider == Catalogue.Provider.TMDB) "Use Personal API Key" else "IMDB backed catalog",
                 )
                 options[provider.id] = opt
                 list.addView(opt.root)
@@ -1001,7 +996,6 @@ object SettingsUi {
             return groupCard
         }
 
-        content.addView(sectionLabel("Catalogue", 0))
         buildProviderCard()
         buildCatalogueCard()
 
@@ -1060,13 +1054,10 @@ object SettingsUi {
         }
         forYouCard.content.addView(refreshNow)
         refreshNow.setOnClickListener {
-            if (!AiService.isConfigured()) {
+            if (!SimklHistory.isSignedIn()) {
                 reportDialog(
-                    title = "Connect an AI provider",
-                    subtitle = "Made for You needs a key under AI API Keys, then pick a model and verify.",
-                    rows = listOf(
-                        Triple("AI API key", "Not connected", WARNING),
-                    ),
+                    title = "Connect Simkl",
+                    subtitle = "Made for You builds from your Simkl watch history. Sign in under Accounts, then try again.",
                     accent = WARNING,
                     actionLabel = "Got it",
                 )
@@ -1074,29 +1065,38 @@ object SettingsUi {
             }
             refreshNow.isEnabled = false
             refreshNow.text = "Rebuilding..."
-            ForYouEngine.invalidate(context)
             CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
-                val movieCount = ForYouEngine.row("movie", 1).size
-                val tvCount = ForYouEngine.row("tv", 1).size
-                val total = movieCount + tvCount
-                refreshNow.post {
-                    refreshNow.text = "Refresh now"
-                    refreshNow.isEnabled = true
-                    setState(forYouCard, if (total > 0) "On" else "Off", total > 0)
-                    if (dialog?.isShowing == true) {
-                        reportDialog(
-                            title = "Made for You",
-                            subtitle = if (total > 0) {
-                                "Recommendations rebuilt from your watch history."
-                            } else {
-                                "No picks were built. Watch a few titles, then try again."
-                            },
-                            rows = listOf(
-                                Triple("Movies", "$movieCount picks", if (movieCount > 0) SUCCESS else TEXT_DIM),
-                                Triple("Series", "$tvCount picks", if (tvCount > 0) SUCCESS else TEXT_DIM),
-                            ),
-                            accent = if (total > 0) SUCCESS else WARNING,
-                        )
+                var result: ForYouEngine.RebuildResult? = null
+                try {
+                    result = ForYouEngine.rebuildAll()
+                } catch (c: kotlinx.coroutines.CancellationException) {
+                    throw c
+                } catch (t: Throwable) {
+                    android.util.Log.w("IndStream", "Made for You rebuild failed: ${t.message}")
+                } finally {
+                    val rebuilt = result
+                    refreshNow.post {
+                        refreshNow.text = "Refresh now"
+                        refreshNow.isEnabled = true
+                        val movies = rebuilt?.movies ?: 0
+                        val series = rebuilt?.series ?: 0
+                        val total = movies + series
+                        if (rebuilt?.rebuilt == true) setState(forYouCard, "On", true)
+                        if (dialog?.isShowing == true) {
+                            reportDialog(
+                                title = "Made for You",
+                                subtitle = when {
+                                    rebuilt == null -> "Refresh failed - check your connection and try again."
+                                    total > 0 -> "Recommendations rebuilt from your watch history."
+                                    else -> "No picks were built. Watch a few titles, then try again."
+                                },
+                                rows = listOf(
+                                    Triple("Movies", "$movies picks", if (movies > 0) SUCCESS else TEXT_DIM),
+                                    Triple("Series", "$series picks", if (series > 0) SUCCESS else TEXT_DIM),
+                                ),
+                                accent = if (total > 0) SUCCESS else WARNING,
+                            )
+                        }
                     }
                 }
             }
@@ -1660,7 +1660,7 @@ object SettingsUi {
         val tmdbSaved = Settings.tmdbApiKey() != null
         val tmdbCard = card(
             "TMDB API Key",
-            "Optional - built-in keys work without it",
+            "Please put your personal API key right here",
             if (tmdbSaved) "Saved" else "Not set",
             tmdbSaved,
         )
@@ -1911,7 +1911,4 @@ object SettingsUi {
             Toast.makeText(context, "No browser found", Toast.LENGTH_SHORT).show()
         }
     }
-
-    private fun dp(context: Context, v: Number): Int =
-        (v.toFloat() * context.resources.displayMetrics.density).roundToInt()
 }

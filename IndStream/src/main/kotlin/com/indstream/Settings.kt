@@ -185,15 +185,17 @@ object Settings {
     }
 
     fun saveAi(context: Context, provider: String, rawKey: String, model: String, baseUrl: String) {
+        if (!aiLoaded) loadAi()
         val key = normalizeKey(rawKey)
         val id = provider.trim().ifBlank { "openrouter" }
         val cleanModel = model.trim()
         val cleanBase = baseUrl.trim().trimEnd('/')
+        val owner = aiProviderCached?.takeIf { it.isNotBlank() } ?: "openrouter"
         runCatching {
             val edit = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 .edit()
                 .putString(AI_PROVIDER, id)
-                .remove(AI_KEY)
+            if (id == owner) edit.remove(AI_KEY)
             if (key.isBlank()) edit.remove(AI_KEY_PREFIX + id) else edit.putString(AI_KEY_PREFIX + id, key)
             if (cleanModel.isBlank()) edit.remove(AI_MODEL_PREFIX + id)
             else edit.putString(AI_MODEL_PREFIX + id, cleanModel)
@@ -213,16 +215,15 @@ object Settings {
         if (!aiLoaded) loadAi()
         val id = provider?.trim()?.takeIf { it.isNotBlank() }
             ?: aiProviderCached?.takeIf { it.isNotBlank() } ?: "openrouter"
+        val owner = aiProviderCached?.takeIf { it.isNotBlank() } ?: "openrouter"
         runCatching {
-            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            val edit = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 .edit()
                 .remove(AI_KEY_PREFIX + id)
                 .remove(AI_MODEL_PREFIX + id)
                 .remove(AI_BASE_PREFIX + id)
-                .remove(AI_MODEL)
-                .remove(AI_BASE)
-                .remove(AI_KEY)
-                .apply()
+            if (id == owner) edit.remove(AI_MODEL).remove(AI_BASE).remove(AI_KEY)
+            edit.apply()
         }
         aiKeys.remove(id)
         aiModels = aiModels - id
@@ -275,7 +276,7 @@ object Settings {
                         aiKeys[name.removePrefix(AI_KEY_PREFIX)] = text
                     }
                     name.startsWith(AI_MODEL_PREFIX) -> models[name.removePrefix(AI_MODEL_PREFIX)] = text
-                    name.startsWith(AI_BASE_PREFIX) -> bases[name.removePrefix(AI_BASE_PREFIX)] = text
+                    name.startsWith(AI_BASE_PREFIX) && name != AI_BASE -> bases[name.removePrefix(AI_BASE_PREFIX)] = text
                 }
             }
             val owner = aiProviderCached?.takeIf { it.isNotBlank() } ?: "openrouter"
@@ -346,7 +347,6 @@ object Settings {
         catalogueOff = if (on) catalogueOff - id else catalogueOff + id
         catalogueLoaded = true
         appContext = context.applicationContext
-        if (!on) dropCatalogueOrder(context, setOf(id))
     }
 
     fun saveAllCatalogueEnabled(context: Context, ids: Collection<String>, on: Boolean) {
@@ -361,7 +361,6 @@ object Settings {
         catalogueOff = if (on) catalogueOff - ids else catalogueOff + ids
         catalogueLoaded = true
         appContext = context.applicationContext
-        if (!on) dropCatalogueOrder(context, ids.toSet())
     }
 
     private fun loadCatalogue() {
@@ -391,12 +390,6 @@ object Settings {
         catalogueOrderCached = clean
         catalogueOrderLoaded = true
         appContext = context.applicationContext
-    }
-
-    private fun dropCatalogueOrder(context: Context, ids: Set<String>) {
-        if (!catalogueOrderLoaded) loadCatalogueOrder()
-        val next = catalogueOrderCached.filterNot { it in ids }
-        if (next.size != catalogueOrderCached.size) saveCatalogueOrder(context, next)
     }
 
     private fun loadCatalogueOrder() {

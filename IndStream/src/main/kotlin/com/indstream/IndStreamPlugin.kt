@@ -3,7 +3,6 @@
 import com.lagradost.cloudstream3.*
 
 import android.content.Context
-import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addImdbId
 import com.lagradost.cloudstream3.LoadResponse.Companion.addScore
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
@@ -35,7 +34,7 @@ class IndStream : Plugin() {
         registerMainAPI(IndStreamProvider())
         openSettings = { ctx -> Settings.openSettings(ctx) }
         CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
-            runCatching { StreamEngine.prewarmMovieBoxToken() }
+            HttpKit.attempt { StreamEngine.prewarmMovieBoxToken() }
         }
         CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
             runCatching { SimklHistory.refresh() }
@@ -47,13 +46,6 @@ object TmdbUrlParser {
     private val tmdbWebUrl = Regex("""themoviedb\.org/(movie|tv)/(\d+)""")
     private val imdbWebUrl = Regex("""imdb\.com/title/(tt\d+)""")
     private val imdbEpisodeUrl = Regex("""imdb\.com/title/(tt\d+)/season/(\d+)/episode/(\d+)""")
-
-    fun parseTmdbUrl(url: String?): Pair<Int, String>? {
-        if (url.isNullOrBlank()) return null
-        val m = tmdbWebUrl.find(url) ?: return null
-        val id = m.groupValues[2].toIntOrNull() ?: return null
-        return id to if (m.groupValues[1] == "movie") "movie" else "tv"
-    }
 
     data class TitleRef(val tmdbId: Int?, val imdbId: String?, val type: String?)
 
@@ -243,23 +235,29 @@ class IndStreamProvider : MainAPI() {
             withTimeoutOrNull(1500L) { TmdbService.findByImdb(urlImdb) }
         } else null
         val tmdbId: Int? = ref.tmdbId ?: quickTmdb?.first
-        val type: String = ref.type ?: quickTmdb?.second?.let { TmdbUrlParser.normType(it) } ?: "movie"
+        val initialType: String? = ref.type ?: quickTmdb?.second?.let { TmdbUrlParser.normType(it) }
+        val typeRef = java.util.concurrent.atomic.AtomicReference<String?>(initialType)
 
         val resolvedTmdbId = java.util.concurrent.atomic.AtomicReference<Int?>(tmdbId)
         val tmdbMetaJob = async {
-            val id = tmdbId ?: urlImdb?.let { iid ->
-                runCatching { withTimeoutOrNull(6000L) { TmdbService.findByImdb(iid) } }.getOrNull()?.first
+            val found = if (tmdbId == null && urlImdb != null) {
+                HttpKit.attempt { withTimeoutOrNull(6000L) { TmdbService.findByImdb(urlImdb) } }
+            } else null
+            found?.let {
+                resolvedTmdbId.set(it.first)
+                typeRef.compareAndSet(null, TmdbUrlParser.normType(it.second))
             }
-            resolvedTmdbId.set(id)
+            val id = tmdbId ?: found?.first
             if (id == null) return@async null
-            withTimeoutOrNull(12000L) { TmdbService.fetchMeta(id, type) }
+            withTimeoutOrNull(12000L) { TmdbService.fetchMeta(id, typeRef.get() ?: "movie") }
         }
         val cineJob = async {
             val iid = urlImdb ?: tmdbId?.let { id ->
-                runCatching { withTimeoutOrNull(6000L) { TmdbService.fetchMeta(id, type)?.imdbId } }
-                    .getOrNull()?.takeIf { it.startsWith("tt") }
+                HttpKit.attempt {
+                    withTimeoutOrNull(6000L) { TmdbService.fetchMeta(id, typeRef.get() ?: "movie")?.imdbId }
+                }?.takeIf { it.startsWith("tt") }
             } ?: return@async null
-            val detail = withTimeoutOrNull(9000L) { ImdbService.fetchMeta(iid, type) }
+            val detail = withTimeoutOrNull(9000L) { ImdbService.fetchMeta(iid, typeRef.get() ?: "movie") }
             detail to iid
         }
         var tmdbMeta: TmdbService.TmdbDetail? = null
@@ -277,20 +275,36 @@ class IndStreamProvider : MainAPI() {
         }
         tmdbMetaJob.cancel()
         cineJob.cancel()
-        val resolvedImdb: String? = tmdbMeta?.imdbId ?: cineIid ?: urlImdb
+        var resolvedImdb: String? = tmdbMeta?.imdbId ?: cineIid ?: urlImdb
+
+        val lateLookup = if (resolvedTmdbId.get() == null && tmdbMeta?.tmdbId == null && resolvedImdb != null) {
+            HttpKit.attempt { withTimeoutOrNull(800L) { TmdbService.findByImdb(resolvedImdb!!) } }
+        } else null
+        lateLookup?.let { typeRef.compareAndSet(null, TmdbUrlParser.normType(it.second)) }
 
         val effectiveTmdbId: Int? = resolvedTmdbId.get()
             ?: tmdbMeta?.tmdbId
-            ?: resolvedImdb?.let { iid ->
-                runCatching { withTimeoutOrNull(800L) { TmdbService.findByImdb(iid)?.first } }
-                    .onFailure { if (it is kotlinx.coroutines.CancellationException) throw it }
-                    .getOrNull()
+            ?: lateLookup?.first
+
+        val type: String = typeRef.get() ?: "movie"
+        if (initialType == null && type != "movie") {
+            val id = effectiveTmdbId
+            if (id != null && id > 0) {
+                tmdbMeta = withTimeoutOrNull(12000L) { TmdbService.fetchMeta(id, type) }
             }
+            if (cineMeta == null) {
+                val iid = resolvedImdb ?: tmdbMeta?.imdbId
+                if (iid != null) {
+                    cineMeta = withTimeoutOrNull(9000L) { ImdbService.fetchMeta(iid, type) }
+                    if (cineMeta != null) resolvedImdb = iid
+                }
+            }
+        }
 
         val preIid = resolvedImdb
         if (effectiveTmdbId == null && preIid != null) {
             fastStartScope.launch {
-                runCatching { withTimeoutOrNull(6000L) { TmdbService.findByImdb(preIid) } }
+                HttpKit.attempt { withTimeoutOrNull(6000L) { TmdbService.findByImdb(preIid) } }
             }
         }
 
@@ -415,7 +429,7 @@ class IndStreamProvider : MainAPI() {
 
     private val tapSeq = java.util.concurrent.atomic.AtomicInteger(0)
 
-    private class FarmHandle(val key: String, val job: kotlinx.coroutines.Job)
+    private class FarmHandle(val job: kotlinx.coroutines.Job)
     private val inFlightFarms = java.util.concurrent.ConcurrentHashMap<String, FarmHandle>()
 
     override suspend fun loadLinks(
@@ -428,7 +442,7 @@ class IndStreamProvider : MainAPI() {
         val t0 = System.currentTimeMillis()
         android.util.Log.i("IndStream", "TAP#$tap loadLinks start casting=$isCasting")
         val result = try {
-            loadLinksInner(tap, data, isCasting, subtitleCallback, callback)
+            loadLinksInner(tap, data, subtitleCallback, callback)
         } catch (c: kotlinx.coroutines.CancellationException) {
             android.util.Log.w("IndStream", "TAP#$tap loadLinks CANCELLED by the app after " +
                 "${System.currentTimeMillis() - t0}ms (${c.message ?: c.javaClass.simpleName})")
@@ -446,20 +460,16 @@ class IndStreamProvider : MainAPI() {
         urlImdb: String?,
     ): String? {
         urlImdb?.takeIf { it.startsWith("tt") }?.let { return it }
-        runCatching { withTimeoutOrNull(8000L) { first() } }
-            .onFailure { if (it is kotlinx.coroutines.CancellationException) throw it }
-            .getOrNull()
+        HttpKit.attempt { withTimeoutOrNull(8000L) { first() } }
             ?.takeIf { it.startsWith("tt") }?.let { return it }
         if (tmdbId <= 0) return null
-        return runCatching { withTimeoutOrNull(8000L) { TmdbService.fetchMeta(tmdbId, type)?.imdbId } }
-            .onFailure { if (it is kotlinx.coroutines.CancellationException) throw it }
-            .getOrNull()?.takeIf { it.startsWith("tt") }
+        return HttpKit.attempt { withTimeoutOrNull(8000L) { TmdbService.fetchMeta(tmdbId, type)?.imdbId } }
+            ?.takeIf { it.startsWith("tt") }
     }
 
     private suspend fun loadLinksInner(
         tap: Int,
         data: String,
-        isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
     ): Boolean {
@@ -515,8 +525,7 @@ class IndStreamProvider : MainAPI() {
             )
             val subsJob = fastStartScope.async {
                 val imdb = imdbWithRetry({ metaDeferred.await()?.imdbId }, tmdbId, type, urlImdb)
-                runCatching { topUpSubtitles(imdb, season, episode, originalLangNow(), subtitleSink) }
-                    .onFailure { android.util.Log.w("IndStream", "fallback subs failed: ${it.message}") }
+                topUpLogged(imdb, season, episode, originalLangNow(), subtitleSink)
             }
             if (warm != null) {
                 val fillStart = System.currentTimeMillis()
@@ -561,8 +570,7 @@ class IndStreamProvider : MainAPI() {
                 android.util.Log.i("IndStream", "TAP#$tap joining in-flight farm for $cacheKey (no second launch)")
                 val subsJob = fastStartScope.async {
                     val imdb = imdbWithRetry({ imdbDeferred.await() }, tmdbId, type, urlImdb)
-                    runCatching { topUpSubtitles(imdb, season, episode, originalLangNow(), subtitleSink) }
-                        .onFailure { android.util.Log.w("IndStream", "fallback subs failed: ${it.message}") }
+                    topUpLogged(imdb, season, episode, originalLangNow(), subtitleSink)
                 }
                 val joined = Collections.synchronizedSet(HashSet<String>())
                 suspend fun tail(): Boolean {
@@ -591,8 +599,6 @@ class IndStreamProvider : MainAPI() {
                         releaseMeta()
                         return false
                     }
-                }
-                if (emitted.get() > 0) {
                 }
                 subsJob.await()
                 android.util.Log.i("IndStream", "TAP#$tap joined farm -> ${emitted.get()} live links " +
@@ -629,32 +635,35 @@ class IndStreamProvider : MainAPI() {
             }
         }
         run {
-            val handle = FarmHandle(cacheKey, farmDone)
+            val handle = FarmHandle(farmDone)
             inFlightFarms[cacheKey] = handle
             farmDone.invokeOnCompletion { inFlightFarms.remove(cacheKey, handle) }
         }
 
         val tmdbWave = if (tmdbId <= 0 && urlImdb != null) {
             fastStartScope.async {
-                val id2 = runCatching { withTimeoutOrNull(6000L) { TmdbService.findByImdb(urlImdb) } }
-                    .getOrNull()?.first?.takeIf { it > 0 }
+                val id2 = HttpKit.attempt { withTimeoutOrNull(6000L) { TmdbService.findByImdb(urlImdb) } }
+                    ?.first?.takeIf { it > 0 }
                 if (id2 == null) {
                     android.util.Log.i("IndStream", "TAP#$tap no TMDB id for $urlImdb (TMDB wave skipped)")
                     return@async
                 }
                 android.util.Log.i("IndStream", "TAP#$tap TMDB id $id2 resolved, launching TMDB wave")
-                runCatching {
+                try {
                     StreamEngine.resolveRealtime(id2, type, season, episode, urlImdb, tmdbOnly = true) { sid, streams ->
                         emitBatch(sid, streams)
                     }
-                }.onFailure { android.util.Log.w("IndStream", "TAP#$tap TMDB wave failed: ${it.message}") }
+                } catch (c: kotlinx.coroutines.CancellationException) {
+                    throw c
+                } catch (t: Throwable) {
+                    android.util.Log.w("IndStream", "TAP#$tap TMDB wave failed: ${t.message}")
+                }
             }
         } else null
 
         val subsJob = fastStartScope.async {
             val imdb = imdbWithRetry({ imdbDeferred.await() }, tmdbId, type, urlImdb)
-            runCatching { topUpSubtitles(imdb, season, episode, originalLangNow(), subtitleSink) }
-                .onFailure { android.util.Log.w("IndStream", "fallback subs failed: ${it.message}") }
+            topUpLogged(imdb, season, episode, originalLangNow(), subtitleSink)
         }
 
         val firstStreamArrived = CompletableDeferred<Unit>()
@@ -689,7 +698,7 @@ class IndStreamProvider : MainAPI() {
         if (!prewarmed.add(key)) return
         if (StreamEngine.FastStartCache.get(key) != null) return
         val job = fastStartScope.launch {
-            runCatching {
+            try {
                 StreamEngine.resolveRealtime(tmdbId, type, -1, -1, imdbId, imdbIdProvider = { imdbId }) { _, streams ->
                     if (streams.isNotEmpty()) {
                         StreamEngine.FastStartCache.put(key, streams)
@@ -697,8 +706,8 @@ class IndStreamProvider : MainAPI() {
                     }
                 }
                 if (tmdbId <= 0 && imdbId != null) {
-                    val id2 = runCatching { withTimeoutOrNull(6000L) { TmdbService.findByImdb(imdbId) } }
-                        .getOrNull()?.first?.takeIf { it > 0 }
+                    val id2 = HttpKit.attempt { withTimeoutOrNull(6000L) { TmdbService.findByImdb(imdbId) } }
+                        ?.first?.takeIf { it > 0 }
                     if (id2 != null) {
                         StreamEngine.resolveRealtime(id2, type, -1, -1, imdbId, tmdbOnly = true) { _, streams ->
                             if (streams.isNotEmpty()) {
@@ -708,7 +717,11 @@ class IndStreamProvider : MainAPI() {
                         }
                     }
                 }
-            }.onFailure { android.util.Log.w("IndStream", "prewarm failed: ${it.message}") }
+            } catch (c: kotlinx.coroutines.CancellationException) {
+                throw c
+            } catch (t: Throwable) {
+                android.util.Log.w("IndStream", "prewarm failed: ${t.message}")
+            }
         }
         warmFarms[key] = job
         job.invokeOnCompletion { warmFarms.remove(key, job) }
@@ -725,6 +738,22 @@ class IndStreamProvider : MainAPI() {
         }
     }
 
+    private suspend fun topUpLogged(
+        imdbId: String?,
+        season: Int,
+        episode: Int,
+        originalLang: String?,
+        sink: SubtitleSink,
+    ) {
+        try {
+            topUpSubtitles(imdbId, season, episode, originalLang, sink)
+        } catch (c: kotlinx.coroutines.CancellationException) {
+            throw c
+        } catch (t: Throwable) {
+            android.util.Log.w("IndStream", "fallback subs failed: ${t.message}")
+        }
+    }
+
     private suspend fun topUpSubtitles(
         imdbId: String?,
         season: Int,
@@ -736,13 +765,13 @@ class IndStreamProvider : MainAPI() {
         coroutineScope {
             Settings.apiKey()?.let { key ->
                 launch {
-                    runCatching {
+                    HttpKit.attempt {
                         WyzieSubs.fetchAndDeliver(imdbId, season, episode, wanted, key) { sink.emit(it) }
                     }
                 }
             }
             launch {
-                runCatching {
+                HttpKit.attempt {
                     SubtilesProvider.fetchAndDeliver(imdbId, season, episode, wanted, originalLang) { sink.emit(it) }
                 }
             }

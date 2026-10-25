@@ -5,12 +5,10 @@ import android.util.Log
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.*
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
@@ -36,6 +34,76 @@ object StreamEngine {
         Regex("""https?://[^\s"'<>\\]+\.webm[^\s"'<>\\]*"""),
     )
 
+    private val WHITESPACE = Regex("""\s+""")
+    private val ORIGIN = Regex("""^https?://[^/]+""")
+    private val NON_ALNUM_LOWER = Regex("""[^a-z0-9]""")
+    private val MOVIEBOX_SEASON_END = Regex("""\s+S(\d+)(?:\s*-\s*S?(\d+))?$""", RegexOption.IGNORE_CASE)
+    private val MOVIEBOX_SEASON_SUFFIX = Regex("""\s+S\d+(?:\s*-\s*S?\d+)?$""", RegexOption.IGNORE_CASE)
+    private val MOVIEBOX_BRACKETS = Regex("""[\[(]([^\])]+)[\])]""", RegexOption.IGNORE_CASE)
+    private val MOVIEBOX_BRACKET_REMOVE = Regex("""\s*[\(\[][^)\]]*[\)\]]""")
+    private val MOVIEBOX_YEAR = Regex("""\s*\d{4}""")
+    private val FILE_NAME_HEIGHT = Regex("""\[(\d{3,4})p\]""", RegexOption.IGNORE_CASE)
+    private val API_HEIGHT = Regex("""(\d{3,4})\s*p""", RegexOption.IGNORE_CASE)
+    private val API_4K = Regex("""\b(4k|uhd)\b""", RegexOption.IGNORE_CASE)
+    private val API_HEIGHTS = setOf(240, 360, 480, 540, 576, 720, 1080, 1440, 2160)
+    private val HEIGHT_HINT = Regex("""(\d{3,4})[pP]""")
+    private val HEIGHT_NUM = Regex("""(\d{3,4})""")
+    private val HINDI_WORD = Regex("""\bHINDI\b""")
+    private val TAMIL_WORD = Regex("""\bTAMIL\b""")
+    private val TELUGU_WORD = Regex("""\bTELUGU\b""")
+    private val MULTI_WORD = Regex("""\b(MULTI|DUAL|DUBBED)\b""")
+    private val ENGLISH_WORD = Regex("""\b(ENGLISH|ENG)\b""")
+    private val FOUR_K_WORD = Regex("""\b4K\b""")
+    private val HUB_OTHER_LANG =
+        Regex("""english|dual|multi|tamil|telugu|malayalam|kannada|japanese|korean|chinese""")
+    private val INDIAN_LANG_WORD =
+        Regex("""\b(tamil|telugu|malayalam|kannada|bengali|marathi|punjabi)\b""")
+    private val ARCHIVE_URL = Regex("""\.(?:zip|rar|7z|tar|gz)(?:[?#]|$)""", RegexOption.IGNORE_CASE)
+    private val BTN_CLASS = Regex("""\bbtn\b""")
+    private val PIXELDRAIN_PAGE =
+        Regex("""(?i)(https?://pixeldrain\.[a-z.]+)/(?:api/file|u)/([A-Za-z0-9_\-]+)""")
+    private val PIXELDRAIN_SHORT = Regex("""pixeldrain\.[a-z]+/u/([a-zA-Z0-9]+)""")
+    private val GDSHINE_SHORT = Regex("""gdshine\.[a-z.]+/s/([A-Za-z0-9_\-]+)""", RegexOption.IGNORE_CASE)
+    private val GOOGLE_VIDEO =
+        Regex("""(https?://video-downloads\.googleusercontent\.com/[^"'\s<>]+)""")
+    private val TOKEN_URL_ABS = Regex("""https?://[^"' ]*?(?:hubcloud|hubdrive)\.php\?[^"' ]+""")
+    private val TOKEN_URL_REL = Regex("""(?:hubcloud|hubdrive)\.php\?[^"' ]+""")
+    private val FILE_HOST_RE =
+        Regex("""(?i)(hubcloud|hubdrive|gdflix|gdshine|hubcdn|pixeldrain|workers\.dev/0:|\.mkv|\.mp4|\.m3u8)""")
+    private val QUALITY_TEXT_RE = Regex("""(?i)\b(2160p|1440p|1080p|720p|480p|4k)\b""")
+    private val HUB_LANG_RE =
+        Regex("""(?i)\b(hindi|english|tamil|telugu|malayalam|kannada|bengali|marathi|punjabi|dual|multi)\b""")
+    private val DOWNLOAD_HEADING = Regex(
+        """(?i)(\d{3,4}p\b|4K|\d+(?:\.\d+)?\s?(?:GB|MB)|/ZiP|/ZIP|\bZIP\b|Batch|Season\s*\d|\bPack\b|DUAL\s*[- ]?AUDIO|HINDI|TAMIL|TELUGU|\bEP(?:\.|ISODE)?\s*\d|S\d{1,2}[\s._-]?E\d{1,3})""",
+    )
+    private val VCLOUD_BTN = Regex(
+        """<a\b[^>]*href="([^"]+)"[^>]*>\s*(?:<[^>]+>\s*)*([^<]*(?:Download|Server|File)[^<]*)(?:<[^>]+>\s*)*</a>""",
+        RegexOption.IGNORE_CASE,
+    )
+    private val VCLOUD_ATOB = Regex(
+        """var\s+url\s*=\s*atob\s*\(\s*atob\s*\(\s*['"]([A-Za-z0-9+/=]{16,})['"]\s*\)\s*\)""",
+    )
+    private val BRACKET_LABEL = Regex("""\[([^\]]+)]""")
+    private val R2_HOST = Regex("""(r2\.cloudflarestorage\.com|r2\.dev)""", RegexOption.IGNORE_CASE)
+    private val GPDL_URL =
+        Regex("""https?://[^"' ]*gpdl[^"' ]*hubcloud[^"' ]+""", RegexOption.IGNORE_CASE)
+    private val VIDEO_EXT = Regex("""(?i)\.(?:mkv|mp4|m3u8)(?:[?#]|$)""")
+    private val TAGGED_SEASON = Regex("""(?i)\bS\d{1,2}\b|\bSeason\s*\d""")
+    private val HUB_QUALITY = Regex("""\b(2160p|1440p|1080p|720p|480p)\b""", RegexOption.IGNORE_CASE)
+    private val NON_CONTENT_PATH = Regex("""/(category|tag|author|page|feed|search)/""", RegexOption.IGNORE_CASE)
+    private val NON_CONTENT_PATH_BASIC = Regex("""/(category|tag|author|page|search)/""", RegexOption.IGNORE_CASE)
+    private val HEADING_TAG = Regex("""h[1-6]""")
+    private val OG_TITLE = Regex("""<meta\s+property="og:title"\s+content="([^"]+)"""", RegexOption.IGNORE_CASE)
+    private val HTML_TITLE = Regex("""<title>([^<]+)</title>""", RegexOption.IGNORE_CASE)
+    private val HUB_GATEWAY_HOST = Regex("""greenmotors|hubcloud|hubdrive""", RegexOption.IGNORE_CASE)
+    private val HUB_GATEWAY_HOST_ALT = Regex("""greenmotors|hubcdn|hubdrive""", RegexOption.IGNORE_CASE)
+    private val SIZE_TOKEN = Regex("""\d+(?:\.\d+)?\s?(?:GB|MB)""", RegexOption.IGNORE_CASE)
+    private val VCLOUD_EPISODE_TAG = Regex("""(?i)\bS\d{1,2}[\s._-]?E\d{1,3}\b""")
+    private val HEADING_SIZE = Regex(
+        """\[\s*(\d+(?:\.\d+)?\s*(?:GB|MB)(?:/E\b|/EP\b|/ZiP|/ZIP)?)\s*]""",
+        RegexOption.IGNORE_CASE,
+    )
+
     private inline fun <T> catching(block: () -> T): Result<T> =
         try {
             Result.success(block())
@@ -52,7 +120,6 @@ object StreamEngine {
         val isM3u8: Boolean,
         val referer: String? = null,
         val qualityHint: Int = 0,
-        val measuredKbps: Long? = null,
         val audioPriority: Int = 0,
         val audioLabel: String = "",
         val sizeLabel: String = "",
@@ -150,7 +217,7 @@ object StreamEngine {
                                 return try {
                                     ResolveAttempt(resolveOne(raceSpec, tmdbId, keyId, type, season, episode, keyType))
                                 } catch (t: CleanMissException) {
-                                    Log.i("IndStream", "${spec.id}: clean miss � ${t.message} (no breaker trip)")
+                                    Log.i("IndStream", "${spec.id}: clean miss - ${t.message} (no breaker trip)")
                                     ResolveAttempt(emptyList(), cleanMiss = true)
                                 } catch (c: kotlinx.coroutines.CancellationException) {
                                     throw c
@@ -290,7 +357,8 @@ object StreamEngine {
                             } else {
                                 val lh = LinkedHashMap<String, String>()
                                 lh.putAll(raw.extraHeaders)
-                                if (!lh.containsKey("Referer") && !raw.referer.isNullOrBlank()) lh["Referer"] = raw.referer!!
+                                val referer = raw.referer
+                                if (!lh.containsKey("Referer") && !referer.isNullOrBlank()) lh["Referer"] = referer
                                 val t0 = System.currentTimeMillis()
                                 val masterText = raw.inlineManifest ?: withTimeoutOrNull(3000L) {
                                     catching { app.get(raw.url, timeout = 3, headers = lh).text }.getOrNull()
@@ -340,18 +408,18 @@ object StreamEngine {
 
         ordered.forEach { r ->
             val raw = r.raw
-            if (!emitted.add(raw.url)) return@forEach
-
             if (!passesQualityFloor(raw.isM3u8, r.fullHeight)) {
                 floorDroppedByServer.merge(raw.serverId, 1, Int::plus)
                 return@forEach
             }
+            if (!emitted.add(raw.url)) return@forEach
             emittedByServer.merge(raw.serverId, 1, Int::plus)
 
             val linkHeaders = LinkedHashMap<String, String>()
             linkHeaders.putAll(raw.extraHeaders)
-            if (!linkHeaders.containsKey("Referer") && !raw.referer.isNullOrBlank()) {
-                linkHeaders["Referer"] = raw.referer!!
+            val rawReferer = raw.referer
+            if (!linkHeaders.containsKey("Referer") && !rawReferer.isNullOrBlank()) {
+                linkHeaders["Referer"] = rawReferer
             }
 
             val isAdaptive = raw.isM3u8
@@ -453,8 +521,9 @@ object StreamEngine {
 
     private fun subtitleProbeHeaders(raw: RawStream): Map<String, String> {
         val headers = LinkedHashMap(raw.extraHeaders)
-        if (!headers.containsKey("Referer") && !raw.referer.isNullOrBlank()) {
-            headers["Referer"] = raw.referer!!
+        val referer = raw.referer
+        if (!headers.containsKey("Referer") && !referer.isNullOrBlank()) {
+            headers["Referer"] = referer
         }
         return headers
     }
@@ -560,14 +629,14 @@ object StreamEngine {
             return emptyList()
         }
         if (spec.id == "moviebox") {
-            val result = resolveMovieBox(spec, tmdbId, imdbId, type, season, episode)
+            val result = resolveMovieBox(spec, tmdbId, type, season, episode)
             if (result.isNotEmpty()) { okServer(spec, start, "moviebox", result.size); return result }
             failServer(spec, "moviebox returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
             return emptyList()
         }
 
         if (spec.id == "vaplayer") {
-            val result = resolveVaplayer(spec, tmdbId, imdbId, type, season, episode)
+            val result = resolveVaplayer(spec, imdbId, type, season, episode)
             if (result.isNotEmpty()) { okServer(spec, start, "vaplayer", result.size); return result }
             failServer(spec, "vaplayer returned no streams")
             return emptyList()
@@ -719,6 +788,17 @@ object StreamEngine {
             return emptyList()
         }
 
+        if (spec.id == "atlantic") {
+            if (type != "movie" && (season <= 0 || episode <= 0)) {
+                Log.w("IndStream", "${spec.id}: tv request without season/episode (s=$season e=$episode), skipping")
+                return emptyList()
+            }
+            val result = resolveAtlantic(spec, tmdbId, type, season, episode, embedUrl)
+            if (result.isNotEmpty()) { okServer(spec, start, "atlantic hls", result.size); return result }
+            failServer(spec, "atlantic returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
+            return emptyList()
+        }
+
         if (spec.isJsonApi) {
             val result = resolveJsonApi(spec, embedUrl, referer)
             if (result.isNotEmpty()) { okServer(spec, start, "json api", result.size); return result }
@@ -741,10 +821,9 @@ object StreamEngine {
         if (direct.isNotEmpty()) {
             Log.d("IndStream", "${spec.id}: direct harvest found ${direct.size} urls")
             val result = direct.map { url ->
-                val probed = HttpKit.probeSpeed(url, referer)
                 val (label, h) = probeAudioHeight(url, referer)
                 val dash = url.contains(".mpd", ignoreCase = true)
-                RawStream(spec.id, spec.name, url, url.contains(".m3u8", ignoreCase = true) || dash, referer, h, probed,
+                RawStream(spec.id, spec.name, url, url.contains(".m3u8", ignoreCase = true) || dash, referer, h,
                     audioLabel = label, isDash = dash)
             }
             okServer(spec, start, "direct harvest", result.size)
@@ -769,11 +848,10 @@ object StreamEngine {
                 file.url.trim().takeIf { it.isNotBlank() }?.let { SubtitleKit.Track(file.lang, it) }
             }.distinctBy { it.url }
             val result = regLinks.map { link ->
-                val probed = HttpKit.probeSpeed(link.url, link.referer)
                 val (label, h) = probeAudioHeight(link.url, link.referer)
                 val dash = link.type == ExtractorLinkType.DASH || link.url.contains(".mpd", ignoreCase = true)
                 RawStream(spec.id, spec.name, link.url, link.type == ExtractorLinkType.M3U8 || dash, link.referer,
-                    ManifestKit.maxQuality(link.quality, h), probed,
+                    ManifestKit.maxQuality(link.quality, h),
                     audioLabel = label, isDash = dash, subtitles = regTracks)
             }
             okServer(spec, start, "extractor registry", result.size)
@@ -786,10 +864,9 @@ object StreamEngine {
         if (jsUrls.isNotEmpty()) {
             Log.d("IndStream", "${spec.id}: js harvest found ${jsUrls.size} urls")
             val result = jsUrls.map { url ->
-                val probed = HttpKit.probeSpeed(url, referer)
                 val (label, h) = probeAudioHeight(url, referer)
                 val dash = url.contains(".mpd", ignoreCase = true)
-                RawStream(spec.id, spec.name, url, url.contains(".m3u8", ignoreCase = true) || dash, referer, h, probed,
+                RawStream(spec.id, spec.name, url, url.contains(".m3u8", ignoreCase = true) || dash, referer, h,
                     audioLabel = label, isDash = dash)
             }
             okServer(spec, start, "js config harvest", result.size)
@@ -801,11 +878,10 @@ object StreamEngine {
         val videoSrc = harvestVideoSource(unwrapped, embedUrl)
         if (videoSrc != null) {
             Log.d("IndStream", "${spec.id}: video tag found: $videoSrc")
-            val probed = HttpKit.probeSpeed(videoSrc, referer)
             val (label, h) = probeAudioHeight(videoSrc, referer)
             okServer(spec, start, "video tag", 1)
             val dash = videoSrc.contains(".mpd", ignoreCase = true)
-            return listOf(RawStream(spec.id, spec.name, videoSrc, videoSrc.contains(".m3u8", ignoreCase = true) || dash, referer, h, probed,
+            return listOf(RawStream(spec.id, spec.name, videoSrc, videoSrc.contains(".m3u8", ignoreCase = true) || dash, referer, h,
                 audioLabel = label, isDash = dash))
         } else {
             Log.d("IndStream", "${spec.id}: no video tag")
@@ -817,7 +893,7 @@ object StreamEngine {
 
     private fun failServer(spec: ServerSpec, reason: String, isCleanMiss: Boolean = false) {
         if (isCleanMiss) {
-            Log.i("IndStream", "${spec.id}: clean miss � $reason (no breaker trip)")
+            Log.i("IndStream", "${spec.id}: clean miss - $reason (no breaker trip)")
         } else {
             Log.w("IndStream", "${spec.id}: $reason")
             if (spec.recordHealth) HealthMonitor.recordFailure(spec.id)
@@ -972,6 +1048,110 @@ object StreamEngine {
         "Referer" to mediaPageUrl,
     )
 
+    private const val ATLANTIC_REFERER = "https://atlantic.st/"
+    private const val ATLANTIC_FALLBACK_KEY_HEX =
+        "55060a042823f51a94c296894a58a0db15f3baef807155140983083fa799ef47"
+
+    internal fun atlanticCdnUrl(jsonText: String?): String? {
+        if (jsonText.isNullOrBlank()) return null
+        val root = catching { org.json.JSONObject(jsonText) }.getOrNull() ?: return null
+        if (!root.optBoolean("ready", false)) return null
+        return root.optString("url").trim().takeIf { it.startsWith("http") }
+    }
+
+    internal fun atlanticSourceUrl(jsonText: String?): String? {
+        if (jsonText.isNullOrBlank()) return null
+        val root = catching { org.json.JSONObject(jsonText) }.getOrNull() ?: return null
+        val sources = root.optJSONObject("sources")
+        val fromSources = sources?.names()?.let { names ->
+            (0 until names.length()).firstNotNullOfOrNull { i ->
+                sources.optJSONObject(names.optString(i))
+                    ?.optString("url")
+                    ?.trim()
+                    ?.takeIf { it.isNotEmpty() }
+            }
+        }
+        return fromSources ?: root.optString("url").trim().takeIf { it.startsWith("ms_") }
+    }
+
+    internal fun atlanticDecryptSource(
+        encoded: String?,
+        keyHex: String = ATLANTIC_FALLBACK_KEY_HEX,
+    ): String? {
+        val payload = encoded?.trim()?.removePrefix("ms_")?.takeIf { it.isNotEmpty() } ?: return null
+        val bytes = catching { hexToBytes(payload) }.getOrNull() ?: return null
+        if (bytes.size <= 28) return null
+        return catching {
+            val cipher = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(
+                javax.crypto.Cipher.DECRYPT_MODE,
+                javax.crypto.spec.SecretKeySpec(hexToBytes(keyHex), "AES"),
+                javax.crypto.spec.GCMParameterSpec(128, bytes.copyOfRange(0, 12)),
+            )
+            String(
+                cipher.doFinal(bytes.copyOfRange(12, bytes.size)),
+                Charsets.UTF_8,
+            ).trim().takeIf { it.startsWith("http") }
+        }.getOrNull()
+    }
+
+    private suspend fun resolveAtlantic(
+        spec: ServerSpec,
+        tmdbId: Int,
+        type: String,
+        season: Int,
+        episode: Int,
+        embedUrl: String,
+    ): List<RawStream> {
+        val headers = mapOf("Referer" to ATLANTIC_REFERER, "User-Agent" to HttpKit.userAgent)
+
+        suspend fun masterStream(url: String, stage: String): RawStream? {
+            val text = withTimeoutOrNull(8_000L) {
+                catching { app.get(url, timeout = 8, headers = headers).text }.getOrNull()
+            }
+            val master = ManifestKit.parseMaster(text, url) ?: run {
+                Log.w("IndStream", "${spec.id}: $stage master unreadable")
+                return null
+            }
+            val height = ManifestKit.bestHeight(master.variants)
+            if (!passesQualityFloor(isAdaptive = true, height = height)) {
+                Log.i("IndStream", "${spec.id}: $stage peak ${ManifestKit.qualityLabel(height)} below floor")
+                return null
+            }
+            Log.d("IndStream", "${spec.id}: $stage ${ManifestKit.qualityLabel(height)} (${master.variants.size} variants)")
+            return RawStream(
+                serverId = spec.id,
+                serverName = spec.name,
+                url = url,
+                isM3u8 = true,
+                referer = ATLANTIC_REFERER,
+                qualityHint = height,
+                audioLabel = ManifestKit.audioLanguageLabel(master).orEmpty(),
+                inlineManifest = text,
+                extraHeaders = headers,
+            )
+        }
+
+        val primaryJson = withTimeoutOrNull(8_000L) {
+            catching { app.get(embedUrl, timeout = 8, headers = headers).text }.getOrNull()
+        }
+        atlanticCdnUrl(primaryJson)?.let { primary ->
+            masterStream(primary, "primary")?.let { return listOf(it) }
+        }
+
+        val fallbackUrl = if (type == "movie") {
+            "https://stream.hls.lol/moscow?tmdbId=$tmdbId&type=movie"
+        } else {
+            "https://stream.hls.lol/moscow?tmdbId=$tmdbId&type=tv&seasonId=$season&episodeId=$episode"
+        }
+        val fallbackJson = withTimeoutOrNull(8_000L) {
+            catching { app.get(fallbackUrl, timeout = 8, headers = headers).text }.getOrNull()
+        }
+        val resolved = atlanticDecryptSource(atlanticSourceUrl(fallbackJson))
+        if (resolved != null) masterStream(resolved, "fallback")?.let { return listOf(it) }
+        return emptyList()
+    }
+
     private suspend fun resolveVidlink(
         spec: ServerSpec,
         id: String,
@@ -1117,8 +1297,7 @@ object StreamEngine {
         httpCode != 429 && (httpCode == 401 || httpCode == 403 || jsonCode != "0")
 
     internal fun movieboxSeasonEnd(rawTitle: String): Int? {
-        val m = Regex("""\s+S(\d+)(?:\s*-\s*S?(\d+))?$""", RegexOption.IGNORE_CASE)
-            .find(rawTitle) ?: return null
+        val m = MOVIEBOX_SEASON_END.find(rawTitle) ?: return null
         return m.groupValues[2].toIntOrNull() ?: m.groupValues[1].toIntOrNull()
     }
 
@@ -1204,7 +1383,6 @@ object StreamEngine {
     private suspend fun resolveMovieBox(
         spec: ServerSpec,
         tmdbId: Int?,
-        imdbId: String?,
         type: String,
         season: Int,
         episode: Int,
@@ -1235,7 +1413,6 @@ object StreamEngine {
         }
         var baseHeaders: Map<String, String> = emptyMap()
         var searchItems: org.json.JSONArray? = null
-        var throttleRetried = false
         val mbStart = System.currentTimeMillis()
         for (attempt in 0 until 2) {
             val budgetSec = if (attempt == 0) 15L else 12L
@@ -1275,27 +1452,22 @@ object StreamEngine {
             }
             val jsonCode = root?.optString("code", "")?.takeIf { it.isNotBlank() } ?: "0"
             if (resp.code == 429) {
-                if (!throttleRetried) {
-                    throttleRetried = true
-                    Log.w("MovieBox", "search throttled (HTTP 429) — retrying once after delay")
-                    delay(MOVIEBOX_THROTTLE_RETRY_MS)
-                    val retryItems = withTimeoutOrNull(10_000L) {
-                        catching {
-                            app.post("$base/wefeed-h5api-bff/subject/search", timeout = 10, headers = baseHeaders,
-                                json = mapOf(
-                                    "keyword" to title, "page" to 1, "perPage" to 24,
-                                    "subjectType" to subjectType,
-                                ))
-                        }.getOrNull()
-                    }?.let { r -> catching { org.json.JSONObject(r.text) }.getOrNull() }
-                        ?.let { unwrapData(it).optJSONArray("items") }
-                    if (retryItems != null && retryItems.length() > 0) {
-                        searchItems = retryItems
-                        break
-                    }
-                    Log.w("MovieBox", "throttle retry answered with no items")
+                Log.w("MovieBox", "search throttled (HTTP 429) — retrying once after delay")
+                delay(MOVIEBOX_THROTTLE_RETRY_MS)
+                val retryItems = withTimeoutOrNull(10_000L) {
+                    catching {
+                        app.post("$base/wefeed-h5api-bff/subject/search", timeout = 10, headers = baseHeaders,
+                            json = mapOf(
+                                "keyword" to title, "page" to 1, "perPage" to 24,
+                                "subjectType" to subjectType,
+                            ))
+                    }.getOrNull()
+                }?.let { r -> catching { org.json.JSONObject(r.text) }.getOrNull() }
+                    ?.let { unwrapData(it).optJSONArray("items") }
+                if (retryItems != null && retryItems.length() > 0) {
+                    searchItems = retryItems
                 } else {
-                    Log.w("MovieBox", "search throttled (HTTP 429)")
+                    Log.w("MovieBox", "throttle retry answered with no items")
                 }
                 break
             }
@@ -1306,14 +1478,12 @@ object StreamEngine {
             }
             if (attempt > 0) break
             Log.w("MovieBox", "search rejected (HTTP ${resp.code}, code=$jsonCode)" +
-                " � retrying once with a fresh bearer token")
+                " - retrying once with a fresh bearer token")
             movieBoxToken = null
         }
         val items = searchItems ?: run { Log.w("MovieBox", "no search items"); return emptyList() }
 
-        val seasonSuffix = Regex("""\s+S\d+(?:\s*-\s*S?\d+)?$""", RegexOption.IGNORE_CASE)
-        val bracketGroups = Regex("""[\[(]([^\])]+)[\])]""", RegexOption.IGNORE_CASE)
-        val norm: (String) -> String = { t -> t.lowercase().replace(Regex("""[^a-z0-9]"""), "") }
+        val norm: (String) -> String = { t -> t.lowercase().replace(NON_ALNUM_LOWER, "") }
         val titleNorm = norm(title)
         val subjects = mutableListOf<SubjectRef>()
         for (i in 0 until items.length()) {
@@ -1321,13 +1491,13 @@ object StreamEngine {
             val id = item.optString("subjectId").takeIf { it.isNotBlank() } ?: continue
             val rawTitle = item.optString("title", "")
             val seasonEnd = movieboxSeasonEnd(rawTitle)
-            val audioTag = bracketGroups.findAll(rawTitle)
+            val audioTag = MOVIEBOX_BRACKETS.findAll(rawTitle)
                 .map { it.groupValues[1] }
                 .firstOrNull { it.any { c -> c.isLetter() } && !it.any { c -> c.isDigit() } }
             val clean = rawTitle
-                .let { seasonSuffix.replace(it, "") }
-                .replace(Regex("""\s*[\(\[][^)\]]*[\)\]]"""), "")
-                .replace(Regex("""\s*\d{4}"""), "")
+                .replace(MOVIEBOX_SEASON_SUFFIX, "")
+                .replace(MOVIEBOX_BRACKET_REMOVE, "")
+                .replace(MOVIEBOX_YEAR, "")
                 .trim()
             val cleanNorm = norm(clean)
             val matched = cleanNorm == titleNorm ||
@@ -1411,9 +1581,11 @@ object StreamEngine {
                             var isDashEntry = dash
                             if (dash) {
                                 val manifest = dashManifestFromPolicy(sign)
-                                if (manifest != null) finalUrl = manifest
-                                else {
-                                    if (isMovieboxNoticeUrl(rawUrl)) continue
+                                if (manifest != null) {
+                                    finalUrl = manifest
+                                } else if (!rawUrl.contains(".mpd", ignoreCase = true) ||
+                                    isMovieboxNoticeUrl(rawUrl)
+                                ) {
                                     continue
                                 }
                                 isDashEntry = true
@@ -1467,7 +1639,6 @@ object StreamEngine {
 
     private suspend fun resolveVaplayer(
         spec: ServerSpec,
-        tmdbId: Int?,
         imdbId: String?,
         type: String,
         season: Int,
@@ -1498,8 +1669,7 @@ object StreamEngine {
         val data = root.optJSONObject("data") ?: return emptyList()
         val urls = data.optJSONArray("stream_urls") ?: return emptyList()
         val fileName = data.optString("file_name", "")
-        val fileNameHeight = Regex("""\[(\d{3,4})p\]""", RegexOption.IGNORE_CASE)
-            .find(fileName)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+        val fileNameHeight = FILE_NAME_HEIGHT.find(fileName)?.groupValues?.get(1)?.toIntOrNull() ?: 0
 
         val out = mutableListOf<RawStream>()
         for (i in 0 until urls.length()) {
@@ -1765,11 +1935,12 @@ object StreamEngine {
             if (current != null && System.currentTimeMillis() - apiKeyAt < API_KEY_TTL_MS) return@withLock current
             val fresh = withTimeoutOrNull(8_000L) {
                 catching {
-                    app.get(
+                    val body = app.get(
                         "$API_BASE/v0.1/system/getSecurityKey/1?channel=$API_CHANNEL&clientType=$API_CLIENT&lang=$API_LANG",
                         timeout = 8, headers = apiRequestHeaders,
                     ).text
-                }.getOrNull()?.let { org.json.JSONObject(it).optString("data").takeIf { value -> value.isNotBlank() } }
+                    org.json.JSONObject(body).optString("data").takeIf { value -> value.isNotBlank() }
+                }.getOrNull()
             }
             if (fresh != null) {
                 apiKey = fresh
@@ -1885,13 +2056,13 @@ object StreamEngine {
 
     internal fun apiQualityLabel(description: String?, resNum: Int): String {
         if (!description.isNullOrBlank()) {
-            Regex("""(\d{3,4})\s*p""", RegexOption.IGNORE_CASE).find(description)?.let {
+            API_HEIGHT.find(description)?.let {
                 val height = it.groupValues[1].toIntOrNull()
-                if (height != null && height in setOf(240, 360, 480, 540, 576, 720, 1080, 1440, 2160)) {
+                if (height != null && height in API_HEIGHTS) {
                     return "${height}p"
                 }
             }
-            if (Regex("""\b(4k|uhd)\b""", RegexOption.IGNORE_CASE).containsMatchIn(description)) return "4K"
+            if (API_4K.containsMatchIn(description)) return "4K"
         }
         return when (resNum) { 1 -> "480p"; 2 -> "720p"; 3 -> "1080p"; 4 -> "4K"; else -> "" }
     }
@@ -2060,11 +2231,11 @@ object StreamEngine {
     internal fun releaseLanguageOf(text: String?): String {
         val u = (text ?: "").uppercase()
         return when {
-            Regex("""\bHINDI\b""").containsMatchIn(u) -> "Hindi"
-            Regex("""\bTAMIL\b""").containsMatchIn(u) -> "Tamil"
-            Regex("""\bTELUGU\b""").containsMatchIn(u) -> "Telugu"
-            Regex("""\b(MULTI|DUAL|DUBBED)\b""").containsMatchIn(u) -> "Multi"
-            Regex("""\b(ENGLISH|ENG)\b""").containsMatchIn(u) -> "English"
+            HINDI_WORD.containsMatchIn(u) -> "Hindi"
+            TAMIL_WORD.containsMatchIn(u) -> "Tamil"
+            TELUGU_WORD.containsMatchIn(u) -> "Telugu"
+            MULTI_WORD.containsMatchIn(u) -> "Multi"
+            ENGLISH_WORD.containsMatchIn(u) -> "English"
             else -> ""
         }
     }
@@ -2072,7 +2243,7 @@ object StreamEngine {
     internal fun releaseHeightOf(text: String?): Int {
         val u = (text ?: "").uppercase()
         return when {
-            u.contains("2160P") || Regex("""\b4K\b""").containsMatchIn(u) -> 2160
+            u.contains("2160P") || FOUR_K_WORD.containsMatchIn(u) -> 2160
             u.contains("1080P") -> 1080
             u.contains("720P") -> 720
             u.contains("480P") -> 480
@@ -2081,18 +2252,17 @@ object StreamEngine {
     }
 
     internal fun hubParseCards(html: String, base: String): List<Pair<String, String>> {
-        val re = Regex("""<a\s+href="([^"]+)"\s+class="movie-card"\s+aria-label="([^"]+)"""", RegexOption.IGNORE_CASE)
-        return re.findAll(html).mapNotNull { m ->
-            val href = m.groupValues[1]
-            val title = m.groupValues[2].removeSuffix(" details").trim()
-            if (href.isBlank() || title.isBlank()) return@mapNotNull null
-            val url = when {
-                href.startsWith("http") -> href
-                href.startsWith("/") -> base.trimEnd('/') + href
-                else -> base.trimEnd('/') + "/" + href
-            }
-            url to title
-        }.toList()
+        val doc = Jsoup.parse(html, base)
+        val out = LinkedHashMap<String, String>()
+        doc.select("a.movie-card").forEach { a ->
+            val href = a.attr("abs:href").trim()
+            if (!href.startsWith("http")) return@forEach
+            val title = a.attr("aria-label").removeSuffix(" details").trim()
+                .ifBlank { a.selectFirst("img")?.attr("alt")?.trim().orEmpty() }
+                .ifBlank { a.text().trim() }
+            if (title.isNotBlank()) out.putIfAbsent(href, title)
+        }
+        return out.map { it.key to it.value }
     }
 
     internal fun titleHits(html: String, base: String): List<Pair<String, String>> {
@@ -2104,7 +2274,7 @@ object StreamEngine {
         ).forEach { a ->
             val href = a.attr("abs:href").trim()
             if (!href.startsWith("http")) return@forEach
-            if (Regex("""/(category|tag|author|page|feed|search)/""", RegexOption.IGNORE_CASE).containsMatchIn(href)) return@forEach
+            if (NON_CONTENT_PATH.containsMatchIn(href)) return@forEach
             val title = a.text().trim().ifBlank { a.attr("title").trim() }
             if (title.isNotBlank()) out.putIfAbsent(href, title)
         }
@@ -2112,7 +2282,7 @@ object StreamEngine {
             val a = p.parent() ?: return@forEach
             val href = a.attr("abs:href").trim()
             if (!href.startsWith("http")) return@forEach
-            if (Regex("""/(category|tag|author|page|feed|search)/""", RegexOption.IGNORE_CASE).containsMatchIn(href)) return@forEach
+            if (NON_CONTENT_PATH.containsMatchIn(href)) return@forEach
             val title = a.text().trim()
             if (title.isNotBlank()) out.putIfAbsent(href, title)
         }
@@ -2124,7 +2294,7 @@ object StreamEngine {
             val href = a.attr("abs:href").trim()
             val title = a.attr("aria-label").trim()
             if (!href.startsWith("http") || title.isBlank()) return@mapNotNull null
-            if (Regex("""/(category|tag|author|page|search)/""", RegexOption.IGNORE_CASE).containsMatchIn(href)) return@mapNotNull null
+            if (NON_CONTENT_PATH_BASIC.containsMatchIn(href)) return@mapNotNull null
             href to title
         }.distinctBy { it.first }
 
@@ -2138,7 +2308,7 @@ object StreamEngine {
             var heading = ""
             while (node != null && heading.isBlank()) {
                 val prev = node.previousElementSibling()
-                if (prev != null && prev.tagName().matches(Regex("h[1-6]"))) heading = prev.text().trim()
+                if (prev != null && HEADING_TAG.matches(prev.tagName())) heading = prev.text().trim()
                 node = node.parent()
             }
             val low = label.lowercase()
@@ -2154,10 +2324,9 @@ object StreamEngine {
     }
 
     internal fun fileHostLinks(html: String, base: String): List<Pair<String, String>> {
-        val hostRe = Regex("""(?i)(hubcloud|hubdrive|gdflix|gdshine|hubcdn|pixeldrain|workers\.dev/0:|\.mkv|\.mp4|\.m3u8)""")
         return Jsoup.parse(html, base).select("a[href]").mapNotNull { a ->
             val href = a.attr("abs:href").trim()
-            if (!href.startsWith("http") || !hostRe.containsMatchIn(href)) return@mapNotNull null
+            if (!href.startsWith("http") || !FILE_HOST_RE.containsMatchIn(href)) return@mapNotNull null
             if (isArchiveUrl(href) || href.contains(".php?", true) || href.contains("/admin", true) ||
                 href.contains("pixel.", true) || href.contains("/tg/", true) || href.contains("t.me", true)
             ) return@mapNotNull null
@@ -2166,7 +2335,7 @@ object StreamEngine {
     }
 
     internal fun qualityText(text: String): String {
-        val value = Regex("""(?i)\b(2160p|1440p|1080p|720p|480p|4k)\b""").find(text)?.value ?: return ""
+        val value = QUALITY_TEXT_RE.find(text)?.value ?: return ""
         return if (value.equals("4k", true)) "4K" else value.lowercase()
     }
 
@@ -2190,9 +2359,8 @@ object StreamEngine {
 
     internal fun hubPostYearOk(html: String, year: String?): Boolean {
         if (year.isNullOrBlank()) return true
-        val title = Regex("""<meta\s+property="og:title"\s+content="([^"]+)"""", RegexOption.IGNORE_CASE)
-            .find(html)?.groupValues?.get(1)
-            ?: Regex("""<title>([^<]+)</title>""", RegexOption.IGNORE_CASE).find(html)?.groupValues?.get(1)
+        val title = OG_TITLE.find(html)?.groupValues?.get(1)
+            ?: HTML_TITLE.find(html)?.groupValues?.get(1)
             ?: return true
         return title.contains(year)
     }
@@ -2206,7 +2374,6 @@ object StreamEngine {
 
     internal fun hub4kItems(html: String): List<HubItem> {
         val root = Jsoup.parse(html)
-        val langRe = Regex("""(?i)\b(hindi|english|tamil|telugu|malayalam|kannada|bengali|marathi|punjabi|dual|multi)\b""")
         return root.select("div.download-item, div.episode-download-item").mapNotNull { item ->
             val header = item.selectFirst("div.download-header")
             val title = (header?.selectFirst("div.flex-1, .font-semibold")
@@ -2218,12 +2385,12 @@ object StreamEngine {
             val size = badges.firstOrNull { normalizeSizeToken(it).isNotBlank() }
                 ?.let { normalizeSizeToken(it) }.orEmpty()
             val langs = (badges + item.select(".badge").map { it.text().trim() })
-                .firstOrNull { langRe.containsMatchIn(it) }
+                .firstOrNull { HUB_LANG_RE.containsMatchIn(it) }
                 .orEmpty()
             val gateways = item.select("a[href]").mapNotNull { a ->
                 val href = a.attr("href").trim()
                 if (!href.startsWith("http")) return@mapNotNull null
-                if (!Regex("""greenmotors|hubcloud|hubdrive""", RegexOption.IGNORE_CASE).containsMatchIn(href)) {
+                if (!HUB_GATEWAY_HOST.containsMatchIn(href)) {
                     return@mapNotNull null
                 }
                 href to a.text().contains("hubcloud", ignoreCase = true)
@@ -2234,8 +2401,7 @@ object StreamEngine {
     }
 
     internal fun normalizeSizeToken(text: String): String =
-        Regex("""\d+(?:\.\d+)?\s?(?:GB|MB)""", RegexOption.IGNORE_CASE).find(text)
-            ?.value?.replace(" ", "")?.uppercase().orEmpty()
+        SIZE_TOKEN.find(text)?.value?.replace(" ", "")?.uppercase().orEmpty()
 
     internal fun rot13(text: String): String = buildString {
         for (c in text) when {
@@ -2252,14 +2418,28 @@ object StreamEngine {
         return catching { String(Base64Kit.decode(padded), Charsets.UTF_8) }.getOrNull()
     }
 
+    private val ROTATOR_BLOB = Regex("""'o'\s*,\s*'([A-Za-z0-9+/=]{16,})[^']*'""")
+    private val ROTATOR_WP_BLOB = Regex("""ck\('_wp_http_\d+','([^']+)'""")
+    private val ROTATOR_O_TOKEN = Regex("\"o\"\\s*:\\s*\"([A-Za-z0-9+/=]{10,})")
+    private val JS_LOCATION = Regex(
+        """(?:window\.)?location(?:\.href)?\s*=\s*['"](https?://[^'"]+)['"]""",
+        RegexOption.IGNORE_CASE,
+    )
+    private val META_REFRESH = Regex(
+        """<meta\s+http-equiv=["']refresh["'][^>]*content=["'][^;]*;\s*url=([^"']+)""",
+        RegexOption.IGNORE_CASE,
+    )
+    private val STORED_REDIRECT = Regex("""s\('o','([A-Za-z0-9+/=]+)'""")
+    private val DIRECT_URL = Regex("""https?://[^\s"'<>\\]+""")
+
     internal fun rotatorTarget(pageHtml: String): String? {
-        val blob = Regex("""'o'\s*,\s*'([A-Za-z0-9+/=]{16,})[^']*'""").find(pageHtml)?.groupValues?.get(1)
-            ?: Regex("""ck\('_wp_http_\d+','([^']+)'""").find(pageHtml)?.groupValues?.get(1)
+        val blob = ROTATOR_BLOB.find(pageHtml)?.groupValues?.get(1)
+            ?: ROTATOR_WP_BLOB.find(pageHtml)?.groupValues?.get(1)
             ?: return null
         val l1 = b64Text(blob) ?: return null
         val l2 = b64Text(l1) ?: return null
         val jsonText = b64Text(rot13(l2)) ?: return null
-        val oToken = Regex("\"o\"\\s*:\\s*\"([A-Za-z0-9+/=]{10,})").find(jsonText)?.groupValues?.get(1)
+        val oToken = ROTATOR_O_TOKEN.find(jsonText)?.groupValues?.get(1)
         val wrapped = catching { org.json.JSONObject(jsonText) }.getOrNull()
             ?: oToken?.takeIf { b64Text(it)?.startsWith("http") == true }
                 ?.let { org.json.JSONObject("{\"o\":\"$it\"}") }
@@ -2268,35 +2448,48 @@ object StreamEngine {
         return url.takeIf { it.startsWith("http") }
     }
 
+    /** Best-effort extraction of a JS/meta redirect target from gateway pages. */
+    internal fun jsRedirectTarget(pageHtml: String): String? {
+        JS_LOCATION.find(pageHtml)?.groupValues?.get(1)?.let { return it }
+        META_REFRESH.find(pageHtml)?.groupValues?.get(1)?.let { return it.trim() }
+        val stored = STORED_REDIRECT.find(pageHtml)?.groupValues?.get(1) ?: return null
+        var payload: String? = stored
+        repeat(6) {
+            val decoded = payload?.let { b64Text(it) } ?: return null
+            DIRECT_URL.find(decoded)?.value?.let { return it }
+            payload = decoded
+        }
+        return null
+    }
+
     internal fun hubLangOf(languages: String): String {
         val s = languages.lowercase()
         val hasHindi = s.contains("hindi")
-        val hasOther = Regex("""english|dual|multi|tamil|telugu|malayalam|kannada|japanese|korean|chinese""").containsMatchIn(s)
+        val hasOther = HUB_OTHER_LANG.containsMatchIn(s)
         return when {
-            s.contains("hindi") && hasOther -> "Multi"
-            s.contains("hindi") -> "Hindi"
-            Regex("""\b(tamil|telugu|malayalam|kannada|bengali|marathi|punjabi)\b""").containsMatchIn(s) ->
+            hasHindi && hasOther -> "Multi"
+            hasHindi -> "Hindi"
+            INDIAN_LANG_WORD.containsMatchIn(s) ->
                 releaseLanguageOf(languages).ifBlank { "Multi" }
             else -> releaseLanguageOf(languages).ifBlank { "" }
         }
     }
 
-    private fun isArchiveUrl(url: String): Boolean =
-        Regex("""\.(?:zip|rar|7z|tar|gz)(?:[?#]|$)""", RegexOption.IGNORE_CASE).containsMatchIn(url)
+    private fun isArchiveUrl(url: String): Boolean = ARCHIVE_URL.containsMatchIn(url)
 
     internal fun hubFileButtons(html: String): List<Pair<String, String>> {
         val doc = Jsoup.parse(html)
         val headQ = releaseHeightOf(doc.selectFirst(".card-header")?.text())
         val out = mutableListOf<Pair<String, String>>()
         for (a in doc.select("a[href]")) {
-            if (!Regex("""\bbtn\b""").containsMatchIn(a.className())) continue
+            if (!BTN_CLASS.containsMatchIn(a.className())) continue
             var url = a.attr("href").trim()
             if (!url.startsWith("http")) continue
             if (isArchiveUrl(url)) continue
             if (url.contains("facebook.") || url.contains("twitter.") || url.contains("t.me") ||
                 url.contains("/tg/") || url.contains("pixel.") || url.contains("/admin")
             ) continue
-            url = Regex("""pixeldrain\.[a-z]+/u/([a-zA-Z0-9]+)""").find(url)?.let {
+            url = PIXELDRAIN_SHORT.find(url)?.let {
                 url.replace("/u/${it.groupValues[1]}", "/api/file/${it.groupValues[1]}")
             } ?: url
             val q = releaseHeightOf(a.text()).takeIf { it > 0 } ?: headQ
@@ -2305,19 +2498,20 @@ object StreamEngine {
         return out.distinctBy { it.first }
     }
 
+    private val REURL_VAR = Regex("""var\s+reurl\s*=\s*"([^"]+)"""")
+    private val HUB_DRIVE_NEXT = Regex("""https?://hubcloud\.[a-z.]+/drive/[A-Za-z0-9]+""")
+
     private suspend fun hubDriveFiles(driveUrl: String, referer: String): List<Pair<String, String>> {
         if (driveUrl.contains("hubdrive.", ignoreCase = true) || driveUrl.contains("hubcdn.", ignoreCase = true)) {
             val index = fetchText(driveUrl, referer) ?: return emptyList()
-            val reurl = Regex("""var\s+reurl\s*=\s*"([^"]+)"""")
-                .find(index)?.groupValues?.get(1)
+            val reurl = REURL_VAR.find(index)?.groupValues?.get(1)
             val direct = reurl?.substringAfter("r=", "")
                 ?.replace('-', '+')?.replace('_', '/')
                 ?.let { b64Text(it) }
                 ?.substringAfter("link=", "")
                 ?.takeIf { it.startsWith("http") }
             if (direct != null) return listOf(direct to qualityText(direct))
-            val next = Regex("""https?://hubcloud\.[a-z.]+/drive/[A-Za-z0-9]+""")
-                .find(index)?.value ?: return emptyList()
+            val next = HUB_DRIVE_NEXT.find(index)?.value ?: return emptyList()
             return hubDriveFiles(next, driveUrl)
         }
         val healed = when {
@@ -2340,9 +2534,9 @@ object StreamEngine {
         }
         if (drive.isBlank()) return emptyList()
         googleVideoLink(drive, finalUrl)?.let { return listOf(it to qualityText(drive)) }
-        val tokenUrl = Regex("""https?://[^"' ]*?(?:hubcloud|hubdrive)\.php\?[^"' ]+""").find(drive)?.value
-            ?: Regex("""(?:hubcloud|hubdrive)\.php\?[^"' ]+""").find(drive)?.value?.let { tokenHref ->
-                val origin = Regex("""^https?://[^/]+""").find(url)?.value ?: return emptyList()
+        val tokenUrl = TOKEN_URL_ABS.find(drive)?.value
+            ?: TOKEN_URL_REL.find(drive)?.value?.let { tokenHref ->
+                val origin = ORIGIN.find(url)?.value ?: return emptyList()
                 "$origin/$tokenHref"
             } ?: return emptyList()
         val page = withTimeoutOrNull(10_000L) {
@@ -2352,8 +2546,7 @@ object StreamEngine {
     }
 
     private fun googleVideoLink(html: String, finalUrl: String): String? {
-        val raw = Regex("""(https?://video-downloads\.googleusercontent\.com/[^"'\s<>]+)""")
-            .find(html)?.groupValues?.get(1)
+        val raw = GOOGLE_VIDEO.find(html)?.groupValues?.get(1)
             ?: finalUrl.substringAfter("dl.php?link=", "")
                 .takeIf { it.startsWith("http") }
             ?: return null
@@ -2373,8 +2566,7 @@ object StreamEngine {
     }
 
     internal fun pixeldrainDirect(url: String): String? {
-        val m = Regex("""(?i)(https?://pixeldrain\.[a-z.]+)/(?:api/file|u)/([A-Za-z0-9_\-]+)""")
-            .find(url) ?: return null
+        val m = PIXELDRAIN_PAGE.find(url) ?: return null
         return "${m.groupValues[1]}/api/file/${m.groupValues[2]}"
     }
 
@@ -2407,9 +2599,8 @@ object StreamEngine {
     }
 
     private suspend fun gdshineStream(host: String, referer: String): Pair<String, String>? {
-        val shortId = Regex("""gdshine\.[a-z.]+/s/([A-Za-z0-9_\-]+)""", RegexOption.IGNORE_CASE)
-            .find(host)?.groupValues?.get(1) ?: return null
-        val origin = Regex("""^https?://[^/]+""").find(host)?.value ?: return null
+        val shortId = GDSHINE_SHORT.find(host)?.groupValues?.get(1) ?: return null
+        val origin = ORIGIN.find(host)?.value ?: return null
         val info = fetchText("$origin/api/files/s/$shortId", referer) ?: return null
         val id = catching { org.json.JSONObject(info) }.getOrNull()
             ?.optJSONObject("data")?.optString("id").orEmpty()
@@ -2445,7 +2636,7 @@ object StreamEngine {
                 )
                 continue
             }
-            if (Regex("""(?i)\.(?:mkv|mp4|m3u8)(?:[?#]|$)""").containsMatchIn(host)) {
+            if (VIDEO_EXT.containsMatchIn(host)) {
                 out += rawFile(spec, label.ifBlank { hostLabel }, host, referer, language, size)
                 continue
             }
@@ -2467,7 +2658,7 @@ object StreamEngine {
                 .containsMatchIn(text)
         ) return true
         if (Regex("""(?i)\b$season\s*x\s*$ep\b""").containsMatchIn(text)) return true
-        val taggedSeason = Regex("""(?i)\bS\d{1,2}\b|\bSeason\s*\d""").containsMatchIn(text)
+        val taggedSeason = TAGGED_SEASON.containsMatchIn(text)
         return !taggedSeason && Regex("""(?i)\b(?:EP?|EPISODE)[\s._-]*$ep\b""")
             .containsMatchIn(text)
     }
@@ -2490,7 +2681,7 @@ object StreamEngine {
 
     private suspend fun healHost(url: String, key: String): String {
         val live = Domains.base(key) ?: return url
-        val old = Regex("""^https?://[^/]+""").find(url)?.value ?: return url
+        val old = ORIGIN.find(url)?.value ?: return url
         val oldHost = old.substringAfter("://").substringBefore('/')
         val liveHost = live.substringAfter("://").substringBefore('/')
         if (oldHost.equals(liveHost, ignoreCase = true)) return url
@@ -2534,7 +2725,6 @@ object StreamEngine {
             base = f.first
             searchHtml = f.second
         }
-        if (base.isBlank()) throw CleanMissException("no search answer")
         val cards = hubParseCards(searchHtml, base)
         if (cards.isEmpty()) throw CleanMissException("no search hits")
         val ranked = cards.map { it to TitleMatch.titleDistance(title, it.second) }
@@ -2561,8 +2751,12 @@ object StreamEngine {
                     val gwPage = withTimeoutOrNull(10_000L) {
                         catching { app.get(gateway, timeout = 10, headers = okHeaders(card.first)).text }.getOrNull()
                     } ?: continue
-                    var driveUrl = rotatorTarget(gwPage)?.let { relUrl(gateway, it) } ?: continue
-                    if (driveUrl.contains("hubdrive.", ignoreCase = true)) {
+                    var resolvedDrive: String? = null
+                    for (target in listOf(rotatorTarget(gwPage), jsRedirectTarget(gwPage))) {
+                        if (target != null) { resolvedDrive = relUrl(gateway, target); break }
+                    }
+                    val driveUrl = resolvedDrive ?: continue
+                    val finalDrive = if (driveUrl.contains("hubdrive.", ignoreCase = true)) {
                         val inner = withTimeoutOrNull(8_000L) {
                             catching { app.get(driveUrl, timeout = 8, headers = okHeaders(card.first)).text }.getOrNull()
                         }?.let { page ->
@@ -2570,15 +2764,12 @@ object StreamEngine {
                                 a.attr("abs:href").contains("hubcloud", ignoreCase = true)
                             }?.attr("abs:href")
                         }
-                        driveUrl = inner?.takeIf { it.startsWith("http") } ?: continue
-                    }
-                    val referer = Regex("""^https?://[^/]+""").find(driveUrl)?.value ?: "https://hubcloud.ist/"
-                    val files = hubDriveFiles(driveUrl, card.first)
+                        inner?.takeIf { it.startsWith("http") } ?: continue
+                    } else driveUrl
+                    val referer = ORIGIN.find(finalDrive)?.value ?: "https://hubcloud.ist/"
+                    val files = hubDriveFiles(finalDrive, card.first)
                     for ((url, q) in files) {
-                        val qText = q.ifBlank {
-                            Regex("""\b(2160p|1440p|1080p|720p|480p)\b""", RegexOption.IGNORE_CASE)
-                                .find(item.title)?.value.orEmpty()
-                        }
+                        val qText = q.ifBlank { HUB_QUALITY.find(item.title)?.value.orEmpty() }
                         out += RawStream(
                             spec.id, "${spec.name} $qText".trim(), url,
                             url.contains(".m3u8", ignoreCase = true), referer,
@@ -2611,6 +2802,8 @@ object StreamEngine {
         return title to meta?.year?.take(4)
     }
 
+    private val LINK_HOST_RE = Regex("""links\.joshapp\.blog|mvlink\.blog""", RegexOption.IGNORE_CASE)
+
     private suspend fun resolveLinkIndex(
         spec: ServerSpec,
         tmdbId: Int,
@@ -2629,16 +2822,12 @@ object StreamEngine {
         for (postUrl in posts) {
             val post = fetchText(postUrl, base) ?: continue
             val links = episodeOrSeason(
-                headingAnchorHits(
-                    post, postUrl,
-                    Regex("""links\.joshapp\.blog|mvlink\.blog""", RegexOption.IGNORE_CASE),
-                ),
+                headingAnchorHits(post, postUrl, LINK_HOST_RE),
                 { "${it.second} ${it.first}" }, type, season, episode,
             ).take(4)
             for ((href, label) in links) {
                 val linkPage = fetchText(href, postUrl) ?: continue
-                val name = Regex("""<title>([^<]+)</title>""", RegexOption.IGNORE_CASE)
-                    .find(linkPage)?.groupValues?.get(1)?.trim().orEmpty()
+                val name = HTML_TITLE.find(linkPage)?.groupValues?.get(1)?.trim().orEmpty()
                 val doc = Jsoup.parse(linkPage, href)
                 val boldb = doc.select("a[href]")
                     .firstOrNull { it.attr("href").contains("boldb.site/?id=") }
@@ -2689,7 +2878,7 @@ object StreamEngine {
             if (!hubPostYearOk(post, year)) continue
             val anchors = Jsoup.parse(post, postUrl).select("a[href]").mapNotNull { a ->
                 val href = a.attr("abs:href").trim()
-                if (!Regex("""greenmotors|hubcdn|hubdrive""", RegexOption.IGNORE_CASE).containsMatchIn(href)) {
+                if (!HUB_GATEWAY_HOST_ALT.containsMatchIn(href)) {
                     return@mapNotNull null
                 }
                 href to a.text().trim()
@@ -2744,7 +2933,7 @@ object StreamEngine {
             val language = releaseLanguageOf(post)
             for ((href, label) in links) {
                 val token = Regex("""from_ac=([^&]+)""").find(href)?.groupValues?.get(1) ?: continue
-                val apiBase = Regex("""^https?://[^/]+""").find(href)?.value
+                val apiBase = ORIGIN.find(href)?.value
                     ?: Domains.base("hubcloud") ?: "https://hubcloud.ist"
                 val quality = qualityText(label)
                 val queries = listOf(
@@ -2845,7 +3034,7 @@ object StreamEngine {
 
     private suspend fun fslGet(url: String, timeoutSec: Long = 12): Pair<String, String>? {
         val res = withTimeoutOrNull(timeoutSec * 1000L) {
-            catching { app.get(url, timeout = timeoutSec * 1000L, headers = okHeaders(url)) }.getOrNull()
+            catching { app.get(url, timeout = timeoutSec, headers = okHeaders(url)) }.getOrNull()
         } ?: return null
         return res.text to res.url
     }
@@ -2854,7 +3043,7 @@ object StreamEngine {
         val (html0, url0) = fslGet(seed, 10)
             ?: (bootstrap?.let { fslGet(it, 10) } ?: return null)
         if (!fslIsLanding(html0)) return html0 to url0
-        val origin = Regex("""^https?://[^/]+""").find(url0)?.value ?: return null
+        val origin = ORIGIN.find(url0)?.value ?: return null
         val probed = fslGet(origin + FSL_LANDING_PROBE, 12) ?: return null
         return if (fslIsLanding(probed.first)) null else probed
     }
@@ -2865,7 +3054,7 @@ object StreamEngine {
         }
         val live = fslLive(seed, bootstrap)
         val liveBase = live?.let { (html, url) ->
-            val origin = Regex("""^https?://[^/]+""").find(url)?.value ?: url
+            val origin = ORIGIN.find(url)?.value ?: url
             fslDomainPick(html, family) ?: origin
         } ?: return null
         fslBaseCache[family] = liveBase to System.currentTimeMillis()
@@ -2884,11 +3073,12 @@ object StreamEngine {
 
     internal data class FslGroup(val heading: String, val gateways: List<String>)
 
+    private val FSL_GATEWAY_LINK = Regex(
+        """https?://[a-z0-9.\-]*(?:nexdrive|gdflix|filepress|vcloud)\.[a-z]{2,10}/[^\s"'<>\\]+""",
+        RegexOption.IGNORE_CASE,
+    )
+
     internal fun fslGroups(html: String): List<FslGroup> {
-        val gatewayRe = Regex(
-            """https?://[a-z0-9.\-]*(?:nexdrive|gdflix|filepress|vcloud)\.[a-z]{2,10}/[^\s"'<>\\]+""",
-            RegexOption.IGNORE_CASE,
-        )
         val doc = Jsoup.parse(html)
         val entry = doc.selectFirst("div.entry-content, article, main") ?: doc.body()
         val groups = ArrayList<FslGroup>()
@@ -2900,7 +3090,7 @@ object StreamEngine {
         }
         for (el in entry.getAllElements()) {
             when {
-                el.tagName().matches(Regex("h[1-6]")) -> {
+                el.tagName().matches(HEADING_TAG) -> {
                     val t = el.text().trim()
                     if (t.isNotBlank() && t.length < 220) {
                         if (anchors.isNotEmpty()) close()
@@ -2909,7 +3099,7 @@ object StreamEngine {
                 }
                 el.tagName() == "a" -> {
                     val href = el.attr("abs:href")
-                    if (gatewayRe.containsMatchIn(href)) {
+                    if (FSL_GATEWAY_LINK.containsMatchIn(href)) {
                         anchors += if (href.contains("vcloud.", ignoreCase = true)) href else href.trimEnd('/') + "/"
                     }
                 }
@@ -2922,30 +3112,37 @@ object StreamEngine {
     }
 
     private fun downloadHeadingShaped(text: String): Boolean =
-        Regex("""(?i)(\d{3,4}p\b|4K|\d+(?:\.\d+)?\s?(?:GB|MB)|/ZiP|/ZIP|\bZIP\b|Batch|Season\s*\d|\bPack\b|DUAL\s*[- ]?AUDIO|HINDI|TAMIL|TELUGU|\bEP(?:\.|ISODE)?\s*\d|S\d{1,2}[\s._-]?E\d{1,3})""").containsMatchIn(text)
+        DOWNLOAD_HEADING.containsMatchIn(text)
+
+    private val SERVER_LABEL_ACTION =
+        Regex("""(?i)^(?:download|file|watch|play|get|stream|online)\b""")
+    private val SERVER_LABEL_TRAILING = Regex("""(?i)\s*\bserver\b\s*$""")
 
     internal fun fslServerLabel(tag: String?, fallback: String): String {
         val label = tag?.trim().orEmpty()
         if (label.isBlank()) return fallback
         if (LinkNaming.languageLabel(label).isNotBlank()) return fallback
-        if (Regex("""(?i)^(?:download|file|watch|play|get|stream|online)\b""").containsMatchIn(label)) return fallback
-        if (Regex("""(?i)\b(?:2160p|1440p|1080p|720p|480p|4k)\b""").containsMatchIn(label)) return fallback
-        return label.replace(Regex("""(?i)\s*\bserver\b\s*$"""), "").trim().ifBlank { fallback }
+        if (SERVER_LABEL_ACTION.containsMatchIn(label)) return fallback
+        if (QUALITY_TEXT_RE.containsMatchIn(label)) return fallback
+        return label.replace(SERVER_LABEL_TRAILING, "").trim().ifBlank { fallback }
     }
 
     internal data class GatewayLinks(val fastdl: List<String>, val cloud: List<String>)
 
+    private val FASTDL_LINK =
+        Regex("""https?://fastdl\.[a-z]{2,10}/embed(?:\.php)?\?download=[A-Za-z0-9_\-]+""", RegexOption.IGNORE_CASE)
+    private val VCLOUD_LINK = Regex("""https?://vcloud\.[a-z]{2,10}/[A-Za-z0-9_\-]{6,}""")
+
     internal fun gatewayLinksOf(html: String): GatewayLinks {
-        val fastdl = Regex("""https?://fastdl\.[a-z]{2,10}/embed(?:\.php)?\?download=[A-Za-z0-9_\-]+""", RegexOption.IGNORE_CASE)
-            .findAll(html.replace("\\/", "/")).map { it.value }.distinct().toList()
-        val vcloud = Regex("""https?://vcloud\.[a-z]{2,10}/[A-Za-z0-9_\-]{6,}""")
-            .findAll(html).map { it.value }.distinct().toList()
+        val normalized = html.replace("\\/", "/")
+        val fastdl = FASTDL_LINK.findAll(normalized).map { it.value }.distinct().toList()
+        val vcloud = VCLOUD_LINK.findAll(html).map { it.value }.distinct().toList()
         return GatewayLinks(fastdl, vcloud)
     }
 
     internal fun vcloudPageMatchesEpisode(pageTitle: String, type: String, season: Int, episode: Int): Boolean {
         if (type != "tv" || season <= 0 || episode <= 0) return true
-        val tagged = Regex("""(?i)\bS\d{1,2}[\s._-]?E\d{1,3}\b""").containsMatchIn(pageTitle)
+        val tagged = VCLOUD_EPISODE_TAG.containsMatchIn(pageTitle)
         return !tagged || episodeMatches(pageTitle, season, episode)
     }
 
@@ -2966,39 +3163,31 @@ object StreamEngine {
         val page = withTimeoutOrNull(15_000L) {
             catching { app.get(url, timeout = 15, headers = okHeaders(referer)).text }.getOrNull()
         } ?: return emptyList()
-        val pageTitle = Regex("""<title>([^<]+)</title>""", RegexOption.IGNORE_CASE)
-            .find(page)?.groupValues?.get(1)?.trim().orEmpty()
+        val pageTitle = HTML_TITLE.find(page)?.groupValues?.get(1)?.trim().orEmpty()
         if (isArchiveUrl(pageTitle) || pageTitle.contains("complete season", ignoreCase = true)) return emptyList()
         if (!vcloudPageMatchesEpisode(pageTitle, type, season, episode)) return emptyList()
-        val tokenUrl = Regex("""var\s+url\s*=\s*atob\s*\(\s*atob\s*\(\s*['"]([A-Za-z0-9+/=]{16,})['"]\s*\)\s*\)""")
-            .find(page)?.groupValues?.get(1)
+        val tokenUrl = VCLOUD_ATOB.find(page)?.groupValues?.get(1)
             ?.let { blob -> vcloudDoubleAtob(blob) }
             ?.takeIf { it.startsWith("http") } ?: return emptyList()
         val token = withTimeoutOrNull(15_000L) {
             catching { app.get(tokenUrl, timeout = 15, headers = okHeaders(url)).text }.getOrNull()
         } ?: return emptyList()
-        val btnRe = Regex(
-            """<a\b[^>]*href="([^"]+)"[^>]*>\s*(?:<[^>]+>\s*)*([^<]*(?:Download|Server|File)[^<]*)(?:<[^>]+>\s*)*</a>""",
-            RegexOption.IGNORE_CASE,
-        )
         val out = ArrayList<Pair<String, String>>()
         val seen = LinkedHashSet<String>()
-        for (m in btnRe.findAll(token)) {
+        for (m in VCLOUD_BTN.findAll(token)) {
             val raw = m.groupValues[1].trim()
-            val label = Regex("""\[([^\]]+)]""").find(m.groupValues[2].trim())?.groupValues?.get(1)?.trim()
+            val label = BRACKET_LABEL.find(m.groupValues[2].trim())?.groupValues?.get(1)?.trim()
                 ?: m.groupValues[2].trim()
             val abs = if (raw.startsWith("http")) raw else {
-                val origin = Regex("""^https?://[^/]+""").find(tokenUrl)?.value ?: continue
+                val origin = ORIGIN.find(tokenUrl)?.value ?: continue
                 "$origin${if (raw.startsWith('/')) raw else "/$raw"}"
             }
             if (isArchiveUrl(abs)) continue
-            if (Regex("""(r2\.cloudflarestorage\.com|r2\.dev)""", RegexOption.IGNORE_CASE).containsMatchIn(abs) && seen.add(abs)) {
+            if (R2_HOST.containsMatchIn(abs) && seen.add(abs)) {
                 out += abs to label.take(20)
             }
         }
-        for (gpdl in Regex("""https?://[^"' ]*gpdl[^"' ]*hubcloud[^"' ]+""", RegexOption.IGNORE_CASE)
-            .findAll(token).map { it.value }.distinct()
-        ) {
+        for (gpdl in GPDL_URL.findAll(token).map { it.value }.distinct()) {
             for ((direct, quality) in hubDriveFiles(gpdl, tokenUrl)) {
                 if (seen.add(direct)) out += direct to quality
             }
@@ -3012,8 +3201,7 @@ object StreamEngine {
     }
 
     internal fun headingSizeOf(heading: String): String {
-        Regex("""\[\s*(\d+(?:\.\d+)?\s*(?:GB|MB)(?:/E\b|/EP\b|/ZiP|/ZIP)?)\s*]""", RegexOption.IGNORE_CASE)
-            .find(heading)?.let { return normalizeSizeToken(it.groupValues[1]).replace("/ZIP", "") }
+        HEADING_SIZE.find(heading)?.let { return normalizeSizeToken(it.groupValues[1]).replace("/ZIP", "") }
         return normalizeSizeToken(heading)
     }
 
@@ -3063,8 +3251,7 @@ object StreamEngine {
                         "Multi" -> 2
                         else -> 1
                     }
-                    val qText = Regex("""\b(2160p|1440p|1080p|720p|480p)\b""", RegexOption.IGNORE_CASE)
-                        .find(group.heading)?.value.orEmpty()
+                    val qText = HUB_QUALITY.find(group.heading)?.value.orEmpty()
                     var perGroup = 0
                     for (gateway in group.gateways) {
                         val cloudLinks = if (gateway.contains("vcloud.", ignoreCase = true)) {
@@ -3081,7 +3268,7 @@ object StreamEngine {
                                 out += RawStream(
                                     spec.id, serverName, url,
                                     url.contains(".m3u8", ignoreCase = true),
-                                    Regex("""^https?://[^/]+""").find(url)?.value,
+                                    ORIGIN.find(url)?.value,
                                     releaseHeightOf(qText.ifBlank { group.heading }),
                                     audioPriority = priority, audioLabel = lang,
                                     sizeLabel = size,
@@ -3114,6 +3301,7 @@ object StreamEngine {
     data class VodSource(val url: String, val quality: String, val type: String)
     data class VodEpisode(val playId: String, val number: Int)
 
+    // Keep the short UA the VOD API was written with; it differs from the browser UA on purpose.
     private fun vodHeaders(): Map<String, String> = mapOf(
         "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
         "Accept" to "application/json, */*",
@@ -3121,7 +3309,7 @@ object StreamEngine {
     )
 
     internal fun decryptVodJson(text: String): org.json.JSONObject? = runCatching {
-        val standard = Base64Kit.fromCustom(text.replace(Regex("\\s+"), ""))
+        val standard = Base64Kit.fromCustom(text.replace(WHITESPACE, ""))
         val raw = Base64Kit.decode(standard)
         val cipher = javax.crypto.Cipher.getInstance("AES/CBC/PKCS5Padding")
         cipher.init(
@@ -3134,7 +3322,9 @@ object StreamEngine {
 
     internal suspend fun searchVod(keyword: String): List<VodHit> = try {
         val text = app.get(
-            "$VOD_API/vod/search?keyword=${java.net.URLEncoder.encode(keyword, "UTF-8")}",
+            "$VOD_API/vod/search?keyword=${
+                java.net.URLEncoder.encode(keyword, "UTF-8").replace("+", "%20")
+            }",
             timeout = 12, headers = vodHeaders(),
         ).text
         val rows = decryptVodJson(text)?.optJSONArray("result") ?: return emptyList()
@@ -3143,6 +3333,8 @@ object StreamEngine {
             val id = row.optString("id").takeIf { it.isNotBlank() } ?: return@mapNotNull null
             VodHit(id, row.optString("title"), row.optString("year"), row.optString("type"))
         }
+    } catch (c: kotlinx.coroutines.CancellationException) {
+        throw c
     } catch (e: Exception) {
         Log.w("IndStream", "vod search failed: ${e.message}")
         emptyList()
@@ -3157,6 +3349,8 @@ object StreamEngine {
             val playId = row.optString("playId").takeIf { it.isNotBlank() } ?: return@mapNotNull null
             VodEpisode(playId, row.optString("episode").toIntOrNull() ?: (i + 1))
         }
+    } catch (c: kotlinx.coroutines.CancellationException) {
+        throw c
     } catch (e: Exception) {
         Log.w("IndStream", "vod detail failed: ${e.message}")
         emptyList()
@@ -3184,13 +3378,15 @@ object StreamEngine {
             }
         } ?: emptyList()
         sources to subs
+    } catch (c: kotlinx.coroutines.CancellationException) {
+        throw c
     } catch (e: Exception) {
         Log.w("IndStream", "vod episode failed: ${e.message}")
         emptyList<VodSource>() to emptyList()
     }
 
     internal fun matchVodTitle(hits: List<VodHit>, title: String, year: Int?, wantType: String): VodHit? {
-        fun norm(value: String) = value.lowercase().replace(Regex("[^a-z0-9]"), "")
+        fun norm(value: String) = value.lowercase().replace(NON_ALNUM_LOWER, "")
         val normalized = norm(title)
         if (normalized.length < 3) return null
         val typeOk: (VodHit) -> Boolean = { hit ->
@@ -3448,6 +3644,8 @@ object StreamEngine {
                 timeout = 15, headers = animeHeaders(ANIME_CATALOG_REFERER),
             ).text,
         )
+    } catch (c: kotlinx.coroutines.CancellationException) {
+        throw c
     } catch (e: Exception) {
         Log.w("IndStream", "anime catalog search failed: ${e.message}")
         emptyList()
@@ -3455,6 +3653,8 @@ object StreamEngine {
 
     private suspend fun fetchAnimePage(url: String): String? = try {
         app.get(url, timeout = 15, headers = animeHeaders(ANIME_CATALOG_REFERER)).text
+    } catch (c: kotlinx.coroutines.CancellationException) {
+        throw c
     } catch (e: Exception) {
         Log.w("IndStream", "anime page failed ($url): ${e.message}")
         null
@@ -3465,6 +3665,8 @@ object StreamEngine {
             "$ANIME_CATALOG/wp-admin/admin-ajax.php?action=action_select_season&season=$season&post=$post",
             timeout = 12, headers = animeAjaxHeaders(ANIME_CATALOG_REFERER),
         ).text
+    } catch (c: kotlinx.coroutines.CancellationException) {
+        throw c
     } catch (e: Exception) {
         Log.w("IndStream", "anime season $season failed: ${e.message}")
         null
@@ -3485,6 +3687,8 @@ object StreamEngine {
         val json = org.json.JSONObject(body)
         json.optString("securedLink").takeIf { it.isNotBlank() }
             ?: json.optString("videoSource").takeIf { it.isNotBlank() }
+    } catch (c: kotlinx.coroutines.CancellationException) {
+        throw c
     } catch (e: Exception) {
         Log.w("IndStream", "anime player failed: ${e.message}")
         null
@@ -3535,6 +3739,8 @@ object StreamEngine {
     internal fun decodeAnimeHash(hash: String): String? = try {
         String(java.util.Base64.getDecoder().decode(hash.trim()), Charsets.UTF_8)
             .takeIf { it.startsWith("http") }
+    } catch (c: kotlinx.coroutines.CancellationException) {
+        throw c
     } catch (e: Exception) {
         null
     }
@@ -3547,6 +3753,8 @@ object StreamEngine {
             val raw = java.util.Base64.getDecoder().decode(blob.trim())
             String(xor(raw, key), Charsets.UTF_8)
         }
+    } catch (c: kotlinx.coroutines.CancellationException) {
+        throw c
     } catch (e: Exception) {
         null
     }
@@ -3559,6 +3767,8 @@ object StreamEngine {
 
     internal fun animePlayerConfig(blob: String): org.json.JSONObject? = try {
         xorDecode(blob)?.let { org.json.JSONObject(it) }
+    } catch (c: kotlinx.coroutines.CancellationException) {
+        throw c
     } catch (e: Exception) {
         null
     }
@@ -3570,6 +3780,8 @@ object StreamEngine {
                 timeout = 15, headers = animeHeaders("$ANIME_INDEX/"),
             ).text,
         )
+    } catch (c: kotlinx.coroutines.CancellationException) {
+        throw c
     } catch (e: Exception) {
         Log.w("IndStream", "anime index search failed: ${e.message}")
         emptyList()
@@ -3584,6 +3796,8 @@ object StreamEngine {
                 ).text,
             ).optString("html"),
         )
+    } catch (c: kotlinx.coroutines.CancellationException) {
+        throw c
     } catch (e: Exception) {
         Log.w("IndStream", "anime index episode list failed: ${e.message}")
         emptyList()
@@ -3598,6 +3812,8 @@ object StreamEngine {
                 ).text,
             ).optString("html"),
         )
+    } catch (c: kotlinx.coroutines.CancellationException) {
+        throw c
     } catch (e: Exception) {
         Log.w("IndStream", "anime index server list failed: ${e.message}")
         emptyList()
@@ -3611,6 +3827,8 @@ object StreamEngine {
                 headers = mapOf("User-Agent" to HttpKit.userAgent, "Referer" to ANIME_EMBED_REFERER),
             ).text,
         )?.let(::animePlayerConfig)
+    } catch (c: kotlinx.coroutines.CancellationException) {
+        throw c
     } catch (e: Exception) {
         Log.w("IndStream", "anime index player failed: ${e.message}")
         null
@@ -3655,7 +3873,6 @@ object StreamEngine {
                 url = masterUrl, isM3u8 = true,
                 referer = playReferer,
                 qualityHint = height,
-                measuredKbps = HttpKit.probeSpeed(masterUrl, playReferer),
                 audioPriority = if (label.contains("Hindi")) 4 else 3,
                 audioLabel = label.ifBlank { "Multi" },
                 extraHeaders = mapOf("Referer" to playReferer),
@@ -3744,7 +3961,7 @@ object StreamEngine {
                 serverId = spec.id, serverName = "${spec.name} $label".trim(),
                 url = streamUrl, isM3u8 = streamUrl.contains(".m3u8", true),
                 referer = streamHeaders["Referer"] ?: "https://www.movy.bz/",
-                qualityHint = Regex("""(\d{3,4})""").find(quality)?.groupValues?.get(1)?.toIntOrNull() ?: 0,
+                qualityHint = HEIGHT_NUM.find(quality)?.groupValues?.get(1)?.toIntOrNull() ?: 0,
                 extraHeaders = streamHeaders,
             )
         }
@@ -3784,7 +4001,7 @@ object StreamEngine {
     }
 
     internal fun heightHintOf(text: String): Int {
-        Regex("""(\d{3,4})[pP]""").find(text)?.groupValues?.get(1)?.toIntOrNull()?.let { return it }
+        HEIGHT_HINT.find(text)?.groupValues?.get(1)?.toIntOrNull()?.let { return it }
         return when {
             text.contains("4k", true) || text.contains("2160", true) -> 2160
             text.contains("1440", true) -> 1440
@@ -3976,6 +4193,8 @@ object StreamEngine {
             }
             val compound = id.substring(0, n) + salt + id.substring(n)
             Base64Kit.encode(riveHashO(riveHash2(compound)).toByteArray(Charsets.US_ASCII))
+        } catch (c: kotlinx.coroutines.CancellationException) {
+            throw c
         } catch (e: Exception) { "topSecret" }
     }
 
@@ -4162,6 +4381,8 @@ object StreamEngine {
             val plain = ByteArray(cipher.size)
             for (j in cipher.indices) plain[j] = (cipher[j].toInt() xor keystream[j].toInt()).toByte()
             String(plain, MOVY_MAGIC.size, plain.size - MOVY_MAGIC.size, Charsets.UTF_8)
+        } catch (c: kotlinx.coroutines.CancellationException) {
+            throw c
         } catch (e: Exception) { null }
     }
 
@@ -4606,8 +4827,11 @@ object StreamEngine {
                 cardUrl = allmovielandCardUrl(html, titleNorm = null)
                 if (cardUrl != null) break
             }
-            if (cardUrl == null && titleNorm == null)
-                throw IllegalStateException("allmovieland search timeout (network, all hosts)")
+            if (cardUrl == null && titleNorm == null) {
+                if (answeredHost == null)
+                    throw IllegalStateException("allmovieland search timeout (network, all hosts)")
+                throw CleanMissException("no card for imdb=${imdb ?: "-"} (title not in library)")
+            }
         }
         if (cardUrl == null && titleNorm != null) {
             val host = answeredHost ?: allmovielandHosts().first()
@@ -4701,7 +4925,7 @@ object StreamEngine {
                 throw CleanMissException("tv request without season/episode (s=$season e=$episode)")
             val epNode = pickAllmovielandEpisodeNode(nodes, season, episode)
             if (epNode == null) {
-                Log.w("Allmovieland", "series tree has no EXACT S$season E$episode � shape: " +
+                Log.w("Allmovieland", "series tree has no EXACT S$season E$episode - shape: " +
                     nodes.joinToString { "'${it.title}'(id=${it.id},ep=${it.episode},kids=${it.children.size})" }
                         .take(400))
                 throw CleanMissException("no exact S$season E$episode in series tree (wrong-episode guard)")
@@ -4789,11 +5013,10 @@ object StreamEngine {
                 isHls && url.isNotBlank() -> probeAudioHeight(url, referer)
                 else -> "" to 0
             }
-            val probed = if (url.isNotBlank()) HttpKit.probeSpeed(url, referer) else null
             out.add(RawStream(
                 serverId = spec.id, serverName = spec.name,
                 url = url, isM3u8 = isHls, referer = referer,
-                qualityHint = height, measuredKbps = probed,
+                qualityHint = height,
                 audioLabel = label, inlineManifest = inlineManifest,
             ))
         }
@@ -4803,12 +5026,11 @@ object StreamEngine {
                 val q = arr.optJSONObject(i) ?: return@mapNotNull null
                 val qUrl = q.optString("url").takeIf { it.isNotBlank() } ?: return@mapNotNull null
                 val qLabel = q.optString("quality").takeIf { it.isNotBlank() }
-                val height = qLabel?.let { Regex("(\\d{3,4})").find(it)?.groupValues?.get(1)?.toIntOrNull() } ?: 0
-                val probed = HttpKit.probeSpeed(qUrl, referer)
+                val height = qLabel?.let { HEIGHT_NUM.find(it)?.groupValues?.get(1)?.toIntOrNull() } ?: 0
                 RawStream(
                     serverId = spec.id, serverName = spec.name,
                     url = qUrl, isM3u8 = false, referer = referer,
-                    qualityHint = height, measuredKbps = probed,
+                    qualityHint = height,
                     audioPriority = 0, audioLabel = "",
                 )
             }.let { out.addAll(it) }
@@ -4874,16 +5096,11 @@ object StreamEngine {
         return relUrl(baseUrl, src).takeIf { it.startsWith("http") }
     }
 
-    private fun relUrl(base: String, path: String): String {
-        if (path.startsWith("http", ignoreCase = true)) return path
-        if (path.startsWith("//")) return "https:$path"
-        val h = Regex("""^https?://[^/]+""").find(base)?.value ?: return path
-        return if (path.startsWith("/")) "$h$path" else "$h/$path"
-    }
+    private fun relUrl(base: String, path: String): String = ManifestKit.resolveUrl(base, path)
 
     private fun okHeaders(referer: String? = null): Map<String, String> {
         val h = LinkedHashMap<String, String>()
-        h["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
+        h["User-Agent"] = HttpKit.userAgent
         if (!referer.isNullOrBlank()) h["Referer"] = referer
         return h
     }
@@ -4965,12 +5182,6 @@ object StreamEngine {
                 val oldest = subtitles.keys.firstOrNull() ?: break
                 subtitles.remove(oldest)
             }
-        }
-
-        fun clear() {
-            map.clear()
-            subtitles.clear()
-            subtitleProbes.clear()
         }
     }
 

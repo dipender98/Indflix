@@ -1,8 +1,10 @@
 package com.indstream
 
-import com.indstream.StreamEngine.RawStream
+import java.util.concurrent.ConcurrentHashMap
 
 object LinkNaming {
+
+    private val WHITESPACE = Regex("""\s+""")
 
     private val RESOLUTION_TOKEN =
         Regex("""\s*(?:\d{3,4}\s*p(?:\d{2,3})?|[24]\s*k)\b""", RegexOption.IGNORE_CASE)
@@ -106,10 +108,6 @@ object LinkNaming {
     private fun flag(cc: String): String =
         cc.uppercase().map { Character.toChars(0x1F1E6 + (it - 'A')).concatToString() }.joinToString("")
 
-    fun hasResolution(indicator: String?): Boolean =
-        !indicator.isNullOrBlank() &&
-            Regex("""\b(\d{3,4})p\b""", RegexOption.IGNORE_CASE).containsMatchIn(indicator)
-
     fun displayName(
         serverName: String,
         audioLabel: String? = "",
@@ -129,9 +127,7 @@ object LinkNaming {
         val tagPart = languageTagPart(tag, names)
 
         val tokens = renditionTokens(listOfNotNull(mediaLabel, rawName).joinToString(" "))
-            .filterNot {
-                Regex("""\b${Regex.escape(it)}\b""", RegexOption.IGNORE_CASE).containsMatchIn(named)
-            }
+            .filterNot { containsToken(named, it) }
             .joinToString(" ")
         val sizePart = sizeLabel?.trim().orEmpty()
         return listOf(named, tokens, tagPart, sizePart)
@@ -140,7 +136,7 @@ object LinkNaming {
 
     private fun stripQuality(text: String): String =
         QUALITY_ALIAS.replace(RESOLUTION_TOKEN.replace(text, " "), " ")
-            .replace(Regex("""\s+"""), " ")
+            .replace(WHITESPACE, " ")
             .trim()
 
     private fun qualityFromText(text: String?): String {
@@ -148,7 +144,7 @@ object LinkNaming {
         if (s.isBlank()) return ""
         val numeric = RESOLUTION_TOKEN.find(s)?.value?.trim()
         if (!numeric.isNullOrBlank()) {
-            return numeric.replace(Regex("""\s+"""), "")
+            return numeric.replace(WHITESPACE, "")
                 .lowercase()
                 .replace("4k", "4K")
                 .replace("2k", "2K")
@@ -276,11 +272,21 @@ object LinkNaming {
         Regex("""\b8[ \-]?BIT\b""", RegexOption.IGNORE_CASE) to "8bit",
     )
 
+    private val ALL_TOKENS =
+        SOURCE_TOKENS + VIDEO_TOKENS + VISION_TOKENS + DEPTH_TOKENS + AUDIO_TOKENS
+
+    private val TOKEN_PATTERNS = ConcurrentHashMap<String, Regex>()
+
+    private fun containsToken(text: String, token: String): Boolean =
+        TOKEN_PATTERNS.getOrPut(token) {
+            Regex("""(?<!\w)${Regex.escape(token)}(?!\w)""", RegexOption.IGNORE_CASE)
+        }.containsMatchIn(text)
+
     fun renditionTokens(text: String?): List<String> {
         val s = text?.trim().orEmpty()
         if (s.isBlank()) return emptyList()
         val found = LinkedHashMap<String, String>()
-        for ((re, canon) in SOURCE_TOKENS + VIDEO_TOKENS + VISION_TOKENS + DEPTH_TOKENS + AUDIO_TOKENS) {
+        for ((re, canon) in ALL_TOKENS) {
             if (re.containsMatchIn(s) && !found.containsKey(canon.lowercase())) {
                 found[canon.lowercase()] = canon
             }

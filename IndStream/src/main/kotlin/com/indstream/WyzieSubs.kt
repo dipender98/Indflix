@@ -59,7 +59,7 @@ object WyzieSubs {
         val key = apiKey.trim().ifEmpty { return null }
         val now = System.currentTimeMillis()
         sourcesCache[key]?.let { (exp, list) -> if (now < exp) return list }
-        val (_, text) = runCatching { get("$BASE/sources?key=${enc(key)}", deadline) }.getOrNull()
+        val (_, text) = HttpKit.attempt { get("$BASE/sources?key=${enc(key)}", deadline) }
             ?: return null
         val list = parseSources(text).takeIf { it.isNotEmpty() } ?: return null
         sourcesCache[key] = (System.currentTimeMillis() + SOURCES_TTL_MS) to list
@@ -98,12 +98,13 @@ object WyzieSubs {
             val url = s.optString("url").takeIf { it.startsWith("http") && seenUrls.add(it) }
                 ?: continue
             val raw = s.optString("language").ifBlank { s.optString("lang") }
-            val code = raw.lowercase()
-            val code1 = code.take(2)
-            if (raw.isBlank() || (code1 !in wantCodes && code !in wantCodes)) continue
-            if ((perLang[code1] ?: 0) >= MAX_PER_LANG) continue
-            perLang[code1] = (perLang[code1] ?: 0) + 1
+            if (raw.isBlank()) continue
             val canon = LinkNaming.canonicalSubtitleName(raw)
+            val code = raw.lowercase()
+            val code1 = SubtilesProvider.codeForLang(canon) ?: code.take(2)
+            if (code1 !in wantCodes && code !in wantCodes && canon.lowercase() !in wantCodes) continue
+            if ((perLang[canon] ?: 0) >= MAX_PER_LANG) continue
+            perLang[canon] = (perLang[canon] ?: 0) + 1
             out.add(SubtilesProvider.SubTrack(canon, url, LinkNaming.subtitleMenuName(canon, raw)))
         }
         return out
@@ -119,12 +120,7 @@ object WyzieSubs {
             return if (code == 400) "request rejected" else "server error ($code)"
         }
         if (text.isNullOrBlank()) return null
-        val t = text.trim()
-        if (t.startsWith("[")) return null
-        if (!t.startsWith("{")) return "server error"
-        val o = runCatching { org.json.JSONObject(t) }.getOrNull() ?: return "server error"
-        if (o.has("subtitles") || o.has("url")) return null
-        return bodyReason(text) ?: "server error"
+        return bodyReason(text)
     }
 
     private fun bodyReason(text: String?): String? {
@@ -151,20 +147,20 @@ object WyzieSubs {
         imdbId: String?,
         season: Int,
         episode: Int,
-        missing: Set<String>,
+        desired: Set<String>,
         apiKey: String,
         quiet: Boolean = false,
         onTrack: suspend (SubtitleFile) -> Unit,
     ): Int {
-        if (missing.isEmpty()) return 0
-        val codes = SubtilesProvider.codesFromLangs(missing)
+        if (desired.isEmpty()) return 0
+        val codes = SubtilesProvider.codesFromLangs(desired)
         if (codes.isEmpty()) return 0
         val groups = SubtilesProvider.groupRequests(codes)
         if (groups.isEmpty()) return 0
         val deadline = System.currentTimeMillis() + FETCH_BUDGET_MS
         val masked = apiKey.trim()
         val srcEnd = minOf(deadline, System.currentTimeMillis() + SOURCES_BUDGET_MS)
-        val sources = runCatching { keySources(apiKey, srcEnd) }.getOrNull()
+        val sources = HttpKit.attempt { keySources(apiKey, srcEnd) }
         Log.d(TAG, "sources=${sources?.joinToString(",") ?: "default"}")
         val results = coroutineScope {
             groups.map { group ->
@@ -221,10 +217,11 @@ object WyzieSubs {
         val key = apiKey.trim()
         if (key.isEmpty()) return false to "Enter a key first"
         val end = System.currentTimeMillis() + FETCH_BUDGET_MS
-        val sources = runCatching { keySources(key, minOf(end, System.currentTimeMillis() + SOURCES_BUDGET_MS)) }.getOrNull()
+        val sources = HttpKit.attempt { keySources(key, minOf(end, System.currentTimeMillis() + SOURCES_BUDGET_MS)) }
         val url = buildUrl("tt1375666", 0, 0, emptySet(), key, sources)
             ?: return false to "Enter a key first"
         val (code, text) = get(url, end)
+        if (code == null && text.isNullOrBlank()) return false to "No reply from subtitle service"
         failureReason(code, text)?.let { return false to "Key failed ($it)" }
         val n = runCatching { parse(text.orEmpty(), setOf("en")) }.getOrDefault(emptyList()).size
         return if (n > 0) true to "Key works - $n English subs found"
@@ -235,10 +232,10 @@ object WyzieSubs {
         val budget = deadline - System.currentTimeMillis()
         if (budget <= 0) return null to null
         return withTimeoutOrNull(budget) {
-            runCatching {
+            HttpKit.attempt {
                 val r = app.get(url, timeout = (budget / 1000L).coerceAtLeast(1L))
                 r.code to r.text
-            }.getOrNull()
+            }
         } ?: (null to null)
     }
 }

@@ -25,6 +25,11 @@ object StremioNuvioAddons {
     private const val MANIFEST_TTL_MS = 6 * 60 * 60 * 1000L
     private const val MANIFEST_MISS_TTL_MS = 60_000L
 
+    private val QUALITY_P = Regex("""(?<!\d)(\d{3,4})p(?!\d)""", RegexOption.IGNORE_CASE)
+    private val FOUR_K = Regex("""\b(?:4k|uhd|2160p)\b""", RegexOption.IGNORE_CASE)
+    private val TWO_K = Regex("""\b(?:2k|1440p)\b""", RegexOption.IGNORE_CASE)
+    private val SIZE_RE = Regex("""(?<!\d)(\d+(?:\.\d+)?)\s*(GB|GiB|MB|MiB)(?!\w)""", RegexOption.IGNORE_CASE)
+
     val DEFAULT_URLS = listOf(
         "https://v3-cinemeta.strem.io",
         "https://opensubtitles-v3.strem.io",
@@ -120,15 +125,25 @@ object StremioNuvioAddons {
             return null
         }
         if (declaredScheme == null) value = "https://$value"
-        value = value.substringBefore("#").trim().trimEnd('/')
+        value = value.substringBefore("#").trim()
+        val queryAt = value.indexOf('?')
+        val query = if (queryAt >= 0) value.substring(queryAt) else ""
+        var path = if (queryAt >= 0) value.substring(0, queryAt) else value
+        path = path.trimEnd('/')
         val manifestSuffix = "/manifest.json"
-        if (value.endsWith(manifestSuffix, ignoreCase = true)) {
-            value = value.dropLast(manifestSuffix.length).trimEnd('/')
+        if (path.endsWith(manifestSuffix, ignoreCase = true)) {
+            path = path.dropLast(manifestSuffix.length).trimEnd('/')
         }
-        val afterScheme = value.substringAfter("://", "")
-        val host = afterScheme.substringBefore("/").substringBefore("?").substringBefore("#")
+        val afterScheme = path.substringAfter("://", "")
+        val host = afterScheme.substringBefore("/")
         if (host.isBlank() || host.any { it.isWhitespace() }) return null
-        return value
+        return path + query
+    }
+
+    private fun endpoint(base: String, path: String): String {
+        val cut = base.indexOfAny(charArrayOf('?', '#'))
+        return if (cut < 0) "$base$path"
+        else base.substring(0, cut).trimEnd('/') + path + base.substring(cut)
     }
 
     fun hostOf(url: String): String =
@@ -163,8 +178,6 @@ object StremioNuvioAddons {
             val rawUrl = item.optString("url").trim()
             val url = if (rawUrl.startsWith("//")) "https:$rawUrl" else rawUrl
             val infoHash = item.optString("infoHash").trim()
-            val external = item.optString("externalUrl").trim()
-            val youtube = item.optString("ytId").trim()
             when {
                 (url.startsWith("http://", ignoreCase = true) ||
                     url.startsWith("https://", ignoreCase = true)) &&
@@ -177,7 +190,6 @@ object StremioNuvioAddons {
                     )
                 }
                 infoHash.isNotBlank() || url.startsWith("magnet:", ignoreCase = true) -> torrents++
-                external.isNotBlank() || youtube.isNotBlank() -> other++
                 else -> other++
             }
         }
@@ -187,20 +199,16 @@ object StremioNuvioAddons {
     fun qualityOf(vararg values: String?): Int {
         val text = values.filterNotNull().joinToString(" ")
         if (text.isBlank()) return 0
-        val p = Regex("""(?<!\d)(\d{3,4})p(?!\d)""", RegexOption.IGNORE_CASE)
-            .findAll(text)
+        val p = QUALITY_P.findAll(text)
             .maxOfOrNull { it.groupValues[1].toIntOrNull() ?: 0 } ?: 0
-        val fourK = Regex("""\b(?:4k|uhd|2160p)\b""", RegexOption.IGNORE_CASE)
-            .containsMatchIn(text)
-        val twoK = Regex("""\b(?:2k|1440p)\b""", RegexOption.IGNORE_CASE)
-            .containsMatchIn(text)
+        val fourK = FOUR_K.containsMatchIn(text)
+        val twoK = TWO_K.containsMatchIn(text)
         return maxOf(p, if (fourK) 2160 else 0, if (twoK) 1440 else 0)
     }
 
     fun sizeOf(vararg values: String?): String {
         val text = values.filterNotNull().joinToString(" ")
-        val match = Regex("""(?<!\d)(\d+(?:\.\d+)?)\s*(GB|GiB|MB|MiB)(?!\w)""", RegexOption.IGNORE_CASE)
-            .find(text) ?: return ""
+        val match = SIZE_RE.find(text) ?: return ""
         val unit = if (match.groupValues[2].uppercase().startsWith("G")) "GB" else "MB"
         return "${match.groupValues[1]} $unit"
     }
@@ -250,7 +258,7 @@ object StremioNuvioAddons {
         if (!supportsStream(manifest) || !supportsType(manifest, "movie")) {
             return CheckResult(manifest.name, "Manifest OK - $resources", true)
         }
-        val body = HttpKit.get("${manifest.baseUrl}/stream/movie/$SAMPLE_IMDB.json", timeout = 8)
+        val body = HttpKit.get(endpoint(manifest.baseUrl, "/stream/movie/$SAMPLE_IMDB.json"), timeout = 8)
         val payload = parseStreamPayload(body)
         val detail = if (body == null) {
             "Manifest OK - $resources; stream check failed"
@@ -258,7 +266,7 @@ object StremioNuvioAddons {
             "Manifest OK - $resources; ${payload.direct.size} direct, " +
                 "${payload.torrents} torrent, ${payload.other} other"
         }
-        return CheckResult(manifest.name, detail, true)
+        return CheckResult(manifest.name, detail, body != null)
     }
 
     suspend fun manifest(rawUrl: String, force: Boolean = false): Manifest? {
@@ -267,7 +275,7 @@ object StremioNuvioAddons {
         if (!force) {
             manifestCache[base]?.let { if (now <= it.expiresAt) return it.manifest }
         }
-        val body = HttpKit.get("$base/manifest.json", timeout = MANIFEST_TIMEOUT_MS / 1000L)
+        val body = HttpKit.get(endpoint(base, "/manifest.json"), timeout = MANIFEST_TIMEOUT_MS / 1000L)
         val parsed = parseManifest(body, base)
         manifestCache[base] = CachedManifest(
             parsed,
@@ -278,7 +286,7 @@ object StremioNuvioAddons {
 
     private suspend fun fetchStreams(manifest: Manifest, id: String, type: String): List<RawStream> {
         val body = HttpKit.get(
-            "${manifest.baseUrl}/stream/$type/$id.json",
+            endpoint(manifest.baseUrl, "/stream/$type/$id.json"),
             timeout = STREAM_TIMEOUT_MS / 1000L,
         ) ?: return emptyList()
         val payload = parseStreamPayload(body)
