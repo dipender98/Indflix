@@ -1,39 +1,50 @@
-# Indflix Project Rules
+customModes:
+  - slug: indflix-project-rules
+    name: Indflix Project Rules
+    description: Project-specific coding rules for this repository.
+    roleDefinition: Follow the repository's project rules when working on its code.
+    groups:
+      - read
+      - edit
+      - browser
+      - command
+    customInstructions: |
+      # Indflix Project Rules
 
-Use logic and judgment on every task. If two rules conflict, correctness wins.
+      Use logic and judgment on every task. If two rules conflict, correctness wins.
 
-## 1. Code Style
+      ## 1. Code Style
 
-- Add a comment only when it is necessary. Keep it short and generic.
-- Never put specific developer, plugin, website, or content names in comments, logs, or user-facing messages. Word such text generically instead (e.g. "the main site", "a title/a movie/a series","this provider"). Exception: keep any specific name the code itself needs to work (URLs, domains, identifiers, parameters, displayed plugin name).
-- Refactor or change code (even across the whole codebase) only when sure the result is correct and better for the long term with low maintenance and good performance.
+      - Add a comment only when it is necessary. Keep it short and generic.
+      - Never put specific developer, plugin, website, or content names in comments, logs, or user-facing messages. Word such text generically instead (e.g. "the main site", "a title/a movie/a series","this provider"). Exception: keep any specific name the code itself needs to work (URLs, domains, identifiers, parameters, displayed plugin name).
+      - Refactor or change code (even across the whole codebase) only when sure the result is correct and better for the long term with low maintenance and good performance.
 
-## 2. Architecture
+      ## 2. Architecture
 
-- Check the existing codebase first; create a new file only when it is necessary and use logic to decide.
-- Keep related logic in the same file and object. Split it out only when that clearly makes the code easier to maintain.
-- Use meaningful names and follow the existing project structure.
+      - Check the existing codebase first; create a new file only when it is necessary and use logic to decide.
+      - Keep related logic in the same file and object. Split it out only when that clearly makes the code easier to maintain.
+      - Use meaningful names and follow the existing project structure.
 
-## 3. Implementation
+      ## 3. Implementation
 
-- IMPORTANT: Understand the relevant code and execution flow before making changes.
-- Take references from the internet.
-- Never emit a stream below 720p; filter out any stream whose height is known to be less than 720. Streams below 720p are not allowed in the server list.
+      - IMPORTANT: Understand the relevant code and execution flow before making changes.
+      - Take references from the internet.
+      - Never emit a stream below 720p; filter out any stream whose height is known to be less than 720. Streams below 720p are not allowed in the server list.
 
-## 4. Verification
+      ## 4. Verification
 
-- Confirm that the root cause is fixed, not only the visible symptom.
-- Run the relevant tests or build whenever possible.
-- Before finishing, review your diff for regressions, unneeded files, and unrelated edits.
-- If you could not verify a fix, or something is still broken, say so plainly. Never claim success without evidence.
+      - Confirm that the root cause is fixed, not only the visible symptom.
+      - Run the relevant tests or build whenever possible.
+      - Before finishing, review your diff for regressions, unneeded files, and unrelated edits.
+      - If you could not verify a fix, or something is still broken, say so plainly. Never claim success without evidence.
 
-## 5. Decision-Making
+      ## 5. Decision-Making
 
-- Think long-term: choose the solution that stays correct, fast, and maintainable over time, not only what works today.
-- Prefer correctness.
-- If you are in doubt about a decision, ask the user or check on internet.
+      - Think long-term: choose the solution that stays correct, fast, and maintainable over time, not only what works today.
+      - Prefer correctness.
+      - If you are in doubt about a decision, ask the user or check on internet.
 
-## 6. Git & Releases
+      ## 6. Git & Releases
 
-- Commit only when asked. Never push or bump the version until the user explicitly says so.
-- Describe the change, implementation etc. in commit message; scale its length to the change: one or two small edits get a short message, a large change gets a detailed one.
+      - Commit only when asked. Never push or bump the version until the user explicitly says so.
+      - Describe the change, implementation etc. in commit message; scale its length to the change: one or two small edits get a short message, a large change gets a detailed one.
