@@ -21,53 +21,19 @@ import android.widget.Toast
 
 object Settings {
 
-    const val KEY_LINK = "https://store.wyzie.io/redeem"
-
     const val TMDB_LINK = "https://www.themoviedb.org/settings/api"
 
     private const val PREFS = "multimovies_settings"
-    private const val KEY = "wyzie_api_key"
     private const val TMDB_KEY = "tmdb_api_key"
 
     @Volatile
     private var appContext: Context? = null
 
-    @Volatile
-    private var cached: String? = null
-
-    @Volatile
-    private var loaded = false
-
     fun init(context: Context) {
         appContext = context.applicationContext
-        load()
     }
 
-    fun apiKey(): String? {
-        if (!loaded) load()
-        return cached?.takeIf { it.isNotBlank() }
-    }
-
-    fun isValidKey(raw: String?): Boolean = normalizeKey(raw).length >= 8
-
-    fun normalizeKey(raw: String?): String = raw?.trim().orEmpty()
-
-    fun save(context: Context, raw: String): Boolean {
-        val key = normalizeKey(raw)
-        if (key.isNotEmpty() && !isValidKey(key)) return false
-        runCatching {
-            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-                .edit().putString(KEY, key).apply()
-        }
-        cached = key
-        loaded = true
-        appContext = context.applicationContext
-        return true
-    }
-
-    fun clear(context: Context) {
-        save(context, "")
-    }
+    private fun normalizeKey(raw: String?): String = raw?.trim().orEmpty()
 
     fun tmdbApiKey(): String? {
         if (!tmdbLoaded) loadTmdb()
@@ -116,32 +82,6 @@ object Settings {
             ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(TMDB_KEY, "").orEmpty()
         }.getOrDefault("")
         tmdbLoaded = true
-    }
-
-    @Volatile
-    private var wyzieFailureNotified = false
-
-    fun notifyWyzieFailed(reason: String) {
-        val ctx = appContext ?: return
-        synchronized(this) {
-            if (wyzieFailureNotified) return
-            wyzieFailureNotified = true
-        }
-        runCatching {
-            android.os.Handler(android.os.Looper.getMainLooper()).post {
-                runCatching {
-                    Toast.makeText(ctx, "Wyzie subtitles failed ($reason) - using built-in", Toast.LENGTH_LONG).show()
-                }
-            }
-        }
-    }
-
-    private fun load() {
-        val ctx = appContext ?: return
-        cached = runCatching {
-            ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY, "").orEmpty()
-        }.getOrDefault("")
-        loaded = true
     }
 
     fun openSettings(context: Context) {
@@ -247,79 +187,6 @@ object Settings {
                 isFocusable = true
             }
 
-        val wyzieSaved = apiKey() != null
-        val wyzieSection = settingsSection(
-            "Wyzie Subs API Key", if (wyzieSaved) "Saved" else "Not set", wyzieSaved,
-        )
-        val chipRow = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.END
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { bottomMargin = dp(6) }
-        }
-        val getApiChip = actionChip("Get API", Color.TRANSPARENT, textColor, borderColor)
-        val verifyChip = actionChip("Verify", chipYellow, chipInk).apply {
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { leftMargin = dp(8) }
-        }
-        chipRow.addView(getApiChip)
-        chipRow.addView(verifyChip)
-        wyzieSection.addView(chipRow)
-        val wyzieKeyInput = EditText(context).apply {
-            setText(apiKey().orEmpty())
-            setHint("wyzie-...")
-            setHintTextColor(hintColor)
-            setTextColor(textColor)
-            setSingleLine(true)
-            inputType = InputType.TYPE_CLASS_TEXT
-            typeface = Typeface.MONOSPACE
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-            background = rounded(fieldColor, 10, 1)
-            setPadding(dp(12), dp(10), dp(12), dp(10))
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-            )
-            wyzieSection.addView(this)
-        }
-
-        val wyzieStatusText = TextView(context).apply {
-            text = if (wyzieSaved) "Wyzie Subs active - your key will be used."
-            else "No key saved - using built-in subtitles."
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            setTextColor(hintColor)
-            setPadding(0, dp(10), 0, dp(12))
-            wyzieSection.addView(this)
-        }
-
-        val wyzieButtonRow = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.END
-        }
-        val clearBtn = Button(context).apply {
-            text = "Clear"
-            setTextColor(textColor)
-            background = rounded(Color.TRANSPARENT, 10)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-            minWidth = 0
-            minHeight = 0
-            setPadding(dp(16), dp(8), dp(16), dp(8))
-        }
-        val saveBtn = Button(context).apply {
-            text = "Save"
-            setTextColor(Color.WHITE)
-            setTypeface(null, Typeface.BOLD)
-            background = rounded(accentColor, 10)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-            minWidth = 0
-            minHeight = 0
-            setPadding(dp(16), dp(8), dp(16), dp(8))
-        }
-        wyzieButtonRow.addView(clearBtn)
-        wyzieButtonRow.addView(saveBtn)
-        wyzieSection.addView(wyzieButtonRow)
-
         val tmdbSaved = tmdbApiKey() != null
         val tmdbSection = settingsSection(
             "TMDB API Key", if (tmdbSaved) "Saved" else "Not set", tmdbSaved,
@@ -409,51 +276,6 @@ object Settings {
         val dialog = AlertDialog.Builder(context, android.R.style.Theme_Material_Dialog)
             .setView(scroll)
             .create()
-        fun verifyNow(key: String) {
-            if (!isValidKey(key)) {
-                wyzieKeyInput.error = "Key looks too short"
-                return
-            }
-            wyzieStatusText.text = "Verifying key..."
-            Thread {
-                val msg = runCatching {
-                    kotlinx.coroutines.runBlocking { WyzieSubs.testKey(key) }.second
-                }.getOrDefault("Verify failed - no network?")
-                wyzieKeyInput.post { wyzieStatusText.text = msg }
-            }.start()
-        }
-        verifyChip.setOnClickListener { verifyNow(wyzieKeyInput.text.toString()) }
-        getApiChip.setOnClickListener {
-            runCatching {
-                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(KEY_LINK)))
-            }.onFailure {
-                Toast.makeText(context, "No browser found", Toast.LENGTH_SHORT).show()
-            }
-        }
-        clearBtn.setOnClickListener {
-            clear(context)
-            Toast.makeText(context, "Cleared - using built-in subtitles", Toast.LENGTH_SHORT).show()
-            dialog.dismiss()
-        }
-        saveBtn.setOnClickListener {
-            val typed = wyzieKeyInput.text.toString()
-            if (save(context, typed)) {
-                Toast.makeText(context, "Saved", Toast.LENGTH_SHORT).show()
-                dialog.dismiss()
-                Thread {
-                    val msg = runCatching {
-                        kotlinx.coroutines.runBlocking { WyzieSubs.testKey(typed) }.second
-                    }.getOrDefault("Verify failed - no network?")
-                    if (!msg.startsWith("Key works")) {
-                        android.os.Handler(android.os.Looper.getMainLooper()).post {
-                            Toast.makeText(context, "Wyzie: $msg", Toast.LENGTH_LONG).show()
-                        }
-                    }
-                }.start()
-            } else {
-                wyzieKeyInput.error = "Key looks too short"
-            }
-        }
         fun tmdbVerifyNow(key: String) {
             tmdbKeyProblem(key)?.let { tmdbKeyInput.error = it; return }
             tmdbStatusText.text = "Verifying key..."

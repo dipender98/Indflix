@@ -1283,7 +1283,6 @@ class MultimoviesProvider : MainAPI() {
             LinkCache.get(meta.imdbId, meta.season, meta.episode)?.let { cached ->
                 if (cached.isNotEmpty()) {
                     cached.forEach { runCatching { callback(it) } }
-                    deliverFallbackSubs(meta, subtitleCallback)
                     return@withDomainRetry true
                 }
             }
@@ -1299,9 +1298,6 @@ class MultimoviesProvider : MainAPI() {
                     android.util.Log.i("Multimovies", "loadLinks: replay ${cached.size} + live tail " +
                         "$extra links (first-tap farm still resolving)")
                 }
-                if (meta != null) {
-                    deliverFallbackSubs(meta, subtitleCallback)
-                }
                 return@withDomainRetry true
             }
         }
@@ -1311,7 +1307,6 @@ class MultimoviesProvider : MainAPI() {
             val extra = tailLiveFarm(data, farm, pushed, callback)
             if (extra > 0) {
                 android.util.Log.i("Multimovies", "loadLinks: joined in-flight farm -> $extra live links")
-                if (meta != null) deliverFallbackSubs(meta, subtitleCallback)
                 return@withDomainRetry true
             }
         }
@@ -1421,13 +1416,6 @@ class MultimoviesProvider : MainAPI() {
             }
         }
 
-        val metaSubs = meta
-        val subsJob = metaSubs?.let { m ->
-            searchScope.async {
-                deliverFallbackSubs(m, subtitleCallback)
-            }
-        }
-
         val loadStartMs = System.currentTimeMillis()
         val nothingToPull = embeds.isEmpty() && globalSources.isEmpty()
         val firstStream = !nothingToPull &&
@@ -1437,15 +1425,12 @@ class MultimoviesProvider : MainAPI() {
             val bg = FastStartCache.get(data)
             if (bg != null && bg.isNotEmpty()) {
                 bg.forEach { runCatching { callback(it) } }
-                meta?.let { deliverFallbackSubs(it, subtitleCallback) }
                 return@withDomainRetry true
             }
             return@withDomainRetry false
         }
 
         withTimeoutOrNull(LIVE_FILL_MS) { allPullsDone.await() }
-
-        subsJob?.await()
 
         val metaFinal = meta
         if (metaFinal != null) {
@@ -1461,73 +1446,6 @@ class MultimoviesProvider : MainAPI() {
         android.util.Log.i("Multimovies", "loadLinks: ${emitted.size} links pushed live in " +
             "${System.currentTimeMillis() - loadStartMs}ms (arrival order, no ranking)")
         return@withDomainRetry true
-    }
-
-    private suspend fun deliverFallbackSubs(
-        meta: SourceMeta,
-        subtitleCallback: (SubtitleFile) -> Unit,
-    ) {
-        runCatching {
-            coroutineScope {
-                val type = if (meta.season != null || meta.episode != null) "tv" else "movie"
-                var imdb = meta.imdbId.takeIf { it.startsWith("tt") }
-                var detail: TmdbService.TmdbDetail? = null
-                if (imdb == null) {
-                    val tmdb = meta.tmdbId?.toIntOrNull()
-                    if (tmdb != null) {
-                        detail = withTimeoutOrNull(4000L) { TmdbService.fetchMeta(tmdb, type) }
-                        imdb = detail?.imdbId?.takeIf { it.startsWith("tt") }
-                    }
-                }
-                val base = SubtilesProvider.desiredLanguages(null)
-                val baseCodes = SubtilesProvider.codesFromLangs(base)
-                val origLang = async {
-                    detail?.originalLanguage ?: meta.tmdbId?.toIntOrNull()?.let { id ->
-                        withTimeoutOrNull(4000L) { TmdbService.fetchMeta(id, type) }?.originalLanguage
-                    }
-                }
-                val seen = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
-                val emitLock = Mutex()
-                suspend fun emit(t: SubtitleFile) {
-                    if (!seen.add(t.url)) return
-                    emitLock.withLock { runCatching { subtitleCallback(t) } }
-                }
-                suspend fun topUpOriginal(wyzieKey: String?): Int {
-                    val code = origLang.await()?.takeIf { it.length == 2 }?.lowercase() ?: return 0
-                    if (code in baseCodes) return 0
-                    return if (wyzieKey != null) {
-                        WyzieSubs.fetchAndDeliver(
-                            imdb, meta.tmdbId, meta.season, meta.episode,
-                            setOf(code), wyzieKey, quiet = true,
-                        ) { emit(it) }
-                    } else {
-                        SubtilesProvider.fetchAndDeliver(
-                            imdb, meta.season, meta.episode, setOf(code), code,
-                        ) { emit(it) }
-                    }
-                }
-                coroutineScope {
-                    Settings.apiKey()?.let { key ->
-                        launch {
-                            runCatching {
-                                WyzieSubs.fetchAndDeliver(
-                                    imdb, meta.tmdbId, meta.season, meta.episode, base, key,
-                                ) { emit(it) }
-                                topUpOriginal(key)
-                            }
-                        }
-                    }
-                    launch {
-                        runCatching {
-                            SubtilesProvider.fetchAndDeliver(
-                                imdb, meta.season, meta.episode, base, null,
-                            ) { emit(it) }
-                            topUpOriginal(null)
-                        }
-                    }
-                }
-            }
-        }.onFailure { android.util.Log.w("Multimovies", "fallback subs failed: ${it.message}") }
     }
 
     private suspend fun pullSource(
