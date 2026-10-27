@@ -551,6 +551,30 @@ object StreamEngine {
         return streams.map { it.copy(subtitles = SubtitleKit.merge(it.subtitles, tracks)) }
     }
 
+    private suspend fun resolveSubtitleEndpoints(
+        streams: List<RawStream>,
+        roots: List<Any?>,
+        baseUrl: String,
+        headers: Map<String, String> = emptyMap(),
+    ): List<RawStream> {
+        if (streams.isEmpty() || roots.isEmpty()) return streams
+        val (cleaned, endpoints) = SubtitleKit.splitSubtitleEndpoints(roots)
+        val direct = withJsonSubtitles(streams, org.json.JSONArray().apply { cleaned.forEach { put(it) } }, baseUrl)
+        if (endpoints.isEmpty()) return direct
+        val fetched = mutableListOf<Any>()
+        for (rawUrl in endpoints.distinct().take(2)) {
+            val url = ManifestKit.resolveUrl(baseUrl, rawUrl)
+            val text = withTimeoutOrNull(6_000L) {
+                catching { app.get(url, timeout = 6, headers = headers).text }.getOrNull()
+            } ?: continue
+            val parsed = catching { org.json.JSONArray(text) }.getOrNull()
+                ?: catching { org.json.JSONObject(text) }.getOrNull() ?: continue
+            fetched += parsed
+        }
+        if (fetched.isEmpty()) return direct
+        return withJsonSubtitles(direct, org.json.JSONArray().apply { fetched.forEach { put(it) } }, baseUrl)
+    }
+
     internal fun speedRankMs(fetchMs: Long?, tagLabel: String): Double {
         if (fetchMs == null) return Double.MAX_VALUE
         val boost = when (LinkNaming.languageTag(tagLabel)) {
@@ -1618,11 +1642,13 @@ object StreamEngine {
                         }
                         return added
                     }
-                    val streams = addStreams(unwrapData(downloadObj).optJSONArray("downloads"), dash = false) +
-                        addStreams(unwrapData(playObj).optJSONArray("streams"), dash = false) +
-                        addStreams(unwrapData(playObj).optJSONArray("dash"), dash = true)
+                    val downloads = unwrapData(downloadObj)
+                    val play = unwrapData(playObj)
+                    val streams = addStreams(downloads.optJSONArray("downloads"), dash = false) +
+                        addStreams(play.optJSONArray("streams"), dash = false) +
+                        addStreams(play.optJSONArray("dash"), dash = true)
                     if (lockedTotal > 0) Log.i("MovieBox", "$subjectId: $lockedTotal VIP-locked rendition(s) skipped")
-                    streams
+                    withJsonSubtitles(streams, org.json.JSONArray().apply { put(downloads); put(play) }, base)
                 }
             }.awaitAll()
         }
@@ -1755,7 +1781,7 @@ object StreamEngine {
                     )
                 }
             }
-            return out
+            return withJsonSubtitles(out, root, base)
         }
 
         val (defaultRoot, vText) = coroutineScope {
@@ -4030,6 +4056,7 @@ object StreamEngine {
             "User-Agent" to HttpKit.userAgent,
         )
         val out = LinkedHashMap<String, RawStream>()
+        val subtitlePayloads = mutableListOf<Any>()
         val deadline = System.currentTimeMillis() + 22_000L
         for (srv in BINGR_SRVS) {
             if (out.size >= 6 || System.currentTimeMillis() > deadline) break
@@ -4044,6 +4071,7 @@ object StreamEngine {
                     }
                 }.getOrNull()
             } ?: continue
+            catching { org.json.JSONObject(text) }.getOrNull()?.let { subtitlePayloads += it }
             for (s in bingrSources(text)) {
                 if (out.containsKey(s.url)) continue
                 val isDash = s.url.contains(".mpd", true)
@@ -4058,7 +4086,7 @@ object StreamEngine {
             }
         }
         Log.d("Bingr", "cascade got ${out.size} sources for $type/$id")
-        return out.values.toList()
+        return resolveSubtitleEndpoints(out.values.toList(), subtitlePayloads, api, postHeaders)
     }
 
 
@@ -4517,17 +4545,17 @@ object StreamEngine {
         val text = withTimeoutOrNull(12_000L) {
             catching { app.get("$base$path", timeout = 12, headers = headers).text }.getOrNull()
         } ?: run { Log.w("Braflix", "api no response"); return emptyList() }
+        val root = catching { org.json.JSONObject(text) }.getOrNull()
         val src = braflixSource(text) ?: run { Log.w("Braflix", "no stream in response"); return emptyList() }
         val abs = if (src.stream.startsWith("http")) src.stream else base + src.stream
         Log.d("Braflix", "got 1 stream for $type/$id")
-        return listOf(
-            RawStream(
-                serverId = spec.id, serverName = spec.name,
-                url = abs, isM3u8 = true, isDash = true,
-                referer = ref, qualityHint = heightHintOf(src.quality),
-                extraHeaders = mapOf("User-Agent" to HttpKit.userAgent, "Referer" to ref),
-            )
+        val stream = RawStream(
+            serverId = spec.id, serverName = spec.name,
+            url = abs, isM3u8 = true, isDash = true,
+            referer = ref, qualityHint = heightHintOf(src.quality),
+            extraHeaders = mapOf("User-Agent" to HttpKit.userAgent, "Referer" to ref),
         )
+        return resolveSubtitleEndpoints(listOf(stream), listOfNotNull(root), base, headers)
     }
 
     internal data class BraflixSource(val stream: String, val quality: String)
@@ -5039,7 +5067,7 @@ object StreamEngine {
         if (out.isEmpty()) {
             Log.w("IndStream", "${spec.id}: source present but carried no url/manifest/qualities; source keys=${namesOf(source)}")
         }
-        return withJsonSubtitles(out, root, apiUrl)
+        return resolveSubtitleEndpoints(out, listOf(root), apiUrl, okHeaders(referer))
     }
 
     private suspend fun unwrapPages(html: String, baseUrl: String, timeoutSec: Int): Pair<String, String> {

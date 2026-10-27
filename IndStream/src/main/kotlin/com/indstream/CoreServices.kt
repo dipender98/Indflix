@@ -1537,7 +1537,7 @@ object SubtitleKit {
         "url", "file", "src", "link", "path", "source", "subtitleUrl", "subtitle_url", "sub_url",
     )
     private val LANGUAGE_FIELDS = listOf(
-        "language", "lang", "srclang", "locale", "languageName", "language_name", "label", "name", "title",
+        "label", "name", "title", "languageName", "language_name", "language", "lang", "srclang", "locale",
     )
     private val NAME_FIELDS = listOf("name", "label", "title")
 
@@ -1596,7 +1596,18 @@ object SubtitleKit {
                         }
                     }
                 }
-                is org.json.JSONArray -> for (i in 0 until node.length()) walk(node.opt(i), depth + 1)
+                is org.json.JSONArray -> {
+                    for (i in 0 until node.length()) {
+                        val entry = node.opt(i)
+                        if (entry is org.json.JSONObject) {
+                            val u = entry.urlField()
+                            if (u != null && looksLikeSubtitle(u)) {
+                                add(u, entry.languageField(), entry.nameField())
+                            }
+                        }
+                        walk(entry, depth + 1)
+                    }
+                }
             }
         }
 
@@ -1610,14 +1621,76 @@ object SubtitleKit {
         return (existing + extra).distinctBy { it.url }
     }
 
-    private fun org.json.JSONObject.urlField(): String? =
-        URL_FIELDS.firstNotNullOfOrNull { key -> optString(key).trim().takeIf { it.isNotBlank() } }
+    fun splitSubtitleEndpoints(roots: List<Any?>): Pair<List<Any>, List<String>> {
+        val endpoints = LinkedHashSet<String>()
+        fun collect(node: Any?, depth: Int) {
+            if (depth > MAX_JSON_DEPTH || node == null) return
+            when (node) {
+                is org.json.JSONObject -> {
+                    val names = node.names() ?: return
+                    for (i in 0 until names.length()) {
+                        val key = names.optString(i)
+                        val value = node.opt(key) ?: continue
+                        if (value is String && isSubtitleKey(key)) endpoints.add(value)
+                        collect(value, depth + 1)
+                    }
+                }
+                is org.json.JSONArray -> for (i in 0 until node.length()) collect(node.opt(i), depth + 1)
+            }
+        }
+        roots.forEach { collect(it, 0) }
+        val cleaned = roots.mapNotNull { stripEndpointStrings(it) }
+        return cleaned to endpoints.toList()
+    }
 
-    private fun org.json.JSONObject.languageField(): String? =
-        LANGUAGE_FIELDS.firstNotNullOfOrNull { key -> optString(key).trim().takeIf { it.isNotBlank() } }
+    private fun stripEndpointStrings(node: Any?, depth: Int = 0): Any? {
+        if (depth > MAX_JSON_DEPTH || node == null) return node
+        return when (node) {
+            is org.json.JSONObject -> {
+                val out = org.json.JSONObject()
+                val names = node.names() ?: return node
+                for (i in 0 until names.length()) {
+                    val key = names.optString(i)
+                    val value = node.opt(key) ?: continue
+                    if (value is String && isSubtitleKey(key)) continue
+                    stripEndpointStrings(value, depth + 1)?.let { out.put(key, it) }
+                }
+                out
+            }
+            is org.json.JSONArray -> {
+                val out = org.json.JSONArray()
+                for (i in 0 until node.length()) {
+                    stripEndpointStrings(node.opt(i), depth + 1)?.let { out.put(it) }
+                }
+                out
+            }
+            else -> node
+        }
+    }
 
-    private fun org.json.JSONObject.nameField(): String? =
-        NAME_FIELDS.firstNotNullOfOrNull { key -> optString(key).trim().takeIf { it.isNotBlank() } }
+    private fun org.json.JSONObject.urlField(): String? {
+        for (key in URL_FIELDS) {
+            val v = optString(key).trim()
+            if (v.isNotBlank()) return v
+        }
+        return null
+    }
+
+    private fun org.json.JSONObject.languageField(): String? {
+        for (key in LANGUAGE_FIELDS) {
+            val v = optString(key).trim()
+            if (v.isNotBlank()) return v
+        }
+        return null
+    }
+
+    private fun org.json.JSONObject.nameField(): String? {
+        for (key in NAME_FIELDS) {
+            val v = optString(key).trim()
+            if (v.isNotBlank()) return v
+        }
+        return null
+    }
 
     private fun isSubtitleKey(key: String): Boolean {
         val k = key.lowercase().replace("_", "").replace("-", "")
@@ -1626,8 +1699,9 @@ object SubtitleKit {
     }
 
     private fun looksLikeSubtitle(raw: String): Boolean {
+        val lower = raw.lowercase()
+        if (SUBTITLE_EXTENSIONS.any { lower.contains(it) }) return true
         val path = raw.substringBefore('?').substringBefore('#').lowercase()
-        if (SUBTITLE_EXTENSIONS.any { path.endsWith(it) }) return true
         return path.contains("/subtitle") || path.contains("/caption") || path.contains("/subs/")
     }
 }

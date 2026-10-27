@@ -4,7 +4,7 @@ import java.util.zip.Deflater
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
-version = 81
+version = 82
 
 plugins {
     id("com.lagradost.cloudstream3.gradle")

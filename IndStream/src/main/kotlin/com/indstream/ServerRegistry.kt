@@ -130,7 +130,7 @@ object ServerFarm {
             movieUrl = "https://api.bingr.one/api/stream",
             tvUrl = "https://api.bingr.one/api/stream",
             referer = "https://bingr.one/",
-            hasSubtitles = false, timeoutSec = 30,
+            hasSubtitles = true, timeoutSec = 30,
             speed = ServerSpeed.FAST,
         ),
         ServerSpec(

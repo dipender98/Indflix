@@ -3,6 +3,7 @@ package Test
 import com.indstream.ServerFarm
 import com.indstream.ServerIdType
 import com.indstream.StreamEngine
+import com.indstream.SubtitleKit
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
@@ -88,5 +89,92 @@ class ServerBingrShowboxTest {
         )
         for (id in gone) assertNull(ServerFarm.allServers.firstOrNull { it.id == id }, "$id must be absent")
         assertNotNull(ServerFarm.allServers.firstOrNull { it.id == "bingr" })
+    }
+
+    @Test
+    fun bingr_spec_marksSubtitles() {
+        assertTrue(ServerFarm.allServers.first { it.id == "bingr" }.hasSubtitles)
+    }
+
+    @Test
+    fun bingr_payloadSubtitles_attachToStreams() {
+        val json = """
+            {"sources":[
+                {"url":"https://cdn.example/master.m3u8","quality":"1080p","language":"Hindi",
+                 "captions":[{"file":"/subs/hi.vtt","label":"Hindi"}]}
+            ],
+             "subtitles":[
+                {"url":"https://sub.example/en.vtt","lang":"en"}
+             ]}
+        """.trimIndent()
+        val streams = listOf(
+            StreamEngine.RawStream(
+                "bingr", "Bingr", "https://cdn.example/master.m3u8", true,
+                referer = "https://bingr.one/",
+            ),
+        )
+        val attached = StreamEngine.withJsonSubtitles(streams, org.json.JSONObject(json), "https://api.bingr.one")
+        assertEquals(1, attached.size)
+        assertTrue(
+            attached[0].subtitles.any { it.url == "https://api.bingr.one/subs/hi.vtt" },
+            "per-source captions must resolve against the api base",
+        )
+        assertTrue(
+            attached[0].subtitles.any { it.url == "https://sub.example/en.vtt" },
+            "top-level subtitles must be kept",
+        )
+    }
+
+    @Test
+    fun netmirror_captions_attachViaProxyUrls() {
+        val json = """
+            {"ok":true,"streams":[
+                {"url":"https://cdn.example/video.mp4","resolution":1080}
+            ],
+             "captions":[
+                {"lang":"ar","name":"العربية","url":"/api/proxy/video?url=https%3A%2F%2Fx%2Fa.srt"}
+             ]}
+        """.trimIndent()
+        val streams = listOf(
+            StreamEngine.RawStream(
+                "netmirror", "NetMirror", "https://cdn.example/video.mp4", false,
+                referer = "https://videodownloader.site/",
+            ),
+        )
+        val attached = StreamEngine.withJsonSubtitles(streams, org.json.JSONObject(json), "https://net79.cc")
+        assertEquals(1, attached.size)
+        assertTrue(
+            attached[0].subtitles.any { it.url.contains("/api/proxy/video") },
+            "proxy-style caption urls must be accepted",
+        )
+    }
+
+    @Test
+    fun braflix_endpointSubtitles_areSplitAndAttachable() {
+        val api = org.json.JSONObject(
+            """
+            {"status":"ready","result":{"file":{
+                "stream":"/dash-proxy?url=x.mpd",
+                "subtitles":"/api/subs/abc123"
+            }}}
+            """.trimIndent(),
+        )
+        val (cleaned, endpoints) = SubtitleKit.splitSubtitleEndpoints(listOf(api))
+        assertEquals(listOf("/api/subs/abc123"), endpoints, "endpoint string must be detected")
+        val tracks = SubtitleKit.fromJson(org.json.JSONArray().apply { cleaned.forEach { put(it) } }, "https://braflix.dev")
+        assertTrue(tracks.none { it.url.contains("/api/subs/") }, "endpoint string must not become a track")
+
+        val subsEndpoint = org.json.JSONArray(
+            """
+            [{"src":"/sub/abc/aHR0cHM6Ly9jYWNoZS52ZHJrLnNpdGUvdjEvdnR0L21vdmllLzI3MjA1L0VuZ2xpc2gudnR0.vtt","label":"English","lang":"en"}]
+            """.trimIndent(),
+        )
+        val attached = StreamEngine.withJsonSubtitles(
+            listOf(StreamEngine.RawStream("braflix", "Braflix", "https://braflix.dev/dash-proxy?url=x.mpd", true, isDash = true)),
+            subsEndpoint,
+            "https://braflix.dev",
+        )
+        assertTrue(attached[0].subtitles.any { it.url.startsWith("https://braflix.dev/sub/abc/") }, "braflix sub src must resolve")
+        assertTrue(attached[0].subtitles.any { it.language == "English" }, "braflix label must become language")
     }
 }

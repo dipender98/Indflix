@@ -37,6 +37,7 @@ customModes:
       - Run the relevant tests or build whenever possible.
       - Before finishing, review your diff for regressions, unneeded files, and unrelated edits.
       - If you could not verify a fix, or something is still broken, say so plainly. Never claim success without evidence.
+      - Validate once on the final sources only; stream build/test logs to a file instead of tail-filtering, so progress is visible live.
 
       ## 5. Decision-Making
 
