@@ -18,19 +18,19 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/dipender98/Indflix/main/IndStream/icon.png",
         "apiVersion": 1,
-        "fileHash": "sha256-97d2a6a11be940ccfe25afa740f16f4fa7b63d994446fae9d7f5bb0a99fb5906"
+        "fileHash": "sha256-4da3db1f580cab5ae34e22706ace8ae6938c6a4abe42003322a50fb7e287f13d"
     },
     {
         "url": "https://raw.githubusercontent.com/dipender98/Indflix/builds/Multimovies.cs3",
         "status": 1,
-        "version": 47,
+        "version": 48,
         "name": "Multimovies",
         "internalName": "Multimovies",
         "authors": [
             "Indflix"
         ],
         "description": "CloudStream provider that scrapes Multimovies and pulls sources in parallel with a per-source timeout.",
-        "fileSize": 152534,
+        "fileSize": 127352,
         "repositoryUrl": "https://github.com/dipender98/Indflix",
         "language": "hi",
         "tvTypes": [
@@ -42,7 +42,7 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/dipender98/Indflix/main/Multimovies/icon.png",
         "apiVersion": 1,
-        "fileHash": "sha256-bbd30fba09ad80eb6b2ceeb52f83c1e16d6585db5c19125699fbfad72dcea424"
+        "fileHash": "sha256-0e203f8b4039d4b42a0f6f6090327d29961d1e34259b5d0dcd06bd17f9a6fd19"
     },
     {
         "url": "https://raw.githubusercontent.com/dipender98/Indflix/builds/Vegamovies.cs3",
@@ -63,6 +63,6 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/dipender98/Indflix/main/Vegamovies/icon.png",
         "apiVersion": 1,
-        "fileHash": "sha256-f893b94e54533a20fb53a0f6002c6b9b9da43ea7051fc18aace97d2c02e58560"
+        "fileHash": "sha256-16287d72db5dcc4f19050c465be8fe2b0a705f6bdf33a00114032c71fb2c488f"
     }
 ]
