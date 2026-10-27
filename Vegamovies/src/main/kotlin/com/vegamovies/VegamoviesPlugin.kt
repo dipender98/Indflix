@@ -776,18 +776,6 @@ class VegamoviesProvider : MainAPI() {
         val referer = payload.pageUrl.ifBlank { mainUrl }
         var emitted = false
 
-        val subsJob = coroutineScope {
-            async {
-                val season = payload.links.firstNotNullOfOrNull { it.season }
-                val episode = payload.links.firstNotNullOfOrNull { it.episode }
-                runCatching {
-                    VegaSubtitles.fetchAndDeliver(payload.imdbId, season, episode) {
-                        runCatching { subtitleCallback(it) }
-                    }
-                }
-            }
-        }
-
         val waves = payload.links
             .groupBy {
                 when (it.kind) {
@@ -821,7 +809,6 @@ class VegamoviesProvider : MainAPI() {
                 }
             }
         }
-        runCatching { subsJob.await() }
         return emitted
     }
 
