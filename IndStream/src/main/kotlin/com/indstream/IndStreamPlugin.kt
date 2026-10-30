@@ -257,6 +257,7 @@ class IndStreamProvider : MainAPI() {
 
     private suspend fun playlistResponse(entry: M3uPlaylists.Entry): LoadResponse {
         M3uPlaylists.remember(entry)
+        android.util.Log.i("IndStream", "M3U load '${entry.name}' -> ${entry.url}")
         val quality = if (entry.height > 0) ManifestKit.qualityLabel(entry.height) else ""
         val plot = listOfNotNull(
             entry.groups.joinToString(", ").takeIf { it.isNotBlank() },
@@ -564,7 +565,9 @@ class IndStreamProvider : MainAPI() {
         val ref = TmdbUrlParser.parseTitleUrl(data)
         if (ref == null) {
             if (isDirectMediaUrl(data)) {
-                emitPlaylistLink(M3uPlaylists.remembered(data) ?: directMediaEntry(data), callback)
+                val entry = M3uPlaylists.remembered(data) ?: directMediaEntry(data)
+                android.util.Log.i("IndStream", "TAP#$tap live direct url -> '${entry.name}' (${entry.url})")
+                emitPlaylistLink(entry, callback)
                 return true
             }
             android.util.Log.w("IndStream", "loadLinks: unparsable url: $data")

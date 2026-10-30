@@ -1,9 +1,13 @@
 package Test
 
+import com.indstream.IndStreamProvider
 import com.indstream.M3uPlaylists
+import com.lagradost.cloudstream3.LiveStreamLoadResponse
+import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -158,5 +162,43 @@ class M3uPlaylistsTest {
         assertEquals(entry, M3uPlaylists.remembered(entry.url))
         assertNull(M3uPlaylists.remembered("https://cdn.example/live/other.m3u8"))
         assertNull(M3uPlaylists.remembered(null))
+    }
+
+    @Test
+    fun the_real_live_entry_url_round_trips() {
+        val entry = M3uPlaylists.Entry(
+            name = "3AW (1080p)",
+            url = "https://3awlive.akamaized.net/hls/live/2032295/3AW/index.m3u8",
+            logo = "https://i.imgur.com/Z4MdB0S.png",
+            groups = listOf("News"),
+            height = 1080,
+            duration = -1,
+        )
+        val encoded = M3uPlaylists.encode(entry)
+        assertTrue(encoded.startsWith("indstream-m3u://item?"))
+        assertTrue(encoded.contains("u=https%3A%2F%2F3awlive.akamaized.net"))
+        val decoded = M3uPlaylists.decode(encoded)
+        assertEquals(entry, decoded)
+        assertTrue(decoded!!.isLive)
+    }
+
+    @Test
+    fun provider_load_returns_a_live_response_for_a_playlist_item() = runBlocking {
+        val entry = M3uPlaylists.Entry(
+            name = "3AW (1080p)",
+            url = "https://3awlive.akamaized.net/hls/live/2032295/3AW/index.m3u8",
+            logo = "https://i.imgur.com/Z4MdB0S.png",
+            groups = listOf("News"),
+            height = 1080,
+            duration = -1,
+        )
+        val response = IndStreamProvider().load(M3uPlaylists.encode(entry))
+        assertNotNull(response)
+        assertIs<LiveStreamLoadResponse>(response)
+        assertEquals("3AW (1080p)", response.name)
+        assertEquals(entry.url, response.dataUrl)
+        assertEquals(entry.logo, response.posterUrl)
+        assertEquals(entry.groups, response.tags)
+        assertEquals(entry, M3uPlaylists.remembered(entry.url))
     }
 }
