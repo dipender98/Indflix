@@ -150,8 +150,14 @@ object M3uPlaylists {
 
     fun decode(url: String?): Entry? {
         val text = url?.trim().orEmpty()
-        if (!text.startsWith(SCHEME, ignoreCase = true)) return null
-        val query = text.substringAfter('?', "")
+        // CloudStream's APIRepository.load() runs fixUrl() on every url before it
+        // reaches the provider. This scheme does not start with "http", so the
+        // card url arrives prefixed with mainUrl (e.g.
+        // "https://.../indstream-m3u://item?..."). Recover the scheme marker
+        // wherever it appears in the string instead of only at the start.
+        val start = text.indexOf(SCHEME, ignoreCase = true)
+        if (start < 0) return null
+        val query = text.substring(start + SCHEME.length).removePrefix("?")
         if (query.isEmpty()) return null
         val params = HashMap<String, String>()
         query.split('&').forEach { part ->

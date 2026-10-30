@@ -201,4 +201,39 @@ class M3uPlaylistsTest {
         assertEquals(entry.groups, response.tags)
         assertEquals(entry, M3uPlaylists.remembered(entry.url))
     }
+
+    @Test
+    fun decode_survives_the_mainurl_prefix_that_fixurl_prepends() {
+        // CloudStream's APIRepository.load() calls api.fixUrl() on the card url.
+        // Because the scheme does not start with "http", the provider receives
+        // "https://www.themoviedb.org/indstream-m3u://item?..." on the device.
+        val entry = M3uPlaylists.Entry(
+            name = "3AW (1080p)",
+            url = "https://3awlive.akamaized.net/hls/live/2032295/3AW/index.m3u8",
+            logo = "https://i.imgur.com/Z4MdB0S.png",
+            groups = listOf("News"),
+            height = 1080,
+            duration = -1,
+        )
+        val mangled = "https://www.themoviedb.org/" + M3uPlaylists.encode(entry)
+        assertEquals(entry, M3uPlaylists.decode(mangled))
+    }
+
+    @Test
+    fun provider_load_returns_a_live_response_for_the_fixurl_mangled_url() = runBlocking {
+        val entry = M3uPlaylists.Entry(
+            name = "3AW (1080p)",
+            url = "https://3awlive.akamaized.net/hls/live/2032295/3AW/index.m3u8",
+            logo = "https://i.imgur.com/Z4MdB0S.png",
+            groups = listOf("News"),
+            height = 1080,
+            duration = -1,
+        )
+        val mangled = "https://www.themoviedb.org/" + M3uPlaylists.encode(entry)
+        val response = IndStreamProvider().load(mangled)
+        assertNotNull(response)
+        assertIs<LiveStreamLoadResponse>(response)
+        assertEquals(entry.url, response.dataUrl)
+        assertEquals(entry, M3uPlaylists.remembered(entry.url))
+    }
 }
