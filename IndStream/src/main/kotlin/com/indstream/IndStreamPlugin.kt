@@ -114,13 +114,30 @@ class IndStreamProvider : MainAPI() {
     override var lang = "hi"
     override val hasMainPage = true
     override val hasQuickSearch = true
-    override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
+    override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Live)
 
     override val mainPage: List<MainPageData>
-        get() = mainPageOf(*Catalogue.homeRows().toTypedArray())
+        get() {
+            val catalogue = Catalogue.homeRows().map { (key, title) ->
+                MainPageData(name = title, data = key, horizontalImages = false)
+            }
+            val playlists = M3uPlaylists.rows().map { (key, title) ->
+                MainPageData(name = title, data = key, horizontalImages = true)
+            }
+            return catalogue + playlists
+        }
 
 
     override suspend fun search(query: String): List<SearchResponse>? = coroutineScope {
+        if (query.isBlank()) return@coroutineScope null
+        val playlistHits = async { HttpKit.attempt { M3uPlaylists.search(query) }.orEmpty() }
+        val vod = searchVod(query)
+        val live = playlistHits.await().mapNotNull { it.toPlaylistCard() }
+        if (live.isEmpty()) return@coroutineScope vod
+        return@coroutineScope vod.orEmpty() + live
+    }
+
+    private suspend fun searchVod(query: String): List<SearchResponse>? = coroutineScope {
         if (query.isBlank()) return@coroutineScope null
         val imdbDef = async { imdbSearchFuzzy(query) }
         val tmdbDef = async { withTimeoutOrNull(12000L) { TmdbService.search(query) }.orEmpty() }
@@ -154,7 +171,7 @@ class IndStreamProvider : MainAPI() {
         }.takeIf { it.isNotEmpty() }
     }
 
-    override suspend fun quickSearch(query: String): List<SearchResponse>? = search(query)
+    override suspend fun quickSearch(query: String): List<SearchResponse>? = searchVod(query)
 
     private suspend fun imdbSearchFuzzy(query: String): List<ImdbService.ImdbHit> = coroutineScope {
         val queries = SearchRank.recallQueries(query, max = 2)
@@ -204,6 +221,12 @@ class IndStreamProvider : MainAPI() {
         page: Int,
         request: MainPageRequest
     ): HomePageResponse? {
+        if (request.data.startsWith("m3u|")) {
+            val entries = withTimeoutOrNull(20_000L) { M3uPlaylists.fetch(request.data, page) }.orEmpty()
+            val cards = entries.mapNotNull { it.toPlaylistCard() }
+            if (cards.isEmpty()) return null
+            return newHomePageResponse(request, cards)
+        }
         val row = Catalogue.parseRow(request.data)
         val parts = request.data.split("|")
         val kind = parts[0].trim()
@@ -221,13 +244,47 @@ class IndStreamProvider : MainAPI() {
         val responses = items.mapNotNull { it.toSearchResponse() }
         if (responses.isEmpty()) return null
         return newHomePageResponse(
-            request.name,
+            request,
             if (Settings.shuffleRows()) responses.shuffled() else responses,
         )
     }
 
 
-    override suspend fun load(url: String): LoadResponse? = coroutineScope {
+    override suspend fun load(url: String): LoadResponse? {
+        M3uPlaylists.decode(url)?.let { return playlistResponse(it) }
+        return loadVod(url)
+    }
+
+    private suspend fun playlistResponse(entry: M3uPlaylists.Entry): LoadResponse {
+        val quality = if (entry.height > 0) ManifestKit.qualityLabel(entry.height) else ""
+        val plot = listOfNotNull(
+            entry.groups.joinToString(", ").takeIf { it.isNotBlank() },
+            quality.takeIf { it.isNotBlank() }?.let { "Quality: $it" },
+        ).joinToString("\n")
+        return newLiveStreamLoadResponse(entry.name, M3uPlaylists.encode(entry), entry.url) {
+            this.posterUrl = entry.logo
+            this.plot = plot.ifBlank { null }
+            this.tags = entry.groups
+        }
+    }
+
+    private fun M3uPlaylists.Entry.toPlaylistCard(): SearchResponse? {
+        if (name.isBlank() || url.isBlank()) return null
+        return newLiveSearchResponse(name, M3uPlaylists.encode(this), TvType.Live, false) {
+            this.posterUrl = logo
+            this.quality = playlistQuality(height)
+        }
+    }
+
+    private fun playlistQuality(height: Int): SearchQuality? = when {
+        height >= 2160 -> SearchQuality.FourK
+        height >= 1080 -> SearchQuality.HQ
+        height >= 720 -> SearchQuality.HD
+        height > 0 -> SearchQuality.SD
+        else -> null
+    }
+
+    private suspend fun loadVod(url: String): LoadResponse? = coroutineScope {
         val ref = TmdbUrlParser.parseTitleUrl(url) ?: return@coroutineScope null
         val urlImdb = ref.imdbId
 
@@ -473,6 +530,17 @@ class IndStreamProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
     ): Boolean {
+        M3uPlaylists.decode(data)?.let { entry ->
+            val type = when {
+                entry.url.contains(".mpd", ignoreCase = true) -> ExtractorLinkType.DASH
+                entry.url.contains(".m3u8", ignoreCase = true) -> ExtractorLinkType.M3U8
+                else -> ExtractorLinkType.VIDEO
+            }
+            callback(newExtractorLink(entry.name, entry.name, entry.url, type) {
+                entry.height.takeIf { it > 0 }?.let { quality = it }
+            })
+            return true
+        }
         val ref = TmdbUrlParser.parseTitleUrl(data) ?: run {
             android.util.Log.w("IndStream", "loadLinks: unparsable url: $data")
             return false

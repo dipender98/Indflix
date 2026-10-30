@@ -1390,14 +1390,14 @@ object SettingsUi {
             return if (status.isNullOrBlank()) url else "$url\n$status"
         }
 
-        fun deleteIcon(onClick: () -> Unit): TextView =
+        fun deleteIcon(description: String = "Delete", onClick: () -> Unit): TextView =
             label(GLYPH_CLOSE, 12f, TEXT_FAINT).apply {
                 gravity = Gravity.CENTER
                 setPadding(dp(8), dp(8), dp(8), dp(8))
                 background = ripple(rounded(Color.TRANSPARENT, 999))
                 isClickable = true
                 isFocusable = true
-                contentDescription = "Delete addon"
+                contentDescription = description
                 setOnClickListener { onClick() }
             }
 
@@ -1597,6 +1597,190 @@ object SettingsUi {
         }
 
         renderAddons()
+
+
+        var m3uEnabled = Settings.m3uEnabled()
+        var m3uSources = Settings.m3uSources().toMutableList()
+
+        fun m3uStateText(): String = when {
+            !m3uEnabled -> "Off"
+            m3uSources.isEmpty() -> "No playlists"
+            m3uSources.size == 1 -> "1 playlist"
+            else -> "${m3uSources.size} playlists"
+        }
+
+        val m3uCard = card(
+            "M3U Playlists",
+            "Home rows from playlists - live, film or series",
+            m3uStateText(),
+            m3uEnabled && m3uSources.isNotEmpty(),
+        )
+
+        fun refreshM3uState() {
+            setState(m3uCard, m3uStateText(), m3uEnabled && m3uSources.isNotEmpty())
+        }
+
+        val m3uStatus = label(
+            "Items keep the quality their name or link states, so pick what your connection handles.",
+            11.5f, TEXT_DIM,
+        ).apply { setPadding(0, dp(10), 0, 0) }
+
+        val m3uMore = chip("Add Playlist")
+        val m3uDefault = chip("Use Default")
+        val m3uList = optionList()
+
+        var m3uDraftVisible = false
+        var m3uDraftText = ""
+        var m3uDraftField: EditText? = null
+        var refreshM3u: () -> Unit = {}
+
+        fun commitM3uDraft(input: EditText) {
+            val normalized = M3uPlaylists.normalizeSource(input.text.toString())
+            if (normalized == null) {
+                input.error = "Enter a valid playlist URL"
+                return
+            }
+            if (m3uSources.any { it.equals(normalized, ignoreCase = true) }) {
+                input.error = "Playlist already added"
+                return
+            }
+            if (m3uSources.size >= M3uPlaylists.MAX_SOURCES) {
+                input.error = "Playlist limit reached"
+                return
+            }
+            input.error = null
+            m3uSources = (m3uSources + normalized).toMutableList()
+            Settings.saveM3uSources(context, m3uSources)
+            m3uDraftVisible = false
+            m3uDraftField = null
+            m3uDraftText = ""
+            refreshM3u()
+            fitHeight()
+        }
+
+        fun m3uRow(url: String): View {
+            val primary = M3uPlaylists.primarySource(m3uSources)?.equals(url, ignoreCase = true) == true
+            val opt = option(
+                M3uPlaylists.sourceLabel(url),
+                if (primary) "$url\nCategory rows" else url,
+            )
+            opt.dot.visibility = View.GONE
+            opt.root.isClickable = false
+            paintOption(opt, true)
+            val remove = deleteIcon("Delete playlist") {
+                m3uSources = m3uSources.filterNot { it.equals(url, ignoreCase = true) }.toMutableList()
+                Settings.saveM3uSources(context, m3uSources)
+                refreshM3u()
+                fitHeight()
+            }
+            opt.root.addView(
+                remove,
+                LinearLayout.LayoutParams(dp(32), dp(32)).apply { leftMargin = dp(4) },
+            )
+            return opt.root
+        }
+
+        fun renderM3u() {
+            if (!m3uDraftVisible) {
+                m3uDraftField = null
+                m3uDraftText = ""
+            } else {
+                m3uDraftField?.let { m3uDraftText = it.text.toString() }
+            }
+            m3uList.removeAllViews()
+            m3uSources.forEach { url -> m3uList.addView(m3uRow(url)) }
+            if (m3uDraftVisible) {
+                val input = field(m3uDraftText, "Paste playlist URL, then press Done").apply {
+                    layoutParams = LinearLayout.LayoutParams(
+                        0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f,
+                    )
+                    imeOptions = EditorInfo.IME_ACTION_DONE
+                }
+                m3uDraftField = input
+                input.setSelection(input.text.length)
+                val cancel = deleteIcon("Cancel") {
+                    m3uDraftVisible = false
+                    m3uDraftField = null
+                    m3uDraftText = ""
+                    refreshM3u()
+                    fitHeight()
+                }
+                val row = LinearLayout(context).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(dp(12), dp(10), dp(10), dp(10))
+                    background = rounded(SURFACE_2, 12, 1, BORDER)
+                    addView(input)
+                    addView(
+                        cancel,
+                        LinearLayout.LayoutParams(dp(32), dp(32)).apply { leftMargin = dp(4) },
+                    )
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ).apply { bottomMargin = dp(8) }
+                }
+                input.setOnEditorActionListener { _, actionId, _ ->
+                    if (actionId == EditorInfo.IME_ACTION_DONE) {
+                        commitM3uDraft(input)
+                        true
+                    } else false
+                }
+                m3uList.addView(row)
+                input.post { input.requestFocus() }
+            }
+            if (m3uSources.isEmpty() && !m3uDraftVisible) {
+                m3uList.addView(label("No playlists added.", 12f, TEXT_DIM))
+            }
+            refreshM3uState()
+        }
+
+        refreshM3u = { renderM3u() }
+
+        val m3uToggleOption = option("Enable M3U", "Add playlist rows to Home")
+        m3uToggleOption.dot.visibility = View.GONE
+        m3uToggleOption.root.isClickable = false
+        paintOption(m3uToggleOption, m3uEnabled)
+        val m3uToggle = smallToggle(m3uEnabled) { on ->
+            m3uEnabled = on
+            if (on && m3uSources.isEmpty()) {
+                m3uSources = M3uPlaylists.DEFAULT_SOURCES.toMutableList()
+                Settings.saveM3uSources(context, m3uSources)
+                refreshM3u()
+            }
+            Settings.saveM3uEnabled(context, on)
+            paintOption(m3uToggleOption, on)
+            refreshM3uState()
+        }
+        m3uToggleOption.root.addView(
+            m3uToggle,
+            LinearLayout.LayoutParams(dp(46), dp(28)).apply { leftMargin = dp(6) },
+        )
+
+        val m3uToggleList = optionList().apply { addView(m3uToggleOption.root) }
+        add(m3uCard, sectionLabel("Playlists", 14))
+        add(m3uCard, m3uToggleList, 8)
+        add(m3uCard, m3uStatus)
+        addRow(m3uCard, 10, m3uMore, m3uDefault)
+        add(m3uCard, m3uList, 8)
+
+        m3uMore.setOnClickListener {
+            if (m3uDraftVisible) return@setOnClickListener
+            m3uDraftVisible = true
+            m3uDraftText = ""
+            refreshM3u()
+            fitHeight()
+        }
+        m3uDefault.setOnClickListener {
+            val target = M3uPlaylists.DEFAULT_SOURCE
+            if (m3uSources.none { it.equals(target, ignoreCase = true) }) {
+                m3uSources = (listOf(target) + m3uSources).toMutableList()
+                Settings.saveM3uSources(context, m3uSources)
+            }
+            refreshM3u()
+            fitHeight()
+        }
+
+        renderM3u()
 
 
         val wyzieSaved = Settings.apiKey() != null

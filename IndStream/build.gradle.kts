@@ -4,7 +4,7 @@ import java.util.zip.Deflater
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
-version = 82
+version = 83
 
 plugins {
     id("com.lagradost.cloudstream3.gradle")
@@ -15,7 +15,7 @@ cloudstream {
     authors = listOf("Indflix")
     description = "Federated embed-server resolver keyed by TMDB/IMDB id. Races dozens of independent HLS/DASH servers, picks the fastest CDN per title, and exposes multi-language audio + per-quality links."
     status = 1
-    tvTypes = listOf("Movie", "TvSeries")
+    tvTypes = listOf("Movie", "TvSeries", "Live")
     requiresResources = false
     setRepo(System.getenv("GITHUB_REPOSITORY") ?: "https://github.com/dipender98/Indflix")
     iconUrl = "https://raw.githubusercontent.com/dipender98/Indflix/main/IndStream/icon.png"

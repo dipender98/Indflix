@@ -29,6 +29,8 @@ object Settings {
     private const val STREMIO_NUVIO_ADDONS = "stremio_addons"
     private const val STREMIO_NUVIO_OFF_PREFIX = "stremio_off_"
     private const val SHUFFLE_ROWS = "shuffle_rows"
+    private const val M3U_ENABLED = "m3u_enabled"
+    private const val M3U_SOURCES = "m3u_sources"
 
     @Volatile
     private var appContext: Context? = null
@@ -151,6 +153,12 @@ object Settings {
 
     @Volatile
     private var shuffleRowsCached: Boolean? = null
+
+    @Volatile
+    private var m3uEnabledCached: Boolean? = null
+
+    @Volatile
+    private var m3uSourcesCached: List<String>? = null
 
     @Volatile
     private var aiProviderCached: String? = null
@@ -490,6 +498,57 @@ object Settings {
                 .toSet()
         }
         stremioNuvioLoaded = true
+    }
+
+    fun m3uEnabled(): Boolean {
+        if (m3uEnabledCached == null) loadM3uEnabled()
+        return m3uEnabledCached == true
+    }
+
+    fun saveM3uEnabled(context: Context, on: Boolean) {
+        runCatching {
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit().putBoolean(M3U_ENABLED, on).apply()
+        }
+        m3uEnabledCached = on
+        appContext = context.applicationContext
+    }
+
+    fun m3uSources(): List<String> {
+        if (m3uSourcesCached == null) loadM3uSources()
+        return m3uSourcesCached ?: M3uPlaylists.DEFAULT_SOURCES
+    }
+
+    fun saveM3uSources(context: Context, urls: Collection<String>) {
+        val clean = urls.mapNotNull { M3uPlaylists.normalizeSource(it) }.distinct()
+        runCatching {
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit().putString(M3U_SOURCES, clean.joinToString("\n")).apply()
+        }
+        m3uSourcesCached = clean
+        appContext = context.applicationContext
+    }
+
+    private fun loadM3uEnabled() {
+        val ctx = appContext ?: return
+        m3uEnabledCached = runCatching {
+            ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(M3U_ENABLED, false)
+        }.getOrDefault(false)
+    }
+
+    private fun loadM3uSources() {
+        val ctx = appContext ?: return
+        m3uSourcesCached = runCatching {
+            val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            if (!prefs.contains(M3U_SOURCES)) {
+                M3uPlaylists.DEFAULT_SOURCES
+            } else {
+                prefs.getString(M3U_SOURCES, "").orEmpty()
+                    .split('\n')
+                    .mapNotNull { M3uPlaylists.normalizeSource(it) }
+                    .distinct()
+            }
+        }.getOrDefault(M3uPlaylists.DEFAULT_SOURCES)
     }
 
     fun shuffleRows(): Boolean {
