@@ -25,6 +25,7 @@ object M3uPlaylists {
     private const val CACHE_TTL_MS = 30 * 60 * 1000L
     private const val EMPTY_TTL_MS = 2 * 60 * 1000L
     private const val SEARCH_LIMIT = 20
+    private const val RECENT_LIMIT = 64
 
     /** One playable item. [duration] is negative for live entries. */
     data class Entry(
@@ -66,6 +67,22 @@ object M3uPlaylists {
     }
 
     private val cache = ConcurrentHashMap<String, Slot>()
+
+    private val recent = object : LinkedHashMap<String, Entry>(RECENT_LIMIT, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Entry>?): Boolean =
+            size > RECENT_LIMIT
+    }
+
+    /** Keeps the item behind a stream link so the player can show its name and quality. */
+    fun remember(entry: Entry) {
+        synchronized(recent) { recent[entry.url] = entry }
+    }
+
+    fun remembered(url: String?): Entry? {
+        val key = url?.trim().orEmpty()
+        if (key.isEmpty()) return null
+        return synchronized(recent) { recent[key] }
+    }
 
     fun rows(): List<Pair<String, String>> {
         if (!Settings.m3uEnabled()) return emptyList()

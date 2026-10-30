@@ -256,6 +256,7 @@ class IndStreamProvider : MainAPI() {
     }
 
     private suspend fun playlistResponse(entry: M3uPlaylists.Entry): LoadResponse {
+        M3uPlaylists.remember(entry)
         val quality = if (entry.height > 0) ManifestKit.qualityLabel(entry.height) else ""
         val plot = listOfNotNull(
             entry.groups.joinToString(", ").takeIf { it.isNotBlank() },
@@ -283,6 +284,31 @@ class IndStreamProvider : MainAPI() {
         height > 0 -> SearchQuality.SD
         else -> null
     }
+
+    private suspend fun emitPlaylistLink(entry: M3uPlaylists.Entry, callback: (ExtractorLink) -> Unit) {
+        val type = when {
+            entry.url.contains(".mpd", ignoreCase = true) -> ExtractorLinkType.DASH
+            entry.url.contains(".m3u8", ignoreCase = true) -> ExtractorLinkType.M3U8
+            else -> ExtractorLinkType.VIDEO
+        }
+        callback(newExtractorLink(entry.name, entry.name, entry.url, type) {
+            entry.height.takeIf { it > 0 }?.let { quality = it }
+        })
+    }
+
+    private fun isDirectMediaUrl(url: String?): Boolean {
+        val text = url?.trim().orEmpty()
+        return text.startsWith("http://", ignoreCase = true) ||
+            text.startsWith("https://", ignoreCase = true)
+    }
+
+    private fun directMediaEntry(url: String): M3uPlaylists.Entry = M3uPlaylists.Entry(
+        name = M3uPlaylists.sourceLabel(url),
+        url = url,
+        logo = null,
+        groups = emptyList(),
+        height = M3uPlaylists.heightOf(null, url),
+    )
 
     private suspend fun loadVod(url: String): LoadResponse? = coroutineScope {
         val ref = TmdbUrlParser.parseTitleUrl(url) ?: return@coroutineScope null
@@ -531,17 +557,16 @@ class IndStreamProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit,
     ): Boolean {
         M3uPlaylists.decode(data)?.let { entry ->
-            val type = when {
-                entry.url.contains(".mpd", ignoreCase = true) -> ExtractorLinkType.DASH
-                entry.url.contains(".m3u8", ignoreCase = true) -> ExtractorLinkType.M3U8
-                else -> ExtractorLinkType.VIDEO
-            }
-            callback(newExtractorLink(entry.name, entry.name, entry.url, type) {
-                entry.height.takeIf { it > 0 }?.let { quality = it }
-            })
+            emitPlaylistLink(entry, callback)
             return true
         }
-        val ref = TmdbUrlParser.parseTitleUrl(data) ?: run {
+        // Live items reach loadLinks as their direct stream url.
+        val ref = TmdbUrlParser.parseTitleUrl(data)
+        if (ref == null) {
+            if (isDirectMediaUrl(data)) {
+                emitPlaylistLink(M3uPlaylists.remembered(data) ?: directMediaEntry(data), callback)
+                return true
+            }
             android.util.Log.w("IndStream", "loadLinks: unparsable url: $data")
             return false
         }

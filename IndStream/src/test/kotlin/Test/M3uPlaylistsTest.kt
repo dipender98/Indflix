@@ -144,4 +144,19 @@ class M3uPlaylistsTest {
     fun playlist_rows_stay_hidden_until_enabled() {
         assertTrue(M3uPlaylists.rows().isEmpty())
     }
+
+    @Test
+    fun a_stream_link_keeps_the_item_it_came_from() {
+        val entry = M3uPlaylists.Entry(
+            name = "News One",
+            url = "https://cdn.example/live/news-one.m3u8",
+            logo = null,
+            groups = listOf("News"),
+            height = 1080,
+        )
+        M3uPlaylists.remember(entry)
+        assertEquals(entry, M3uPlaylists.remembered(entry.url))
+        assertNull(M3uPlaylists.remembered("https://cdn.example/live/other.m3u8"))
+        assertNull(M3uPlaylists.remembered(null))
+    }
 }
