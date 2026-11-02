@@ -55,8 +55,7 @@ object LinkNaming {
         val names = languageNames(s)
         return when {
             names.size == 1 -> names[0]
-            names.size == 2 -> "${names[0]}, ${names[1]}"
-            names.size > 2 -> "Multi"
+            names.size > 1 -> names.joinToString(", ")
             MULTI_MARKER.containsMatchIn(s) -> "Multi"
             else -> ""
         }
@@ -196,8 +195,7 @@ object LinkNaming {
         serverName: String,
     ): String = when {
         names.size == 1 -> names[0]
-        names.size == 2 -> "${names[0]}, ${names[1]}"
-        names.size > 2 -> "Multi"
+        names.size > 1 -> names.joinToString(", ")
         else -> languageLabel(audioLabel, originalLang)
             .ifBlank { languageLabel(mediaLabel, originalLang) }
             .ifBlank { trailingLanguageLabel(serverName, originalLang) }
@@ -216,14 +214,10 @@ object LinkNaming {
 
     private fun languageTagPart(label: String, names: List<String>): String {
         val parts = if (names.isNotEmpty()) names else label.split(',').map { it.trim() }.filter { it.isNotEmpty() }
-        if (parts.size == 2 && parts.none { it == "Multi" || it == "Unknown" || it == "Original" }) {
-            val first = languageFlag(parts[0])
-            val second = languageFlag(parts[1])
-            if (first.isNotBlank() || second.isNotBlank()) {
-                val a = if (first.isBlank()) parts[0] else "$first ${parts[0]}"
-                val b = if (second.isBlank()) parts[1] else "$second ${parts[1]}"
-                return "($a, $b)"
-            }
+        if (parts.size >= 2 && parts.none { it == "Multi" || it == "Unknown" || it == "Original" }) {
+            return "(" + parts.map { p ->
+                languageFlag(p).takeIf { it.isNotBlank() }?.let { "$it $p" } ?: p
+            }.joinToString(", ") + ")"
         }
         val single = parts.singleOrNull()
         val flag = single?.let { languageFlag(it) }.orEmpty()
@@ -329,11 +323,11 @@ object LinkNaming {
             lower.contains("malaysian") || lower == "ms" || lower == "may" || lower == "msa" -> "Malaysian"
             lower.contains("vietnamese") || lower == "vi" || lower == "vie" -> "Vietnamese"
             lower.contains("english") || lower == "en" || lower == "eng" -> "English"
-            lower.contains("தமழ") || lower.contains("tamil") || lower == "ta" || lower == "tam" -> "Tamil"
+            lower.contains("தமிழ") || lower.contains("tamil") || lower == "ta" || lower == "tam" -> "Tamil"
             lower.contains("తెలుగు") || lower.contains("telugu") || lower == "te" || lower == "tel" -> "Telugu"
             lower.contains("മലയാള") || lower.contains("malayalam") || lower == "ml" || lower == "mal" -> "Malayalam"
             lower.contains("ಕನ್ನಡ") || lower.contains("kannada") || lower == "kn" || lower == "kan" -> "Kannada"
-            lower.contains("मराझ") || lower.contains("marathi") || lower == "mr" || lower == "mar" -> "Marathi"
+            lower.contains("मराठ") || lower.contains("marathi") || lower == "mr" || lower == "mar" -> "Marathi"
             lower.contains("ਪੰਜਾਬ") || lower.contains("punjabi") || lower == "pa" || lower == "pan" -> "Punjabi"
             lower.contains("ગુજરાત") || lower.contains("gujarati") || lower == "gu" || lower == "guj" -> "Gujarati"
             lower.contains("नेपाल") || lower.contains("nepali") || lower == "ne" || lower == "nep" -> "Nepali"

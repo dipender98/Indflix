@@ -160,27 +160,13 @@ class ServerFarmHindiTest {
         assertNull(ServerFarm.allServers.firstOrNull { it.id == "vidcore" })
         val api = ServerFarm.allServers.first { it.id == "vidcore-api" }
         assertEquals("VidCore", api.name)
-        assertEquals("https://www.vidcore.org/", api.referer)
-        assertTrue(api.movieUrl.contains("vidrack.created.app"))
+        assertEquals("https://vidcore.org/", api.referer)
+        assertTrue(api.movieUrl.contains("vidcore.org/embed"))
     }
 
     @Test
-    fun allmovieland_presentWithDeclaredLanguages() {
-        val s = ServerFarm.allServers.first { it.id == "allmovieland" }
-        assertEquals("Allmovieland", s.name)
-        assertEquals(ServerIdType.IMDB, s.idType)
-        assertEquals(setOf("Hindi", "Tamil", "Telugu", "Bengali"), s.declaredLanguages)
-        assertEquals(60, s.timeoutSec, "allmovieland farm kill must fit the resolver chain")
-        val m = ServerFarm.buildMovieUrl(s, "tt1375666")
-        assertTrue(m.contains("allmovieland.art") && m.contains("tt1375666"))
-    }
-
-    @Test
-    fun allmovieland_hosts_fallbackOrderPinned() {
-        assertEquals(
-            listOf("https://allmovieland.art", "https://allmovieland.one"),
-            StreamEngine.allmovielandHosts(),
-        )
+    fun allmovieland_removed_unusableProviderMustNotBeInFarm() {
+        assertNull(ServerFarm.allServers.firstOrNull { it.id == "allmovieland" })
     }
 
     @Test
@@ -191,7 +177,7 @@ class ServerFarmHindiTest {
 
     @Test
     fun bulletTrainServers_present() {
-        val ids = setOf("vidlink", "vaplayer", "moviebox", "allmovieland", "netmirror",
+        val ids = setOf("vidlink", "vaplayer", "moviebox", "netmirror",
             "castletv", "streamflix", "onetouchtv", "vidcore-api")
         for (id in ids) {
             assertNotNull(
@@ -205,7 +191,8 @@ class ServerFarmHindiTest {
             "primesrc", "myflixer-hindi",
             "mp4hydra", "vidzee", "streamprovider",
             "videm", "8stream", "dahmermovies", "vidzy", "vixsrc",
-            "nhd", "vidapi", "zxcstreams", "vidsrc-to", "nontongo", "vidcore")
+            "nhd", "vidapi", "zxcstreams", "vidsrc-to", "nontongo", "vidcore",
+            "allmovieland")
         for (id in disabled) {
             assertNull(
                 ServerFarm.allServers.firstOrNull { it.id == id },

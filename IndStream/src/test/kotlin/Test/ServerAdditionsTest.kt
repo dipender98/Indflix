@@ -276,6 +276,7 @@ class ServerAdditionsTest {
     @Test
     fun hubLangOf_dualAudio() {
         assertEquals("Multi", StreamEngine.hubLangOf("Hindi, English"))
+        assertEquals("Multi", StreamEngine.hubLangOf("Hindi, Bengali"))
         assertEquals("Hindi", StreamEngine.hubLangOf("Hindi"))
         assertEquals("", StreamEngine.hubLangOf("BluRay exclusive"))
     }

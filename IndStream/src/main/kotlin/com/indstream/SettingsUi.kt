@@ -1008,9 +1008,41 @@ object SettingsUi {
         )
         add(
             forYouCard,
-            label("Enabling \"Made for You - Recommendation\" catalogue", 12f, TEXT_DIM)
+            label("Show these rows on Home", 12f, TEXT_DIM)
                 .apply { setPadding(0, dp(12), 0, 0) },
         )
+        val forYouRowOptions = LinkedHashMap<String, Option>()
+        val forYouRowList = optionList()
+        add(forYouCard, forYouRowList, 8)
+
+        fun refreshForYouState() {
+            val enabled = Catalogue.forYouRowTitles().any { (key, _) -> Settings.catalogueEnabled(key) }
+            setState(forYouCard, if (enabled) "On" else "Off", enabled)
+            forYouRowOptions.forEach { (key, opt) ->
+                paintOption(opt, Settings.catalogueEnabled(key))
+            }
+        }
+
+        Catalogue.forYouRowTitles().forEach { (key, title) ->
+            val signedIn = SimklHistory.isSignedIn()
+            val opt = option(
+                title,
+                if (signedIn) "Built from your Simkl watch history" else "Sign in to Simkl to show this row",
+            )
+            forYouRowOptions[key] = opt
+            forYouRowList.addView(opt.root)
+            paintOption(opt, Settings.catalogueEnabled(key) && signedIn)
+            opt.root.isClickable = signedIn
+            opt.root.alpha = if (signedIn) 1f else 0.5f
+            opt.root.setOnClickListener {
+                if (!signedIn) return@setOnClickListener
+                val on = !Settings.catalogueEnabled(key)
+                Settings.saveCatalogueEnabled(context, key, on)
+                paintOption(opt, on)
+                refreshForYouState()
+            }
+        }
+        refreshForYouState()
         val shuffleOn = Settings.shuffleRows()
         val shuffleOpt = option(
             "Shuffle all rows",
@@ -2083,8 +2115,8 @@ object SettingsUi {
         fitHeight()
 
         Thread {
-            val on = SimklHistory.refresh()
-            forYouCard.root.post { setState(forYouCard, if (on) "On" else "Off", on) }
+            SimklHistory.refresh()
+            forYouCard.root.post { refreshForYouState() }
         }.start()
     }
 

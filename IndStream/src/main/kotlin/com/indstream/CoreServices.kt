@@ -1468,6 +1468,9 @@ object ManifestKit {
             isOriginal(t) -> "Original"
             else -> null
         }
+        val ordered = (master.audio.filter { it.default } + master.audio).distinct()
+        val named = ordered.mapNotNull { trackLabel(it) }.filter { it != "Original" }.distinct()
+        if (named.size >= 3) return named.joinToString(", ")
         val defaultTrack = master.audio.firstOrNull { it.default }
         if (defaultTrack != null) return trackLabel(defaultTrack)
         if (master.audio.size == 1) return trackLabel(master.audio.first())

@@ -249,6 +249,25 @@ class ManifestKitTest {
     }
 
     @Test
+    fun audioLanguageLabel_threeOrMoreListsAll() {
+        val master = masterWithAudio(
+            """#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="Hindi",LANGUAGE="hi",URI="hi.m3u8"""",
+            """#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="English",LANGUAGE="en",URI="en.m3u8"""",
+            """#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="Tamil",LANGUAGE="ta",URI="ta.m3u8"""",
+        )
+        assertNotNull(master)
+        assertEquals("Hindi, English, Tamil", ManifestKit.audioLanguageLabel(master))
+        val four = masterWithAudio(
+            """#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="Hindi",LANGUAGE="hi",URI="hi.m3u8"""",
+            """#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="English",LANGUAGE="en",URI="en.m3u8"""",
+            """#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="Tamil",LANGUAGE="ta",URI="ta.m3u8"""",
+            """#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="Telugu",LANGUAGE="te",URI="te.m3u8"""",
+        )
+        assertNotNull(four)
+        assertEquals("Hindi, English, Tamil, Telugu", ManifestKit.audioLanguageLabel(four))
+    }
+
+    @Test
     fun audioLanguageLabel_tamilEnglishNoDefaultPrefersTamil() {
         val master = masterWithAudio(
             """#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="English",LANGUAGE="en",URI="en.m3u8"""",

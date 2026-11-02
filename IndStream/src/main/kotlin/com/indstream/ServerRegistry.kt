@@ -69,15 +69,6 @@ object ServerFarm {
             speed = ServerSpeed.FAST, reliable = true, downloadFriendly = true,
         ),
         ServerSpec(
-            id = "allmovieland", name = "Allmovieland",
-            idType = ServerIdType.IMDB,
-            movieUrl = "https://allmovieland.art/?do=search&subaction=search&story={id}",
-            tvUrl = "https://allmovieland.art/?do=search&subaction=search&story={id}",
-            referer = "https://allmovieland.art/",
-            hasSubtitles = false, timeoutSec = 60,
-            declaredLanguages = setOf("Hindi", "Tamil", "Telugu", "Bengali"),
-        ),
-        ServerSpec(
             id = "netmirror", name = "NetMirror",
             idType = ServerIdType.TMDB,
             movieUrl = "https://net79.cc/api/embed-tmdb/{id}?type=movie",
@@ -118,10 +109,10 @@ object ServerFarm {
         ServerSpec(
             id = "vidcore-api", name = "VidCore",
             idType = ServerIdType.TMDB,
-            movieUrl = "https://vidrack.created.app/api/sources/movy?id={id}",
-            tvUrl = "https://vidrack.created.app/api/sources/movy?id={id}&season={season}&episode={episode}",
-            isJsonApi = true, referer = "https://www.vidcore.org/",
-            hasSubtitles = false, timeoutSec = 20,
+            movieUrl = "https://vidcore.org/embed/movie/{id}",
+            tvUrl = "https://vidcore.org/embed/tv/{id}/{season}/{episode}",
+            isJsonApi = true, referer = "https://vidcore.org/",
+            hasSubtitles = true, timeoutSec = 25,
             speed = ServerSpeed.FAST,
         ),
         ServerSpec(

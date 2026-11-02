@@ -51,6 +51,12 @@ object Catalogue {
 
     val forYouRowKeys: List<String> = listOf(FOR_YOU_MOVIE, FOR_YOU_TV)
 
+    fun forYouRowTitles(): List<Pair<String, String>> =
+        listOf(
+            FOR_YOU_MOVIE to "Made for You: Movies",
+            FOR_YOU_TV to "Made for You: Series",
+        )
+
     private data class Language(val code: String, val label: String)
 
     private val languages = listOf(
@@ -192,10 +198,7 @@ object Catalogue {
 
     fun forYouRows(): List<Pair<String, String>> =
         if (SimklHistory.isSignedIn()) {
-            listOf(
-                FOR_YOU_MOVIE to "Made for You: Movies",
-                FOR_YOU_TV to "Made for You: Series",
-            )
+            forYouRowTitles().filter { (key, _) -> Settings.catalogueEnabled(key) }
         } else {
             emptyList()
         }

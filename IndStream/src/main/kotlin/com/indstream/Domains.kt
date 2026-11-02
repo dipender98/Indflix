@@ -30,8 +30,8 @@ object Domains {
             val lockedAt = System.currentTimeMillis()
             if (lockedAt - fetchedAt < TTL_MS) return
             if (lockedAt - failedAt < RETRY_MS) return
-            var added = 0
-            for (url in listOf(PRIMARY, SECONDARY)) {
+            val merged = LinkedHashMap<String, String>()
+            for (url in listOf(SECONDARY, PRIMARY)) {
                 val body = try {
                     app.get(url, timeout = 10, headers = HttpKit.commonHeaders).text
                 } catch (c: kotlinx.coroutines.CancellationException) {
@@ -49,12 +49,12 @@ object Domains {
                     val name = keys.next()
                     val value = root.optString(name).trim()
                     if (value.startsWith("http")) {
-                        map[name.lowercase()] = value.trimEnd('/')
-                        added++
+                        merged[name.lowercase()] = value.trimEnd('/')
                     }
                 }
             }
-            if (added > 0) {
+            if (merged.isNotEmpty()) {
+                map.putAll(merged)
                 fetchedAt = System.currentTimeMillis()
                 failedAt = 0L
             } else {

@@ -59,8 +59,8 @@ class LinkNamingTest {
     }
 
     @Test
-    fun languageLabel_moreThanTwoIsMulti_singleStaysSingle() {
-        assertEquals("Multi", LinkNaming.languageLabel("Hindi+English+Tamil"))
+    fun languageLabel_moreThanTwoListsAll_singleStaysSingle() {
+        assertEquals("Hindi, English, Tamil", LinkNaming.languageLabel("Hindi+English+Tamil"))
         assertEquals("Multi", LinkNaming.languageLabel("Dual Audio"))
         assertEquals("Tamil", LinkNaming.languageLabel("Tamil"))
         assertEquals("", LinkNaming.languageLabel("Show 2024 1080p"))
@@ -75,11 +75,11 @@ class LinkNamingTest {
     }
 
     @Test
-    fun displayName_threeLanguagesCollapseToMulti() {
+    fun displayName_threeLanguagesListsAllFlags() {
         val name = LinkNaming.displayName(
             serverName = "VidLink", audioLabel = "Hindi+English+Tamil",
         )
-        assertEquals("VidLink (Multi)", name)
+        assertEquals("VidLink ($IN Hindi, $GB English, $IN Tamil)", name)
     }
 
     @Test
