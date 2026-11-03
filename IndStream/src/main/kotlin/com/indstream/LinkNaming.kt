@@ -111,7 +111,6 @@ object LinkNaming {
         serverName: String,
         audioLabel: String? = "",
         subIndicator: String? = null,
-        originalLang: String? = null,
         sizeLabel: String? = null,
         mediaLabel: String? = null,
     ): String {
@@ -121,8 +120,8 @@ object LinkNaming {
         val named = stripQuality(TRAILING_LANGUAGE.replace(stripQuality(composed), ""))
             .trim().ifBlank { "Server" }
 
-        val names = displayLanguageNames(audioLabel, mediaLabel, cleanName)
-        val tag = displayLanguageTag(names, audioLabel, mediaLabel, originalLang, cleanName)
+        val names = displayLanguageNames(audioLabel, mediaLabel)
+        val tag = displayLanguageTag(names, audioLabel, mediaLabel)
         val tagPart = languageTagPart(tag, names)
 
         val tokens = renditionTokens(listOfNotNull(mediaLabel, rawName).joinToString(" "))
@@ -173,7 +172,6 @@ object LinkNaming {
     private fun displayLanguageNames(
         audioLabel: String?,
         mediaLabel: String?,
-        serverName: String,
     ): List<String> {
         val audio = languageNames(audioLabel)
         val media = languageNames(mediaLabel)
@@ -181,9 +179,8 @@ object LinkNaming {
             audio.size >= 2 -> audio
             media.size > audio.size -> media
             audio.isNotEmpty() -> audio
-            media.isNotEmpty() -> media
-            languageLabel(audioLabel).isNotBlank() || languageLabel(mediaLabel).isNotBlank() -> emptyList()
-            else -> trailingLanguageNames(serverName)
+            media.isNotEmpty() && languageLabel(audioLabel).isBlank() -> media
+            else -> emptyList()
         }
     }
 
@@ -191,25 +188,12 @@ object LinkNaming {
         names: List<String>,
         audioLabel: String?,
         mediaLabel: String?,
-        originalLang: String?,
-        serverName: String,
     ): String = when {
         names.size == 1 -> names[0]
         names.size > 1 -> names.joinToString(", ")
-        else -> languageLabel(audioLabel, originalLang)
-            .ifBlank { languageLabel(mediaLabel, originalLang) }
-            .ifBlank { trailingLanguageLabel(serverName, originalLang) }
+        else -> languageLabel(audioLabel)
+            .ifBlank { languageLabel(mediaLabel) }
             .ifBlank { "Unknown" }
-    }
-
-    private fun trailingLanguageNames(serverName: String): List<String> {
-        val tail = TRAILING_LANGUAGE.find(serverName)?.value ?: return emptyList()
-        return languageNames(tail)
-    }
-
-    private fun trailingLanguageLabel(serverName: String, originalLang: String?): String {
-        val tail = TRAILING_LANGUAGE.find(serverName)?.value ?: return ""
-        return languageLabel(tail, originalLang)
     }
 
     private fun languageTagPart(label: String, names: List<String>): String {

@@ -708,7 +708,10 @@ class IndStreamProvider : MainAPI() {
             val fresh = streams.filter { it.url.isNotBlank() && pushedUrls.add(it.url) }
             if (fresh.isEmpty()) return
             StreamEngine.FastStartCache.put(cacheKey, fresh)
-            if (!windowOpen.get()) return
+            if (!windowOpen.get()) {
+                fastStartScope.launch { StreamEngine.warmAudioLabels(fresh, cacheKey) }
+                return
+            }
             android.util.Log.i("IndStream", "TAP#$tap +${fresh.size} from $sid at " +
                 "${System.currentTimeMillis() - loadStartMs}ms (window open)")
             StreamEngine.emit(
@@ -716,6 +719,7 @@ class IndStreamProvider : MainAPI() {
                 { emitted.incrementAndGet(); callback(it) },
                 originalLangNow(),
                 onSubtitle = subtitleSink::emit,
+                onResolved = { labels -> StreamEngine.FastStartCache.patchLabels(cacheKey, labels) },
             )
         }
 
@@ -798,6 +802,7 @@ class IndStreamProvider : MainAPI() {
                 StreamEngine.resolveRealtime(tmdbId, type, -1, -1, imdbId, imdbIdProvider = { imdbId }) { _, streams ->
                     if (streams.isNotEmpty()) {
                         StreamEngine.FastStartCache.put(key, streams)
+                        StreamEngine.warmAudioLabels(streams, key)
                         StreamEngine.cacheSubtitles(streams)
                     }
                 }
@@ -808,6 +813,7 @@ class IndStreamProvider : MainAPI() {
                         StreamEngine.resolveRealtime(id2, type, -1, -1, imdbId, tmdbOnly = true) { _, streams ->
                             if (streams.isNotEmpty()) {
                                 StreamEngine.FastStartCache.put(key, streams)
+                                StreamEngine.warmAudioLabels(streams, key)
                                 StreamEngine.cacheSubtitles(streams)
                             }
                         }

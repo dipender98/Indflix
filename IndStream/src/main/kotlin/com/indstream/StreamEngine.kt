@@ -278,11 +278,7 @@ object StreamEngine {
                                 if (spec.recordHealth) HealthMonitor.recordFailure(spec.id)
                             }
                         }
-                        val streams = outcome?.map { s ->
-                            if (s.audioLabel.isBlank() && spec.declaredLanguages.size == 1)
-                                s.copy(audioLabel = spec.declaredLanguages.first())
-                            else s
-                        }.orEmpty()
+                        val streams = outcome.orEmpty()
                         if (dual && streams.isEmpty() && crashed == null && !cleanMiss) {
                             Log.w("IndStream", "${spec.id}: no streams (recording failure)")
                             if (spec.recordHealth) HealthMonitor.recordFailure(spec.id)
@@ -305,6 +301,7 @@ object StreamEngine {
         originalLang: String? = null,
         probeManifests: Boolean = true,
         onSubtitle: (suspend (SubtitleFile) -> Unit)? = null,
+        onResolved: ((Map<String, String>) -> Unit)? = null,
     ): Set<String> {
         val emitted = java.util.Collections.synchronizedSet(HashSet<String>())
         if (streams.isEmpty()) return emitted
@@ -349,29 +346,16 @@ object StreamEngine {
                 async {
                     when {
                         raw.isM3u8 && probeManifests -> {
-                            val alreadyKnown = raw.qualityHint > 0
-                            if (alreadyKnown) {
-                                ResolvedEmit(raw, raw.qualityHint, raw.audioLabel)
-                            } else {
-                                val lh = LinkedHashMap<String, String>()
-                                lh.putAll(raw.extraHeaders)
-                                val referer = raw.referer
-                                if (!lh.containsKey("Referer") && !referer.isNullOrBlank()) lh["Referer"] = referer
-                                val t0 = System.currentTimeMillis()
-                                val masterText = raw.inlineManifest ?: withTimeoutOrNull(3000L) {
-                                    catching { app.get(raw.url, timeout = 3, headers = lh).text }.getOrNull()
-                                }
-                                val fetchMs = if (raw.inlineManifest != null) 0
-                                else masterText?.let { System.currentTimeMillis() - t0 }
-                                val h = (ManifestKit.bestHeightOf(masterText, raw.url).takeIf { it > 0 } ?: raw.qualityHint).coerceAtLeast(0)
-                                val master = ManifestKit.parseMaster(masterText, raw.url)
-                                val tag = (if (raw.audioLabel.isNotBlank()) raw.audioLabel
-                                else if (master != null) ManifestKit.audioLanguageLabel(master).orEmpty()
-                                    .ifBlank { if (master.isMultiAudio) "Multi" else "" }
-                                else raw.audioLabel)
-                                    .ifBlank { declaredLanguageHint(raw) ?: "" }
-                                ResolvedEmit(raw, h, tag, fetchMs, masterText)
-                            }
+                            val t0 = System.currentTimeMillis()
+                            val masterText = fetchMasterText(raw)
+                            val fetchMs = if (raw.inlineManifest != null) 0
+                            else masterText?.let { System.currentTimeMillis() - t0 }
+                            val h = (ManifestKit.bestHeightOf(masterText, raw.url).takeIf { it > 0 } ?: raw.qualityHint).coerceAtLeast(0)
+                            val master = ManifestKit.parseMaster(masterText, raw.url)
+                            // The manifest's own audio declaration is the most specific data; it
+                            // overrides a coarser label stamped earlier in the chain.
+                            val tag = manifestAudioTag(master).ifBlank { raw.audioLabel }
+                            ResolvedEmit(raw, h, tag, fetchMs, masterText)
                         }
                         !raw.isM3u8 && probeManifests -> {
                             val t0 = System.currentTimeMillis()
@@ -382,7 +366,7 @@ object StreamEngine {
                                 val fromUrl = ManifestKit.resolutionFromUrl(raw.url)
                                 if (fromUrl > 0) fromUrl else -1
                             }
-                            val tag = raw.audioLabel.ifBlank { declaredLanguageHint(raw) ?: "" }
+                            val tag = raw.audioLabel
                             ResolvedEmit(raw, h, tag, fetchMs)
                         }
                         else -> {
@@ -392,12 +376,18 @@ object StreamEngine {
                                 val h = ManifestKit.bestHeightOf(raw.inlineManifest, raw.url).takeIf { it > 0 } ?: 0
                                 if (h > 0) fullHeight = h
                             }
-                            val tag = raw.audioLabel.ifBlank { declaredLanguageHint(raw) ?: "" }
+                            val tag = raw.audioLabel
                             ResolvedEmit(raw, fullHeight, tag)
                         }
                     }
                 }
             }.awaitAll()
+        }
+        if (onResolved != null && probeManifests) {
+            val probed = preResolved
+                .filter { it.tagLabel.isNotBlank() && it.tagLabel != it.raw.audioLabel }
+                .associate { it.raw.url to it.tagLabel }
+            if (probed.isNotEmpty()) onResolved(probed)
         }
         val ordered = preResolved.sortedBy { speedRankMs(it.fetchMs, it.tagLabel) }
 
@@ -426,7 +416,6 @@ object StreamEngine {
             val label = LinkNaming.displayName(
                 serverName = raw.serverName,
                 audioLabel = r.tagLabel,
-                originalLang = originalLang,
                 sizeLabel = raw.sizeLabel.takeIf { it.isNotBlank() },
                 mediaLabel = raw.mediaLabel.takeIf { it.isNotBlank() },
             )
@@ -457,6 +446,47 @@ object StreamEngine {
     /** Warms the subtitle cache without emitting anything, used by background preloads. */
     suspend fun cacheSubtitles(streams: List<RawStream>) {
         emitSubtitles(streams, emptyMap(), null)
+    }
+
+    /**
+     * Resolves manifest audio declarations and patches cached labels, so later cache
+     * replays keep the accurate list instead of the coarser label stamped at harvest.
+     */
+    suspend fun warmAudioLabels(streams: List<RawStream>, cacheKey: String) {
+        val targets = streams.filter { it.url.isNotBlank() && it.isM3u8 }
+        if (targets.isEmpty()) return
+        val labels = java.util.concurrent.ConcurrentHashMap<String, String>()
+        coroutineScope {
+            targets.map { raw ->
+                async {
+                    warmLabelGate.acquire()
+                    try {
+                        val master = ManifestKit.parseMaster(fetchMasterText(raw), raw.url)
+                        manifestAudioTag(master).takeIf { it.isNotBlank() }?.let { labels[raw.url] = it }
+                    } finally {
+                        warmLabelGate.release()
+                    }
+                }
+            }.awaitAll()
+        }
+        FastStartCache.patchLabels(cacheKey, labels)
+    }
+
+    private val warmLabelGate = Semaphore(6)
+
+    private fun manifestAudioTag(master: ManifestKit.MasterPlaylist?): String =
+        master?.let {
+            ManifestKit.audioLanguageLabel(it).orEmpty()
+                .ifBlank { if (it.isMultiAudio) "Multi" else "" }
+        }.orEmpty()
+
+    private suspend fun fetchMasterText(raw: RawStream, timeoutSec: Int = 3): String? {
+        val headers = LinkedHashMap<String, String>()
+        headers.putAll(raw.extraHeaders)
+        if (!headers.containsKey("Referer") && !raw.referer.isNullOrBlank()) headers["Referer"] = raw.referer
+        return raw.inlineManifest ?: withTimeoutOrNull(timeoutSec * 1000L) {
+            catching { app.get(raw.url, timeout = timeoutSec.toLong(), headers = headers).text }.getOrNull()
+        }
     }
 
     private suspend fun emitSubtitles(
@@ -921,9 +951,6 @@ object StreamEngine {
         Log.d("IndStream", "${spec.id}: OK via $stage, $streamCount streams in ${ms}ms")
         if (spec.recordHealth) HealthMonitor.recordSuccess(spec.id)
     }
-
-    private fun declaredLanguageHint(raw: RawStream): String? =
-        ManifestKit.languageFromName(raw.serverName, raw.url)
 
     private suspend fun probeAudioHeight(url: String, referer: String?): Pair<String, Int> {
         val isAdaptive = url.contains(".m3u8", ignoreCase = true) || url.contains(".mpd", ignoreCase = true)
@@ -2160,17 +2187,20 @@ object StreamEngine {
             )
         }
         val pick = pickAudioTrack(tracks)
+        var usedTrack = pick
         val vids = mutableListOf<ApiVideo>()
         if (pick != null) {
             apiVideo(sec, activeId, epId, pick.languageId.takeIf { it.isNotBlank() }, 3)
                 ?.let { vids += apiVideos(it, 3) }
         }
         if (vids.isEmpty()) {
+            // The server default response carries no language declaration of its own.
+            usedTrack = null
             apiVideo(sec, activeId, epId, null, 3)
                 ?.let { vids += apiVideos(it, 3) }
         }
         if (vids.isEmpty()) throw CleanMissException("no video urls")
-        val langLabel = LinkNaming.languageLabel(pick?.languageName)
+        val langLabel = LinkNaming.languageLabel(usedTrack?.languageName)
         return vids.take(4).map {
             RawStream(spec.id, "${spec.name} $langLabel".trim(), it.url,
                 it.url.contains(".m3u8", ignoreCase = true), null, releaseHeightOf(it.quality),
@@ -4972,6 +5002,20 @@ object StreamEngine {
                     map.entries.minByOrNull { it.value.expiresAt }
                         ?.let { map.remove(it.key) } ?: break
                 }
+            }
+        }
+
+        fun patchLabels(key: String, labels: Map<String, String>) {
+            if (labels.isEmpty()) return
+            val now = System.currentTimeMillis()
+            map.computeIfPresent(key) { _, e ->
+                if (now > e.expiresAt) e
+                else Entry(
+                    e.streams.map { s ->
+                        labels[s.url]?.takeIf { it.isNotBlank() }?.let { s.copy(audioLabel = it) } ?: s
+                    },
+                    e.expiresAt,
+                )
             }
         }
 

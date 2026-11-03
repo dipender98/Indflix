@@ -1,6 +1,7 @@
 package Test
 
 import com.indstream.LinkNaming
+import com.indstream.StreamEngine
 import com.indstream.StreamEngine.RawStream
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -339,34 +340,20 @@ class LinkNamingTest {
     }
 
     @Test
-    fun displayName_languageFromServerSuffixAddsFlag() {
+    fun displayName_serverNameSuffixIsNotAudioEvidence() {
         listOf(
             "MovieServer Hindi",
             "MovieServer (Hindi)",
             "MovieServer [Hindi]",
             "MovieServer Hindi 1080p",
             "MovieServer Hindi Dubbed",
+            "MovieServer English",
         ).forEach { server ->
             assertEquals(
-                "MovieServer ($IN Hindi)",
+                "MovieServer (Unknown)",
                 LinkNaming.displayName(server, audioLabel = ""),
             )
         }
-        assertEquals(
-            "MovieServer ($GB English)",
-            LinkNaming.displayName("MovieServer English", audioLabel = ""),
-        )
-    }
-
-    @Test
-    fun displayName_originalLangLabelGetsFlag() {
-        // Original-language fallback resolves to the audio language and must still carry its flag.
-        assertEquals(
-            "AnimeWorld ($JP Japanese)",
-            LinkNaming.displayName(
-                "AnimeWorld", audioLabel = "", originalLang = "ja",
-            ),
-        )
     }
 
     @Test
@@ -498,6 +485,27 @@ class LinkNamingTest {
     @Test
     fun taggedSubtitleName_neverDuplicatesSource() {
         assertEquals("Hindi (VidLink)", LinkNaming.taggedSubtitleName("Hindi (VidLink)", "VidLink"))
+    }
+
+    @Test
+    fun cacheReplay_keepsProbedAudioLabels() {
+        val key = "label-patch-" + System.nanoTime()
+        val stream = raw("Server A", "Hindi", 1080)
+        StreamEngine.FastStartCache.put(key, listOf(stream))
+        StreamEngine.FastStartCache.patchLabels(
+            key,
+            mapOf(stream.url to "Hindi, Tamil, Telugu, English"),
+        )
+        assertEquals(
+            "Hindi, Tamil, Telugu, English",
+            StreamEngine.FastStartCache.get(key)?.single()?.audioLabel,
+        )
+        // Patches for unknown urls must not add or alter cached entries.
+        StreamEngine.FastStartCache.patchLabels(key, mapOf("https://example.com/none.m3u8" to "English"))
+        assertEquals(
+            "Hindi, Tamil, Telugu, English",
+            StreamEngine.FastStartCache.get(key)?.single()?.audioLabel,
+        )
     }
 
     private fun raw(

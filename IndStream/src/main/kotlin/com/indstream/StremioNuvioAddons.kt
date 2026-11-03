@@ -55,6 +55,7 @@ object StremioNuvioAddons {
         val url: String,
         val name: String,
         val title: String,
+        val description: String,
         val languages: String,
         val headers: Map<String, String>,
     )
@@ -187,6 +188,7 @@ object StremioNuvioAddons {
                         url = url,
                         name = item.optString("name").trim(),
                         title = item.optString("title").trim(),
+                        description = item.optString("description").trim(),
                         languages = item.optJSONArray("languages")
                             ?.let { arr ->
                                 (0 until arr.length())
@@ -221,8 +223,17 @@ object StremioNuvioAddons {
         return "${match.groupValues[1]} $unit"
     }
 
-    internal fun streamAudioLabel(languages: String, name: String): String =
-        LinkNaming.languageLabel(languages.ifBlank { name })
+    private val SUBTITLE_LINE = Regex("""(?i)\b(subtitles?|subs|cc)\b""")
+
+    internal fun streamAudioLabel(source: StreamSource): String {
+        val detail = listOf(source.title, source.description)
+            .flatMap { it.lineSequence().toList() }
+            .filterNot { SUBTITLE_LINE.containsMatchIn(it) }
+            .joinToString("\n")
+        val declared = listOf(source.languages, detail)
+            .filter { it.isNotBlank() }.joinToString("\n")
+        return LinkNaming.languageLabel(declared).ifBlank { LinkNaming.languageLabel(source.name) }
+    }
 
     suspend fun resolve(imdbId: String, type: String, season: Int, episode: Int): List<RawStream> {
         val baseId = imdbId.trim()
@@ -305,7 +316,8 @@ object StremioNuvioAddons {
         return payload.direct.mapNotNull { source ->
             val u = source.url
             if (u.isBlank()) return@mapNotNull null
-            val haystack = listOf(source.name, source.title).filter { it.isNotBlank() }.joinToString(" ")
+            val haystack = listOf(source.name, source.title, source.description)
+                .filter { it.isNotBlank() }.joinToString(" ")
             RawStream(
                 serverId = serverKey,
                 serverName = manifest.name,
@@ -314,7 +326,7 @@ object StremioNuvioAddons {
                 referer = source.headers.entries
                     .firstOrNull { it.key.equals("Referer", ignoreCase = true) }?.value,
                 qualityHint = qualityOf(u).takeIf { it > 0 } ?: qualityOf(haystack),
-                audioLabel = streamAudioLabel(source.languages, source.name),
+                audioLabel = streamAudioLabel(source),
                 sizeLabel = sizeOf(haystack),
                 extraHeaders = source.headers,
                 isDash = u.contains(".mpd", ignoreCase = true),

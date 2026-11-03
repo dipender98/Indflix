@@ -1413,16 +1413,13 @@ object ManifestKit {
         return hasHindi && hasEnglish
     }
 
-    fun isOriginal(rendition: MediaRendition): Boolean =
-        rendition.default ||
-            rendition.name.contains("original", ignoreCase = true)
+    private val ORIGINAL_TOKEN = Regex("""\b(?:original|orig|org)\b""", RegexOption.IGNORE_CASE)
 
-    data class DubLanguage(val canonical: String, val codes: Set<String>, val names: Set<String>) {
-        val asciiPatterns: List<Regex> = names
-            .filter { name -> name.all { it.code < 128 } }
-            .map { name -> Regex("""(?i)\b${Regex.escape(name)}\b""") }
-        val nonAsciiNames: List<String> = names.filter { name -> name.any { it.code >= 128 } }
-    }
+    fun isOriginal(rendition: MediaRendition): Boolean =
+        ORIGINAL_TOKEN.containsMatchIn(rendition.name) ||
+            ORIGINAL_TOKEN.containsMatchIn(rendition.language.orEmpty())
+
+    data class DubLanguage(val canonical: String, val codes: Set<String>, val names: Set<String>)
 
     val INDIAN_DUB_LANGUAGES = listOf(
         DubLanguage("Hindi", setOf("hi", "hin"), setOf("hindi", "हिन्दी", "हिंदी")),
@@ -1447,18 +1444,6 @@ object ManifestKit {
         return INDIAN_DUB_LANGUAGES.firstOrNull { spec -> spec.names.any { name.contains(it) } }?.canonical
     }
 
-    fun languageFromName(name: String?, url: String?): String? {
-        val hay = buildString {
-            name?.let { append(it.lowercase()); append(' ') }
-            url?.let { append(it.lowercase()); append(' ') }
-        }
-        if (hay.isBlank()) return null
-        return INDIAN_DUB_LANGUAGES.firstOrNull { spec ->
-            spec.asciiPatterns.any { it.containsMatchIn(hay) } ||
-                spec.nonAsciiNames.any { hay.contains(it) }
-        }?.canonical
-    }
-
     fun audioLanguageLabel(master: MasterPlaylist): String? {
         if (master.audio.isEmpty()) return null
         fun trackLabel(t: MediaRendition): String? = when {
@@ -1470,20 +1455,12 @@ object ManifestKit {
         }
         val ordered = (master.audio.filter { it.default } + master.audio).distinct()
         val named = ordered.mapNotNull { trackLabel(it) }.filter { it != "Original" }.distinct()
-        if (named.size >= 3) return named.joinToString(", ")
+        if (named.size >= 2) return named.joinToString(", ")
+        if (named.size == 1) return named.first()
         val defaultTrack = master.audio.firstOrNull { it.default }
         if (defaultTrack != null) return trackLabel(defaultTrack)
         if (master.audio.size == 1) return trackLabel(master.audio.first())
-        val hasHindi = master.audio.any { isHindi(it) }
-        val hasEnglish = master.audio.any { isEnglish(it) }
-        val hasOriginal = master.audio.any { isOriginal(it) }
-        return when {
-            hasHindi && hasEnglish -> "Hindi+English"
-            hasHindi -> "Hindi"
-            hasOriginal -> "Original"
-            else -> master.audio.firstNotNullOfOrNull { indianLanguageOf(it) }
-                ?: if (hasEnglish) "English" else null
-        }
+        return if (master.audio.any { isOriginal(it) }) "Original" else null
     }
 
     fun audioPriority(master: MasterPlaylist): Int {

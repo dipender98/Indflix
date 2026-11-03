@@ -211,13 +211,13 @@ class ManifestKitTest {
     }
 
     @Test
-    fun audioLanguageLabel_defaultTeluguWins() {
+    fun audioLanguageLabel_defaultFirstListsAll() {
         val master = masterWithAudio(
             """#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="Telugu",LANGUAGE="te",URI="te.m3u8",DEFAULT=YES""",
             """#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="Hindi",LANGUAGE="hi",URI="hi.m3u8"""",
         )
         assertNotNull(master)
-        assertEquals("Telugu", ManifestKit.audioLanguageLabel(master))
+        assertEquals("Telugu, Hindi", ManifestKit.audioLanguageLabel(master))
     }
 
     @Test
@@ -245,7 +245,7 @@ class ManifestKitTest {
             """#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="English",LANGUAGE="en",URI="en.m3u8"""",
         )
         assertNotNull(master)
-        assertEquals("Hindi+English", ManifestKit.audioLanguageLabel(master))
+        assertEquals("Hindi, English", ManifestKit.audioLanguageLabel(master))
     }
 
     @Test
@@ -268,13 +268,13 @@ class ManifestKitTest {
     }
 
     @Test
-    fun audioLanguageLabel_tamilEnglishNoDefaultPrefersTamil() {
+    fun audioLanguageLabel_tamilEnglishNoDefaultListsBoth() {
         val master = masterWithAudio(
             """#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="English",LANGUAGE="en",URI="en.m3u8"""",
             """#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="Tamil",LANGUAGE="ta",URI="ta.m3u8"""",
         )
         assertNotNull(master)
-        assertEquals("Tamil", ManifestKit.audioLanguageLabel(master))
+        assertEquals("English, Tamil", ManifestKit.audioLanguageLabel(master))
     }
 
     @Test
@@ -304,6 +304,25 @@ class ManifestKitTest {
     }
 
     @Test
+    fun audioLanguageLabel_unknownDefaultStaysUnknown() {
+        val master = masterWithAudio(
+            """#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="Track 1",LANGUAGE="und",URI="t1.m3u8",DEFAULT=YES""",
+        )
+        assertNotNull(master)
+        assertNull(ManifestKit.audioLanguageLabel(master))
+    }
+
+    @Test
+    fun isOriginal_requiresExplicitDeclaration() {
+        fun rend(name: String, lang: String?, default: Boolean) =
+            ManifestKit.MediaRendition("AUDIO", "a", name, lang, null, default = default)
+        assertTrue(ManifestKit.isOriginal(rend("Original", "ja", true)))
+        assertTrue(ManifestKit.isOriginal(rend("Track", "original", true)))
+        assertFalse(ManifestKit.isOriginal(rend("Track 1", "und", true)))
+        assertFalse(ManifestKit.isOriginal(rend("English", "en", true)))
+    }
+
+    @Test
     fun indianLanguageOf_coversOfficialDubSet() {
         fun rend(lang: String?, name: String) =
             ManifestKit.MediaRendition("AUDIO", "a", name, lang, null)
@@ -317,27 +336,6 @@ class ManifestKitTest {
         assertEquals("Gujarati", ManifestKit.indianLanguageOf(rend("gu", "x")))
         assertNull(ManifestKit.indianLanguageOf(rend("ja", "Japanese")))
         assertNull(ManifestKit.indianLanguageOf(rend(null, "Track 3")))
-    }
-
-    @Test
-    fun languageFromName_hostDeclarationsOnly() {
-        assertEquals("Hindi", ManifestKit.languageFromName("MyFlixer Hindi", null))
-        assertEquals("Tamil", ManifestKit.languageFromName(null, "https://cdn.x/tamil/master.m3u8"))
-        assertEquals("Telugu", ManifestKit.languageFromName("Server Telugu 1080p", "x"))
-        assertNull(ManifestKit.languageFromName("server-1", "https://cdn.x/te/master.m3u8"))
-        assertNull(ManifestKit.languageFromName("Nova", "https://cdn.x/a.m3u8"))
-        assertNull(ManifestKit.languageFromName(null, null))
-    }
-
-    @Test
-    fun languageFromName_wordBoundaryAvoidsFalsePositives() {
-        // Substring matches inside unrelated words must not force a dub language.
-        assertNull(ManifestKit.languageFromName("hindismith", null))
-        assertNull(ManifestKit.languageFromName(null, "https://cdn.x/hindiarchive/master.m3u8"))
-        assertNull(ManifestKit.languageFromName("tamilnadu", null))
-        // Whole-word matches still resolve.
-        assertEquals("Hindi", ManifestKit.languageFromName("MyFlixer Hindi", null))
-        assertEquals("Tamil", ManifestKit.languageFromName(null, "https://cdn.x/tamil/master.m3u8"))
     }
 
     @Test
