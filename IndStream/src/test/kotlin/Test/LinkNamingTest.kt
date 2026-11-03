@@ -521,4 +521,27 @@ class LinkNamingTest {
 
     private fun countToken(label: String, tokenRegex: String) =
         Regex(tokenRegex, RegexOption.IGNORE_CASE).findAll(label).count()
+
+    @Test
+    fun languageNames_splitsOnSemicolonColonAndTab() {
+        assertEquals(listOf("Hindi", "English", "Tamil"), LinkNaming.languageNames("Hindi;English;Tamil"))
+        assertEquals(listOf("Hindi", "English", "Tamil"), LinkNaming.languageNames("Hindi:English:Tamil"))
+        assertEquals(listOf("Hindi", "English", "Tamil"), LinkNaming.languageNames("Hindi\tEnglish\tTamil"))
+    }
+
+    @Test
+    fun displayName_prefersRicherLanguageSet() {
+        // audio declares 2 languages, media metadata declares 5 -> all 5 must show.
+        val name = LinkNaming.displayName(
+            serverName = "VidLink",
+            audioLabel = "Hindi, English",
+            mediaLabel = "Hindi, English, Tamil, Telugu, Malayalam",
+        )
+        assertEquals("VidLink ($IN Hindi, $GB English, $IN Tamil, $IN Telugu, $IN Malayalam)", name)
+    }
+
+    @Test
+    fun canonicalSubtitleName_unknownKeepsFullString() {
+        assertEquals("Some Unknown Language", LinkNaming.canonicalSubtitleName("Some Unknown Language"))
+    }
 }

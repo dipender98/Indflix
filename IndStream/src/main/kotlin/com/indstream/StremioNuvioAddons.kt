@@ -192,7 +192,15 @@ object StremioNuvioAddons {
                         languages = item.optJSONArray("languages")
                             ?.let { arr ->
                                 (0 until arr.length())
-                                    .mapNotNull { a -> arr.optString(a).trim().takeIf { it.isNotBlank() } }
+                                    .mapNotNull { a ->
+                                        val value = arr.opt(a)
+                                        val str = when (value) {
+                                            is String -> value.trim()
+                                            is org.json.JSONObject -> value.optString("name").trim()
+                                            else -> ""
+                                        }
+                                        str.takeIf { it.isNotBlank() }
+                                    }
                                     .joinToString(", ")
                             }
                             ?: item.optString("languages").trim(),
@@ -224,15 +232,32 @@ object StremioNuvioAddons {
     }
 
     private val SUBTITLE_LINE = Regex("""(?i)\b(subtitles?|subs|cc)\b""")
+    private val SEG_CLAUSE = Regex("""(?:\s*[|;]\s*)""")
 
     internal fun streamAudioLabel(source: StreamSource): String {
         val detail = listOf(source.title, source.description)
             .flatMap { it.lineSequence().toList() }
-            .filterNot { SUBTITLE_LINE.containsMatchIn(it) }
+            // Remove only the subtitle clause, never a whole line: audio languages that share a
+            // line with a subtitle mention (e.g. "Audio: Hindi, English | Subtitles: English")
+            // must not be lost.
+            .map { line ->
+                if (SUBTITLE_LINE.containsMatchIn(line)) {
+                    line.split(SEG_CLAUSE)
+                        .filterNot { SUBTITLE_LINE.containsMatchIn(it) }
+                        .filter { it.isNotBlank() }
+                        .joinToString(", ")
+                } else {
+                    line
+                }
+            }
+            .filter { it.isNotBlank() }
             .joinToString("\n")
         val declared = listOf(source.languages, detail)
             .filter { it.isNotBlank() }.joinToString("\n")
-        return LinkNaming.languageLabel(declared).ifBlank { LinkNaming.languageLabel(source.name) }
+        // The stream name is a title/poster text, not audio-language evidence. Falling back to it
+        // mislabels streams (e.g. "Hindi Movie" -> Hindi) even when the addon reports several
+        // audio languages elsewhere. Return blank so displayName renders "(Unknown)" honestly.
+        return LinkNaming.languageLabel(declared).orEmpty()
     }
 
     suspend fun resolve(imdbId: String, type: String, season: Int, episode: Int): List<RawStream> {

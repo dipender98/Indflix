@@ -23,7 +23,7 @@ object LinkNaming {
     )
 
     private val LANGUAGE_SPLIT =
-        Regex("""[+,&/|.\-_]|\band\b|\bdual\b|\bmulti\b|\s+""", RegexOption.IGNORE_CASE)
+        Regex("""[+,&/|.:;_ \t-]|\band\b|\bdual\b|\bmulti\b|\s+""", RegexOption.IGNORE_CASE)
 
     private val LANGUAGE_MODIFIERS = setOf(
         "audio", "dub", "dubbed", "version", "track", "sub", "subs", "subtitle", "subtitles",
@@ -176,7 +176,9 @@ object LinkNaming {
         val audio = languageNames(audioLabel)
         val media = languageNames(mediaLabel)
         return when {
-            audio.size >= 2 -> audio
+            // Prefer audio only when it is at least as rich as media; otherwise media may hold
+            // more languages (e.g. addon reports 2 audio langs but 5 in the stream metadata).
+            audio.size >= 2 && audio.size >= media.size -> audio
             media.size > audio.size -> media
             audio.isNotEmpty() -> audio
             media.isNotEmpty() && languageLabel(audioLabel).isBlank() -> media
@@ -323,7 +325,7 @@ object LinkNaming {
             lower.contains("dutch") || lower == "nl" || lower == "dut" || lower == "nld" -> "Dutch"
             lower.contains("polish") || lower == "pl" || lower == "pol" -> "Polish"
             lower.contains("hindi dubbed") || lower == "dubbed" -> "Hindi"
-            else -> s.substringBefore('-').substringBefore(' ').ifBlank { "Subtitle" }
+            else -> s.ifBlank { "Subtitle" }
         }
     }
 

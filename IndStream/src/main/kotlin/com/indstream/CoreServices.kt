@@ -1392,10 +1392,13 @@ object ManifestKit {
     private val LANG_HINDI = setOf("hi", "hin")
     private val LANG_ENGLISH = setOf("en", "eng")
 
+    private val NAME_HINDI = Regex("""\bhindi\b""", RegexOption.IGNORE_CASE)
+    private val NAME_ENGLISH = Regex("""\benglish\b""", RegexOption.IGNORE_CASE)
+
     fun isHindi(rendition: MediaRendition): Boolean {
         val lang = rendition.language?.lowercase()
         if (lang != null && (lang in LANG_HINDI || lang.startsWith("hi"))) return true
-        return rendition.name.contains("hindi", ignoreCase = true) ||
+        return NAME_HINDI.containsMatchIn(rendition.name) ||
             rendition.name.contains("हिन्दी", ignoreCase = true) ||
             rendition.name.contains("हिंदी", ignoreCase = true)
     }
@@ -1403,7 +1406,7 @@ object ManifestKit {
     fun isEnglish(rendition: MediaRendition): Boolean {
         val lang = rendition.language?.lowercase()
         if (lang != null && (lang in LANG_ENGLISH || lang.startsWith("en"))) return true
-        return rendition.name.contains("english", ignoreCase = true)
+        return NAME_ENGLISH.containsMatchIn(rendition.name)
     }
 
     fun hasHindiEnglishAudio(master: MasterPlaylist): Boolean {

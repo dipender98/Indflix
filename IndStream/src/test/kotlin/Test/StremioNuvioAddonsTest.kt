@@ -158,7 +158,24 @@ class StremioNuvioAddonsTest {
     }
 
     @Test
-    fun streamAudioLabel_declaredThenDetailThenName() {
+    fun streams_parse_languages_as_json_objects_and_strings() {
+        val payload = StremioNuvioAddons.parseStreamPayload(
+            """
+            {"streams": [
+              {"name": "1080p", "title": "Example Movie", "languages": [{"name": "Hindi"}, {"name": "English"}, {"name": "Tamil"}],
+               "url": "https://cdn.example/obj.m3u8"},
+              {"name": "1080p", "title": "Example Movie", "languages": ["hin", "eng", "tam"],
+               "url": "https://cdn.example/arr.m3u8"}
+            ]}
+            """.trimIndent(),
+        )
+        assertEquals(2, payload.direct.size)
+        assertEquals("Hindi, English, Tamil", payload.direct[0].languages)
+        assertEquals("hin, eng, tam", payload.direct[1].languages)
+    }
+
+    @Test
+    fun streamAudioLabel_declaredThenDetail_noNameGuessing() {
         fun src(name: String, title: String = "", description: String = "", languages: String = "") =
             StremioNuvioAddons.StreamSource(
                 "https://cdn.example/s.m3u8", name, title, description, languages, emptyMap(),
@@ -183,10 +200,19 @@ class StremioNuvioAddonsTest {
                 src("HDHub", title = "Example Movie 2024 1080p", description = "Hindi | Tamil | Telugu | English"),
             ),
         )
-        // Subtitle rows never leak into the audio label.
+        // Subtitle-only lines never leak into the audio label.
         assertEquals("Hindi", StremioNuvioAddons.streamAudioLabel(src("1080p", description = "Audio: Hindi\nSubtitles: English")))
-        // No detail language -> the name badge is used.
-        assertEquals("English", StremioNuvioAddons.streamAudioLabel(src("1080p English")))
+        // Audio languages sharing a line with a subtitle mention are kept; only the subtitle
+        // clause is removed.
+        assertEquals(
+            "Hindi, English, Tamil, Telugu, Malayalam",
+            StremioNuvioAddons.streamAudioLabel(
+                src("HDHub 1080p Hindi", description = "Audio: Hindi, English, Tamil, Telugu, Malayalam | Subtitles: English"),
+            ),
+        )
+        // Without declared data, the name badge is NOT guessed as audio evidence.
+        assertEquals("", StremioNuvioAddons.streamAudioLabel(src("1080p English")))
+        assertEquals("", StremioNuvioAddons.streamAudioLabel(src("HDHub 1080p Hindi")))
     }
 
     @Test

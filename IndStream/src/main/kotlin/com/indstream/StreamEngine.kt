@@ -833,6 +833,12 @@ object StreamEngine {
             failServer(spec, "hianime returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
             return emptyList()
         }
+        if (spec.id == "multimovies") {
+            val result = resolveMultimovies(spec, tmdbId, type, season, episode)
+            if (result.isNotEmpty()) { okServer(spec, start, "watch config streams", result.size); return result }
+            failServer(spec, "no streams (soft miss, no breaker trip)", isCleanMiss = true)
+            return emptyList()
+        }
 
         if (spec.id == "atlantic") {
             if (type != "movie" && (season <= 0 || episode <= 0)) {
@@ -2790,9 +2796,12 @@ object StreamEngine {
             ).take(4)
             val out = mutableListOf<RawStream>()
             for (item in items) {
-                val lang = hubLangOf(item.languages)
+                // Keep every language name from the source data for the audio label; hubLangOf
+                // remains the priority bucket ("Multi" for Hindi+others) and is not shown.
+                val langNames = LinkNaming.languageNames(item.languages)
+                val lang = langNames.joinToString(", ")
                 val audioLang = LinkNaming.languageLabel(item.languages).ifBlank { lang }
-                val priority = when (lang) {
+                val priority = when (hubLangOf(item.languages)) {
                     "Hindi" -> 4
                     "Multi" -> 2
                     else -> 1
@@ -3080,6 +3089,128 @@ object StreamEngine {
             if (out.isNotEmpty()) return out.distinctBy { it.url }
         }
         throw CleanMissException("no file links")
+    }
+
+    private val MULTIMOVIES_CARD_DATA = Regex("""data-save-title="([^"]+)"""")
+    private val MULTIMOVIES_WATCH_CONFIG = Regex("""const\s+watchConfig\s*=\s*""")
+    private val MULTIMOVIES_TMDB_IN_URL =
+        Regex("""(?:movie\?id=|embed/tmdb/movie\?id=|watch/movie/|/movie/)(\d+)""")
+
+    private fun multimoviesCards(html: String, base: String): List<Pair<String, String>> {
+        val doc = Jsoup.parse(html, base)
+        val out = LinkedHashMap<String, String>()
+        doc.select("article.poster-card").forEach { card ->
+            val raw = card.attr("data-save-title")
+            val json = catching { org.json.JSONObject(raw.replace("&quot;", "\"")) }.getOrNull() ?: return@forEach
+            val url = json.optString("url")
+            val title = json.optString("title")
+            if (url.isNotBlank() && title.isNotBlank()) out.putIfAbsent(url, title)
+        }
+        return out.map { it.key to it.value }
+    }
+
+    private fun bracedJson(html: String, marker: String): org.json.JSONObject? {
+        val start = html.indexOf(marker)
+        if (start < 0) return null
+        val braceStart = html.indexOf('{', start)
+        if (braceStart < 0) return null
+        var depth = 0
+        var inString = false
+        var escaped = false
+        for (i in braceStart until html.length) {
+            val ch = html[i]
+            if (escaped) {
+                escaped = false
+                continue
+            }
+            when {
+                ch == '\\' && inString -> escaped = true
+                ch == '"' -> inString = !inString
+                ch == '{' && !inString -> depth++
+                ch == '}' && !inString -> {
+                    depth--
+                    if (depth == 0) {
+                        return catching { org.json.JSONObject(html.substring(braceStart, i + 1)) }.getOrNull()
+                    }
+                }
+            }
+        }
+        return null
+    }
+
+    private suspend fun multimoviesVidbolt(tmdbId: String): List<RawStream> {
+        val origin = "https://vidbolt.xyz"
+        val body = fetchText("$origin/api/resolve?type=movie&id=$tmdbId", "$origin/", timeoutSec = 20) ?: return emptyList()
+        val stream = catching { org.json.JSONObject(body) }.getOrNull()
+            ?.optJSONObject("stream") ?: return emptyList()
+        val sources = stream.optJSONArray("sources") ?: return emptyList()
+        val out = ArrayList<RawStream>(sources.length())
+        for (i in 0 until sources.length()) {
+            val src = sources.optJSONObject(i) ?: continue
+            val url = src.optString("url")
+            if (!url.startsWith("http")) continue
+            val quality = src.optString("quality")
+            val height = releaseHeightOf(quality)
+            if (height < 720) continue
+            val lang = src.optString("language").ifBlank { "" }
+            val audioLabel = LinkNaming.languageLabel(lang)
+            val audioPriority = when {
+                audioLabel.contains(',') || audioLabel == "Multi" -> 2
+                audioLabel.startsWith("Hindi") -> 4
+                else -> 1
+            }
+            out += RawStream(
+                serverId = "multimovies",
+                serverName = listOf("Multimovies", quality, "VidBolt").filter { it.isNotBlank() }.joinToString(" "),
+                url = url,
+                isM3u8 = true,
+                referer = origin,
+                qualityHint = height,
+                audioPriority = audioPriority,
+                audioLabel = audioLabel,
+                mediaLabel = src.optString("label").ifBlank { "VidBolt $quality" },
+            )
+        }
+        return out
+    }
+
+    private suspend fun resolveMultimovies(
+        spec: ServerSpec,
+        tmdbId: Int,
+        type: String,
+        season: Int,
+        episode: Int,
+    ): List<RawStream> {
+        if (type != "movie") throw CleanMissException("series pages unsupported yet")
+        val (title, year) = titleYear(tmdbId, type)
+        fun enc(s: String) = java.net.URLEncoder.encode(s, "UTF-8")
+        val base = Domains.base("multimovies") ?: "https://m1.multimovies.courses"
+        val search = fetchText("$base/search?q=${enc(title)}", base, timeoutSec = 12)
+            ?: throw CleanMissException("no search answer")
+        val cards = multimoviesCards(search, base)
+            .map { it to TitleMatch.titleDistance(title, it.second) }
+            .filter { (_, d) -> d >= 0.5 }
+            .sortedByDescending { it.second }
+            .take(3)
+        if (cards.isEmpty()) throw CleanMissException("no match")
+        for ((cardPair, _) in cards) {
+            val cardUrl = cardPair.first
+            val detailUrl = if (cardUrl.startsWith("http")) cardUrl else base.trimEnd('/') + cardUrl
+            val detail = fetchText(detailUrl, base, timeoutSec = 12) ?: continue
+            val watchConfig = bracedJson(detail, "const watchConfig = ") ?: continue
+            val servers = watchConfig.optJSONArray("initialServers") ?: continue
+            var tmdb = ""
+            var vidbolt = false
+            for (i in 0 until servers.length()) {
+                val serverUrl = servers.optJSONObject(i)?.optString("url").orEmpty()
+                if (tmdb.isBlank()) tmdb = MULTIMOVIES_TMDB_IN_URL.find(serverUrl)?.groupValues?.get(1).orEmpty()
+                if (serverUrl.contains("vidbolt.xyz")) vidbolt = true
+            }
+            val out = ArrayList<RawStream>(6)
+            if (vidbolt && tmdb.isNotBlank()) out += multimoviesVidbolt(tmdb)
+            if (out.isNotEmpty()) return out.take(10)
+        }
+        throw CleanMissException("no playable files")
     }
 
     private val FSL_SEEDS = listOf(

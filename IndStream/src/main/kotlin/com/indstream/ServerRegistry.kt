@@ -246,6 +246,17 @@ object ServerFarm {
             hasSubtitles = false, timeoutSec = 45,
             animeOnly = true,
         ),
+        ServerSpec(
+            id = "multimovies", name = "Multimovies",
+            idType = ServerIdType.TMDB,
+            movieUrl = "https://m1.multimovies.courses/search?q={id}",
+            tvUrl = "https://m1.multimovies.courses/search?q={id}",
+            probeUrl = "https://m1.multimovies.courses/search?q={title}",
+            referer = "https://m1.multimovies.courses/",
+            hasSubtitles = false, timeoutSec = 40,
+            declaredLanguages = setOf("Hindi", "English", "Tamil", "Telugu", "Bengali"),
+            speed = ServerSpeed.FAST, downloadFriendly = true,
+        ),
     )
 
     fun buildMovieUrl(spec: ServerSpec, id: String): String =
