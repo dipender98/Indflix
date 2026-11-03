@@ -56,8 +56,6 @@ object StreamEngine {
     private val FOUR_K_WORD = Regex("""\b4K\b""")
     private val HUB_OTHER_LANG =
         Regex("""english|dual|multi|tamil|telugu|malayalam|kannada|bengali|marathi|punjabi|urdu|japanese|korean|chinese""")
-    private val INDIAN_LANG_WORD =
-        Regex("""\b(tamil|telugu|malayalam|kannada|bengali|marathi|punjabi)\b""")
     private val ARCHIVE_URL = Regex("""\.(?:zip|rar|7z|tar|gz)(?:[?#]|$)""", RegexOption.IGNORE_CASE)
     private val BTN_CLASS = Regex("""\bbtn\b""")
     private val PIXELDRAIN_PAGE =
@@ -2069,7 +2067,7 @@ object StreamEngine {
 
     internal fun pickAudioTrack(tracks: List<AudioTrack>): AudioTrack? {
         if (tracks.isEmpty()) return null
-        tracks.firstOrNull { it.languageName.contains("hindi", ignoreCase = true) }?.let { return it }
+        tracks.firstOrNull { LinkNaming.languageNames(it.languageName).contains("Hindi") }?.let { return it }
         tracks.firstOrNull { it.existVideo }?.let { return it }
         return tracks.first()
     }
@@ -2172,12 +2170,11 @@ object StreamEngine {
                 ?.let { vids += apiVideos(it, 3) }
         }
         if (vids.isEmpty()) throw CleanMissException("no video urls")
-        val hindi = pick?.languageName?.contains("hindi", ignoreCase = true) == true
-        val langLabel = if (hindi) "Hindi" else pick?.languageName.orEmpty()
+        val langLabel = LinkNaming.languageLabel(pick?.languageName)
         return vids.take(4).map {
             RawStream(spec.id, "${spec.name} $langLabel".trim(), it.url,
                 it.url.contains(".m3u8", ignoreCase = true), null, releaseHeightOf(it.quality),
-                audioPriority = if (hindi) 4 else 1, audioLabel = langLabel)
+                audioPriority = if (langLabel.contains("Hindi")) 4 else 1, audioLabel = langLabel)
         }
     }
 
@@ -2485,23 +2482,20 @@ object StreamEngine {
 
     internal fun hubLangOf(languages: String): String {
         val s = languages.lowercase()
-        val hasHindi = s.contains("hindi")
-        val hasOther = HUB_OTHER_LANG.containsMatchIn(s)
         return when {
-            hasHindi && hasOther -> "Multi"
-            hasHindi -> "Hindi"
-            INDIAN_LANG_WORD.containsMatchIn(s) ->
-                releaseLanguageOf(languages).ifBlank { "Multi" }
-            else -> releaseLanguageOf(languages).ifBlank { "" }
+            // Hindi mixed with any other listed language is the ambiguity bucket (priority only).
+            s.contains("hindi") && HUB_OTHER_LANG.containsMatchIn(s) -> "Multi"
+            s.contains("hindi") -> "Hindi"
+            else -> LinkNaming.languageLabel(languages).ifBlank { "" }
         }
     }
 
     private fun isArchiveUrl(url: String): Boolean = ARCHIVE_URL.containsMatchIn(url)
 
-    internal fun hubFileButtons(html: String): List<Pair<String, String>> {
+    internal fun hubFileButtons(html: String): List<Triple<String, String, String>> {
         val doc = Jsoup.parse(html)
         val headQ = releaseHeightOf(doc.selectFirst(".card-header")?.text())
-        val out = mutableListOf<Pair<String, String>>()
+        val out = mutableListOf<Triple<String, String, String>>()
         for (a in doc.select("a[href]")) {
             if (!BTN_CLASS.containsMatchIn(a.className())) continue
             var url = a.attr("href").trim()
@@ -2513,8 +2507,9 @@ object StreamEngine {
             url = PIXELDRAIN_SHORT.find(url)?.let {
                 url.replace("/u/${it.groupValues[1]}", "/api/file/${it.groupValues[1]}")
             } ?: url
-            val q = releaseHeightOf(a.text()).takeIf { it > 0 } ?: headQ
-            out += url to (if (q > 0) "${q}p" else "")
+            val text = a.text().trim()
+            val q = releaseHeightOf(text).takeIf { it > 0 } ?: headQ
+            out += Triple(url, if (q > 0) "${q}p" else "", LinkNaming.languageLabel(text))
         }
         return out.distinctBy { it.first }
     }
@@ -2522,7 +2517,7 @@ object StreamEngine {
     private val REURL_VAR = Regex("""var\s+reurl\s*=\s*"([^"]+)"""")
     private val HUB_DRIVE_NEXT = Regex("""https?://hubcloud\.[a-z.]+/drive/[A-Za-z0-9]+""")
 
-    private suspend fun hubDriveFiles(driveUrl: String, referer: String): List<Pair<String, String>> {
+    private suspend fun hubDriveFiles(driveUrl: String, referer: String): List<Triple<String, String, String>> {
         if (driveUrl.contains("hubdrive.", ignoreCase = true) || driveUrl.contains("hubcdn.", ignoreCase = true)) {
             val index = fetchText(driveUrl, referer) ?: return emptyList()
             val reurl = REURL_VAR.find(index)?.groupValues?.get(1)
@@ -2531,7 +2526,7 @@ object StreamEngine {
                 ?.let { b64Text(it) }
                 ?.substringAfter("link=", "")
                 ?.takeIf { it.startsWith("http") }
-            if (direct != null) return listOf(direct to qualityText(direct))
+            if (direct != null) return listOf(Triple(direct, qualityText(direct), ""))
             val next = HUB_DRIVE_NEXT.find(index)?.value ?: return emptyList()
             return hubDriveFiles(next, driveUrl)
         }
@@ -2554,7 +2549,7 @@ object StreamEngine {
             break
         }
         if (drive.isBlank()) return emptyList()
-        googleVideoLink(drive, finalUrl)?.let { return listOf(it to qualityText(drive)) }
+        googleVideoLink(drive, finalUrl)?.let { return listOf(Triple(it, qualityText(drive), "")) }
         val tokenUrl = TOKEN_URL_ABS.find(drive)?.value
             ?: TOKEN_URL_REL.find(drive)?.value?.let { tokenHref ->
                 val origin = ORIGIN.find(url)?.value ?: return emptyList()
@@ -2645,28 +2640,32 @@ object StreamEngine {
     ): List<RawStream> {
         val out = mutableListOf<RawStream>()
         for ((host, hostLabel) in hosts) {
+            val hostLang = releaseLanguageOf(hostLabel).ifBlank { language }
             val pixeldrain = pixeldrainDirect(host)
             if (pixeldrain != null) {
-                out += rawFile(spec, label.ifBlank { hostLabel }, pixeldrain, referer, language, size)
+                out += rawFile(spec, label.ifBlank { hostLabel }, pixeldrain, referer, hostLang, size)
                 continue
             }
             if (host.contains("gdshine.", ignoreCase = true)) {
                 val stream = gdshineStream(host, referer) ?: continue
                 out += rawFile(
-                    spec, label.ifBlank { stream.second }, stream.first, referer, language, size,
+                    spec, label.ifBlank { stream.second }, stream.first, referer, hostLang, size,
                 )
                 continue
             }
             if (VIDEO_EXT.containsMatchIn(host)) {
-                out += rawFile(spec, label.ifBlank { hostLabel }, host, referer, language, size)
+                out += rawFile(spec, label.ifBlank { hostLabel }, host, referer, hostLang, size)
                 continue
             }
             if (host.contains("hubcloud.", ignoreCase = true) ||
                 host.contains("hubdrive.", ignoreCase = true) ||
                 host.contains("hubcdn.", ignoreCase = true)
             ) {
-                for ((url, quality) in hubDriveFiles(host, referer)) {
-                    out += rawFile(spec, quality.ifBlank { label }, url, referer, language, size)
+                for ((url, quality, fileLang) in hubDriveFiles(host, referer)) {
+                    out += rawFile(
+                        spec, quality.ifBlank { label }, url, referer,
+                        fileLang.ifBlank { language }, size,
+                    )
                 }
             }
         }
@@ -2789,13 +2788,24 @@ object StreamEngine {
                     } else driveUrl
                     val referer = ORIGIN.find(finalDrive)?.value ?: "https://hubcloud.ist/"
                     val files = hubDriveFiles(finalDrive, card.first)
-                    for ((url, q) in files) {
+                    for ((url, q, fileLang) in files) {
                         val qText = q.ifBlank { HUB_QUALITY.find(item.title)?.value.orEmpty() }
+                        val fileAudio = LinkNaming.languageLabel(fileLang)
+                        val audio = when {
+                            fileAudio.isNotBlank() -> fileAudio
+                            audioLang.isNotBlank() -> audioLang
+                            else -> lang
+                        }
+                        val audioPriority = when {
+                            audio.contains(',') || audio == "Multi" -> 2
+                            audio.startsWith("Hindi") -> 4
+                            else -> 1
+                        }
                         out += RawStream(
                             spec.id, "${spec.name} $qText".trim(), url,
                             url.contains(".m3u8", ignoreCase = true), referer,
                             releaseHeightOf(qText.ifBlank { item.title }),
-                            audioPriority = priority, audioLabel = audioLang,
+                            audioPriority = audioPriority, audioLabel = audio,
                             sizeLabel = item.size,
                             mediaLabel = item.title,
                         )
@@ -2869,7 +2879,7 @@ object StreamEngine {
                     fileHostLinks(linkPage, href)
                 }
                 if (hosts.isEmpty()) continue
-                val language = releaseLanguageOf(name.ifBlank { label })
+                val language = LinkNaming.languageLabel(label).ifBlank { releaseLanguageOf(name) }
                 val size = normalizeSizeToken(label).ifBlank { normalizeSizeToken(name) }
                 val ref = if (boldb != null) "https://boldb.site/" else hshare ?: href
                 out += hostStreams(spec, hosts, label.ifBlank { name }, ref, language, size)
@@ -2990,7 +3000,9 @@ object StreamEngine {
                         ) continue
                         val url = hit.optString("url")
                         if (!url.startsWith("http")) continue
-                        val hosts = hubDriveFiles(url, postUrl)
+                        val hosts = hubDriveFiles(url, postUrl).map { (u, q, fileLang) ->
+                            u to listOf(q, fileLang).filter { it.isNotBlank() }.joinToString(" ")
+                        }
                         out += hostStreams(
                             spec, hosts, label.ifBlank { file }, postUrl,
                             releaseLanguageOf(file).ifBlank { language }, normalizeSizeToken(label),
@@ -3220,7 +3232,7 @@ object StreamEngine {
             }
         }
         for (gpdl in GPDL_URL.findAll(token).map { it.value }.distinct()) {
-            for ((direct, quality) in hubDriveFiles(gpdl, tokenUrl)) {
+            for ((direct, quality, _) in hubDriveFiles(gpdl, tokenUrl)) {
                 if (seen.add(direct)) out += direct to quality
             }
         }
@@ -3406,7 +3418,7 @@ object StreamEngine {
             (0 until rows.length()).mapNotNull { i ->
                 val row = rows.optJSONObject(i) ?: return@mapNotNull null
                 val url = row.optString("file").takeIf { it.isNotBlank() } ?: return@mapNotNull null
-                (row.optString("name").ifBlank { "English" }) to url
+                row.optString("name") to url
             }
         } ?: emptyList()
         sources to subs
@@ -3906,7 +3918,7 @@ object StreamEngine {
                 referer = playReferer,
                 qualityHint = height,
                 audioPriority = if (label.contains("Hindi")) 4 else 3,
-                audioLabel = label.ifBlank { "Multi" },
+                audioLabel = label,
                 extraHeaders = mapOf("Referer" to playReferer),
             ),
         )
@@ -4753,7 +4765,7 @@ object StreamEngine {
         kotlinx.coroutines.coroutineScope {
             (0 until playlist.length()).mapNotNull { i ->
                 val entry = playlist.optJSONObject(i) ?: return@mapNotNull null
-                val lang = entry.optString("title").ifBlank { "Multi" }
+                val lang = entry.optString("title")
                 val file = entry.optString("file").takeIf { it.isNotBlank() } ?: return@mapNotNull null
                 async {
                     val linkJson = withTimeoutOrNull(8_000L) {

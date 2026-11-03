@@ -138,6 +138,38 @@ class StremioNuvioAddonsTest {
     }
 
     @Test
+    fun streams_parse_declared_languages_field() {
+        val payload = StremioNuvioAddons.parseStreamPayload(
+            """
+            {"streams": [
+              {"name": "1080p", "title": "Example Movie", "languages": ["hin", "eng"],
+               "url": "https://cdn.example/movie.m3u8"},
+              {"name": "1080p", "title": "Example Movie", "languages": "Hindi",
+               "url": "https://cdn.example/movie-two.m3u8"},
+              {"name": "1080p", "title": "Example Movie", "url": "https://cdn.example/movie-three.m3u8"}
+            ]}
+            """.trimIndent(),
+        )
+        assertEquals(3, payload.direct.size)
+        assertEquals("hin, eng", payload.direct[0].languages)
+        assertEquals("Hindi", payload.direct[1].languages)
+        assertEquals("", payload.direct[2].languages)
+    }
+
+    @Test
+    fun streamAudioLabel_declaredDataOnly() {
+        // No declared language and no badge -> blank (title text is never scanned).
+        assertEquals("", StremioNuvioAddons.streamAudioLabel("", "1080p WEB-DL"))
+        assertEquals("", StremioNuvioAddons.streamAudioLabel("", ""))
+        // Declared field wins over the name badge.
+        assertEquals("Hindi", StremioNuvioAddons.streamAudioLabel("Hindi", "English"))
+        // Badge-only fallback, and declared codes canonicalize.
+        assertEquals("English", StremioNuvioAddons.streamAudioLabel("", "English"))
+        assertEquals("Hindi, English", StremioNuvioAddons.streamAudioLabel("hin,eng", "1080p"))
+        assertEquals("Hindi, English", StremioNuvioAddons.streamAudioLabel(" Hindi + English ", ""))
+    }
+
+    @Test
     fun quality_is_read_from_stream_titles_and_urls() {
         assertEquals(2160, StremioNuvioAddons.qualityOf("4K HDR"))
         assertEquals(2160, StremioNuvioAddons.qualityOf("2160p WEB-DL"))

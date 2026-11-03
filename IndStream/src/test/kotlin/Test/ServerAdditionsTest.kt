@@ -160,6 +160,9 @@ class ServerAdditionsTest {
         fun t(id: String, name: String, v: Boolean) = StreamEngine.AudioTrack(id, name, v)
         val tracks = listOf(t("1", "English", true), t("2", "Hindi", true), t("3", "Tamil", false))
         assertEquals("2", StreamEngine.pickAudioTrack(tracks)?.languageId)
+        assertEquals("2", StreamEngine.pickAudioTrack(
+            listOf(t("1", "English", true), t("2", "हिन्दी", true), t("3", "Tamil", false)),
+        )?.languageId)
         assertEquals("1", StreamEngine.pickAudioTrack(listOf(t("1", "English", true)))?.languageId)
         assertNull(StreamEngine.pickAudioTrack(emptyList()))
     }
@@ -278,7 +281,17 @@ class ServerAdditionsTest {
         assertEquals("Multi", StreamEngine.hubLangOf("Hindi, English"))
         assertEquals("Multi", StreamEngine.hubLangOf("Hindi, Bengali"))
         assertEquals("Hindi", StreamEngine.hubLangOf("Hindi"))
+        assertEquals("Multi", StreamEngine.hubLangOf("Dual Audio"))
+        assertEquals("English", StreamEngine.hubLangOf("English"))
         assertEquals("", StreamEngine.hubLangOf("BluRay exclusive"))
+    }
+
+    @Test
+    fun hubLangOf_namesSingleNonHindiLanguages() {
+        assertEquals("Bengali", StreamEngine.hubLangOf("Bengali"))
+        assertEquals("Marathi", StreamEngine.hubLangOf("Marathi"))
+        assertEquals("Tamil", StreamEngine.hubLangOf("Tamil"))
+        assertEquals("Hindi", StreamEngine.hubLangOf("हिन्दी"))
     }
 
     @Test
@@ -394,6 +407,20 @@ class ServerAdditionsTest {
         assertEquals(1, out.size)
         assertEquals("https://pixeldrain.dev/api/file/AbC123", out[0].first)
         assertEquals("720p", out[0].second)
+        assertEquals("", out[0].third)
+    }
+
+    @Test
+    fun hubFileButtons_perFileLanguage() {
+        val html = "<div class=\"card-header\">Show 2023 720p</div>" +
+            "<a class=\"btn\" href=\"https://hubcloud.ist/drive/Hin\">Hindi 720p</a>" +
+            "<a class=\"btn\" href=\"https://hubcloud.ist/drive/Eng\">English 720p</a>"
+        val out = StreamEngine.hubFileButtons(html)
+        assertEquals(2, out.size)
+        assertEquals("720p", out[0].second)
+        assertEquals("720p", out[1].second)
+        assertEquals("Hindi", out[0].third)
+        assertEquals("English", out[1].third)
     }
 
     @Test
@@ -407,6 +434,7 @@ class ServerAdditionsTest {
         assertEquals(1, out.size)
         assertEquals("https://pixeldrain.dev/api/file/AbC123", out[0].first)
         assertEquals("720p", out[0].second)
+        assertEquals("", out[0].third)
     }
 
     @Test

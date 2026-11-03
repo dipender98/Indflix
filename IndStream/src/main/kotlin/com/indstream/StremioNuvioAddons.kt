@@ -55,6 +55,7 @@ object StremioNuvioAddons {
         val url: String,
         val name: String,
         val title: String,
+        val languages: String,
         val headers: Map<String, String>,
     )
 
@@ -186,6 +187,13 @@ object StremioNuvioAddons {
                         url = url,
                         name = item.optString("name").trim(),
                         title = item.optString("title").trim(),
+                        languages = item.optJSONArray("languages")
+                            ?.let { arr ->
+                                (0 until arr.length())
+                                    .mapNotNull { a -> arr.optString(a).trim().takeIf { it.isNotBlank() } }
+                                    .joinToString(", ")
+                            }
+                            ?: item.optString("languages").trim(),
                         headers = streamHeaders(item),
                     )
                 }
@@ -212,6 +220,9 @@ object StremioNuvioAddons {
         val unit = if (match.groupValues[2].uppercase().startsWith("G")) "GB" else "MB"
         return "${match.groupValues[1]} $unit"
     }
+
+    internal fun streamAudioLabel(languages: String, name: String): String =
+        LinkNaming.languageLabel(languages.ifBlank { name })
 
     suspend fun resolve(imdbId: String, type: String, season: Int, episode: Int): List<RawStream> {
         val baseId = imdbId.trim()
@@ -303,7 +314,7 @@ object StremioNuvioAddons {
                 referer = source.headers.entries
                     .firstOrNull { it.key.equals("Referer", ignoreCase = true) }?.value,
                 qualityHint = qualityOf(u).takeIf { it > 0 } ?: qualityOf(haystack),
-                audioLabel = LinkNaming.languageLabel(haystack),
+                audioLabel = streamAudioLabel(source.languages, source.name),
                 sizeLabel = sizeOf(haystack),
                 extraHeaders = source.headers,
                 isDash = u.contains(".mpd", ignoreCase = true),
