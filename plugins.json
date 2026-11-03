@@ -2,7 +2,7 @@
     {
         "url": "https://raw.githubusercontent.com/dipender98/Indflix/builds/IndStream.cs3",
         "status": 1,
-        "version": 86,
+        "version": 87,
         "name": "IndStream",
         "internalName": "IndStream",
         "authors": [
@@ -19,7 +19,7 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/dipender98/Indflix/main/IndStream/icon.png",
         "apiVersion": 1,
-        "fileHash": "sha256-4e27fd7cf4beeb5fa10f520bc763da31b4fc54d8fa403535e061d28cc731fd9b"
+        "fileHash": "sha256-751d9aa2883b11f06664a10fac94ff7b85192a99608d21e5caebaa55bf37ea1a"
     },
     {
         "url": "https://raw.githubusercontent.com/dipender98/Indflix/builds/Multimovies.cs3",
@@ -43,7 +43,7 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/dipender98/Indflix/main/Multimovies/icon.png",
         "apiVersion": 1,
-        "fileHash": "sha256-b9ebcbee60a1d0e60064d34c2329aac8369c7419843be7dc12e1eb80b502f924"
+        "fileHash": "sha256-ed02eae5439ab815781c6a1ec7357436e339c233313521e6852f8c731f46be0f"
     },
     {
         "url": "https://raw.githubusercontent.com/dipender98/Indflix/builds/Vegamovies.cs3",
@@ -64,6 +64,6 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/dipender98/Indflix/main/Vegamovies/icon.png",
         "apiVersion": 1,
-        "fileHash": "sha256-97277ec06f8691a7ef1b207e0371ba8497a05100d0bfb7f3fcac63dbd11d6f77"
+        "fileHash": "sha256-774da44be1c9737b151f07bf2ab4ba4a8e6be4433f968600d1e9145280cd8078"
     }
 ]
