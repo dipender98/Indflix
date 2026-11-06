@@ -670,6 +670,28 @@ object StreamEngine {
             return emptyList()
         }
 
+        if (spec.id == "vidbolt") {
+            if (type != "movie" && (season <= 0 || episode <= 0)) {
+                Log.w("IndStream", "${spec.id}: tv request without season/episode (s=$season e=$episode), skipping")
+                return emptyList()
+            }
+            val result = resolveVidbolt(spec, tmdbId, type, season, episode)
+            if (result.isNotEmpty()) { okServer(spec, start, "vidbolt api", result.size); return result }
+            failServer(spec, "vidbolt returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
+            return emptyList()
+        }
+
+        if (spec.id == "vidly") {
+            if (type != "movie" && (season <= 0 || episode <= 0)) {
+                Log.w("IndStream", "${spec.id}: tv request without season/episode (s=$season e=$episode), skipping")
+                return emptyList()
+            }
+            val result = resolveVidly(spec, tmdbId, type, season, episode)
+            if (result.isNotEmpty()) { okServer(spec, start, "vidly embed", result.size); return result }
+            failServer(spec, "vidly returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
+            return emptyList()
+        }
+
         if (spec.id == "vidlink") {
             if (type != "movie" && (season <= 0 || episode <= 0)) {
                 Log.w("IndStream", "${spec.id}: tv request without season/episode (s=$season e=$episode), skipping")
@@ -805,12 +827,6 @@ object StreamEngine {
             val result = resolveMovy(spec, tmdbId, type, season, episode)
             if (result.isNotEmpty()) { okServer(spec, start, "movy api", result.size); return result }
             failServer(spec, "movy returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
-            return emptyList()
-        }
-        if (spec.id == "braflix") {
-            val result = resolveBraflix(spec, id, type, season, episode)
-            if (result.isNotEmpty()) { okServer(spec, start, "braflix api", result.size); return result }
-            failServer(spec, "braflix returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
             return emptyList()
         }
         if (spec.id == "animeworld") {
@@ -3138,40 +3154,62 @@ object StreamEngine {
         return null
     }
 
-    private suspend fun multimoviesVidbolt(tmdbId: String): List<RawStream> {
-        val origin = "https://vidbolt.xyz"
-        val body = fetchText("$origin/api/resolve?type=movie&id=$tmdbId", "$origin/", timeoutSec = 20) ?: return emptyList()
-        val stream = catching { org.json.JSONObject(body) }.getOrNull()
-            ?.optJSONObject("stream") ?: return emptyList()
+    private const val VIDBOLT_ORIGIN = "https://vidbolt.xyz"
+    internal val VIDBOLT_SERVERS = listOf("orion", "callisto", "vega", "quantum", "quasar")
+
+    internal data class VidboltSource(
+        val url: String,
+        val kind: String,
+        val quality: String,
+        val language: String,
+        val label: String,
+        val master: String,
+    )
+
+    internal fun vidboltSources(jsonText: String): List<VidboltSource> {
+        val root = catching { org.json.JSONObject(jsonText) }.getOrNull() ?: return emptyList()
+        val stream = root.optJSONObject("stream") ?: return emptyList()
         val sources = stream.optJSONArray("sources") ?: return emptyList()
-        val out = ArrayList<RawStream>(sources.length())
+        val out = ArrayList<VidboltSource>(sources.length())
         for (i in 0 until sources.length()) {
             val src = sources.optJSONObject(i) ?: continue
-            val url = src.optString("url")
+            val url = src.optString("url").trim()
             if (!url.startsWith("http")) continue
-            val quality = src.optString("quality")
-            val height = releaseHeightOf(quality)
-            if (height < 720) continue
-            val lang = src.optString("language").ifBlank { "" }
-            val audioLabel = LinkNaming.languageLabel(lang)
-            val audioPriority = when {
-                audioLabel.contains(',') || audioLabel == "Multi" -> 2
-                audioLabel.startsWith("Hindi") -> 4
-                else -> 1
-            }
-            out += RawStream(
-                serverId = "multimovies",
-                serverName = listOf("Multimovies", quality, "VidBolt").filter { it.isNotBlank() }.joinToString(" "),
+            out += VidboltSource(
                 url = url,
-                isM3u8 = true,
-                referer = origin,
-                qualityHint = height,
-                audioPriority = audioPriority,
-                audioLabel = audioLabel,
-                mediaLabel = src.optString("label").ifBlank { "VidBolt $quality" },
+                kind = src.optString("kind"),
+                quality = src.optString("quality"),
+                language = src.optString("language"),
+                label = src.optString("label"),
+                master = src.optString("master"),
             )
         }
         return out
+    }
+
+    private suspend fun multimoviesVidbolt(tmdbId: String): List<RawStream> {
+        val origin = VIDBOLT_ORIGIN
+        val body = fetchText("$origin/api/resolve?type=movie&id=$tmdbId", "$origin/", timeoutSec = 20) ?: return emptyList()
+        return vidboltSources(body).mapNotNull { src ->
+            val height = heightHintOf(src.quality)
+            if (height in 1..719) return@mapNotNull null
+            val audioLabel = LinkNaming.languageLabel(src.language.takeUnless { it.contains("sub", true) })
+            RawStream(
+                serverId = "multimovies",
+                serverName = listOf("Multimovies", src.quality, "VidBolt").filter { it.isNotBlank() }.joinToString(" "),
+                url = src.url,
+                isM3u8 = src.kind.equals("hls", true) || src.url.contains(".m3u8", true),
+                referer = "$origin/",
+                qualityHint = height,
+                audioPriority = when {
+                    audioLabel.contains(',') || audioLabel == "Multi" -> 2
+                    audioLabel.startsWith("Hindi") -> 4
+                    else -> 1
+                },
+                audioLabel = audioLabel,
+                mediaLabel = src.label.ifBlank { "VidBolt ${src.quality}" },
+            )
+        }
     }
 
     private suspend fun resolveMultimovies(
@@ -4668,6 +4706,115 @@ object StreamEngine {
         )
     }
 
+    private suspend fun resolveVidbolt(
+        spec: ServerSpec, tmdbId: Int, type: String, season: Int, episode: Int,
+    ): List<RawStream> {
+        val origin = VIDBOLT_ORIGIN
+        val api = if (type == "movie") ServerFarm.buildMovieUrl(spec, tmdbId.toString())
+        else ServerFarm.buildTvUrl(spec, tmdbId.toString(), season, episode)
+        val payloads = ArrayList<String>(VIDBOLT_SERVERS.size)
+        val first = fetchText(api, "$origin/", timeoutSec = 8)
+        if (first != null && vidboltSources(first).isNotEmpty()) payloads += first
+        if (payloads.isEmpty()) {
+            val deadline = System.currentTimeMillis() + 15_000L
+            for (server in VIDBOLT_SERVERS) {
+                if (System.currentTimeMillis() >= deadline) break
+                val text = fetchText("$api&only=$server", "$origin/", timeoutSec = 6) ?: continue
+                if (vidboltSources(text).isNotEmpty()) payloads += text
+            }
+        }
+        if (payloads.isEmpty()) {
+            Log.w("VidBolt", "no sources for $type/$tmdbId")
+            return emptyList()
+        }
+        val out = LinkedHashMap<String, RawStream>()
+        for (payload in payloads) {
+            for (src in vidboltSources(payload)) {
+                if (out.containsKey(src.url)) continue
+                val master = src.master.takeIf { it.contains("#EXTM3U") || it.contains("<MPD", true) }
+                val playlist = ManifestKit.parseMaster(master, src.url)
+                val height = heightHintOf(src.quality).takeIf { it > 0 }
+                    ?: playlist?.let { ManifestKit.bestHeight(it.variants) } ?: 0
+                if (height in 1..719) continue
+                val audioRaw = src.language.takeUnless { it.contains("sub", true) }.orEmpty()
+                val audioLabel = LinkNaming.languageLabel(audioRaw)
+                    .ifBlank { playlist?.let { ManifestKit.audioLanguageLabel(it) }.orEmpty() }
+                val isDash = src.kind.equals("dash", true) || src.url.contains(".mpd", true)
+                out[src.url] = RawStream(
+                    serverId = spec.id, serverName = spec.name,
+                    url = src.url,
+                    isM3u8 = src.kind.equals("hls", true) || src.url.contains(".m3u8", true) || isDash,
+                    isDash = isDash,
+                    referer = "$origin/",
+                    qualityHint = height,
+                    audioPriority = when {
+                        audioLabel.contains(',') || audioLabel == "Multi" -> 2
+                        audioLabel.startsWith("Hindi") -> 4
+                        else -> 1
+                    },
+                    audioLabel = audioLabel,
+                    mediaLabel = src.label.ifBlank { src.quality },
+                    inlineManifest = master?.takeIf { playlist != null },
+                    extraHeaders = mapOf("User-Agent" to HttpKit.userAgent, "Referer" to "$origin/"),
+                    subtitles = playlist?.let { SubtitleKit.fromMaster(it, src.url) }.orEmpty(),
+                )
+            }
+        }
+        Log.d("VidBolt", "parsed ${out.size} streams for $type/$tmdbId")
+        return out.values.toList()
+    }
+
+    private suspend fun resolveVidly(
+        spec: ServerSpec, tmdbId: Int, type: String, season: Int, episode: Int,
+    ): List<RawStream> {
+        val origin = "https://vidly.pro"
+        val page = if (type == "movie") ServerFarm.buildMovieUrl(spec, tmdbId.toString())
+        else ServerFarm.buildTvUrl(spec, tmdbId.toString(), season, episode)
+        val html = withTimeoutOrNull(12_000L) {
+            catching { app.get(page, timeout = 12, headers = okHeaders("$origin/")).text }.getOrNull()
+        } ?: run { Log.w("Vidly", "embed no response"); return emptyList() }
+        val urls = vidlyStreams(html)
+        if (urls.isEmpty()) {
+            Log.w("Vidly", "no stream in embed for $type/$tmdbId")
+            return emptyList()
+        }
+        val out = ArrayList<RawStream>(urls.size)
+        for (url in urls.take(4)) {
+            val masterText = fetchText(url, "$origin/", timeoutSec = 6)
+            val master = ManifestKit.parseMaster(masterText, url)
+            val height = master?.let { ManifestKit.bestHeight(it.variants) } ?: 0
+            if (height in 1..719) continue
+            out += RawStream(
+                serverId = spec.id, serverName = spec.name,
+                url = url,
+                isM3u8 = true,
+                referer = "$origin/",
+                qualityHint = height,
+                audioLabel = master?.let { ManifestKit.audioLanguageLabel(it) }.orEmpty(),
+                inlineManifest = masterText?.takeIf { master != null },
+                extraHeaders = mapOf("User-Agent" to HttpKit.userAgent, "Referer" to "$origin/"),
+                subtitles = master?.let { SubtitleKit.fromMaster(it, url) }.orEmpty(),
+            )
+        }
+        Log.d("Vidly", "parsed ${out.size} streams for $type/$tmdbId")
+        return out
+    }
+
+    private val VIDLY_M3U8 = Regex("""https?://[^"'\s<>\\]+\.m3u8[^"'\s<>\\]*""", RegexOption.IGNORE_CASE)
+
+    internal fun vidlyStreams(html: String): List<String> {
+        if (html.isBlank()) return emptyList()
+        val text = html.replace("\\/", "/")
+            .replace("\\u0026", "&")
+            .replace("\\u003d", "=")
+            .replace("\\u003f", "?")
+        return VIDLY_M3U8.findAll(text)
+            .map { it.value.trim() }
+            .filter { it.startsWith("http") }
+            .distinct()
+            .toList()
+    }
+
     private suspend fun resolveWecollegeSources(
         spec: ServerSpec,
         tmdbId: Int,
@@ -4738,42 +4885,6 @@ object StreamEngine {
         return out.values.toList()
     }
 
-
-    private suspend fun resolveBraflix(
-        spec: ServerSpec, id: String, type: String, season: Int, episode: Int,
-    ): List<RawStream> {
-        if (type != "movie" && (season <= 0 || episode <= 0)) return emptyList()
-        val base = "https://braflix.dev"
-        val path = if (type == "movie") "/api/play/movie/$id"
-        else "/api/play/tv/$id/$season/$episode"
-        val ref = "$base/"
-        val headers = mapOf("User-Agent" to HttpKit.userAgent, "Referer" to ref, "Origin" to base)
-        val text = withTimeoutOrNull(12_000L) {
-            catching { app.get("$base$path", timeout = 12, headers = headers).text }.getOrNull()
-        } ?: run { Log.w("Braflix", "api no response"); return emptyList() }
-        val root = catching { org.json.JSONObject(text) }.getOrNull()
-        val src = braflixSource(text) ?: run { Log.w("Braflix", "no stream in response"); return emptyList() }
-        val abs = if (src.stream.startsWith("http")) src.stream else base + src.stream
-        Log.d("Braflix", "got 1 stream for $type/$id")
-        val stream = RawStream(
-            serverId = spec.id, serverName = spec.name,
-            url = abs, isM3u8 = true, isDash = true,
-            referer = ref, qualityHint = heightHintOf(src.quality),
-            extraHeaders = mapOf("User-Agent" to HttpKit.userAgent, "Referer" to ref),
-        )
-        return resolveSubtitleEndpoints(listOf(stream), listOfNotNull(root), base, headers)
-    }
-
-    internal data class BraflixSource(val stream: String, val quality: String)
-
-    internal fun braflixSource(jsonText: String): BraflixSource? {
-        val root = catching { org.json.JSONObject(jsonText) }.getOrNull() ?: return null
-        val result = root.optJSONObject("result") ?: return null
-        val stream = result.optJSONObject("file")?.optString("stream")
-            ?.takeIf { it.isNotBlank() } ?: return null
-        val quality = result.optJSONObject("source")?.optString("quality").orEmpty()
-        return BraflixSource(stream, quality)
-    }
 
     private suspend fun resolveVidem(
         spec: ServerSpec,

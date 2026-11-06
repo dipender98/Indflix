@@ -150,7 +150,7 @@ class ServerBingrShowboxTest {
     }
 
     @Test
-    fun braflix_endpointSubtitles_areSplitAndAttachable() {
+    fun subtitleEndpointStrings_areSplitAndAttachable() {
         val api = org.json.JSONObject(
             """
             {"status":"ready","result":{"file":{
@@ -161,7 +161,7 @@ class ServerBingrShowboxTest {
         )
         val (cleaned, endpoints) = SubtitleKit.splitSubtitleEndpoints(listOf(api))
         assertEquals(listOf("/api/subs/abc123"), endpoints, "endpoint string must be detected")
-        val tracks = SubtitleKit.fromJson(org.json.JSONArray().apply { cleaned.forEach { put(it) } }, "https://braflix.dev")
+        val tracks = SubtitleKit.fromJson(org.json.JSONArray().apply { cleaned.forEach { put(it) } }, "https://player.example")
         assertTrue(tracks.none { it.url.contains("/api/subs/") }, "endpoint string must not become a track")
 
         val subsEndpoint = org.json.JSONArray(
@@ -170,11 +170,11 @@ class ServerBingrShowboxTest {
             """.trimIndent(),
         )
         val attached = StreamEngine.withJsonSubtitles(
-            listOf(StreamEngine.RawStream("braflix", "Braflix", "https://braflix.dev/dash-proxy?url=x.mpd", true, isDash = true)),
+            listOf(StreamEngine.RawStream("test", "Test", "https://player.example/dash-proxy?url=x.mpd", true, isDash = true)),
             subsEndpoint,
-            "https://braflix.dev",
+            "https://player.example",
         )
-        assertTrue(attached[0].subtitles.any { it.url.startsWith("https://braflix.dev/sub/abc/") }, "braflix sub src must resolve")
-        assertTrue(attached[0].subtitles.any { it.language == "English" }, "braflix label must become language")
+        assertTrue(attached[0].subtitles.any { it.url.startsWith("https://player.example/sub/abc/") }, "sub src must resolve")
+        assertTrue(attached[0].subtitles.any { it.language == "English" }, "label must become language")
     }
 }

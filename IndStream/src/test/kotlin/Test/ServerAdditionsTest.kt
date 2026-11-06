@@ -20,7 +20,7 @@ class ServerAdditionsTest {
 
     @Test
     fun deadServers_stayOut() {
-        for (id in setOf("nhd", "vidapi", "zxcstreams", "vidsrc-to", "nontongo")) {
+        for (id in setOf("nhd", "vidapi", "zxcstreams", "vidsrc-to", "nontongo", "braflix")) {
             assertNull(ServerFarm.allServers.firstOrNull { it.id == id }, "$id must stay out")
         }
     }
@@ -120,10 +120,6 @@ class ServerAdditionsTest {
         val vidlink = ServerFarm.allServers.first { it.id == "vidlink" }
         assertTrue(vidlink.supportsImdb("movie"))
         assertFalse(vidlink.supportsImdb("tv"))
-
-        val braflix = ServerFarm.allServers.first { it.id == "braflix" }
-        assertTrue(braflix.supportsImdb("movie"))
-        assertTrue(braflix.supportsImdb("tv"))
 
         val streamflix = ServerFarm.allServers.first { it.id == "streamflix" }
         assertTrue(streamflix.supportsImdb("movie"))

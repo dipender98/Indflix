@@ -12,7 +12,7 @@ class NewSourcesTest {
 
     @Test
     fun farm_presentAndTmdbKeyed() {
-        for (id in listOf("vidrift", "rivestream", "movy", "vidy", "braflix")) {
+        for (id in listOf("vidrift", "rivestream", "movy", "vidy", "vidbolt", "vidly")) {
             val s = ServerFarm.allServers.firstOrNull { it.id == id }
             assertTrue(s != null, "$id must be in the farm")
             assertEquals(ServerIdType.TMDB, s!!.idType)
@@ -175,17 +175,75 @@ class NewSourcesTest {
     }
 
     @Test
-    fun braflix_parseSource() {
+    fun vidbolt_usesJsonResolverRoute() {
+        val s = ServerFarm.allServers.first { it.id == "vidbolt" }
+        assertEquals("VidBolt", s.name)
+        assertEquals(ServerIdType.TMDB, s.idType)
+        assertTrue(s.isJsonApi)
+        assertTrue(s.hasSubtitles)
+        assertEquals(
+            "https://vidbolt.xyz/api/resolve?type=movie&id=27205",
+            ServerFarm.buildMovieUrl(s, "27205"),
+        )
+        assertEquals(
+            "https://vidbolt.xyz/api/resolve?type=tv&id=1399&season=1&episode=1",
+            ServerFarm.buildTvUrl(s, "1399", 1, 1),
+        )
+    }
+
+    @Test
+    fun vidly_usesEmbedRoutes() {
+        val s = ServerFarm.allServers.first { it.id == "vidly" }
+        assertEquals("Vidly", s.name)
+        assertEquals(ServerIdType.TMDB, s.idType)
+        assertTrue(s.hasSubtitles)
+        assertEquals(
+            "https://vidly.pro/embed/movie/27205",
+            ServerFarm.buildMovieUrl(s, "27205"),
+        )
+        assertEquals(
+            "https://vidly.pro/embed/tv/1399/1/1",
+            ServerFarm.buildTvUrl(s, "1399", 1, 1),
+        )
+    }
+
+    @Test
+    fun vidboltSources_parsesSources() {
         val json = """
-            {"status":"ready","result":{"token":"d0",
-            "source":{"kind":"dash","quality":"720,480"},
-            "file":{"playback":"dash","stream":"/dash-proxy?url=x&cookie=y"}}}
+            {"stream":{"server":"orion","sources":[
+              {"url":"https://cdn.example/master.m3u8","kind":"hls","quality":"1080p",
+               "language":"Hindi","master":"#EXTM3U\n#EXT-X-STREAM-INF:RESOLUTION=1920x1080\nv.m3u8"},
+              {"url":"not-a-url","quality":"720p"},
+              {"url":"https://cdn.example/2160.mp4","kind":"mp4","quality":"4K","label":"UHD"}
+            ]}}
         """.trimIndent()
-        val src = StreamEngine.braflixSource(json)
-        assertTrue(src != null)
-        assertEquals("/dash-proxy?url=x&cookie=y", src!!.stream)
-        assertEquals("720,480", src.quality)
-        assertNull(StreamEngine.braflixSource("""{"status":"pending"}"""))
-        assertNull(StreamEngine.braflixSource("nope"))
+        val src = StreamEngine.vidboltSources(json)
+        assertEquals(2, src.size)
+        assertEquals("https://cdn.example/master.m3u8", src[0].url)
+        assertEquals("hls", src[0].kind)
+        assertEquals("1080p", src[0].quality)
+        assertEquals("Hindi", src[0].language)
+        assertTrue(src[0].master.contains("#EXTM3U"))
+        assertEquals("4K", src[1].quality)
+        assertEquals("UHD", src[1].label)
+        assertTrue(StreamEngine.vidboltSources("""{"stream":{"sources":[]}}""").isEmpty())
+        assertTrue(StreamEngine.vidboltSources("nope").isEmpty())
+    }
+
+    @Test
+    fun vidlyStreams_unescapesAndDedupes() {
+        val html = """
+            <link rel="preload" href="https://img.example/media/a/index.m3u8?api_key=x">
+            <script>self.__next_f.push([1,"https:\/\/img.example\/media\/a\/index.m3u8?api_key=x"])</script>
+            <script>self.__next_f.push([1,"https:\/\/img.example\/media\/b\/master.m3u8"])</script>
+        """.trimIndent()
+        assertEquals(
+            listOf(
+                "https://img.example/media/a/index.m3u8?api_key=x",
+                "https://img.example/media/b/master.m3u8",
+            ),
+            StreamEngine.vidlyStreams(html),
+        )
+        assertTrue(StreamEngine.vidlyStreams("<html>no stream</html>").isEmpty())
     }
 }
