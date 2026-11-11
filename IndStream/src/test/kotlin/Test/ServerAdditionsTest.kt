@@ -20,7 +20,7 @@ class ServerAdditionsTest {
 
     @Test
     fun deadServers_stayOut() {
-        for (id in setOf("nhd", "vidapi", "zxcstreams", "vidsrc-to", "nontongo", "braflix")) {
+        for (id in setOf("nhd", "vidapi", "zxcstreams", "vidsrc-to", "nontongo", "braflix", "onetouchtv", "vidcore-api")) {
             assertNull(ServerFarm.allServers.firstOrNull { it.id == id }, "$id must stay out")
         }
     }
@@ -28,15 +28,6 @@ class ServerAdditionsTest {
     @Test
     fun videasy_removed_v63() {
         assertNull(ServerFarm.allServers.firstOrNull { it.id == "videasy" })
-    }
-
-    @Test
-    fun onetouchtv_presentAndTmdbKeyed() {
-        val s = ServerFarm.allServers.first { it.id == "onetouchtv" }
-        assertEquals("OneTouchTV", s.name)
-        assertEquals(ServerIdType.TMDB, s.idType)
-        assertEquals(30, s.timeoutSec)
-        assertTrue(s.hasSubtitles)
     }
 
     @Test
@@ -84,22 +75,6 @@ class ServerAdditionsTest {
         assertTrue(StreamEngine.vixsrcTokenFresh("1999999999", 1_700_000_000_000L))
         assertTrue(!StreamEngine.vixsrcTokenFresh("1000", 1_700_000_000_000L))
         assertTrue(!StreamEngine.vixsrcTokenFresh("not-a-number", 1_700_000_000_000L))
-    }
-
-    @Test
-    fun onetouchtv_pureHelpers() {
-        assertEquals(1080, StreamEngine.releaseHeightOf("1080p"))
-        assertEquals(720, StreamEngine.releaseHeightOf("720p"))
-        assertEquals(2160, StreamEngine.releaseHeightOf("4K"))
-        assertEquals(0, StreamEngine.releaseHeightOf("Auto"))
-        assertEquals(0, StreamEngine.releaseHeightOf(null))
-        val hits = listOf(
-            StreamEngine.VodHit("a", "Dune Part Two (2024)", "2024", "movie"),
-            StreamEngine.VodHit("b", "Dune (2021)", "2021", "movie"),
-        )
-        assertEquals("a", StreamEngine.matchVodTitle(hits, "Dune Part Two", 2024, "movie")?.id)
-        assertEquals(null, StreamEngine.matchVodTitle(hits, "Dune Part Two", 2021, "movie")?.id)
-        assertEquals(null, StreamEngine.matchVodTitle(emptyList(), "Dune", 2024, "movie"))
     }
 
     @Test

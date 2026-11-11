@@ -48,9 +48,9 @@ class PracticalResolveTest {
         }
         val pick = StreamEngine.pickAudioTrack(tracks)
         println("CastleTV tracks: ${tracks.map { it.languageName }} pick=${pick?.languageName}")
-        val data = StreamEngine.apiVideo(sec, best.first, epId, pick?.languageId?.takeIf { it.isNotBlank() }, 3)
+        val data = StreamEngine.apiVideo(sec, best.first, epId, pick?.languageId?.takeIf { it.isNotBlank() }, 2)
         assertNotNull(data, "video must resolve")
-        val vids = StreamEngine.apiVideos(data, 3)
+        val vids = StreamEngine.apiVideos(data, 2)
         println("CastleTV videos: ${vids.map { it.quality to it.url.take(80) }}")
         assertTrue(vids.isNotEmpty(), "video urls")
         assertTrue(HttpKit.aliveCheck(vids.first().url) != false, "first video must be playable")
@@ -124,16 +124,5 @@ class PracticalResolveTest {
         val landed = rows.map { it.first }.toSet()
         val missing = com.indstream.ServerFarm.allServers.map { it.id }.toSet() - landed
         println("MISSING: ${missing.joinToString()}")
-    }
-
-    @Test
-    fun onetouchtv_fullChain() = runBlocking {
-        val spec = com.indstream.ServerFarm.allServers.first { it.id == "onetouchtv" }
-        val out = StreamEngine.resolveOne(spec, 693134, "tt15239678", "movie", 1, 1)
-        println("OneTouchTV streams: ${out.size} ${out.map { it.qualityHint to it.url.take(70) }}")
-        assertTrue(out.isNotEmpty(), "onetouchtv must resolve streams")
-        val live = out.map { it to (HttpKit.aliveCheck(it.url, it.referer, it.extraHeaders) != false) }
-        live.forEach { (s, ok) -> println("  ${s.qualityHint}p alive=$ok ${s.url.take(70)}") }
-        assertTrue(live.any { it.second }, "at least one onetouchtv stream must be playable")
     }
 }

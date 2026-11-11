@@ -715,12 +715,6 @@ object StreamEngine {
             failServer(spec, "vaplayer returned no streams")
             return emptyList()
         }
-        if (spec.id == "onetouchtv") {
-            val result = resolveOneTouchTv(spec, tmdbId, type, season, episode)
-            if (result.isNotEmpty()) { okServer(spec, start, "onetouchtv api", result.size); return result }
-            failServer(spec, "onetouchtv returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
-            return emptyList()
-        }
         if (spec.id == "videm") {
             val result = resolveVidem(spec, tmdbId, imdbId, type, season, episode)
             if (result.isNotEmpty()) { okServer(spec, start, "videm", result.size); return result }
@@ -797,12 +791,6 @@ object StreamEngine {
             val result = resolveArchiveFiles(spec, tmdbId, type, season, episode)
             if (result.isNotEmpty()) { okServer(spec, start, "archive gateway files", result.size); return result }
             failServer(spec, "archive gateway returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
-            return emptyList()
-        }
-        if (spec.id == "vidcore-api") {
-            val result = resolveVidcore(spec, tmdbId, type, season, episode)
-            if (result.isNotEmpty()) { okServer(spec, start, "vidcore api", result.size); return result }
-            failServer(spec, "vidcore api returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
             return emptyList()
         }
         if (spec.id == "bingr") {
@@ -2137,17 +2125,18 @@ object StreamEngine {
     internal fun apiVideos(data: org.json.JSONObject, resolution: Int): List<ApiVideo> {
         val single = data.optString("videoUrl").takeIf { it.isNotBlank() }
         val arr = data.optJSONArray("videos")
-        if ((arr == null || arr.length() == 0) && single != null) {
-            return listOf(ApiVideo(single, apiQualityLabel(data.optString("resolutionDescription"), resolution)))
-        }
-        if (arr == null) return emptyList()
-        return (0 until arr.length()).mapNotNull { i ->
-            val video = arr.optJSONObject(i) ?: return@mapNotNull null
-            val url = video.optString("url").ifBlank { single } ?: return@mapNotNull null
-            if (url.isBlank()) return@mapNotNull null
+        val entries = (0 until (arr?.length() ?: 0)).mapNotNull { i ->
+            val video = arr!!.optJSONObject(i) ?: return@mapNotNull null
+            val url = video.optString("url").takeIf { it.isNotBlank() } ?: return@mapNotNull null
             ApiVideo(url, apiQualityLabel(video.optString("resolutionDescription"), video.optInt("resolution", resolution)))
-        }.distinctBy { it.url }
+        }
+        if (entries.isNotEmpty()) return entries.distinctBy { it.url }
+        return single?.let { listOf(ApiVideo(it, apiQualityLabel(data.optString("resolutionDescription"), resolution))) }
+            ?: emptyList()
     }
+
+    internal fun apiDenied(data: org.json.JSONObject): Boolean =
+        data.optBoolean("permissionDenied", false)
 
     private suspend fun resolveCastleTv(
         spec: ServerSpec,
@@ -2212,14 +2201,16 @@ object StreamEngine {
         var usedTrack = pick
         val vids = mutableListOf<ApiVideo>()
         if (pick != null) {
-            apiVideo(sec, activeId, epId, pick.languageId.takeIf { it.isNotBlank() }, 3)
-                ?.let { vids += apiVideos(it, 3) }
+            apiVideo(sec, activeId, epId, pick.languageId.takeIf { it.isNotBlank() }, 2)
+                ?.takeIf { !apiDenied(it) }
+                ?.let { vids += apiVideos(it, 2) }
         }
         if (vids.isEmpty()) {
             // The server default response carries no language declaration of its own.
             usedTrack = null
-            apiVideo(sec, activeId, epId, null, 3)
-                ?.let { vids += apiVideos(it, 3) }
+            apiVideo(sec, activeId, epId, null, 2)
+                ?.takeIf { !apiDenied(it) }
+                ?.let { vids += apiVideos(it, 2) }
         }
         if (vids.isEmpty()) throw CleanMissException("no video urls")
         val langLabel = LinkNaming.languageLabel(usedTrack?.languageName)
@@ -2364,6 +2355,18 @@ object StreamEngine {
             val title = a.attr("aria-label").trim()
             if (!href.startsWith("http") || title.isBlank()) return@mapNotNull null
             if (NON_CONTENT_PATH_BASIC.containsMatchIn(href)) return@mapNotNull null
+            href to title
+        }.distinctBy { it.first }
+
+    internal fun posterHits(html: String, base: String): List<Pair<String, String>> =
+        Jsoup.parse(html, base).select("a[href][data-wpel-link]").mapNotNull { a ->
+            val href = a.attr("abs:href").trim()
+            if (!href.startsWith("http")) return@mapNotNull null
+            if (NON_CONTENT_PATH_BASIC.containsMatchIn(href)) return@mapNotNull null
+            val title = a.selectFirst(".poster-title")?.text()?.trim().orEmpty()
+                .ifBlank { a.attr("title").trim() }
+                .ifBlank { a.text().trim().take(120) }
+            if (title.isBlank()) return@mapNotNull null
             href to title
         }.distinctBy { it.first }
 
@@ -3001,11 +3004,10 @@ object StreamEngine {
     ): List<RawStream> {
         val (title, year) = titleYear(tmdbId, type)
         fun enc(s: String) = java.net.URLEncoder.encode(s, "UTF-8").replace("+", "%20")
-        val base = Domains.base("moviesdrive") ?: "https://new3.moviesdrive.beer"
-        val searchJson = fetchText("$base/search.php?q=${enc(title)}&page=1", base)
+        val base = Domains.base("moviesdrive") ?: "https://new2.moviesdrive.cyou"
+        val search = fetchText("$base/search/${enc(title)}/", base)
             ?: throw CleanMissException("no search answer")
-        val hits = fslSearchHits(searchJson).map { relUrl(base, it.first) to it.second }
-        val posts = rankedHits(hits, title, year)
+        val posts = rankedHits(posterHits(search, base), title, year)
         if (posts.isEmpty()) throw CleanMissException("no match")
         val episodeTag = if (type == "tv" && season > 0 && episode > 0) {
             "S${season.toString().padStart(2, '0')}E${episode.toString().padStart(2, '0')}"
@@ -3096,7 +3098,11 @@ object StreamEngine {
             ).take(4)
             for ((href, label) in links) {
                 val archive = fetchText(href, postUrl) ?: continue
-                val hosts = fileHostLinks(archive, href)
+                val hosts = episodeOrSeason(
+                    fileHostLinks(archive, href),
+                    { "${it.first} ${it.second}" },
+                    type, season, episode,
+                )
                 out += hostStreams(
                     spec, hosts, label, href,
                     releaseLanguageOf(label).ifBlank { releaseLanguageOf(post) }, normalizeSizeToken(label),
@@ -3116,7 +3122,7 @@ object StreamEngine {
         val doc = Jsoup.parse(html, base)
         val out = LinkedHashMap<String, String>()
         doc.select("article.poster-card").forEach { card ->
-            val raw = card.attr("data-save-title")
+            val raw = card.selectFirst("[data-save-title]")?.attr("data-save-title").orEmpty()
             val json = catching { org.json.JSONObject(raw.replace("&quot;", "\"")) }.getOrNull() ?: return@forEach
             val url = json.optString("url")
             val title = json.optString("title")
@@ -3534,167 +3540,6 @@ object StreamEngine {
         return out
     }
 
-
-    private const val VOD_API = "https://api3.devcorp.me"
-    private const val VOD_REFERER = "https://onetouchtv.xyz/"
-    private val VOD_KEY = "im72charPasswordofdInitVectorStm".toByteArray(Charsets.UTF_8)
-    private val VOD_IV = "im72charPassword".toByteArray(Charsets.UTF_8)
-
-    data class VodHit(val id: String, val title: String, val year: String, val type: String)
-    data class VodSource(val url: String, val quality: String, val type: String)
-    data class VodEpisode(val playId: String, val number: Int)
-
-    // Keep the short UA the VOD API was written with; it differs from the browser UA on purpose.
-    private fun vodHeaders(): Map<String, String> = mapOf(
-        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        "Accept" to "application/json, */*",
-        "Referer" to VOD_REFERER,
-    )
-
-    internal fun decryptVodJson(text: String): org.json.JSONObject? = runCatching {
-        val standard = Base64Kit.fromCustom(text.replace(WHITESPACE, ""))
-        val raw = Base64Kit.decode(standard)
-        val cipher = javax.crypto.Cipher.getInstance("AES/CBC/PKCS5Padding")
-        cipher.init(
-            javax.crypto.Cipher.DECRYPT_MODE,
-            javax.crypto.spec.SecretKeySpec(VOD_KEY, "AES"),
-            javax.crypto.spec.IvParameterSpec(VOD_IV),
-        )
-        org.json.JSONObject(String(cipher.doFinal(raw), Charsets.UTF_8))
-    }.getOrNull()
-
-    internal suspend fun searchVod(keyword: String): List<VodHit> = try {
-        val text = app.get(
-            "$VOD_API/vod/search?keyword=${
-                java.net.URLEncoder.encode(keyword, "UTF-8").replace("+", "%20")
-            }",
-            timeout = 12, headers = vodHeaders(),
-        ).text
-        val rows = decryptVodJson(text)?.optJSONArray("result") ?: return emptyList()
-        (0 until rows.length()).mapNotNull { i ->
-            val row = rows.optJSONObject(i) ?: return@mapNotNull null
-            val id = row.optString("id").takeIf { it.isNotBlank() } ?: return@mapNotNull null
-            VodHit(id, row.optString("title"), row.optString("year"), row.optString("type"))
-        }
-    } catch (c: kotlinx.coroutines.CancellationException) {
-        throw c
-    } catch (e: Exception) {
-        Log.w("IndStream", "vod search failed: ${e.message}")
-        emptyList()
-    }
-
-    internal suspend fun vodEpisodes(id: String): List<VodEpisode> = try {
-        val text = app.get("$VOD_API/vod/$id/detail", timeout = 12, headers = vodHeaders()).text
-        val rows = decryptVodJson(text)?.optJSONObject("result")?.optJSONArray("episodes")
-            ?: return emptyList()
-        (0 until rows.length()).mapNotNull { i ->
-            val row = rows.optJSONObject(i) ?: return@mapNotNull null
-            val playId = row.optString("playId").takeIf { it.isNotBlank() } ?: return@mapNotNull null
-            VodEpisode(playId, row.optString("episode").toIntOrNull() ?: (i + 1))
-        }
-    } catch (c: kotlinx.coroutines.CancellationException) {
-        throw c
-    } catch (e: Exception) {
-        Log.w("IndStream", "vod detail failed: ${e.message}")
-        emptyList()
-    }
-
-    internal suspend fun vodStreams(
-        id: String,
-        playId: String,
-    ): Pair<List<VodSource>, List<Pair<String, String>>> = try {
-        val text = app.get("$VOD_API/vod/$id/episode/$playId", timeout = 12, headers = vodHeaders()).text
-        val result = decryptVodJson(text)?.optJSONObject("result")
-            ?: return emptyList<VodSource>() to emptyList()
-        val sources = result.optJSONArray("sources")?.let { rows ->
-            (0 until rows.length()).mapNotNull { i ->
-                val row = rows.optJSONObject(i) ?: return@mapNotNull null
-                val url = row.optString("url").takeIf { it.isNotBlank() } ?: return@mapNotNull null
-                VodSource(url, row.optString("quality"), row.optString("type"))
-            }
-        } ?: emptyList()
-        val subs = result.optJSONArray("track")?.let { rows ->
-            (0 until rows.length()).mapNotNull { i ->
-                val row = rows.optJSONObject(i) ?: return@mapNotNull null
-                val url = row.optString("file").takeIf { it.isNotBlank() } ?: return@mapNotNull null
-                row.optString("name") to url
-            }
-        } ?: emptyList()
-        sources to subs
-    } catch (c: kotlinx.coroutines.CancellationException) {
-        throw c
-    } catch (e: Exception) {
-        Log.w("IndStream", "vod episode failed: ${e.message}")
-        emptyList<VodSource>() to emptyList()
-    }
-
-    internal fun matchVodTitle(hits: List<VodHit>, title: String, year: Int?, wantType: String): VodHit? {
-        fun norm(value: String) = value.lowercase().replace(NON_ALNUM_LOWER, "")
-        val normalized = norm(title)
-        if (normalized.length < 3) return null
-        val typeOk: (VodHit) -> Boolean = { hit ->
-            if (wantType == "movie") hit.type.equals("movie", true)
-            else !hit.type.equals("movie", true)
-        }
-        val yearOk: (VodHit) -> Boolean = { hit ->
-            year == null || year <= 0 || hit.year.toIntOrNull() == null || hit.year.toIntOrNull() == year
-        }
-        return hits.filter { typeOk(it) && yearOk(it) }.firstOrNull { norm(it.title) == normalized }
-            ?: hits.filter { typeOk(it) && yearOk(it) }.firstOrNull {
-                val candidate = norm(it.title)
-                candidate.length >= 3 && (candidate.startsWith(normalized) || normalized.startsWith(candidate))
-            }
-    }
-
-    internal fun vodPlaybackHeaders(): Map<String, String> = mapOf("Referer" to "$VOD_API/")
-
-    internal fun vodPlaybackReferer(): String = "$VOD_API/"
-
-    private suspend fun resolveOneTouchTv(
-        spec: ServerSpec,
-        tmdbId: Int?,
-        type: String,
-        season: Int,
-        episode: Int,
-    ): List<RawStream> {
-        val id = tmdbId ?: return emptyList()
-        if (type != "movie" && (season <= 0 || episode <= 0)) return emptyList()
-        val meta = try {
-            TmdbService.fetchMeta(id, type)
-        } catch (c: kotlinx.coroutines.CancellationException) {
-            throw c
-        } catch (t: Throwable) {
-            null
-        }
-        val title = meta?.name ?: throw CleanMissException("no title for tmdb=$id (title-keyed API)")
-        val year = meta?.year?.take(4)?.toIntOrNull()
-        val hits = searchVod(title)
-        if (hits.isEmpty()) throw CleanMissException("no search hits for '$title'")
-        val hit = matchVodTitle(hits, title, year, type)
-            ?: throw CleanMissException("no title match for '$title' in ${hits.size} rows")
-        val eps = vodEpisodes(hit.id)
-        if (eps.isEmpty()) throw CleanMissException("no episodes for '${hit.title}'")
-        val wantEp = if (type == "movie") 1 else {
-            if (season <= 1) episode.coerceAtLeast(1)
-            else throw CleanMissException("multi-season absolute mapping unsupported (S$season)")
-        }
-        val ep = eps.firstOrNull { it.number == wantEp }
-            ?: throw CleanMissException("episode $wantEp missing")
-        val (sources, subtitleRows) = vodStreams(hit.id, ep.playId)
-        if (sources.isEmpty()) throw CleanMissException("no sources for '${hit.title}' ep ${ep.number}")
-        val tracks = subtitleRows.map { (language, url) -> SubtitleKit.Track(language, url) }
-        return sources.map { source ->
-            RawStream(
-                serverId = spec.id, serverName = spec.name,
-                url = source.url,
-                isM3u8 = source.url.contains(".m3u8", true) || source.type.equals("hls", true),
-                referer = vodPlaybackReferer(),
-                qualityHint = releaseHeightOf(source.quality),
-                extraHeaders = vodPlaybackHeaders(),
-                subtitles = tracks,
-            )
-        }.distinctBy { it.url }
-    }
 
     private suspend fun isAnimationTitle(tmdbId: Int, type: String): Boolean {
         val meta = try {
@@ -4169,74 +4014,6 @@ object StreamEngine {
         val prior = TmdbService.fetchSeasons(tmdbId, (1 until season).toList())
         val counted = prior.count { it.seasonNumber < season && it.episodeNumber > 0 }
         return if (counted > 0) counted + episode else episode
-    }
-
-    private val VIDCORE_PROVIDERS = listOf(
-        "movenerds-orion-master", "movenerds-orion-direct", "movenerds-cinejoy",
-        "movenerds-vidzee", "movenerds-vidsrc", "vidbolt-orion", "vidbolt-quantum",
-        "mb-andromeda", "movy-miami",
-    )
-
-    private suspend fun resolveVidcore(
-        spec: ServerSpec, tmdbId: Int?, type: String, season: Int, episode: Int,
-    ): List<RawStream> {
-        val id = tmdbId ?: return emptyList()
-        val origin = "https://vidcore.org"
-        val embedPath = if (type == "movie") "embed/movie/$id"
-        else "embed/tv/$id/$season/$episode"
-        val embedUrl = "$origin/$embedPath"
-        val headers = mapOf("Referer" to "$origin/", "User-Agent" to HttpKit.userAgent)
-        Log.d("VidCore", "GET $embedUrl")
-        val embedHtml = withTimeoutOrNull(15_000L) {
-            catching { app.get(embedUrl, timeout = 15, headers = headers).text }.getOrNull()
-        } ?: run { Log.w("VidCore", "no embed response"); return emptyList() }
-        val metaText = Regex("""var embedMeta = (\{.*?\});""").find(embedHtml)?.groupValues?.get(1)
-        val meta = metaText?.let { catching { org.json.JSONObject(it) }.getOrNull() }
-            ?: run { Log.w("VidCore", "no embedMeta"); return emptyList() }
-        val token = meta.optString("playbackToken").takeIf { it.isNotBlank() }
-            ?: run { Log.w("VidCore", "no playbackToken"); return emptyList() }
-        val apiPath = if (type == "movie") "api/source/movie/$id"
-        else "api/source/tv/$id/$season/$episode"
-        val providers = LinkedHashSet<String>()
-        meta.optString("provider").takeIf { it.isNotBlank() }?.let { providers.add(it) }
-        providers.addAll(VIDCORE_PROVIDERS)
-        var lastJson: String? = null
-        for (provider in providers) {
-            val api = "$origin/$apiPath?token=${java.net.URLEncoder.encode(token, "UTF-8")}" +
-                "&provider=${java.net.URLEncoder.encode(provider, "UTF-8")}&parent=&hevc=0"
-            Log.d("VidCore", "GET $api")
-            val jsonText = withTimeoutOrNull(12_000L) {
-                catching { app.get(api, timeout = 12, headers = headers).text }.getOrNull()
-            } ?: continue
-            val root = catching { org.json.JSONObject(jsonText) }.getOrNull() ?: continue
-            val sources = root.optJSONArray("streams") ?: continue
-            if (sources.length() == 0) { lastJson = jsonText; continue }
-            val out = mutableListOf<RawStream>()
-            for (i in 0 until sources.length()) {
-                val s = sources.optJSONObject(i) ?: continue
-                val raw = s.optString("url").takeIf { it.isNotBlank() } ?: continue
-                val streamUrl = if (raw.startsWith("http")) raw
-                else "$origin${if (raw.startsWith("/")) raw else "/$raw"}"
-                val name = s.optString("name", "")
-                val label = name.ifBlank { s.optString("label", "") }
-                val streamHeaders = mutableMapOf(
-                    "User-Agent" to HttpKit.userAgent,
-                    "Referer" to embedUrl,
-                )
-                out += RawStream(
-                    serverId = spec.id, serverName = "${spec.name} $label".trim(),
-                    url = streamUrl,
-                    isM3u8 = s.optString("type", "").equals("hls", true) || streamUrl.contains(".m3u8", true),
-                    referer = embedUrl,
-                    qualityHint = HEIGHT_NUM.find(name)?.groupValues?.get(1)?.toIntOrNull() ?: 0,
-                    extraHeaders = streamHeaders,
-                )
-            }
-            Log.d("VidCore", "provider=$provider parsed ${out.size} sources")
-            return withJsonSubtitles(out, root, api)
-        }
-        Log.w("VidCore", "no provider returned streams; last=${lastJson?.take(160)}")
-        return emptyList()
     }
 
     internal val BINGR_SRVS = listOf("s40", "s70", "s80", "s81", "s62", "s63", "s30", "s60", "s61", "s31", "s3")

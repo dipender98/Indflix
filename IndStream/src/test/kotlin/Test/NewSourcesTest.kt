@@ -50,6 +50,19 @@ class NewSourcesTest {
     }
 
     @Test
+    fun posterHits_parsesSearchMarkup() {
+        val html = "<a href=\"https://site.example/jawan-2023/\" data-wpel-link=\"internal\">" +
+            "<div class=\"poster-card\"><p class=\"poster-title\">Download Jawan (2023) Hindi 720p 1080p</p></div></a>" +
+            "<a href=\"https://site.example/search/\" data-wpel-link=\"internal\">" +
+            "<p class=\"poster-title\">Search</p></a>" +
+            "<a href=\"https://site.example/latest/\" data-wpel-link=\"internal\"><div class=\"poster-card\"></div></a>"
+        val hits = StreamEngine.posterHits(html, "https://site.example")
+        assertEquals(1, hits.size)
+        assertEquals("https://site.example/jawan-2023/", hits[0].first)
+        assertTrue(hits[0].second.contains("Jawan"))
+    }
+
+    @Test
     fun headingAnchorHits_usesNearestHeading() {
         val html = "<h3>Jawan 2023 720p [1.4GB]</h3>" +
             "<p><a href=\"https://links.example/1\">Download Links</a></p>"
@@ -93,6 +106,22 @@ class NewSourcesTest {
             StreamEngine.pixeldrainDirect("https://pixeldrain.com/api/file/AbC123"),
         )
         assertNull(StreamEngine.pixeldrainDirect("https://share.example/u/AbC123"))
+    }
+
+    @Test
+    fun apiVideos_fallsBackToSingleUrlWhenEntriesCarryNoUrl() {
+        val single = "https://cdn.example/hindi_720.m3u8"
+        val data = org.json.JSONObject(
+            """{"videoUrl":"$single","isPreview":false,"permissionDenied":false,""" +
+                """"videos":[{"resolutionDescription":"SD 480P","resolution":1},""" +
+                """{"resolutionDescription":"HD 720P","resolution":2},{"resolutionDescription":"FHD 1080P","resolution":3}]}""",
+        )
+        val out = StreamEngine.apiVideos(data, 2)
+        assertEquals(1, out.size)
+        assertEquals(single, out[0].url)
+        assertEquals("720p", out[0].quality)
+        assertTrue(StreamEngine.apiDenied(org.json.JSONObject("""{"permissionDenied":true}""")))
+        assertTrue(!StreamEngine.apiDenied(data))
     }
 
     @Test

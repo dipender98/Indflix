@@ -2,7 +2,6 @@ package Test
 
 import com.indstream.HealthMonitor
 import com.indstream.ImdbService
-import com.indstream.StreamEngine
 import com.indstream.TmdbService
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -48,18 +47,6 @@ class ResilienceTest {
         val hits = ImdbService.parseSuggest(json)
         assertEquals(1, hits.size)
         assertEquals("tv", hits.first().type)
-    }
-
-    @Test
-    fun onetouchtv_does_not_match_a_title_that_normalises_to_nothing() {
-        val hits = listOf(StreamEngine.VodHit("1", "日本語", "2020", "movie"))
-        assertNull(StreamEngine.matchVodTitle(hits, "Inception", 2010, "movie"))
-    }
-
-    @Test
-    fun onetouchtv_matches_on_a_normalised_title() {
-        val hits = listOf(StreamEngine.VodHit("1", "Inception", "2010", "movie"))
-        assertNotNull(StreamEngine.matchVodTitle(hits, "Inception", 2010, "movie"))
     }
 
     @Test

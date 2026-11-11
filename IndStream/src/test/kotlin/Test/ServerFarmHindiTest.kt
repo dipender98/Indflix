@@ -156,15 +156,6 @@ class ServerFarmHindiTest {
     }
 
     @Test
-    fun vidcore_retired_vidcoreApiPresent() {
-        assertNull(ServerFarm.allServers.firstOrNull { it.id == "vidcore" })
-        val api = ServerFarm.allServers.first { it.id == "vidcore-api" }
-        assertEquals("VidCore", api.name)
-        assertEquals("https://vidcore.org/", api.referer)
-        assertTrue(api.movieUrl.contains("vidcore.org/embed"))
-    }
-
-    @Test
     fun allmovieland_removed_unusableProviderMustNotBeInFarm() {
         assertNull(ServerFarm.allServers.firstOrNull { it.id == "allmovieland" })
     }
@@ -178,7 +169,7 @@ class ServerFarmHindiTest {
     @Test
     fun bulletTrainServers_present() {
         val ids = setOf("vidlink", "vaplayer", "moviebox", "netmirror",
-            "castletv", "streamflix", "onetouchtv", "vidcore-api")
+            "castletv", "streamflix")
         for (id in ids) {
             assertNotNull(
                 ServerFarm.allServers.firstOrNull { it.id == id },
@@ -191,7 +182,7 @@ class ServerFarmHindiTest {
             "primesrc", "myflixer-hindi",
             "mp4hydra", "vidzee", "streamprovider",
             "videm", "8stream", "dahmermovies", "vidzy", "vixsrc",
-            "nhd", "vidapi", "zxcstreams", "vidsrc-to", "nontongo", "vidcore",
+            "nhd", "vidapi", "zxcstreams", "vidsrc-to", "nontongo", "vidcore", "vidcore-api",
             "allmovieland", "braflix")
         for (id in disabled) {
             assertNull(

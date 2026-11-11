@@ -19,9 +19,9 @@ class ServerProbeUrlTest {
 
     @Test
     fun probe_url_uses_title_placeholder() {
-        val spec = ServerFarm.allServers.first { it.id == "onetouchtv" }
+        val spec = ServerFarm.allServers.first { it.id == "multimovies" }
         assertEquals(
-            "https://api3.devcorp.me/vod/search?keyword=Inception",
+            "https://m1.multimovies.courses/search?q=Inception",
             ServerFarm.buildProbeUrl(spec, "27205", "Inception", "2010"),
         )
     }
