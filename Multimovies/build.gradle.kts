@@ -12,7 +12,7 @@ plugins {
 cloudstream {
     language = "hi"
     authors = listOf("Indflix")
-    description = "CloudStream provider that scrapes Multimovies and pulls sources in parallel with a per-source timeout."
+    description = "Fast and Multi-Language Provider"
     status = 1
     tvTypes = listOf("Movie", "TvSeries", "Anime", "AnimeMovie", "Cartoon")
     requiresResources = false
