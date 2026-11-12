@@ -21,7 +21,7 @@ class ServerAdditionsTest {
     @Test
     fun deadServers_stayOut() {
         for (id in setOf("nhd", "vidapi", "zxcstreams", "vidsrc-to", "nontongo", "braflix", "onetouchtv", "vidcore-api",
-            "castletv", "streamflix", "dudefilms", "multimovies", "rivestream")) {
+            "castletv", "streamflix", "dudefilms", "multimovies", "rivestream", "katmoviehd")) {
             assertNull(ServerFarm.allServers.firstOrNull { it.id == id }, "$id must stay out")
         }
     }
@@ -350,17 +350,44 @@ class ServerAdditionsTest {
     }
 
     @Test
-    fun hubFileButtons_skipsGatewayNoise() {
+    fun hubFileButtons_keepsPixelGatewayForResolution() {
         val html = "<div class=\"card-header\">Jawan 2023 720p</div>" +
             "<a class=\"btn btn-success\" href=\"https://pixeldrain.dev/u/AbC123\">Download</a>" +
             "<a class=\"btn btn-primary\" href=\"https://hubcloud.ist/tg/go?id=x\">Telegram</a>" +
             "<a class=\"btn btn-danger\" href=\"https://pixel.hubcloud.ist/x\">Pixel</a>" +
             "<a class=\"btn btn-primary\" href=\"https://hubcloud.ist/drive/admin\">Admin</a>"
         val out = StreamEngine.hubFileButtons(html)
-        assertEquals(1, out.size)
+        assertEquals(2, out.size)
         assertEquals("https://pixeldrain.dev/api/file/AbC123", out[0].first)
         assertEquals("720p", out[0].second)
         assertEquals("", out[0].third)
+        assertEquals("https://pixel.hubcloud.ist/x", out[1].first)
+        assertEquals("720p", out[1].second)
+    }
+
+    @Test
+    fun pixelDirectFromFinalUrl_decodesLinkParam() {
+        val direct = "https://cdn.example/files/Inception.mkv?sig=y"
+        val enc = java.net.URLEncoder.encode(direct, "UTF-8")
+        assertEquals(direct, StreamEngine.pixelDirectFromFinalUrl("https://gw.example/dl.php?link=$enc"))
+        assertEquals(
+            direct,
+            StreamEngine.pixelDirectFromFinalUrl("https://gw.example/dl.php?link=https://cdn.example/files/Inception.mkv?sig=y"),
+        )
+        assertEquals("https://cdn.example/direct.mkv", StreamEngine.pixelDirectFromFinalUrl("https://cdn.example/direct.mkv"))
+        assertNull(StreamEngine.pixelDirectFromFinalUrl("https://gw.example/pixel.html?id=1"))
+        assertNull(StreamEngine.pixelDirectFromFinalUrl("https://gw.example/dl.php?x=1"))
+        assertNull(StreamEngine.pixelDirectFromFinalUrl(null))
+    }
+
+    @Test
+    fun hubFileButtons_fillsLanguageFromCardHeader() {
+        val html = "<div class=\"card-header text-white bg-primary\">Fiim 2024 1080p Hindi English Tamil.mkv</div>" +
+            "<a class=\"btn btn-danger btn-lg h6\" href=\"https://pixel.hubcloud.ist/x\">Download</a>"
+        val out = StreamEngine.hubFileButtons(html)
+        assertEquals(1, out.size)
+        assertEquals("Hindi, English, Tamil", out[0].third)
+        assertEquals("1080p", out[0].second)
     }
 
     @Test
@@ -405,58 +432,4 @@ class ServerAdditionsTest {
         )
     }
 
-    @Test
-    fun katmoviehd_registered() {
-        val s = ServerFarm.allServers.firstOrNull { it.id == "katmoviehd" }
-        assertNotNull(s)
-        assertEquals("KatMovieHD", s!!.name)
-        assertEquals(ServerIdType.TMDB, s.idType)
-        assertEquals(70, s.timeoutSec)
-        assertTrue(s.declaredLanguages.contains("Hindi"))
-        assertTrue(s.downloadFriendly)
-    }
-
-    @Test
-    fun katmovieSearchHits_parsesWpSearch() {
-        val json = """[{"id":12,"title":"Film &#038; City (2024) Hindi Dubbed","url":"https://site.example/film-city/"},""" +
-            """{"id":13,"title":"","url":"https://site.example/empty/"}]"""
-        val hits = StreamEngine.katmovieSearchHits(json)
-        assertEquals(1, hits.size)
-        assertEquals("https://site.example/film-city/", hits[0].first)
-        assertEquals("Film & City (2024) Hindi Dubbed", hits[0].second)
-        assertTrue(StreamEngine.katmovieSearchHits("<html>not json</html>").isEmpty())
-        assertTrue(StreamEngine.katmovieSearchHits("[]").isEmpty())
-    }
-
-    @Test
-    fun katmoviePayloadLinks_mixedEscapes() {
-        val payload = "href=\\\"https://links.kmhd.me/file/e89419d7_a9c2-\\\" 480p Pack " +
-            "href=\\\"https://links.kmhd.me/file/e89419d7_a9c2-\\\" again " +
-            "https:\\/\\/links.kmhd.me\\/pack\\/5fff950b 1080p " +
-            "https:\\u002F\\u002Flinks.kmhd.me\\u002Ffile\\u002F18ebbcf1_b948- x264"
-        val (files, packs) = StreamEngine.katmoviePayloadLinks(payload)
-        assertEquals(listOf("e89419d7_a9c2-", "18ebbcf1_b948-"), files)
-        assertEquals(listOf("5fff950b"), packs)
-        assertEquals(emptyList<String>() to emptyList<String>(), StreamEngine.katmoviePayloadLinks("no links here"))
-    }
-
-    @Test
-    fun katmovieLangText_expandsAbbreviations() {
-        assertEquals("Hindi-English", StreamEngine.katmovieLangText("HIN-ENG"))
-        assertEquals("Hindi,English", StreamEngine.katmovieLangText("HIN,ENG"))
-        assertEquals("Tamil Telugu Malayalam", StreamEngine.katmovieLangText("TAM TEL MAL"))
-        assertEquals("HINDI ENGLISH x264 ESub", StreamEngine.katmovieLangText("HINDI ENGLISH x264 ESub"))
-        assertEquals("PANJABI", StreamEngine.katmovieLangText("PANJABI"))
-        assertEquals("BENGALI", StreamEngine.katmovieLangText("BENGALI"))
-        assertEquals("Film 2024 1080p", StreamEngine.katmovieLangText("Film 2024 1080p"))
-    }
-
-    @Test
-    fun katmovieSizeLabel_bytes() {
-        assertEquals("", StreamEngine.katmovieSizeLabel(0))
-        assertEquals("", StreamEngine.katmovieSizeLabel(-5))
-        assertEquals("202MB", StreamEngine.katmovieSizeLabel(211486508))
-        assertEquals("2.0GB", StreamEngine.katmovieSizeLabel(2147483648))
-        assertEquals("1.5GB", StreamEngine.katmovieSizeLabel(1610612736))
-    }
 }

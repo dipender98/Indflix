@@ -182,7 +182,7 @@ class ServerFarmHindiTest {
             "mp4hydra", "vidzee", "streamprovider",
             "videm", "8stream", "dahmermovies", "vidzy", "vixsrc",
             "nhd", "vidapi", "zxcstreams", "vidsrc-to", "nontongo", "vidcore", "vidcore-api",
-            "allmovieland", "braflix", "castletv", "streamflix", "dudefilms", "multimovies")
+            "allmovieland", "braflix", "castletv", "streamflix", "dudefilms", "multimovies", "katmoviehd")
         for (id in disabled) {
             assertNull(
                 ServerFarm.allServers.firstOrNull { it.id == id },

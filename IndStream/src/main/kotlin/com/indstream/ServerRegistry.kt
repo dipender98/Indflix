@@ -180,16 +180,6 @@ object ServerFarm {
             speed = ServerSpeed.SLOW, downloadFriendly = true,
         ),
         ServerSpec(
-            id = "katmoviehd", name = "KatMovieHD",
-            idType = ServerIdType.TMDB,
-            movieUrl = "https://katmoviehd.top/",
-            tvUrl = "https://katmoviehd.top/",
-            referer = "https://katmoviehd.top/",
-            hasSubtitles = false, timeoutSec = 70,
-            declaredLanguages = setOf("Hindi", "English", "Tamil", "Telugu", "Malayalam", "Punjabi", "Bengali"),
-            speed = ServerSpeed.SLOW, downloadFriendly = true,
-        ),
-        ServerSpec(
             id = "animeworld", name = "AnimeWorld",
             idType = ServerIdType.TMDB,
             movieUrl = "https://watchanimeworld.one/?s={id}",

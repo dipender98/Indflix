@@ -777,12 +777,6 @@ object StreamEngine {
             failServer(spec, "recover search returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
             return emptyList()
         }
-        if (spec.id == "katmoviehd") {
-            val result = resolveKatmovie(spec, tmdbId, type, season, episode)
-            if (result.isNotEmpty()) { okServer(spec, start, "file api links", result.size); return result }
-            failServer(spec, "file api returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
-            return emptyList()
-        }
         if (spec.id == "bingr") {
             val result = resolveBingr(spec, tmdbId, type, season, episode)
             if (result.isNotEmpty()) { okServer(spec, start, "bingr cascade", result.size); return result }
@@ -1222,11 +1216,11 @@ object StreamEngine {
             val code = err.optInt("code", -1)
             val msg = err.optString("message").ifBlank { err.optString("error") }.ifBlank { "unknown" }
             if (code == 2004 && attempt < VIDLINK_TOKEN_OFFSETS.lastIndex) {
-                Log.w("VidLink", "2004 at offset +${offset}s — retrying with next offset")
+                Log.w("VidLink", "2004 at offset +${offset}s â€” retrying with next offset")
                 continue
             }
             if (code == 2004) {
-                Log.e("VidLink", "CRITICAL: code 2004 — encryption key rotated! Update VIDLINK_KEY_HEX immediately. " +
+                Log.e("VidLink", "CRITICAL: code 2004 â€” encryption key rotated! Update VIDLINK_KEY_HEX immediately. " +
                     "Extract the new key from https://vidlink.pro player JS bundles (look for 64-char hex near secretbox/sodium). " +
                     "Current key: ${VIDLINK_KEY_HEX.take(8)}...${VIDLINK_KEY_HEX.takeLast(8)}")
             } else {
@@ -1482,7 +1476,7 @@ object StreamEngine {
             }
             val jsonCode = root?.optString("code", "")?.takeIf { it.isNotBlank() } ?: "0"
             if (resp.code == 429) {
-                Log.w("MovieBox", "search throttled (HTTP 429) — retrying once after delay")
+                Log.w("MovieBox", "search throttled (HTTP 429) â€” retrying once after delay")
                 delay(MOVIEBOX_THROTTLE_RETRY_MS)
                 val retryItems = withTimeoutOrNull(10_000L) {
                     catching {
@@ -2199,7 +2193,9 @@ object StreamEngine {
 
     internal fun hubFileButtons(html: String): List<Triple<String, String, String>> {
         val doc = Jsoup.parse(html)
-        val headQ = releaseHeightOf(doc.selectFirst(".card-header")?.text())
+        val headText = doc.selectFirst(".card-header")?.text().orEmpty()
+        val headQ = releaseHeightOf(headText)
+        val headLang = LinkNaming.languageLabel(headText)
         val out = mutableListOf<Triple<String, String, String>>()
         for (a in doc.select("a[href]")) {
             if (!BTN_CLASS.containsMatchIn(a.className())) continue
@@ -2207,16 +2203,39 @@ object StreamEngine {
             if (!url.startsWith("http")) continue
             if (isArchiveUrl(url)) continue
             if (url.contains("facebook.") || url.contains("twitter.") || url.contains("t.me") ||
-                url.contains("/tg/") || url.contains("pixel.") || url.contains("/admin")
+                url.contains("/tg/") || url.contains("/admin")
             ) continue
             url = PIXELDRAIN_SHORT.find(url)?.let {
                 url.replace("/u/${it.groupValues[1]}", "/api/file/${it.groupValues[1]}")
             } ?: url
             val text = a.text().trim()
             val q = releaseHeightOf(text).takeIf { it > 0 } ?: headQ
-            out += Triple(url, if (q > 0) "${q}p" else "", LinkNaming.languageLabel(text))
+            out += Triple(url, if (q > 0) "${q}p" else "", LinkNaming.languageLabel(text).ifBlank { headLang })
         }
         return out.distinctBy { it.first }
+    }
+
+    internal fun pixelDirectFromFinalUrl(finalUrl: String?): String? {
+        if (finalUrl.isNullOrBlank()) return null
+        val m = Regex("""[?&]link=([^\s"]+)""").find(finalUrl)
+        if (m != null) {
+            val raw = m.groupValues[1].trim()
+            val direct = if (raw.contains('%')) {
+                catching { java.net.URLDecoder.decode(raw, "UTF-8") }.getOrNull()
+            } else raw
+            return direct?.trim()?.takeIf { it.startsWith("http") }
+        }
+        if (finalUrl.contains("pixel.", true) || finalUrl.contains("workers.dev", true) ||
+            finalUrl.contains("dl.php", true)
+        ) return null
+        return finalUrl.trim().takeIf { it.startsWith("http") }
+    }
+
+    private suspend fun pixelChainDirect(url: String): String? {
+        val finalUrl = withTimeoutOrNull(10_000L) {
+            catching { app.get(url, timeout = 10, headers = okHeaders(url)).url }.getOrNull()
+        } ?: return null
+        return pixelDirectFromFinalUrl(finalUrl)
     }
 
     private val REURL_VAR = Regex("""var\s+reurl\s*=\s*"([^"]+)"""")
@@ -2263,7 +2282,15 @@ object StreamEngine {
         val page = withTimeoutOrNull(10_000L) {
             catching { app.get(tokenUrl, timeout = 10, headers = okHeaders(url)).text }.getOrNull()
         } ?: return emptyList()
-        return hubFileButtons(page).take(4)
+        return hubFileButtons(page).take(4).mapNotNull { (u, q, lang) ->
+            if (u.contains("pixel.", true) || u.contains("workers.dev", true) ||
+                u.contains("dl.php?link=", true)
+            ) {
+                pixelChainDirect(u)?.let { direct ->
+                    Triple(direct, q.ifBlank { qualityText(direct) }, lang)
+                }
+            } else Triple(u, q, lang)
+        }
     }
 
     private fun googleVideoLink(html: String, finalUrl: String): String? {
@@ -2308,9 +2335,9 @@ object StreamEngine {
             url.contains(".m3u8", ignoreCase = true),
             referer,
             releaseHeightOf(label),
-            audioPriority = when (lang) {
-                "Hindi" -> 4
-                "Multi" -> 2
+            audioPriority = when {
+                lang.contains(',') || lang == "Multi" -> 2
+                lang.startsWith("Hindi") -> 4
                 else -> 1
             },
             audioLabel = lang,
@@ -2345,7 +2372,10 @@ object StreamEngine {
     ): List<RawStream> {
         val out = mutableListOf<RawStream>()
         for ((host, hostLabel) in hosts) {
-            val hostLang = releaseLanguageOf(hostLabel).ifBlank { language }
+            val richLangs = (LinkNaming.languageNames(hostLabel) + LinkNaming.languageNames(label))
+                .distinct()
+            val hostLang = if (richLangs.isNotEmpty()) richLangs.joinToString(", ")
+                else releaseLanguageOf(hostLabel).ifBlank { language }
             val pixeldrain = pixeldrainDirect(host)
             if (pixeldrain != null) {
                 out += rawFile(spec, label.ifBlank { hostLabel }, pixeldrain, referer, hostLang, size)
@@ -2368,8 +2398,8 @@ object StreamEngine {
             ) {
                 for ((url, quality, fileLang) in hubDriveFiles(host, referer)) {
                     out += rawFile(
-                        spec, quality.ifBlank { label }, url, referer,
-                        fileLang.ifBlank { language }, size,
+                        spec, label.ifBlank { quality }, url, referer,
+                        fileLang.ifBlank { hostLang }, size,
                     )
                 }
             }
@@ -2736,149 +2766,6 @@ object StreamEngine {
                 }
                 if (out.isNotEmpty()) return out.distinctBy { it.url }
             }
-        }
-        throw CleanMissException("no file links")
-    }
-
-    private val KMHD_FILE_RE = Regex("""links\.kmhd\.me/file/([A-Za-z0-9_-]+)""")
-    private val KMHD_PACK_RE = Regex("""links\.kmhd\.me/pack/([A-Za-z0-9_-]+)""")
-
-    internal fun katmovieSearchHits(json: String): List<Pair<String, String>> {
-        val arr = catching { org.json.JSONArray(json.trim()) }.getOrNull() ?: return emptyList()
-        val out = mutableListOf<Pair<String, String>>()
-        for (i in 0 until arr.length()) {
-            val hit = arr.optJSONObject(i) ?: continue
-            val url = hit.optString("url").trim()
-            val title = animeUnescape(hit.optString("title"))
-            if (!url.startsWith("http") || title.isBlank()) continue
-            out += url to title
-        }
-        return out.distinctBy { it.first }
-    }
-
-    internal fun katmoviePayloadLinks(payload: String): Pair<List<String>, List<String>> {
-        val normalized = payload
-            .replace("\\u002F", "/")
-            .replace("\\\\/", "/")
-            .replace("\\/", "/")
-        val files = KMHD_FILE_RE.findAll(normalized).map { it.groupValues[1] }.distinct().toList()
-        val packs = KMHD_PACK_RE.findAll(normalized).map { it.groupValues[1] }.distinct().toList()
-        return files to packs
-    }
-
-    private suspend fun katmoviePackFiles(packId: String): List<Pair<String, String>> {
-        val json = fetchText(
-            "https://api.dandndn.one/api/v1/pack/$packId", "https://links.kmhd.me/", timeoutSec = 12,
-        ) ?: return emptyList()
-        val info = catching { org.json.JSONObject(json).optJSONObject("info") }.getOrNull()
-            ?: return emptyList()
-        val out = mutableListOf<Pair<String, String>>()
-        val keys = info.keys()
-        while (keys.hasNext()) {
-            val id = keys.next()
-            val name = info.optJSONObject(id)?.optString("name").orEmpty().trim()
-            if (name.isBlank()) continue
-            out += id to animeUnescape(name)
-        }
-        return out
-    }
-
-    private suspend fun katmovieFileMeta(id: String): org.json.JSONObject? {
-        val json = fetchText(
-            "https://api.dandndn.one/api/v1/file/$id", "https://links.kmhd.me/", timeoutSec = 12,
-        ) ?: return null
-        return catching { org.json.JSONObject(json) }.getOrNull()
-    }
-
-    internal fun katmovieLangText(name: String): String = name
-        .replace(Regex("""(?i)\bHIN\b"""), "Hindi")
-        .replace(Regex("""(?i)\bENG\b"""), "English")
-        .replace(Regex("""(?i)\bTAM\b"""), "Tamil")
-        .replace(Regex("""(?i)\bTEL\b"""), "Telugu")
-        .replace(Regex("""(?i)\bMAL\b"""), "Malayalam")
-        .replace(Regex("""(?i)\bPAN\b"""), "Punjabi")
-        .replace(Regex("""(?i)\bBEN\b"""), "Bengali")
-
-    internal fun katmovieSizeLabel(bytes: Long): String = when {
-        bytes <= 0L -> ""
-        bytes >= 1L shl 30 -> String.format(java.util.Locale.US, "%.1fGB", bytes / 1073741824.0)
-        else -> String.format(java.util.Locale.US, "%.0fMB", bytes / 1048576.0)
-    }
-
-    private suspend fun resolveKatmovie(
-        spec: ServerSpec,
-        tmdbId: Int,
-        type: String,
-        season: Int,
-        episode: Int,
-    ): List<RawStream> {
-        val (title, year) = titleYear(tmdbId, type)
-        fun enc(s: String) = java.net.URLEncoder.encode(s, "UTF-8")
-        val site = Domains.base("katmoviehd") ?: "https://katmoviehd.top"
-        val postSite = "https://new." + site.substringAfter("://")
-        val searchJson = fetchText(
-            "$site/wp-json/wp/v2/search?search=${enc(title)}&per_page=8", site, timeoutSec = 15,
-        ) ?: throw CleanMissException("no search answer")
-        val hits = katmovieSearchHits(searchJson)
-        val posts = rankedHits(hits, title, year)
-        if (posts.isEmpty()) throw CleanMissException("no match")
-        for (postUrl in posts) {
-            val slug = postUrl.trimEnd('/').substringAfterLast('/')
-            if (slug.isBlank()) continue
-            val payload = fetchText("$postSite/post/$slug/__data.json", postSite, timeoutSec = 15)
-                ?: continue
-            val (fileIds, packIds) = katmoviePayloadLinks(payload)
-            if (fileIds.isEmpty() && packIds.isEmpty()) continue
-            val candidates = packIds.take(3).flatMap { katmoviePackFiles(it) } +
-                fileIds.take(6).map { it to "" }
-            val picked = episodeOrSeason(candidates, { it.second }, type, season, episode)
-                .sortedByDescending { releaseHeightOf(it.second) }
-                .take(4)
-            val postTitle = hits.firstOrNull { it.first == postUrl }?.second.orEmpty()
-            val out = mutableListOf<RawStream>()
-            for ((fileId, packedName) in picked) {
-                if (releaseHeightOf(packedName) in 1..719) continue
-                val file = katmovieFileMeta(fileId) ?: continue
-                val name = file.optString("name").trim()
-                if (name.isBlank() || file.optBoolean("is_zip") ||
-                    name.endsWith("zip", ignoreCase = true) ||
-                    !fileNameMatches(title, year, name)
-                ) continue
-                if (releaseHeightOf(name) in 1..719) continue
-                val hubId = file.optJSONObject("upload_links")?.optString("hubdrive_res")
-                    .orEmpty().trim()
-                if (hubId.isBlank() || hubId.equals("None", true) || hubId.equals("null", true)) continue
-                val status = file.optJSONObject("status")?.optString("hubdrive_res").orEmpty().trim()
-                if (status.isNotBlank() && !status.equals("Uploaded", true) && !status.equals("null", true)) continue
-                val size = katmovieSizeLabel(file.optLong("size"))
-                val mirror = "${Domains.base("hubcloud") ?: "https://hubcloud.ist"}/drive/$hubId"
-                val referer = ORIGIN.find(mirror)?.value ?: mirror
-                val expanded = katmovieLangText(name)
-                val audio = LinkNaming.languageNames(expanded).joinToString(", ")
-                    .ifBlank { LinkNaming.languageLabel(postTitle) }
-                val priority = when (hubLangOf(expanded)) {
-                    "Hindi" -> 4
-                    "Multi" -> 2
-                    else -> 1
-                }
-                for ((url, q, fileLang) in hubDriveFiles(mirror, "https://links.kmhd.me/")) {
-                    if (!VIDEO_EXT.containsMatchIn(url) && !url.contains("pixeldrain.", ignoreCase = true)) continue
-                    val qText = q.ifBlank { qualityText(name) }
-                    if (releaseHeightOf(qText) in 1..719) continue
-                    out += RawStream(
-                        spec.id, "${spec.name} $qText".trim(), url,
-                        url.contains(".m3u8", ignoreCase = true), referer,
-                        releaseHeightOf(qText.ifBlank { name }),
-                        audioPriority = priority,
-                        audioLabel = LinkNaming.languageLabel(fileLang).ifBlank { audio },
-                        sizeLabel = size,
-                        mediaLabel = name,
-                    )
-                    if (out.size >= 6) break
-                }
-                if (out.size >= 6) break
-            }
-            if (out.isNotEmpty()) return out.distinctBy { it.url }
         }
         throw CleanMissException("no file links")
     }

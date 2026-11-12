@@ -439,7 +439,7 @@ class IndStreamProvider : MainAPI() {
             tags = won.genres
             score = won.rating
             cast = won.cast
-            duration = won.runtime?.let { it * 60 }
+            duration = won.runtime
         } else {
             val wonCine = cineMeta ?: return@coroutineScope null
             title = wonCine.name ?: return@coroutineScope null
@@ -450,7 +450,7 @@ class IndStreamProvider : MainAPI() {
             tags = wonCine.genres
             score = wonCine.rating
             cast = extendImdbCast(wonCine, effectiveTmdbId, type)
-            duration = wonCine.runtime?.let { it * 60 }
+            duration = wonCine.runtime
         }
         val dataUrl = if (effectiveTmdbId != null) TmdbUrlParser.tmdbUrl(effectiveTmdbId, type, resolvedImdb)
         else TmdbUrlParser.imdbUrl(resolvedImdb ?: return@coroutineScope null, type, null)
@@ -485,7 +485,7 @@ class IndStreamProvider : MainAPI() {
                 ep.released?.take(10)?.takeIf { it.isNotBlank() }?.let { runCatching { addDate(it) } }
                 ep.thumbnail?.let { this.posterUrl = it }
                 ep.rating?.let { this.score = Score.from10(it) }
-                ep.runtime?.let { this.runTime = it * 60 }
+                ep.runtime?.let { this.runTime = it }
             }
         }
 
