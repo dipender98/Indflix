@@ -115,10 +115,7 @@ object LinkNaming {
         mediaLabel: String? = null,
     ): String {
         val rawName = serverName.trim().ifBlank { "Server" }
-        val cleanName = stripQuality(rawName).ifBlank { "Server" }
-        val composed = if (subIndicator.isNullOrBlank()) cleanName else "$cleanName ${subIndicator.trim()}".trim()
-        val named = stripQuality(TRAILING_LANGUAGE.replace(stripQuality(composed), ""))
-            .trim().ifBlank { "Server" }
+        val named = baseName(rawName, subIndicator)
 
         val names = displayLanguageNames(audioLabel, mediaLabel)
         val tag = displayLanguageTag(names, audioLabel, mediaLabel)
@@ -130,6 +127,40 @@ object LinkNaming {
         val sizePart = sizeLabel?.trim().orEmpty()
         return listOf(named, tokens, tagPart, sizePart)
             .filter { it.isNotBlank() }.joinToString(" ")
+    }
+
+    fun priorityName(
+        serverName: String,
+        audioLabel: String? = "",
+        mediaLabel: String? = null,
+    ): String {
+        val base = baseName(serverName.trim().ifBlank { "Server" }, null)
+        val named = stripRendition(base).ifBlank { base }
+
+        val names = displayLanguageNames(audioLabel, mediaLabel)
+        val tag = displayLanguageTag(names, audioLabel, mediaLabel)
+        return listOf(named, languageTagPart(tag, names))
+            .filter { it.isNotBlank() }.joinToString(" ")
+    }
+
+    private fun baseName(rawName: String, subIndicator: String?): String {
+        val cleanName = stripQuality(rawName).ifBlank { "Server" }
+        val composed = if (subIndicator.isNullOrBlank()) cleanName else "$cleanName ${subIndicator.trim()}".trim()
+        return stripQuality(TRAILING_LANGUAGE.replace(stripQuality(composed), ""))
+            .trim().ifBlank { "Server" }
+    }
+
+    private val REMUX_TOKEN = Regex("""\bREMUX\b""", RegexOption.IGNORE_CASE)
+    private val SIZE_WORD = Regex("""\b\d+(?:\.\d+)?\s?(?:GB|MB)\b""", RegexOption.IGNORE_CASE)
+    private val EMPTY_BRACKETS = Regex("""\[\s*]|\(\s*\)""")
+
+    private fun stripRendition(text: String): String {
+        var out = text
+        for ((pattern, _) in ALL_TOKENS) out = pattern.replace(out, " ")
+        out = REMUX_TOKEN.replace(out, " ")
+        out = SIZE_WORD.replace(out, " ")
+        out = EMPTY_BRACKETS.replace(out, " ")
+        return WHITESPACE.replace(out, " ").trim()
     }
 
     private fun stripQuality(text: String): String =

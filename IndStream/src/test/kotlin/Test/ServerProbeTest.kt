@@ -68,7 +68,6 @@ class ServerProbeTest {
         val results = mutableListOf<ProbeResult>()
         val special = mapOf(
             "moviebox" to ::checkMovieBox,
-            "castletv" to ::checkCastleTv,
         )
         for (spec in ServerFarm.allServers) {
             val check = special[spec.id]
@@ -120,12 +119,5 @@ class ServerProbeTest {
         val token = f.header("x-user")?.contains("token") == true
         return listOf(ProbeResult(id, "token", f.code == 200 && token,
             "HTTP ${f.code} x-user=${if (token) "present" else "MISSING"} ${f.error ?: ""}".trim()))
-    }
-
-    private fun checkCastleTv(id: String): List<ProbeResult> {
-        val url = ServerFarm.buildMovieUrl(ServerFarm.allServers.first { it.id == id }, tmdbMovieId)
-        val f = fetch(url, mapOf("Accept" to "application/json"))
-        return listOf(ProbeResult(id, "seckey", f.code == 200 && f.body.contains("\"data\""),
-            "HTTP ${f.code} ${f.body.take(80)} ${f.error ?: ""}".trim()))
     }
 }

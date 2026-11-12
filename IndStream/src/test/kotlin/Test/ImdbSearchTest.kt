@@ -79,6 +79,24 @@ class ImdbSearchTest {
     }
 
     @Test
+    fun parseCinemetaEpisodes_readsRating() {
+        val raw = """{"meta":{"videos":[
+            {"season":1,"episode":1,"name":"E1","rating":"7.7"},
+            {"season":1,"episode":2,"name":"E2","rating":8.4},
+            {"season":1,"episode":3,"name":"E3","rating":"0"},
+            {"season":1,"episode":4,"name":"E4","rating":""},
+            {"season":1,"episode":5,"name":"E5"}
+        ]}}"""
+        val eps = ImdbService.parseCinemetaEpisodes(raw)
+        assertEquals(5, eps.size)
+        assertEquals(7.7, eps[0].rating)
+        assertEquals(8.4, eps[1].rating)
+        assertNull(eps[2].rating)
+        assertNull(eps[3].rating)
+        assertNull(eps[4].rating)
+    }
+
+    @Test
     fun parsePersonImage_prefersExactNameHit() {
         val raw = """{"d":[
             {"id":"nm0000001","l":"Wrong Person","i":{"imageUrl":"https://example.com/wrong.jpg"}},

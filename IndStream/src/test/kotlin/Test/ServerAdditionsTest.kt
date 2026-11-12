@@ -20,7 +20,8 @@ class ServerAdditionsTest {
 
     @Test
     fun deadServers_stayOut() {
-        for (id in setOf("nhd", "vidapi", "zxcstreams", "vidsrc-to", "nontongo", "braflix", "onetouchtv", "vidcore-api")) {
+        for (id in setOf("nhd", "vidapi", "zxcstreams", "vidsrc-to", "nontongo", "braflix", "onetouchtv", "vidcore-api",
+            "castletv", "streamflix", "dudefilms", "multimovies", "rivestream")) {
             assertNull(ServerFarm.allServers.firstOrNull { it.id == id }, "$id must stay out")
         }
     }
@@ -78,27 +79,10 @@ class ServerAdditionsTest {
     }
 
     @Test
-    fun hindiBatch_presentAndTmdbKeyed() {
-        val castle = ServerFarm.allServers.first { it.id == "castletv" }
-        assertEquals("CastleTV", castle.name)
-        assertEquals(ServerIdType.TMDB, castle.idType)
-        assertEquals(30, castle.timeoutSec)
-        assertEquals(setOf("Hindi", "Tamil", "Telugu"), castle.declaredLanguages)
-        val flix = ServerFarm.allServers.first { it.id == "streamflix" }
-        assertEquals("StreamFlix", flix.name)
-        assertEquals(ServerIdType.TMDB, flix.idType)
-        assertEquals(25, flix.timeoutSec)
-    }
-
-    @Test
     fun dualIdServers_declareSupport() {
         val vidlink = ServerFarm.allServers.first { it.id == "vidlink" }
         assertTrue(vidlink.supportsImdb("movie"))
         assertFalse(vidlink.supportsImdb("tv"))
-
-        val streamflix = ServerFarm.allServers.first { it.id == "streamflix" }
-        assertTrue(streamflix.supportsImdb("movie"))
-        assertTrue(streamflix.supportsImdb("tv"))
 
         val netmirror = ServerFarm.allServers.first { it.id == "netmirror" }
         assertFalse(netmirror.supportsImdb("movie"))
@@ -115,35 +99,6 @@ class ServerAdditionsTest {
     fun vidrock_removed_v63() {
         assertNull(ServerFarm.allServers.firstOrNull { it.id == "vidrock" })
         assertNull(ServerFarm.allServers.firstOrNull { it.id == "vidrock-net" })
-    }
-
-    @Test
-    fun castleDecrypt_liveVector() {
-        assertEquals(
-            "hello-castle-1080p",
-            StreamEngine.decryptApiPayload("XP4abirPGczy5P0SITVv+4mF5GM4XmyP1UXyVmi8ouA=", "ZkpBVG0qa2dmSg=="),
-        )
-        assertNull(StreamEngine.decryptApiPayload("!!!not-base64!!!", "ZkpBVG0qa2dmSg=="))
-    }
-
-    @Test
-    fun castlePickTrack_hindiFirst() {
-        fun t(id: String, name: String, v: Boolean) = StreamEngine.AudioTrack(id, name, v)
-        val tracks = listOf(t("1", "English", true), t("2", "Hindi", true), t("3", "Tamil", false))
-        assertEquals("2", StreamEngine.pickAudioTrack(tracks)?.languageId)
-        assertEquals("2", StreamEngine.pickAudioTrack(
-            listOf(t("1", "English", true), t("2", "हिन्दी", true), t("3", "Tamil", false)),
-        )?.languageId)
-        assertEquals("1", StreamEngine.pickAudioTrack(listOf(t("1", "English", true)))?.languageId)
-        assertNull(StreamEngine.pickAudioTrack(emptyList()))
-    }
-
-    @Test
-    fun castleQualityOf_labels() {
-        assertEquals("1080p", StreamEngine.apiQualityLabel("FHD 1080p", 3))
-        assertEquals("4K", StreamEngine.apiQualityLabel("UHD", 4))
-        assertEquals("720p", StreamEngine.apiQualityLabel(null, 2))
-        assertEquals("", StreamEngine.apiQualityLabel(null, 0))
     }
 
     @Test
@@ -448,5 +403,60 @@ class ServerAdditionsTest {
             ),
             out.map { it.url },
         )
+    }
+
+    @Test
+    fun katmoviehd_registered() {
+        val s = ServerFarm.allServers.firstOrNull { it.id == "katmoviehd" }
+        assertNotNull(s)
+        assertEquals("KatMovieHD", s!!.name)
+        assertEquals(ServerIdType.TMDB, s.idType)
+        assertEquals(70, s.timeoutSec)
+        assertTrue(s.declaredLanguages.contains("Hindi"))
+        assertTrue(s.downloadFriendly)
+    }
+
+    @Test
+    fun katmovieSearchHits_parsesWpSearch() {
+        val json = """[{"id":12,"title":"Film &#038; City (2024) Hindi Dubbed","url":"https://site.example/film-city/"},""" +
+            """{"id":13,"title":"","url":"https://site.example/empty/"}]"""
+        val hits = StreamEngine.katmovieSearchHits(json)
+        assertEquals(1, hits.size)
+        assertEquals("https://site.example/film-city/", hits[0].first)
+        assertEquals("Film & City (2024) Hindi Dubbed", hits[0].second)
+        assertTrue(StreamEngine.katmovieSearchHits("<html>not json</html>").isEmpty())
+        assertTrue(StreamEngine.katmovieSearchHits("[]").isEmpty())
+    }
+
+    @Test
+    fun katmoviePayloadLinks_mixedEscapes() {
+        val payload = "href=\\\"https://links.kmhd.me/file/e89419d7_a9c2-\\\" 480p Pack " +
+            "href=\\\"https://links.kmhd.me/file/e89419d7_a9c2-\\\" again " +
+            "https:\\/\\/links.kmhd.me\\/pack\\/5fff950b 1080p " +
+            "https:\\u002F\\u002Flinks.kmhd.me\\u002Ffile\\u002F18ebbcf1_b948- x264"
+        val (files, packs) = StreamEngine.katmoviePayloadLinks(payload)
+        assertEquals(listOf("e89419d7_a9c2-", "18ebbcf1_b948-"), files)
+        assertEquals(listOf("5fff950b"), packs)
+        assertEquals(emptyList<String>() to emptyList<String>(), StreamEngine.katmoviePayloadLinks("no links here"))
+    }
+
+    @Test
+    fun katmovieLangText_expandsAbbreviations() {
+        assertEquals("Hindi-English", StreamEngine.katmovieLangText("HIN-ENG"))
+        assertEquals("Hindi,English", StreamEngine.katmovieLangText("HIN,ENG"))
+        assertEquals("Tamil Telugu Malayalam", StreamEngine.katmovieLangText("TAM TEL MAL"))
+        assertEquals("HINDI ENGLISH x264 ESub", StreamEngine.katmovieLangText("HINDI ENGLISH x264 ESub"))
+        assertEquals("PANJABI", StreamEngine.katmovieLangText("PANJABI"))
+        assertEquals("BENGALI", StreamEngine.katmovieLangText("BENGALI"))
+        assertEquals("Film 2024 1080p", StreamEngine.katmovieLangText("Film 2024 1080p"))
+    }
+
+    @Test
+    fun katmovieSizeLabel_bytes() {
+        assertEquals("", StreamEngine.katmovieSizeLabel(0))
+        assertEquals("", StreamEngine.katmovieSizeLabel(-5))
+        assertEquals("202MB", StreamEngine.katmovieSizeLabel(211486508))
+        assertEquals("2.0GB", StreamEngine.katmovieSizeLabel(2147483648))
+        assertEquals("1.5GB", StreamEngine.katmovieSizeLabel(1610612736))
     }
 }

@@ -99,6 +99,34 @@ object TmdbUrlParser {
         Regex("""[?&]$key=([^&#]+)""").find(url)?.groupValues?.get(1)
 }
 
+internal fun mergeEpisodes(
+    tmdb: List<TmdbService.TmdbEpisode>,
+    cinemeta: List<TmdbService.TmdbEpisode>,
+): List<TmdbService.TmdbEpisode> {
+    if (tmdb.isEmpty()) return sortEpisodes(cinemeta)
+    if (cinemeta.isEmpty()) return sortEpisodes(tmdb)
+    val cineByKey = cinemeta.associateBy { it.seasonNumber to it.episodeNumber }
+    val merged = tmdb.map { t ->
+        val c = cineByKey[t.seasonNumber to t.episodeNumber] ?: return@map t
+        t.copy(
+            name = t.name?.takeIf { it.isNotBlank() } ?: c.name,
+            overview = t.overview?.takeIf { it.isNotBlank() } ?: c.overview,
+            released = t.released?.takeIf { it.isNotBlank() } ?: c.released,
+            thumbnail = t.thumbnail?.takeIf { it.isNotBlank() } ?: c.thumbnail,
+            rating = t.rating ?: c.rating,
+            runtime = t.runtime ?: c.runtime,
+        )
+    }
+    val seen = HashSet<Pair<Int, Int>>(tmdb.size)
+    for (t in tmdb) seen.add(t.seasonNumber to t.episodeNumber)
+    return sortEpisodes(merged + cinemeta.filter { (it.seasonNumber to it.episodeNumber) !in seen })
+}
+
+private fun sortEpisodes(
+    episodes: List<TmdbService.TmdbEpisode>,
+): List<TmdbService.TmdbEpisode> =
+    episodes.sortedWith(compareBy({ it.seasonNumber }, { it.episodeNumber }))
+
 class IndStreamProvider : MainAPI() {
 
     private val fastStartScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -502,13 +530,9 @@ class IndStreamProvider : MainAPI() {
             val raw = withTimeoutOrNull(9000L) { ImdbService.fetchSeriesRaw(imdbId) }
             ImdbService.parseCinemetaEpisodes(raw)
         }
-        val won = select<List<TmdbService.TmdbEpisode>> {
-            tmdbJob.onAwait { if (it.isNotEmpty()) it else cineJob.await() }
-            cineJob.onAwait { if (it.isNotEmpty()) it else tmdbJob.await() }
-        }
-        tmdbJob.cancel()
-        cineJob.cancel()
-        won.sortedWith(compareBy({ it.seasonNumber }, { it.episodeNumber }))
+        val tmdb = HttpKit.attempt { tmdbJob.await() }.orEmpty()
+        val cine = HttpKit.attempt { cineJob.await() }.orEmpty()
+        mergeEpisodes(tmdb, cine)
     }
 
     private val tapSeq = java.util.concurrent.atomic.AtomicInteger(0)

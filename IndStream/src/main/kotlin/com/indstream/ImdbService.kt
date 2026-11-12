@@ -296,6 +296,11 @@ object ImdbService {
                     ?: v.optInt("number", -1).takeIf { it > 0 } ?: return@mapNotNull null
                 val released = v.optString("released").takeIf { it.isNotBlank() }
                     ?: v.optString("firstAired").takeIf { it.isNotBlank() }
+                val rate = when (val raw = v.opt("rating")) {
+                    is Number -> raw.toDouble()
+                    is String -> raw.toDoubleOrNull()
+                    else -> null
+                }?.takeIf { it > 0 }
                 TmdbService.TmdbEpisode(
                     seasonNumber = season,
                     episodeNumber = ep,
@@ -305,7 +310,7 @@ object ImdbService {
                         ?: v.optString("description").takeIf { it.isNotBlank() },
                     released = released?.take(10)?.takeIf { it.isNotBlank() },
                     thumbnail = v.optString("thumbnail").takeIf { it.isNotBlank() },
-                    rating = null,
+                    rating = rate,
                 )
             }
         } catch (e: Exception) { emptyList() }

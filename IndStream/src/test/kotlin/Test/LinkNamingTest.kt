@@ -115,6 +115,45 @@ class LinkNamingTest {
     }
 
     @Test
+    fun priorityName_dropsRenditionTagsAndSize() {
+        assertEquals(
+            "MovieBox ($IN Hindi)",
+            LinkNaming.priorityName(
+                serverName = "MovieBox",
+                audioLabel = "Hindi",
+                mediaLabel = "Film 2024 1080p WEB-DL HEVC 10bit Dolby 5.1",
+            ),
+        )
+        assertEquals(
+            "HubCloud ($IN Hindi)",
+            LinkNaming.priorityName("HubCloud Remux 1080p", "Hindi"),
+        )
+        assertEquals(
+            "HubCloud ($IN Hindi)",
+            LinkNaming.priorityName("HubCloud 1.7GB", "Hindi"),
+        )
+        assertEquals(
+            "HubCloud ($IN Hindi)",
+            LinkNaming.priorityName("HubCloud [1.7GB]", "Hindi"),
+        )
+        assertEquals(
+            "BrandNewServer ($IN Tamil)",
+            LinkNaming.priorityName("BrandNewServer WEB-DL HEVC", "Tamil"),
+        )
+    }
+
+    @Test
+    fun priorityName_keepsLanguageVariantsDistinct() {
+        assertEquals("VidLink ($IN Hindi)", LinkNaming.priorityName("VidLink", "Hindi"))
+        assertEquals("VidLink ($GB English)", LinkNaming.priorityName("VidLink", "English"))
+    }
+
+    @Test
+    fun priorityName_unknownLanguageStaysLabeled() {
+        assertEquals("PrimeSrc (Unknown)", LinkNaming.priorityName("PrimeSrc", ""))
+    }
+
+    @Test
     fun displayName_englishNoResolution() {
         val name = LinkNaming.displayName(
             serverName = "VaPlayer", audioLabel = "English",

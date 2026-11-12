@@ -168,8 +168,7 @@ class ServerFarmHindiTest {
 
     @Test
     fun bulletTrainServers_present() {
-        val ids = setOf("vidlink", "vaplayer", "moviebox", "netmirror",
-            "castletv", "streamflix")
+        val ids = setOf("vidlink", "vaplayer", "moviebox", "netmirror")
         for (id in ids) {
             assertNotNull(
                 ServerFarm.allServers.firstOrNull { it.id == id },
@@ -183,7 +182,7 @@ class ServerFarmHindiTest {
             "mp4hydra", "vidzee", "streamprovider",
             "videm", "8stream", "dahmermovies", "vidzy", "vixsrc",
             "nhd", "vidapi", "zxcstreams", "vidsrc-to", "nontongo", "vidcore", "vidcore-api",
-            "allmovieland", "braflix")
+            "allmovieland", "braflix", "castletv", "streamflix", "dudefilms", "multimovies")
         for (id in disabled) {
             assertNull(
                 ServerFarm.allServers.firstOrNull { it.id == id },

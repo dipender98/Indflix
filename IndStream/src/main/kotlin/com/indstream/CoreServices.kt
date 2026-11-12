@@ -1105,7 +1105,7 @@ object TmdbService {
         }
     }
 
-    private fun parseSeasonEpisodes(json: String, season: Int): List<TmdbEpisode>? = try {
+    internal fun parseSeasonEpisodes(json: String, season: Int): List<TmdbEpisode>? = try {
         val root = JSONObject(json)
         root.optJSONArray("episodes")?.let { arr ->
             (0 until arr.length()).mapNotNull { i ->

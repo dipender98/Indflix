@@ -12,7 +12,7 @@ class NewSourcesTest {
 
     @Test
     fun farm_presentAndTmdbKeyed() {
-        for (id in listOf("vidrift", "rivestream", "movy", "vidy", "vidbolt", "vidly")) {
+        for (id in listOf("vidrift", "movy", "vidy", "vidbolt", "vidly")) {
             val s = ServerFarm.allServers.firstOrNull { it.id == id }
             assertTrue(s != null, "$id must be in the farm")
             assertEquals(ServerIdType.TMDB, s!!.idType)
@@ -21,7 +21,7 @@ class NewSourcesTest {
 
     @Test
     fun downloadFarm_presentAndTmdbKeyed() {
-        for (id in listOf("hindmoviez", "hdhub4u", "moviesdrive", "dudefilms")) {
+        for (id in listOf("hindmoviez", "hdhub4u", "moviesdrive")) {
             val s = ServerFarm.allServers.firstOrNull { it.id == id }
             assertTrue(s != null, "$id must be in the farm")
             assertEquals(ServerIdType.TMDB, s!!.idType)
@@ -109,66 +109,12 @@ class NewSourcesTest {
     }
 
     @Test
-    fun apiVideos_fallsBackToSingleUrlWhenEntriesCarryNoUrl() {
-        val single = "https://cdn.example/hindi_720.m3u8"
-        val data = org.json.JSONObject(
-            """{"videoUrl":"$single","isPreview":false,"permissionDenied":false,""" +
-                """"videos":[{"resolutionDescription":"SD 480P","resolution":1},""" +
-                """{"resolutionDescription":"HD 720P","resolution":2},{"resolutionDescription":"FHD 1080P","resolution":3}]}""",
-        )
-        val out = StreamEngine.apiVideos(data, 2)
-        assertEquals(1, out.size)
-        assertEquals(single, out[0].url)
-        assertEquals("720p", out[0].quality)
-        assertTrue(StreamEngine.apiDenied(org.json.JSONObject("""{"permissionDenied":true}""")))
-        assertTrue(!StreamEngine.apiDenied(data))
-    }
-
-    @Test
     fun qualityText_and_fileNameMatches() {
         assertEquals("720p", StreamEngine.qualityText("720p 10Bit HEVC [1GB]"))
         assertEquals("4K", StreamEngine.qualityText("4K [2160p SDR]"))
         assertTrue(StreamEngine.fileNameMatches("Jawan", "2023", "Jawan.Extended.Cut.2023.720p.mkv"))
         assertTrue(!StreamEngine.fileNameMatches("Jawan", "2023", "Kuriyan.Jawan.Bapu.2025.720p.mkv"))
         assertTrue(StreamEngine.fileNameMatches("Dune Part Two", "2024", "Dune.Part.Two.2024.1080p.mkv"))
-    }
-
-    @Test
-    fun rivestream_secretKey_pinnedVectors() {
-        assertEquals("NDQzM2UwYzI=", StreamEngine.rivestreamSecretKey("550"))
-        assertEquals("Nzg3ZmU5YTI=", StreamEngine.rivestreamSecretKey("1396"))
-        assertEquals("LTZmMzMzMjM5", StreamEngine.rivestreamSecretKey("27205"))
-        assertEquals("NGExYjUxOGY=", StreamEngine.rivestreamSecretKey("603"))
-        assertEquals("LTIwYjFkMjc5", StreamEngine.rivestreamSecretKey("1399"))
-    }
-
-    @Test
-    fun rivestream_parseSources() {
-        val json = """
-            {"data":{"sources":[
-              {"quality":"720p | English","url":"https://img1.hscow.com/hls/78164859/720/index_287.m3u8?sig=a","source":"Citadel","format":"hls"},
-              {"quality":"480p | English","url":"https://img1.hscow.com/hls_mps/78164859/480/index_287.m3u8?sig=b","source":"Citadel","format":"hls"}
-            ],"captions":[{"file":"https://img1.fhxod.com/subtitle/78164859/English.vtt","label":"English - Citadel"}]}}
-        """.trimIndent()
-        val out = StreamEngine.rivestreamSources(json)
-        assertEquals(2, out.size)
-        assertEquals("720p | English", out[0].quality)
-        assertTrue(out[0].url.startsWith("https://img1.hscow.com/"))
-        assertTrue(StreamEngine.rivestreamSources("""{"data":{}}""").isEmpty())
-    }
-
-    @Test
-    fun rivestream_servicesAudioProxy() {
-        assertEquals(listOf("citadel", "apogee"), StreamEngine.rivestreamServicesFrom("""{"data":["citadel","apogee"]}"""))
-        assertTrue(StreamEngine.rivestreamServicesFrom("not json").isEmpty())
-        assertEquals("Hindi", StreamEngine.rivestreamAudio("720p | Hindi"))
-        assertEquals("", StreamEngine.rivestreamAudio("1080p"))
-        val proxy = "https://proxy.valhallastream.com/m3u8?url=https%3A%2F%2Fx&headers=" +
-            "%7B%22Origin%22%3A%22https%3A%2F%2Fbingr.one%22%2C%22Referer%22%3A%22https%3A%2F%2Fbingr.one%2F%22%7D"
-        val h = StreamEngine.rivestreamProxyHeaders(proxy)
-        assertEquals("https://bingr.one/", h["Referer"])
-        assertEquals("https://bingr.one", h["Origin"])
-        assertTrue(StreamEngine.rivestreamProxyHeaders("https://x.example/a.m3u8").isEmpty())
     }
 
     @Test

@@ -2,7 +2,6 @@
 
 import com.indstream.HttpKit
 import com.indstream.StreamEngine
-import com.indstream.TitleMatch
 import com.indstream.TmdbService
 import com.lagradost.cloudstream3.app
 import kotlinx.coroutines.runBlocking
@@ -22,38 +21,6 @@ class PracticalResolveTest {
         val meta = TmdbService.fetchMeta(27205, "movie")
         assertNotNull(meta, "TMDB must answer")
         assertTrue(meta.name?.contains("Inception") == true, "title must match")
-    }
-
-    @Test
-    fun castletv_fullChain() = runBlocking {
-        val sec = StreamEngine.apiSecurityKey()
-        assertNotNull(sec, "seckey must issue")
-        val rows = StreamEngine.searchApi(sec, "Inception 2010")
-        println("CastleTV search rows: ${rows.size} ${rows.take(3)}")
-        assertTrue(rows.isNotEmpty(), "search must hit")
-        val best = rows.maxByOrNull { TitleMatch.titleDistance("Inception", it.second) }
-        assertNotNull(best, "title match")
-        val det = StreamEngine.apiDetails(sec, best.first)
-        assertNotNull(det, "details must load")
-        val eps = det.optJSONArray("episodes")
-        assertNotNull(eps, "episodes array")
-        assertTrue(eps.length() > 0, "episode entries")
-        val ep = eps.optJSONObject(0)
-        val epId = ep.opt("id")?.toString()
-        assertNotNull(epId, "episode id")
-        val tracksJson = ep.optJSONArray("tracks")
-        val tracks = (0 until (tracksJson?.length() ?: 0)).mapNotNull { i ->
-            val t = tracksJson!!.optJSONObject(i) ?: return@mapNotNull null
-            StreamEngine.AudioTrack(t.optString("languageId"), t.optString("languageName"), t.optBoolean("existIndividualVideo"))
-        }
-        val pick = StreamEngine.pickAudioTrack(tracks)
-        println("CastleTV tracks: ${tracks.map { it.languageName }} pick=${pick?.languageName}")
-        val data = StreamEngine.apiVideo(sec, best.first, epId, pick?.languageId?.takeIf { it.isNotBlank() }, 2)
-        assertNotNull(data, "video must resolve")
-        val vids = StreamEngine.apiVideos(data, 2)
-        println("CastleTV videos: ${vids.map { it.quality to it.url.take(80) }}")
-        assertTrue(vids.isNotEmpty(), "video urls")
-        assertTrue(HttpKit.aliveCheck(vids.first().url) != false, "first video must be playable")
     }
 
     @Test

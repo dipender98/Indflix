@@ -235,6 +235,48 @@ function displayName(serverName, audioLabel, subIndicator, sizeLabel, mediaLabel
   return [named, tagPart, sizePart].filter(x=>x).join(" ");
 }
 
+// ---- FIXED: priorityName (SourcePriority dialog key) ----
+// Mirrors Kotlin LinkNaming.priorityName: base name + language tag only.
+// All rendition tokens (source/audio/video/vision/depth), REMUX, and sizes are removed
+// so every rendition of the same source+language shares one priority key.
+const ALL_TOKENS_RE = [
+  /\bWEB[ \-]?DL\b/gi, /\bWEB[ \-]?RIP\b/gi, /\bBLU[ \-]?RAY\b/gi,
+  /\bBR[ \-]?RIP\b/gi, /\bHD[ \-]?RIP\b/gi, /\bDVD[ \-]?RIP\b/gi,
+  /\bHDTV\b/gi, /\b(?:HD[ \-]?T[SCS]|HD[ \-]?CAM|CAM[ \-]?RIP|CAM|HDM)\b/gi,
+  /\bDOLBY[ \-]?ATMOS\b|\bATMOS\b/gi,
+  /\bTRUEHD\b/gi,
+  /\b(?:DOLBY[ \-]*(?:DIGITAL)?[ \-]*|DDP?[ \-]*|E[ \-]?AC[ \-]?3[ \-]*|AC[ \-]?3)[5]\.1\b/gi,
+  /\b(?:DOLBY[ \-]*(?:DIGITAL)?[ \-]*|DDP?[ \-]*|E[ \-]?AC[ \-]?3[ \-]*|AC[ \-]?3)[7]\.1\b/gi,
+  /\b(?:DDP|DD[ \-]?\+|E[ \-]?AC[ \-]?3|AC[ \-]?3|DD)\b/gi,
+  /\bDOLBY\b/gi, /\bDTS[ \-]?H[DI]\b/gi, /\bDTS\b/gi, /\bAAC\b/gi,
+  /\bDOLBY[ \-]?VISION\b/gi, /\bDV\b/gi, /\bHDR10\+(?!\d)/gi, /\bHDR10\b/gi, /\bHDR\b/gi,
+  /\bHEVC\b|\bH\.?[ \-]?265\b|\bX\.?265\b/gi,
+  /\bH\.?[ \-]?264\b|\bX\.?264\b|\bAVC\b|\bMPEG[ \-]?4\b/gi,
+  /\bAV1\b/gi, /\b10[ \-]?BIT\b/gi, /\b8[ \-]?BIT\b/gi,
+];
+const REMUX_RE = /\bREMUX\b/gi;
+const SIZE_WORD_RE = /\b\d+(?:\.\d+)?\s?(?:GB|MB)\b/gi;
+
+function stripRendition(text) {
+  let out = text;
+  for (const re of ALL_TOKENS_RE) out = out.replace(re, " ");
+  out = out.replace(REMUX_RE, " ").replace(SIZE_WORD_RE, " ");
+  out = out.replace(/\[\s*\]|\(\s*\)/g, " ");
+  return out.replace(/\s+/g, " ").trim();
+}
+
+function priorityName(serverName, audioLabel, mediaLabel) {
+  const rawName = orBlank(serverName).trim() || "Server";
+  const cleanName = stripQuality(rawName) || "Server";
+  const base = stripQuality(cleanName.replace(TRAILING_LANGUAGE, "")).trim() || "Server";
+  const named = stripRendition(base) || base;
+  const names = displayLanguageNamesFixed(audioLabel, mediaLabel);
+  const tag = names.length === 1 ? names[0] : (names.length > 1 ? names.join(", ")
+    : (languageLabel(audioLabel) || languageLabel(mediaLabel) || "Unknown"));
+  const tagPart = languageTagPart(tag, names);
+  return [named, tagPart].filter(x=>x).join(" ");
+}
+
 // ================= RUN TESTS =================
 let pass = 0, fail = 0;
 function check(name, actual, expected) {
@@ -334,6 +376,31 @@ console.log("\n=== END-TO-END: displayName with 5 audio languages ===");
 check("displayName 5 langs -> all 5 with flags",
   displayName("VidLink", "Hindi, English, Tamil, Telugu, Malayalam", null, null, null),
   "VidLink (🇮🇳 Hindi, 🇬🇧 English, 🇮🇳 Tamil, 🇮🇳 Telugu, 🇮🇳 Malayalam)");
+
+console.log("\n=== FIX 9: priorityName drops all rendition tokens + sizes, keeps name+language ===");
+check("priorityName full attrs -> name + language only",
+  priorityName("MovieBox", "Hindi", "Film 2024 1080p WEB-DL HEVC 10bit Dolby 5.1"),
+  "MovieBox (🇮🇳 Hindi)");
+check("priorityName Remux -> dropped",
+  priorityName("HubCloud Remux 1080p", "Hindi"),
+  "HubCloud (🇮🇳 Hindi)");
+check("priorityName size word -> dropped",
+  priorityName("HubCloud 1.7GB", "Hindi"),
+  "HubCloud (🇮🇳 Hindi)");
+check("priorityName bracketed size -> dropped cleanly",
+  priorityName("HubCloud [1.7GB]", "Hindi"),
+  "HubCloud (🇮🇳 Hindi)");
+check("priorityName WEB-DL HEVC in server name -> dropped",
+  priorityName("BrandNewServer WEB-DL HEVC", "Tamil"),
+  "BrandNewServer (🇮🇳 Tamil)");
+check("priorityName same name+lang distinct from other lang",
+  priorityName("VidLink", "English"), "VidLink (🇬🇧 English)");
+check("priorityName quality variants collapse to one key",
+  priorityName("FSL 1080p", "Hindi"), priorityName("FSL 720p", "Hindi"));
+check("priorityName unknown language stays labeled",
+  priorityName("PrimeSrc", ""), "PrimeSrc (Unknown)");
+check("priorityName multi language",
+  priorityName("VidLink", "Hindi+English"), "VidLink (🇮🇳 Hindi, 🇬🇧 English)");
 
 console.log("\n=== SUMMARY ===");
 console.log("PASS: " + pass + "  FAIL: " + fail);
