@@ -394,7 +394,7 @@ object SettingsUi {
         }
 
         fun pill(value: String, primary: Boolean = false): TextView =
-            label(value, 11f, if (primary) ON_CONTROL else TEXT_DIM, medium = true).apply {
+            label(value, 13f, if (primary) ON_CONTROL else TEXT_DIM, medium = true).apply {
                 gravity = Gravity.CENTER
                 setPadding(dp(12), 0, dp(12), 0)
                 background = ripple(
@@ -439,7 +439,7 @@ object SettingsUi {
         }
 
         fun filledAction(value: String, iconKind: String): TextView =
-            label(value, 13f, ON_CONTROL, medium = true).apply {
+            label(value, 16f, ON_CONTROL, medium = true).apply {
                 gravity = Gravity.CENTER
                 setPadding(dp(18), 0, dp(18), 0)
                 background = ripple(
@@ -462,7 +462,7 @@ object SettingsUi {
             setSingleLine(true)
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
             typeface = Typeface.MONOSPACE
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
             setPadding(dp(14), dp(12), dp(14), dp(12))
             background = inputBackground()
             layoutParams = LinearLayout.LayoutParams(
@@ -480,7 +480,7 @@ object SettingsUi {
                 threshold = 0
                 inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
                 typeface = Typeface.MONOSPACE
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
                 setPadding(dp(14), dp(12), dp(14), dp(12))
                 dropDownWidth = (context.resources.displayMetrics.widthPixels * 0.82f).toInt()
                 background = inputBackground()
@@ -549,8 +549,8 @@ object SettingsUi {
                 orientation = LinearLayout.VERTICAL
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
             }
-            val titleView = label(title, 13f, TEXT, medium = true)
-            val summaryView = label(summary, 11f, TEXT_DIM).apply {
+            val titleView = label(title, 16f, TEXT, medium = true)
+            val summaryView = label(summary, 13f, TEXT_DIM).apply {
                 setPadding(0, dp(3), 0, 0)
             }
             texts.addView(titleView)
@@ -711,14 +711,14 @@ object SettingsUi {
                 },
             )
             head.addView(
-                label(title, 24f, TEXT, medium = true),
+                label(title, 29f, TEXT, medium = true),
                 LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
             )
             val close = iconButton("close", "Close")
             head.addView(close)
             panel.addView(head)
             panel.addView(
-                label(subtitle, 13f, TEXT_DIM).apply {
+                label(subtitle, 16f, TEXT_DIM).apply {
                     setPadding(0, dp(8), 0, 0)
                     setLineSpacing(dp(2).toFloat(), 1f)
                 },
@@ -736,10 +736,10 @@ object SettingsUi {
                             setPadding(dp(14), dp(13), dp(14), dp(13))
                             background = rounded(SURFACE_LOW, 16)
                             addView(
-                                label(name, 13f, TEXT_DIM),
+                                label(name, 16f, TEXT_DIM),
                                 LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
                             )
-                            addView(label(value, 14f, tone, medium = true))
+                            addView(label(value, 17f, tone, medium = true))
                         },
                         LinearLayout.LayoutParams(
                             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -807,9 +807,9 @@ object SettingsUi {
                 orientation = LinearLayout.VERTICAL
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
             }
-            headTexts.addView(label("Home Row Order", 24f, TEXT, medium = true))
+            headTexts.addView(label("Home Row Order", 29f, TEXT, medium = true))
             headTexts.addView(
-                label("Use the arrows to set the order.", 13f, TEXT_DIM)
+                label("Use the arrows to set the order.", 16f, TEXT_DIM)
                     .apply { setPadding(0, dp(4), 0, 0) },
             )
             head.addView(headTexts)
@@ -837,7 +837,7 @@ object SettingsUi {
                 ).apply { topMargin = dp(16) },
             )
 
-            val status = label("", 12f, TEXT_DIM, medium = true).apply {
+            val status = label("", 14f, TEXT_DIM, medium = true).apply {
                 setPadding(0, dp(8), 0, 0)
                 visibility = View.GONE
             }
@@ -934,7 +934,7 @@ object SettingsUi {
                     }
                     val number = label(
                         "${index + 1}",
-                        12f,
+                        14f,
                         TEXT,
                         medium = true,
                     ).apply {
@@ -943,7 +943,7 @@ object SettingsUi {
                         layoutParams = LinearLayout.LayoutParams(dp(32), dp(32))
                         contentDescription = "Position ${index + 1}"
                     }
-                    val title = label(row.title, 13f, TEXT, medium = true).apply {
+                    val title = label(row.title, 16f, TEXT, medium = true).apply {
                         setPadding(dp(10), 0, dp(8), 0)
                         maxLines = 2
                         ellipsize = TextUtils.TruncateAt.END
@@ -1070,7 +1070,7 @@ object SettingsUi {
         }
 
         fun sectionLabel(value: String, top: Int): TextView =
-            label(value, 10f, TEXT_FAINT, medium = true, spacing = 0.12f).apply {
+            label(value, 12f, TEXT_FAINT, medium = true, spacing = 0.12f).apply {
                 setPadding(0, dp(top), 0, dp(8))
                 text = value.uppercase()
             }
@@ -1083,7 +1083,7 @@ object SettingsUi {
         val providerBody: (LinearLayout) -> Unit = { content ->
             add(
                 content,
-                label("Pick one source at a time — selecting another turns off the current one.", 12f, TEXT_DIM),
+                label("Pick one source at a time — selecting another turns off the current one.", 14f, TEXT_DIM),
                 2,
             )
             val options = LinkedHashMap<String, Option>()
@@ -1130,7 +1130,7 @@ object SettingsUi {
 
             add(
                 content,
-                label("Toggle rows by group, or reorder every row at once.", 12f, TEXT_DIM),
+                label("Toggle rows by group, or reorder every row at once.", 14f, TEXT_DIM),
                 2,
             )
             val groupChips = LinkedHashMap<Catalogue.Group, TextView>()
@@ -1172,6 +1172,26 @@ object SettingsUi {
             reorder.layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(42),
             ).apply { topMargin = dp(10) }
+
+            val shuffleOn = Settings.shuffleRows()
+            val shuffleOpt = option(
+                "Shuffle all rows",
+                if (shuffleOn) "Items in every row appear in random order" else "Rows keep their normal order",
+            )
+            shuffleOpt.dot.visibility = View.GONE
+            shuffleOpt.root.isClickable = false
+            paintOption(shuffleOpt, shuffleOn)
+            val shuffleToggle = smallToggle(shuffleOn) { on ->
+                Settings.saveShuffleRows(context, on)
+                shuffleOpt.summary.text =
+                    if (on) "Items in every row appear in random order" else "Rows keep their normal order"
+                paintOption(shuffleOpt, on)
+            }
+            shuffleOpt.root.addView(
+                shuffleToggle,
+                LinearLayout.LayoutParams(dp(52), dp(32)).apply { leftMargin = dp(6) },
+            )
+            add(content, shuffleOpt.root, 10)
 
             val enableAll = textButton("Enable all")
             val disableAll = textButton("Disable all")
@@ -1252,7 +1272,7 @@ object SettingsUi {
         val forYouBody: (LinearLayout) -> Unit = { content ->
             add(
                 content,
-                label("Rows built from your watch history.", 12f, TEXT_DIM),
+                label("Rows built from your watch history.", 14f, TEXT_DIM),
                 2,
             )
 
@@ -1260,7 +1280,7 @@ object SettingsUi {
             val forYouRowList = optionList()
             add(
                 content,
-                label("Show these rows on Home", 12f, TEXT_DIM)
+                label("Show these rows on Home", 14f, TEXT_DIM)
                     .apply { setPadding(0, dp(14), 0, 0) },
             )
             add(content, forYouRowList, 8)
@@ -1294,20 +1314,6 @@ object SettingsUi {
                 }
             }
             doRefreshForYouState()
-            val shuffleOn = Settings.shuffleRows()
-            val shuffleOpt = option(
-                "Shuffle all rows",
-                if (shuffleOn) "Items in every row appear in random order" else "Rows keep their normal order",
-            )
-            paintOption(shuffleOpt, shuffleOn)
-            shuffleOpt.root.setOnClickListener {
-                val on = !Settings.shuffleRows()
-                Settings.saveShuffleRows(context, on)
-                paintOption(shuffleOpt, on)
-                shuffleOpt.summary.text =
-                    if (on) "Items in every row appear in random order" else "Rows keep their normal order"
-            }
-            add(content, shuffleOpt.root, 4)
             add(content, sectionLabel("Refresh schedule", 18))
             val modeOptions = LinkedHashMap<ForYouRefresh.Mode, Option>()
             val modeList = optionList()
@@ -1358,20 +1364,21 @@ object SettingsUi {
                 orientation = LinearLayout.VERTICAL
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
             }
-            buildTexts.addView(label("AI catalogue build", 16f, TEXT, medium = true))
+            buildTexts.addView(label("AI catalogue build", 19f, TEXT, medium = true))
             buildTexts.addView(
-                label("Rebuilds Made for You from your watch history", 12f, TEXT_FAINT)
+                label("Rebuilds Made for You from your watch history", 14f, TEXT_FAINT)
                     .apply { setPadding(0, dp(3), 0, 0) },
             )
             buildHead.addView(buildTexts)
             val buildPill = statePill()
+            buildPill.text.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
             paintStatePill(buildPill, "Ready", true)
             buildHead.addView(buildPill.root)
             buildCard.addView(buildHead)
             buildCard.addView(
                 label(
                     "With a key saved, your model ranks the shortlist. Without one, a local score picks the rows.",
-                    12f,
+                    14f,
                     TEXT_DIM,
                 ).apply {
                     setPadding(0, dp(14), 0, 0)
@@ -1456,7 +1463,7 @@ object SettingsUi {
 
             add(
                 content,
-                label("Choose which providers supply streams.", 12f, TEXT_DIM),
+                label("Choose which providers supply streams.", 14f, TEXT_DIM),
                 2,
             )
 
@@ -1499,12 +1506,12 @@ object SettingsUi {
                 val dot = View(context).apply {
                     layoutParams = LinearLayout.LayoutParams(dp(9), dp(9)).apply { leftMargin = dp(8) }
                 }
-                val name = label(spec.name, 12f, TEXT, medium = true).apply {
+                val name = label(spec.name, 14f, TEXT, medium = true).apply {
                     maxLines = 1
                     ellipsize = TextUtils.TruncateAt.END
                     layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
                 }
-                val probeStatus = label("Not tested", 10f, TEXT_FAINT, medium = true).apply {
+                val probeStatus = label("Not tested", 12f, TEXT_FAINT, medium = true).apply {
                     maxLines = 1
                     layoutParams = LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -1554,8 +1561,8 @@ object SettingsUi {
                     addView(dot)
                     addView(toggleRoot)
                 }
-                val tags = label(providerTags(spec), 9f, TEXT_FAINT).apply {
-                    maxLines = 2
+                val tags = label(providerTags(spec), 11f, TEXT_FAINT).apply {
+                    maxLines = 1
                     ellipsize = TextUtils.TruncateAt.END
                     setPadding(0, dp(2), 0, 0)
                 }
@@ -1629,7 +1636,7 @@ object SettingsUi {
 
             val testSummary = label(
                 "Test (2 movies + 1 series) on every provider. Up means at least one sample returned streams.",
-                11f,
+                13f,
                 TEXT_FAINT,
             ).apply {
                 setPadding(0, dp(8), 0, 0)
@@ -1695,43 +1702,50 @@ object SettingsUi {
                     tile.root.visibility = if (visible) View.VISIBLE else View.GONE
                 }
             }
-            val row1 = LinearLayout(context).apply {
+            // one helper for both rows: even gaps, no trailing margin, perfectly centered
+            fun presetRow(vararg views: TextView): LinearLayout = LinearLayout(context).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_HORIZONTAL or Gravity.CENTER_VERTICAL
-            }
-            row1.addView(testAllButton)
-            row1.addView(chip("All").apply {
-                setOnClickListener { providerPreset = "All"; applyProviderPreset() }
-            })
-            row1.addView(chip("Recommended").apply {
-                setOnClickListener { providerPreset = "Recommended"; applyProviderPreset() }
-            })
-            add(content, row1, 6)
-            val row2 = LinearLayout(context).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_HORIZONTAL or Gravity.CENTER_VERTICAL
-            }
-            row2.addView(chip("Downloadable").apply {
-                setOnClickListener { providerPreset = "Downloadable"; applyProviderPreset() }
-            })
-            row2.addView(chip("4K").apply {
-                setOnClickListener { providerPreset = "4K"; applyProviderPreset() }
-            })
-            row2.addView(chip("Reset").apply {
-                setOnClickListener {
-                    providerPreset = "All"
-                    Settings.resetAllServers(context)
-                    paintServerTiles()
-                    refreshProvidersState()
+                views.forEachIndexed { index, view ->
+                    view.layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT, control,
+                    ).apply { if (index > 0) leftMargin = gap }
+                    addView(view)
                 }
-            })
-            add(content, row2, 4)
+            }
+            val row1 = presetRow(
+                testAllButton,
+                chip("All").apply {
+                    setOnClickListener { providerPreset = "All"; applyProviderPreset() }
+                },
+                chip("Recommended").apply {
+                    setOnClickListener { providerPreset = "Recommended"; applyProviderPreset() }
+                },
+            )
+            add(content, row1, 6)
+            val row2 = presetRow(
+                chip("Downloadable").apply {
+                    setOnClickListener { providerPreset = "Downloadable"; applyProviderPreset() }
+                },
+                chip("4K").apply {
+                    setOnClickListener { providerPreset = "4K"; applyProviderPreset() }
+                },
+                chip("Reset").apply {
+                    setOnClickListener {
+                        providerPreset = "All"
+                        Settings.resetAllServers(context)
+                        paintServerTiles()
+                        refreshProvidersState()
+                    }
+                },
+            )
+            add(content, row2, 6)
             add(content, testSummary, 10)
 
             val providerGrid = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
             providerTiles.forEachIndexed { rowIndex, tile ->
                 val row = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
-                tile.root.layoutParams = LinearLayout.LayoutParams(0, dp(42), 1f)
+                tile.root.layoutParams = LinearLayout.LayoutParams(0, dp(52), 1f)
                 row.addView(tile.root)
                 providerGrid.addView(
                     row,
@@ -1769,13 +1783,13 @@ object SettingsUi {
 
             add(
                 content,
-                label("Load streams from addon manifests.", 12f, TEXT_DIM),
+                label("Load streams from addon manifests.", 14f, TEXT_DIM),
                 2,
             )
 
             val addonStatus = label(
                 "Only direct HTTP(S) streams are played. Torrent and external links are detected but skipped.",
-                11f, TEXT_DIM,
+                13f, TEXT_DIM,
             ).apply { setPadding(0, dp(10), 0, 0) }
             val addonMore = chip("Add More")
             val addonCheck = chip("Check")
@@ -1919,7 +1933,7 @@ object SettingsUi {
                     input.post { input.requestFocus() }
                 }
                 if (addonUrls.isEmpty() && !draftVisible) {
-                    addonList.addView(label("No addons configured.", 12f, TEXT_DIM))
+                    addonList.addView(label("No addons configured.", 14f, TEXT_DIM))
                 }
                 refreshAddonState()
             }
@@ -2007,13 +2021,13 @@ object SettingsUi {
 
             add(
                 content,
-                label("Home rows from playlists - live, film or series.", 12f, TEXT_DIM),
+                label("Home rows from playlists - live, film or series.", 14f, TEXT_DIM),
                 2,
             )
 
             val m3uStatus = label(
                 "Items keep the quality their name or link states, so pick what your connection handles.",
-                11f, TEXT_DIM,
+                13f, TEXT_DIM,
             ).apply { setPadding(0, dp(10), 0, 0) }
 
             val m3uMore = chip("Add Playlist")
@@ -2117,7 +2131,7 @@ object SettingsUi {
                     input.post { input.requestFocus() }
                 }
                 if (m3uSources.isEmpty() && !m3uDraftVisible) {
-                    m3uList.addView(label("No playlists added.", 12f, TEXT_DIM))
+                    m3uList.addView(label("No playlists added.", 14f, TEXT_DIM))
                 }
                 refreshM3uState()
             }
@@ -2180,12 +2194,12 @@ object SettingsUi {
 
             add(
                 content,
-                label("Optional - built-in subtitles work without it.", 12f, TEXT_DIM),
+                label("Optional - built-in subtitles work without it.", 14f, TEXT_DIM),
                 2,
             )
             val wyzieStatus = label(
                 if (wyzieSaved) "Your key is used for subtitle lookups." else "Built-in subtitles are in use.",
-                11f, TEXT_DIM,
+                13f, TEXT_DIM,
             ).apply { setPadding(0, dp(10), 0, 0) }
             val wyzieSecret = secret(Settings.apiKey().orEmpty(), "api key...")
             val wyzieKeyInput = wyzieSecret.input
@@ -2245,12 +2259,12 @@ object SettingsUi {
 
             add(
                 content,
-                label("Paste the short API key, not the long access token.", 12f, TEXT_DIM),
+                label("Paste the short API key, not the long access token.", 14f, TEXT_DIM),
                 2,
             )
             val tmdbStatus = label(
                 if (tmdbSaved) "Your key is used for metadata first." else "Built-in keys are in use.",
-                11f, TEXT_DIM,
+                13f, TEXT_DIM,
             ).apply { setPadding(0, dp(10), 0, 0) }
             val tmdbSecret = secret(Settings.tmdbApiKey().orEmpty(), "api key...")
             val tmdbKeyInput = tmdbSecret.input
@@ -2310,7 +2324,7 @@ object SettingsUi {
 
             add(
                 content,
-                label("Optional - reorders the rows you already match.", 12f, TEXT_DIM),
+                label("Optional - reorders the rows you already match.", 14f, TEXT_DIM),
                 2,
             )
             var selectedProvider = Settings.aiProviderId()
@@ -2352,7 +2366,7 @@ object SettingsUi {
             aiModelInput.setOnClickListener {
                 if (aiModelInput.adapter != null) aiModelInput.showDropDown()
             }
-            val aiStatus = label("", 12f, TEXT_DIM).apply {
+            val aiStatus = label("", 14f, TEXT_DIM).apply {
                 setPadding(0, dp(10), 0, 0)
                 visibility = View.GONE
             }
