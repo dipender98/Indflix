@@ -1018,6 +1018,9 @@ object SettingsUi {
         // state bus: detail toolbars and home tiles both paint from this
         val stateCache = LinkedHashMap<String, Pair<String, Boolean>>()
         val stateListeners = mutableListOf<(String, String, Boolean) -> Unit>()
+        val dirtyChecks = mutableListOf<() -> Boolean>()
+        val resetActions = mutableListOf<() -> Unit>()
+        val saveActions = mutableListOf<() -> Unit>()
 
         fun setState(id: String, value: String, on: Boolean) {
             stateCache[id] = value to on
@@ -1373,8 +1376,8 @@ object SettingsUi {
             )
             val refreshNow = filledAction("Refresh now", "foryou").apply {
                 layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, dp(48),
-                ).apply { topMargin = dp(16) }
+                    ViewGroup.LayoutParams.WRAP_CONTENT, dp(48),
+                ).apply { topMargin = dp(16); gravity = Gravity.CENTER_HORIZONTAL }
             }
             buildCard.addView(refreshNow)
             add(content, buildCard, 16)
@@ -1486,22 +1489,22 @@ object SettingsUi {
                 val dot = View(context).apply {
                     layoutParams = LinearLayout.LayoutParams(dp(6), dp(6)).apply { leftMargin = dp(5) }
                 }
-                val name = label(spec.name, 12.75f, TEXT, medium = true).apply {
+                val name = label(spec.name, 16.5f, TEXT, medium = true).apply {
                     maxLines = 1
                     ellipsize = TextUtils.TruncateAt.END
                     layoutParams = LinearLayout.LayoutParams(
                         0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f,
-                    )
+                    ).apply { rightMargin = dp(6) }
                 }
                 val probeStatus = label("Not tested", 9.35f, TEXT_FAINT, medium = true).apply {
                     maxLines = 1
                     layoutParams = LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-                    ).apply { leftMargin = dp(5) }
+                    )
                 }
                 val initialChecked = Settings.serverEnabled(spec.id)
                 val toggleRoot = FrameLayout(context).apply {
-                    layoutParams = LinearLayout.LayoutParams(dp(39), dp(24)).apply { leftMargin = dp(5) }
+                    layoutParams = LinearLayout.LayoutParams(dp(39), dp(24)).apply { leftMargin = dp(6) }
                     background = ripple(
                         StateListDrawable().apply {
                             addState(intArrayOf(android.R.attr.state_focused), rounded(Color.TRANSPARENT, 999, 2, CONTROL))
@@ -1521,15 +1524,15 @@ object SettingsUi {
                 }
                 toggleRoot.addView(toggleTrack)
                 toggleRoot.addView(toggleThumb)
-                val tags = label(providerTags(spec), 8.5f, TEXT, medium = true).apply {
+                val tags = label(providerTags(spec), 9.75f, ON_CONTROL, medium = true).apply {
                     maxLines = 1
                     ellipsize = TextUtils.TruncateAt.END
                     gravity = Gravity.CENTER
-                    setPadding(dp(6), 0, dp(6), 0)
-                    background = rounded(Color.argb(20, 255, 255, 255), 999, 1, Color.argb(38, 255, 255, 255))
+                    setPadding(dp(8), 0, dp(8), 0)
+                    background = rounded(CONTROL, 999)
                     layoutParams = LinearLayout.LayoutParams(
-                        0, dp(19), 1f,
-                    )
+                        0, dp(22), 1f,
+                    ).apply { leftMargin = dp(6); rightMargin = dp(6) }
                 }
                 fun paintToggle(checked: Boolean, animate: Boolean) {
                     toggleTrack.background = if (checked) rounded(CONTROL, 999) else rounded(SURFACE_HIGH, 999)
@@ -1545,33 +1548,25 @@ object SettingsUi {
                     }
                 }
                 paintToggle(initialChecked, false)
-                val headRow = LinearLayout(context).apply {
+                val statusSection = LinearLayout(context).apply {
                     orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
+                    gravity = Gravity.CENTER_VERTICAL or Gravity.END
                     layoutParams = LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                        0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f,
                     )
-                    addView(name)
                     addView(probeStatus)
                     addView(dot)
                     addView(toggleRoot)
                 }
-                val tagRow = LinearLayout(context).apply {
+                val root = LinearLayout(context).apply {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = Gravity.CENTER_VERTICAL
-                    layoutParams = LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-                    ).apply { topMargin = dp(7) }
-                    addView(tags)
-                }
-                val root = LinearLayout(context).apply {
-                    orientation = LinearLayout.VERTICAL
-                    gravity = Gravity.CENTER_VERTICAL
-                    setPadding(dp(9), dp(7), dp(9), dp(8))
+                    setPadding(dp(10), dp(8), dp(10), dp(8))
                     isClickable = true
                     isFocusable = true
-                    addView(headRow)
-                    addView(tagRow)
+                    addView(name)
+                    addView(tags)
+                    addView(statusSection)
                 }
                 return ProviderTile(spec, root, dot, probeStatus, toggleRoot, toggleTrack, toggleThumb, initialChecked, ::paintToggle)
             }
@@ -1699,17 +1694,15 @@ object SettingsUi {
                     }
                     matches
                 }
-                val rows = visible.chunked(2)
+                val rows = visible.chunked(1)
                 rows.forEachIndexed { rowIndex, pair ->
                     val row = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
                     pair.forEachIndexed { index, tile ->
-                        tile.root.layoutParams = LinearLayout.LayoutParams(0, dp(63), 1f).apply {
+                        (tile.root.parent as? ViewGroup)?.removeView(tile.root)
+                        tile.root.layoutParams = LinearLayout.LayoutParams(0, dp(58), 1f).apply {
                             if (index > 0) leftMargin = gap
                         }
                         row.addView(tile.root)
-                    }
-                    if (pair.size == 1) {
-                        row.addView(View(context), LinearLayout.LayoutParams(0, dp(63), 1f))
                     }
                     providerGrid.addView(
                         row,
@@ -1738,17 +1731,17 @@ object SettingsUi {
                 gravity = Gravity.CENTER_VERTICAL
             }
             listOf(
-                chip("All").apply {
+                pill("All", primary = true).apply {
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
                     ellipsize = TextUtils.TruncateAt.END
                     setOnClickListener { providerPreset = "All"; applyProviderPreset() }
                 },
-                chip("4K").apply {
+                pill("4K", primary = true).apply {
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
                     ellipsize = TextUtils.TruncateAt.END
                     setOnClickListener { providerPreset = "4K"; applyProviderPreset() }
                 },
-                chip("Downloadable").apply {
+                pill("Downloadable", primary = true).apply {
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
                     ellipsize = TextUtils.TruncateAt.END
                     setOnClickListener { providerPreset = "Downloadable"; applyProviderPreset() }
@@ -1999,6 +1992,9 @@ object SettingsUi {
             }
 
             renderAddons()
+            dirtyChecks += { draftVisible && draftText.isNotBlank() }
+            resetActions += { draftVisible = false; draftText = ""; draftField = null; renderAddons() }
+            saveActions += { draftField?.let { commitDraft(it) } }
         }
         sections += SectionSpec(
             "addons", "Stremio / Nuvio",
@@ -2178,6 +2174,9 @@ object SettingsUi {
             }
 
             renderM3u()
+            dirtyChecks += { m3uDraftVisible && m3uDraftText.isNotBlank() }
+            resetActions += { m3uDraftVisible = false; m3uDraftText = ""; m3uDraftField = null; renderM3u() }
+            saveActions += { m3uDraftField?.let(::commitM3uDraft) }
         }
         sections += SectionSpec(
             "m3u", "M3U Playlists",
@@ -2243,6 +2242,9 @@ object SettingsUi {
                     if (on) "Your key is used for subtitle lookups." else "Built-in subtitles are in use."
                 setState("subtitles", if (on) "Saved" else "Not set", on)
             }
+            dirtyChecks += { wyzieKeyInput.text.toString() != Settings.apiKey().orEmpty() }
+            resetActions += { wyzieKeyInput.setText(Settings.apiKey().orEmpty()); wyzieKeyInput.error = null }
+            saveActions += { wyzieSave.performClick() }
         }
         sections += SectionSpec(
             "subtitles", "Subtitles Key",
@@ -2308,6 +2310,9 @@ object SettingsUi {
                     if (on) "Your key is used for metadata first." else "Built-in keys are in use."
                 setState("tmdb", if (on) "Saved" else "Not set", on)
             }
+            dirtyChecks += { tmdbKeyInput.text.toString() != Settings.tmdbApiKey().orEmpty() }
+            resetActions += { tmdbKeyInput.setText(Settings.tmdbApiKey().orEmpty()); tmdbKeyInput.error = null }
+            saveActions += { tmdbSave.performClick() }
         }
         sections += SectionSpec(
             "tmdb", "TMDB API Key",
@@ -2482,6 +2487,19 @@ object SettingsUi {
                 aiStatus.text = if (on) "Saved - the model reorders your rows." else "Cleared - rows use the local score."
                 setState("ai", if (on) "Saved" else "Not set", on)
             }
+            dirtyChecks += {
+                aiKeyInput.text.toString() != Settings.aiApiKey(selectedProvider).orEmpty() ||
+                    aiModelInput.text.toString() != Settings.aiModel(selectedProvider).ifBlank { AiService.Provider.from(selectedProvider).defaultModel } ||
+                    aiBaseInput.text.toString() != Settings.aiBaseUrl(selectedProvider)
+            }
+            resetActions += {
+                val p = selectedProvider
+                aiKeyInput.setText(Settings.aiApiKey(p).orEmpty())
+                aiModelInput.setText(Settings.aiModel(p).ifBlank { AiService.Provider.from(p).defaultModel })
+                aiBaseInput.setText(Settings.aiBaseUrl(p))
+                aiKeyInput.error = null
+            }
+            saveActions += { aiSave.performClick() }
         }
         sections += SectionSpec(
             "ai", "AI API Keys",
@@ -2788,9 +2806,64 @@ object SettingsUi {
                 .withEndAction { built.dismiss() }
                 .start()
         }
-        close.setOnClickListener { dismissSheet() }
+        fun hasUnsavedChanges(): Boolean = dirtyChecks.any { runCatching { it() }.getOrDefault(false) }
+        fun showUnsavedPopup(onProceed: () -> Unit) {
+            if (!hasUnsavedChanges()) { onProceed(); return }
+            val popup = Dialog(context)
+            val panel = LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(24), dp(24), dp(24), dp(24))
+                background = rounded(SURFACE, 24)
+            }
+            panel.addView(label("Unsaved changes", 20f, TEXT, medium = true))
+            panel.addView(
+                label("You have unsaved changes. Save or discard them?", 14f, TEXT_DIM).apply {
+                    setPadding(0, dp(8), 0, 0)
+                },
+            )
+            val row = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.END
+                setPadding(0, dp(16), 0, 0)
+            }
+            val discard = label("Discard", 14f, WARNING, medium = true).apply {
+                setPadding(dp(12), dp(10), dp(12), dp(10))
+                isClickable = true
+                isFocusable = true
+            }
+            val save = action("Save", primary = true).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, control,
+                ).apply { leftMargin = gap }
+            }
+            discard.setOnClickListener {
+                resetActions.forEach { runCatching { it() } }
+                popup.dismiss()
+                onProceed()
+            }
+            save.setOnClickListener {
+                saveActions.forEach { runCatching { it() } }
+                if (!hasUnsavedChanges()) {
+                    popup.dismiss()
+                    onProceed()
+                }
+            }
+            row.addView(discard)
+            row.addView(save)
+            panel.addView(row)
+            popup.setContentView(panel)
+            popup.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            popup.show()
+        }
+        close.setOnClickListener {
+            if (hasUnsavedChanges()) showUnsavedPopup { dismissSheet() } else dismissSheet()
+        }
         built.onBack = {
-            if (!navigateBack()) dismissSheet()
+            if (currentDetail != null) {
+                if (hasUnsavedChanges()) showUnsavedPopup { navigateBack() } else navigateBack()
+            } else {
+                if (hasUnsavedChanges()) showUnsavedPopup { dismissSheet() } else dismissSheet()
+            }
             true
         }
         built.window?.setBackgroundDrawable(ColorDrawable(SURFACE))
