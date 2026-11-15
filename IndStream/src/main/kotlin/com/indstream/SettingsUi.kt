@@ -1492,7 +1492,7 @@ object SettingsUi {
                     spec.tvUrl.contains("multilang", true) ||
                     spec.declaredLanguages.size >= 2
                 if (multiAudio) tags += "Multi audio"
-                return tags.take(3).joinToString(" · ")
+                return tags.take(2).joinToString(" · ")
             }
 
             fun providerTile(spec: ServerSpec): ProviderTile {
@@ -1554,8 +1554,8 @@ object SettingsUi {
                     addView(dot)
                     addView(toggleRoot)
                 }
-                val tags = label(providerTags(spec), 10f, TEXT_FAINT).apply {
-                    maxLines = 1
+                val tags = label(providerTags(spec), 9f, TEXT_FAINT).apply {
+                    maxLines = 2
                     ellipsize = TextUtils.TruncateAt.END
                     setPadding(0, dp(2), 0, 0)
                 }
