@@ -1,6 +1,6 @@
 package com.multimovies
 
-import android.app.AlertDialog
+import android.app.Dialog
 import android.content.Context
 import android.content.Intent
 import android.content.res.ColorStateList
@@ -8,21 +8,23 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.ColorFilter
 import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
-import android.graphics.drawable.LayerDrawable
 import android.graphics.drawable.RippleDrawable
 import android.graphics.drawable.StateListDrawable
 import android.net.Uri
 import android.text.InputType
+import android.text.TextUtils
+import android.text.method.PasswordTransformationMethod
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
-import android.view.animation.DecelerateInterpolator
+import android.view.WindowManager
 import android.view.animation.PathInterpolator
 import android.widget.EditText
 import android.widget.FrameLayout
@@ -101,22 +103,20 @@ object Settings {
     fun openSettings(context: Context) {
         fun dp(v: Number): Int = (v.toFloat() * context.resources.displayMetrics.density).roundToInt()
 
+        val SURFACE = Color.parseColor("#101319")
+        val SURFACE_LOW = Color.parseColor("#161A21")
+        val SURFACE_HIGH = Color.parseColor("#1E232B")
+        val BORDER = Color.parseColor("#3B414B")
         val TEXT = Color.parseColor("#E3E4EA")
         val TEXT_DIM = Color.parseColor("#C1C6D1")
         val TEXT_MUTED = Color.parseColor("#AAB0BC")
         val TEXT_FAINT = Color.parseColor("#8B929E")
-        val BORDER = Color.parseColor("#3B414B")
-        val ACCENT = Color.parseColor("#A9C7FF")
-        val ACCENT_PALE = Color.parseColor("#D7E3FF")
-        val ACCENT_TOP = Color.parseColor("#C4D8FF")
-        val ON_PRIMARY = Color.parseColor("#003063")
-        val SECONDARY_CONTAINER = Color.parseColor("#2A3A4D")
-        val ON_SECONDARY_CONTAINER = Color.parseColor("#D8E3F6")
-        val TONE_TOP = Color.parseColor("#4E3766")
-        val TONE_BOTTOM = Color.parseColor("#392946")
+        val CONTROL = Color.parseColor("#DFDFDF")
+        val ON_CONTROL = Color.parseColor("#14171C")
+        val HAIRLINE = Color.argb(28, 255, 255, 255)
+        val TONE_CONTAINER = Color.parseColor("#4E3766")
         val TONE_GLYPH = Color.parseColor("#F2DAFF")
         val TONE_BEAD = Color.parseColor("#D9BCE9")
-        val GLASS_STROKE = Color.argb(36, 255, 255, 255)
 
         fun withAlpha(color: Int, alpha: Int): Int =
             Color.argb(alpha, Color.red(color), Color.green(color), Color.blue(color))
@@ -125,7 +125,7 @@ object Settings {
             color: Int,
             radius: Number,
             stroke: Number = 0,
-            strokeColor: Int = GLASS_STROKE,
+            strokeColor: Int = HAIRLINE,
         ): GradientDrawable = GradientDrawable().apply {
             shape = GradientDrawable.RECTANGLE
             setColor(color)
@@ -133,69 +133,24 @@ object Settings {
             if (stroke.toFloat() > 0f) setStroke(dp(stroke), strokeColor)
         }
 
-        fun circle(color: Int, stroke: Number = 0, strokeColor: Int = GLASS_STROKE): GradientDrawable =
+        fun circle(color: Int, stroke: Number = 0, strokeColor: Int = HAIRLINE): GradientDrawable =
             GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
                 setColor(color)
                 if (stroke.toFloat() > 0f) setStroke(dp(stroke), strokeColor)
             }
 
-        fun glassPanel(radius: Number = 24): GradientDrawable =
-            GradientDrawable(
-                GradientDrawable.Orientation.TOP_BOTTOM,
-                intArrayOf(Color.parseColor("#1D2026"), Color.parseColor("#14171D")),
-            ).apply {
-                shape = GradientDrawable.RECTANGLE
-                cornerRadius = dp(radius).toFloat()
-                setStroke(dp(1), BORDER)
-            }
-
-        fun sheetFill(): GradientDrawable =
-            GradientDrawable(
-                GradientDrawable.Orientation.TOP_BOTTOM,
-                intArrayOf(Color.parseColor("#171A21"), Color.parseColor("#0E1116")),
-            ).apply {
-                shape = GradientDrawable.RECTANGLE
-                cornerRadius = dp(32).toFloat()
-                setStroke(dp(1), Color.argb(36, 255, 255, 255))
-            }
-
-        fun iconChip(radius: Number): Drawable {
-            val base = GradientDrawable(
-                GradientDrawable.Orientation.TOP_BOTTOM,
-                intArrayOf(TONE_TOP, TONE_BOTTOM),
-            ).apply {
-                shape = GradientDrawable.RECTANGLE
-                cornerRadius = dp(radius).toFloat()
-                setStroke(dp(1), withAlpha(TONE_GLYPH, 36))
-            }
-            val aura = GradientDrawable().apply {
-                shape = GradientDrawable.OVAL
-                gradientType = GradientDrawable.RADIAL_GRADIENT
-                gradientRadius = dp(30).toFloat()
-                setGradientCenter(0.5f, 0.34f)
-                setColors(intArrayOf(withAlpha(TONE_GLYPH, 30), Color.TRANSPARENT))
-            }
-            val sheen = GradientDrawable(
-                GradientDrawable.Orientation.TOP_BOTTOM,
-                intArrayOf(Color.argb(18, 255, 255, 255), Color.TRANSPARENT),
-            ).apply { cornerRadius = dp(radius).toFloat() }
-            return LayerDrawable(arrayOf(base, aura, sheen))
-        }
+        fun iconChip(radius: Number): GradientDrawable = rounded(TONE_CONTAINER, radius)
 
         fun ripple(content: Drawable, color: Int = Color.argb(30, 255, 255, 255)): RippleDrawable =
             RippleDrawable(ColorStateList.valueOf(color), content, null)
 
-        fun inputFill(focused: Boolean): GradientDrawable =
-            GradientDrawable(
-                GradientDrawable.Orientation.TOP_BOTTOM,
-                intArrayOf(Color.argb(16, 255, 255, 255), Color.argb(8, 255, 255, 255)),
-            ).apply {
-                shape = GradientDrawable.RECTANGLE
-                cornerRadius = dp(16).toFloat()
-                if (focused) setStroke(dp(1.4f).coerceAtLeast(1), ACCENT)
-                else setStroke(dp(1), GLASS_STROKE)
-            }
+        fun inputFill(focused: Boolean): GradientDrawable = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            setColor(SURFACE_HIGH)
+            cornerRadius = dp(16).toFloat()
+            if (focused) setStroke(dp(2), CONTROL) else setStroke(dp(1), HAIRLINE)
+        }
 
         fun inputBackground(): StateListDrawable = StateListDrawable().apply {
             addState(intArrayOf(android.R.attr.state_focused), inputFill(true))
@@ -217,28 +172,78 @@ object Settings {
             includeFontPadding = false
         }
 
-        fun pill(value: String, style: String): TextView {
-            val textColor = when (style) {
-                "filled" -> ON_PRIMARY
-                "tonal" -> ON_SECONDARY_CONTAINER
-                else -> TEXT_DIM
-            }
-            return label(value, 12f, textColor, medium = true).apply {
+        fun pill(value: String, filled: Boolean = false): TextView =
+            label(value, 12f, if (filled) ON_CONTROL else TEXT_DIM, medium = true).apply {
                 gravity = Gravity.CENTER
                 setPadding(dp(16), 0, dp(16), 0)
                 background = ripple(
-                    when (style) {
-                        "filled" -> rounded(ACCENT_TOP, 999)
-                        "tonal" -> rounded(SECONDARY_CONTAINER, 999)
-                        else -> rounded(Color.TRANSPARENT, 999, 1, BORDER)
+                    StateListDrawable().apply {
+                        if (filled) {
+                            addState(intArrayOf(android.R.attr.state_focused), rounded(CONTROL, 999, 2, ON_CONTROL))
+                            addState(intArrayOf(), rounded(CONTROL, 999))
+                        } else {
+                            addState(intArrayOf(android.R.attr.state_focused), rounded(Color.TRANSPARENT, 999, 2, CONTROL))
+                            addState(intArrayOf(), rounded(Color.TRANSPARENT, 999, 1, BORDER))
+                        }
                     },
                 )
                 isClickable = true
                 isFocusable = true
                 layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT, dp(44),
-                ).apply { rightMargin = dp(8) }
+                    ViewGroup.LayoutParams.WRAP_CONTENT, dp(48),
+                )
             }
+
+        fun eyeIcon(crossed: Boolean, color: Int): Drawable = object : Drawable() {
+            private val pen = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                style = Paint.Style.STROKE
+                strokeWidth = dp(1.6f).toFloat()
+                strokeCap = Paint.Cap.ROUND
+                strokeJoin = Paint.Join.ROUND
+                this.color = color
+            }
+            private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                style = Paint.Style.FILL
+                this.color = color
+            }
+
+            override fun getIntrinsicWidth(): Int = dp(20)
+
+            override fun getIntrinsicHeight(): Int = dp(20)
+
+            override fun draw(canvas: Canvas) {
+                val w = bounds.width().toFloat()
+                val h = bounds.height().toFloat()
+                val cx = bounds.exactCenterX()
+                val cy = bounds.exactCenterY()
+                val halfW = w * 0.42f
+                val halfH = h * 0.26f
+                val eye = Path().apply {
+                    moveTo(cx - halfW, cy)
+                    cubicTo(cx - halfW * 0.45f, cy - halfH, cx + halfW * 0.45f, cy - halfH, cx + halfW, cy)
+                    cubicTo(cx + halfW * 0.45f, cy + halfH, cx - halfW * 0.45f, cy + halfH, cx - halfW, cy)
+                    close()
+                }
+                canvas.drawPath(eye, pen)
+                canvas.drawCircle(cx, cy, h * 0.13f, fill)
+                if (crossed) {
+                    val d = w * 0.34f
+                    canvas.drawLine(cx - d, cy + d, cx + d, cy - d, pen)
+                }
+            }
+
+            override fun setAlpha(alpha: Int) {
+                pen.alpha = alpha
+                fill.alpha = alpha
+            }
+
+            override fun setColorFilter(colorFilter: ColorFilter?) {
+                pen.colorFilter = colorFilter
+                fill.colorFilter = colorFilter
+            }
+
+            @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
+            override fun getOpacity(): Int = PixelFormat.TRANSLUCENT
         }
 
         fun icon(kind: String, color: Int, size: Int): Drawable = object : Drawable() {
@@ -251,6 +256,7 @@ object Settings {
             }
 
             override fun getIntrinsicWidth(): Int = dp(size)
+
             override fun getIntrinsicHeight(): Int = dp(size)
 
             override fun draw(canvas: Canvas) {
@@ -280,13 +286,18 @@ object Settings {
             override fun getOpacity(): Int = PixelFormat.TRANSLUCENT
         }
 
-        fun circleButton(description: String): FrameLayout {
+        fun iconButton(description: String): FrameLayout {
             val root = FrameLayout(context).apply {
-                background = ripple(circle(Color.parseColor("#1D2026"), 1, BORDER))
+                background = ripple(
+                    StateListDrawable().apply {
+                        addState(intArrayOf(android.R.attr.state_focused), circle(SURFACE_HIGH, 2, CONTROL))
+                        addState(intArrayOf(), circle(SURFACE_HIGH))
+                    },
+                )
                 isClickable = true
                 isFocusable = true
                 contentDescription = description
-                layoutParams = LinearLayout.LayoutParams(dp(42), dp(42))
+                layoutParams = LinearLayout.LayoutParams(dp(44), dp(44))
             }
             root.addView(
                 ImageView(context).apply {
@@ -310,6 +321,7 @@ object Settings {
             }
 
             override fun getIntrinsicWidth(): Int = dp(22)
+
             override fun getIntrinsicHeight(): Int = dp(22)
 
             override fun draw(canvas: Canvas) {
@@ -333,44 +345,54 @@ object Settings {
             override fun getOpacity(): Int = PixelFormat.TRANSLUCENT
         }
 
-        val pages = FrameLayout(context).apply {
-            layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
+        fun dividerRow(): View = View(context).apply {
+            background = ColorDrawable(Color.argb(16, 255, 255, 255))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(1),
             )
         }
 
-        // faint aurora from the top corners: primary on one side, tertiary on the other
-        fun glow(color: Int, radius: Int, size: Int): View = View(context).apply {
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.OVAL
-                gradientType = GradientDrawable.RADIAL_GRADIENT
-                gradientRadius = dp(radius).toFloat()
-                setGradientCenter(0.5f, 0.5f)
-                setColors(intArrayOf(color, Color.TRANSPARENT))
-            }
-            layoutParams = FrameLayout.LayoutParams(dp(size), dp(size))
+        val pages = FrameLayout(context).apply {
+            setBackgroundColor(SURFACE)
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+            )
         }
-        val glowStart = glow(withAlpha(ACCENT, 26), 170, 340)
-        glowStart.layoutParams = FrameLayout.LayoutParams(dp(340), dp(340)).apply {
-            gravity = Gravity.TOP or Gravity.START
-            leftMargin = dp(-130)
-            topMargin = dp(-130)
+
+        val page = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+            )
         }
-        pages.addView(glowStart)
-        val glowEnd = glow(withAlpha(TONE_BEAD, 20), 160, 320)
-        glowEnd.layoutParams = FrameLayout.LayoutParams(dp(320), dp(320)).apply {
-            gravity = Gravity.TOP or Gravity.END
-            rightMargin = dp(-140)
-            topMargin = dp(-120)
+
+        val header = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(20), dp(16), dp(14))
         }
-        pages.addView(glowEnd)
+        val titleRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        titleRow.addView(
+            label("Multimovies", 22f, TEXT, medium = true),
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+        )
+        val close = iconButton("Close")
+        titleRow.addView(close)
+        header.addView(titleRow)
+        header.addView(
+            label("Metadata and API keys", 13f, TEXT_DIM)
+                .apply { setPadding(0, dp(6), 0, 0) },
+        )
+        page.addView(header)
+        page.addView(dividerRow())
 
         val contentColumn = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-            )
+            setPadding(dp(20), dp(18), dp(20), dp(32))
         }
         val contentScroll = ScrollView(context).apply {
             overScrollMode = View.OVER_SCROLL_NEVER
@@ -380,48 +402,46 @@ object Settings {
             isVerticalScrollBarEnabled = false
             addView(
                 contentColumn,
-                FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
                 ),
             )
         }
-
-        val header = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(20), dp(14), dp(16), dp(10))
-        }
-        val heading = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-        }
-        heading.addView(label("INDFLIX", 10f, TEXT_FAINT, medium = true, spacing = 0.26f))
-        heading.addView(
-            label("Settings", 24f, TEXT, medium = true).apply {
-                setPadding(0, dp(3), 0, 0)
-            },
-        )
-        header.addView(heading)
-        val close = circleButton("Close")
-        header.addView(close)
-        contentColumn.addView(
-            header,
+        page.addView(
+            contentScroll,
             LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f,
             ),
         )
+        pages.addView(page)
+
+        val groupRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 0, 0, dp(10))
+        }
+        groupRow.addView(
+            View(context).apply {
+                background = circle(TONE_BEAD)
+                layoutParams = LinearLayout.LayoutParams(dp(6), dp(6)).apply { rightMargin = dp(7) }
+            },
+        )
+        groupRow.addView(
+            label("KEYS & SERVICES", 11f, TEXT_DIM, medium = true, spacing = 0.14f),
+        )
+        groupRow.addView(
+            View(context).apply {
+                background = ColorDrawable(Color.argb(16, 255, 255, 255))
+                layoutParams = LinearLayout.LayoutParams(0, dp(1), 1f).apply { leftMargin = dp(12) }
+            },
+        )
+        contentColumn.addView(groupRow)
 
         val card = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(14), dp(16), dp(16))
-            background = glassPanel(24)
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply {
-                leftMargin = dp(16)
-                rightMargin = dp(16)
-                bottomMargin = dp(18)
-            }
+            setPadding(dp(18), dp(18), dp(18), dp(18))
+            background = rounded(SURFACE_LOW, 24)
         }
         contentColumn.addView(card)
 
@@ -430,15 +450,14 @@ object Settings {
             gravity = Gravity.CENTER_VERTICAL
         }
         val tile = FrameLayout(context).apply {
-            background = iconChip(16)
-            elevation = dp(2).toFloat()
-            layoutParams = LinearLayout.LayoutParams(dp(46), dp(46)).apply { rightMargin = dp(12) }
+            background = iconChip(18)
+            layoutParams = LinearLayout.LayoutParams(dp(52), dp(52)).apply { rightMargin = dp(14) }
         }
         tile.addView(
             ImageView(context).apply {
                 scaleType = ImageView.ScaleType.CENTER_INSIDE
                 setImageDrawable(tmdbIcon(TONE_GLYPH))
-                setPadding(dp(12), dp(12), dp(12), dp(12))
+                setPadding(dp(13), dp(13), dp(13), dp(13))
                 layoutParams = FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT,
                 )
@@ -449,20 +468,14 @@ object Settings {
             orientation = LinearLayout.VERTICAL
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
-        headTexts.addView(label("TMDB API Key", 15f, TEXT, medium = true))
-        val overline = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(2), 0, 0)
-        }
-        overline.addView(View(context).apply {
-            background = circle(TONE_BEAD)
-            layoutParams = LinearLayout.LayoutParams(dp(6), dp(6)).apply { rightMargin = dp(7) }
+        headTexts.addView(label("TMDB API Key", 16f, TEXT, medium = true).apply {
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
         })
-        overline.addView(
-            label("KEYS & SERVICES", 10f, TEXT_DIM, medium = true, spacing = 0.12f),
+        headTexts.addView(
+            label("Metadata and artwork", 13f, TEXT_FAINT)
+                .apply { setPadding(0, dp(4), 0, 0) },
         )
-        headTexts.addView(overline)
         sectionHead.addView(headTexts)
 
         val savedNow = tmdbApiKey() != null
@@ -485,20 +498,23 @@ object Settings {
 
         fun paintState(on: Boolean) {
             pillText.text = if (on) "Saved" else "Not set"
-            pillText.setTextColor(if (on) ACCENT_PALE else TEXT_MUTED)
+            pillText.setTextColor(if (on) CONTROL else TEXT_MUTED)
             statePill.background = if (on) {
-                rounded(withAlpha(ACCENT, 41), 999)
+                rounded(withAlpha(CONTROL, 26), 999)
             } else {
                 rounded(Color.argb(14, 255, 255, 255), 999)
             }
-            pillDot.background = if (on) circle(ACCENT) else circle(Color.TRANSPARENT, 1, TEXT_FAINT)
+            pillDot.background = if (on) circle(CONTROL) else circle(Color.TRANSPARENT, 1, TEXT_FAINT)
         }
         paintState(savedNow)
 
         val description = label(
             "Optional - built-ins apply when empty. Paste the API Key (v3), the short 32-character key, not the long Read Access Token.",
             12f, TEXT_DIM,
-        ).apply { setPadding(0, dp(12), 0, 0) }
+        ).apply {
+            setPadding(0, dp(16), 0, 0)
+            setLineSpacing(dp(2).toFloat(), 1f)
+        }
         card.addView(description)
 
         val tmdbKeyInput = EditText(context).apply {
@@ -508,15 +524,58 @@ object Settings {
             setTextColor(TEXT)
             setSingleLine(true)
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            transformationMethod = PasswordTransformationMethod.getInstance()
             typeface = Typeface.MONOSPACE
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-            setPadding(dp(14), dp(12), dp(14), dp(12))
+            setPadding(dp(14), dp(12), dp(10), dp(12))
             background = inputBackground()
             layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { topMargin = dp(12) }
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f,
+            )
         }
-        card.addView(tmdbKeyInput)
+        var keyVisible = false
+        val eye = ImageView(context).apply {
+            scaleType = ImageView.ScaleType.CENTER
+            background = ripple(
+                StateListDrawable().apply {
+                    addState(intArrayOf(android.R.attr.state_focused), circle(SURFACE_HIGH, 2, CONTROL))
+                    addState(intArrayOf(), circle(SURFACE_HIGH))
+                },
+            )
+            isClickable = true
+            isFocusable = true
+            contentDescription = "Show key"
+            setImageDrawable(eyeIcon(false, TEXT_DIM))
+            layoutParams = LinearLayout.LayoutParams(dp(44), dp(44)).apply { leftMargin = dp(8) }
+        }
+        val keyRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(14) }
+            addView(tmdbKeyInput)
+            addView(eye)
+        }
+        fun paintEye() {
+            tmdbKeyInput.inputType = InputType.TYPE_CLASS_TEXT or
+                if (keyVisible) {
+                    InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+                } else {
+                    InputType.TYPE_TEXT_VARIATION_PASSWORD
+                }
+            tmdbKeyInput.transformationMethod =
+                if (keyVisible) null else PasswordTransformationMethod.getInstance()
+            tmdbKeyInput.typeface = Typeface.MONOSPACE
+            tmdbKeyInput.setSelection(tmdbKeyInput.text.length)
+            eye.setImageDrawable(eyeIcon(keyVisible, if (keyVisible) TEXT else TEXT_DIM))
+            eye.contentDescription = if (keyVisible) "Hide key" else "Show key"
+        }
+        eye.setOnClickListener {
+            keyVisible = !keyVisible
+            paintEye()
+        }
+        card.addView(keyRow)
 
         val tmdbStatusText = label(
             if (savedNow) "Your key is used for metadata first." else "Built-in keys are in use.",
@@ -527,12 +586,14 @@ object Settings {
         val chipRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(14), 0, 0)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(16) }
         }
-        val getApi = pill("Get key", "outlined")
-        getApi.layoutParams = LinearLayout.LayoutParams(0, dp(44), 1f).apply { rightMargin = dp(8) }
-        val verify = pill("Verify", "tonal")
-        verify.layoutParams = LinearLayout.LayoutParams(0, dp(44), 1f)
+        val getApi = pill("Get key")
+        getApi.layoutParams = LinearLayout.LayoutParams(0, dp(48), 1f).apply { rightMargin = dp(10) }
+        val verify = pill("Verify")
+        verify.layoutParams = LinearLayout.LayoutParams(0, dp(48), 1f)
         chipRow.addView(getApi)
         chipRow.addView(verify)
         card.addView(chipRow)
@@ -540,57 +601,47 @@ object Settings {
         val buttonRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(10), 0, 0)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(10) }
         }
-        val clearBtn = pill("Clear", "outlined")
-        clearBtn.layoutParams = LinearLayout.LayoutParams(0, dp(44), 1f).apply { rightMargin = dp(8) }
-        val saveBtn = pill("Save", "filled")
-        saveBtn.layoutParams = LinearLayout.LayoutParams(0, dp(44), 1f)
+        val clearBtn = pill("Clear")
+        clearBtn.layoutParams = LinearLayout.LayoutParams(0, dp(48), 1f).apply { rightMargin = dp(10) }
+        val saveBtn = pill("Save", true)
+        saveBtn.layoutParams = LinearLayout.LayoutParams(0, dp(48), 1f)
         buttonRow.addView(clearBtn)
         buttonRow.addView(saveBtn)
         card.addView(buttonRow)
-        pages.addView(contentScroll)
-
-        // specular highlight along the top edge of the glass sheet
-        val specular = View(context).apply {
-            background = GradientDrawable(
-                GradientDrawable.Orientation.LEFT_RIGHT,
-                intArrayOf(
-                    Color.TRANSPARENT,
-                    Color.argb(72, 255, 255, 255),
-                    Color.argb(72, 255, 255, 255),
-                    Color.TRANSPARENT,
-                ),
-            )
-            layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(1),
-            ).apply { topMargin = dp(1) }
-        }
-        pages.addView(specular)
 
         val sheet = FrameLayout(context).apply {
-            background = sheetFill()
-            clipToOutline = true
-            elevation = dp(18).toFloat()
+            background = ColorDrawable(SURFACE)
             addView(
                 pages,
                 FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT,
                 ),
             )
         }
 
-        val dialog = AlertDialog.Builder(context, android.R.style.Theme_Material_Dialog)
-            .setView(sheet)
-            .create()
+        val dialog = Dialog(context, android.R.style.Theme_Material_Dialog)
+        dialog.setContentView(
+            sheet,
+            ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+            ),
+        )
 
+        val enter = PathInterpolator(0.05f, 0.7f, 0.1f, 1f)
+        val exit = PathInterpolator(0.4f, 0f, 1f, 1f)
         var closing = false
         fun dismissSheet() {
             if (closing) return
             closing = true
-            sheet.animate().scaleX(0.97f).scaleY(0.97f).alpha(0f)
-                .setDuration(170)
+            pages.animate().alpha(0f)
+                .setDuration(140)
+                .setInterpolator(exit)
                 .withEndAction { dialog.dismiss() }
                 .start()
         }
@@ -631,29 +682,22 @@ object Settings {
         }
         close.setOnClickListener { dismissSheet() }
         dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-        dialog.window?.setDimAmount(0.55f)
+        dialog.window?.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+        dialog.window?.setDimAmount(0f)
+        dialog.window?.setWindowAnimations(0)
+        dialog.window?.setLayout(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT,
+        )
         dialog.show()
-        val width = (context.resources.displayMetrics.widthPixels * 0.92f).roundToInt()
-        dialog.window?.setLayout(minOf(width, dp(560)), ViewGroup.LayoutParams.WRAP_CONTENT)
 
-        // expressive entrance: the sheet settles, content staggers up
-        val enter = PathInterpolator(0.05f, 0.7f, 0.1f, 1f)
-        sheet.scaleX = 0.96f
-        sheet.scaleY = 0.96f
-        sheet.alpha = 0f
-        sheet.animate().scaleX(1f).scaleY(1f).alpha(1f)
-            .setDuration(300)
+        // opaque entrance: the page surface is painted first, then content settles in
+        pages.alpha = 0f
+        pages.translationY = dp(12).toFloat()
+        pages.animate().alpha(1f).translationY(0f)
+            .setDuration(260)
             .setInterpolator(enter)
+            .withLayer()
             .start()
-        for (index in 0 until contentColumn.childCount) {
-            val child = contentColumn.getChildAt(index)
-            child.translationY = dp(14).toFloat()
-            child.alpha = 0f
-            child.animate().translationY(0f).alpha(1f)
-                .setStartDelay((index * 60).toLong())
-                .setDuration(260)
-                .setInterpolator(DecelerateInterpolator(1.6f))
-                .start()
-        }
     }
 }

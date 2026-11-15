@@ -1,6 +1,6 @@
 package com.indstream
 
-import android.app.AlertDialog
+import android.app.Dialog
 import android.content.Context
 import android.content.Intent
 import android.content.res.ColorStateList
@@ -10,6 +10,7 @@ import android.graphics.ColorFilter
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.PixelFormat
+import android.graphics.Rect
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
@@ -26,9 +27,8 @@ import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
-import android.view.animation.DecelerateInterpolator
-import android.view.animation.OvershootInterpolator
 import android.view.animation.PathInterpolator
 import android.widget.ArrayAdapter
 import android.widget.AutoCompleteTextView
@@ -59,45 +59,40 @@ import kotlin.math.roundToInt
 
 object SettingsUi {
 
+    private val SURFACE = Color.parseColor("#101319")
+    private val SURFACE_LOW = Color.parseColor("#161A21")
+    private val SURFACE_HIGH = Color.parseColor("#1E232B")
     private val BORDER = Color.parseColor("#3B414B")
     private val TEXT = Color.parseColor("#E3E4EA")
     private val TEXT_DIM = Color.parseColor("#C1C6D1")
     private val TEXT_MUTED = Color.parseColor("#AAB0BC")
     private val TEXT_FAINT = Color.parseColor("#8B929E")
-    private val ACCENT = Color.parseColor("#A9C7FF")
-    private val ACCENT_PALE = Color.parseColor("#D7E3FF")
-    private val ACCENT_TOP = Color.parseColor("#C4D8FF")
-    private val ON_PRIMARY = Color.parseColor("#003063")
-    private val SECONDARY_CONTAINER = Color.parseColor("#2A3A4D")
-    private val ON_SECONDARY_CONTAINER = Color.parseColor("#D8E3F6")
+    private val CONTROL = Color.parseColor("#DFDFDF")
+    private val ON_CONTROL = Color.parseColor("#14171C")
     private val SUCCESS = Color.parseColor("#7FD9A0")
     private val WARNING = Color.parseColor("#FFB4AB")
 
-    private val GLASS_STROKE = Color.argb(36, 255, 255, 255)
-    private val GLASS_STROKE_SOFT = Color.argb(22, 255, 255, 255)
+    private val HAIRLINE = Color.argb(28, 255, 255, 255)
+    private val HAIRLINE_SOFT = Color.argb(16, 255, 255, 255)
 
     private class Tone(
-        val top: Int,
-        val bottom: Int,
+        val container: Int,
         val glyph: Int,
         val bead: Int,
     )
 
     private val TONE_PRIMARY = Tone(
         Color.parseColor("#2B4F86"),
-        Color.parseColor("#1E3B64"),
         Color.parseColor("#D7E3FF"),
         Color.parseColor("#A9C7FF"),
     )
     private val TONE_SECONDARY = Tone(
         Color.parseColor("#374C64"),
-        Color.parseColor("#26384A"),
         Color.parseColor("#D8E3F6"),
         Color.parseColor("#BCC7DA"),
     )
     private val TONE_TERTIARY = Tone(
         Color.parseColor("#4E3766"),
-        Color.parseColor("#392946"),
         Color.parseColor("#F2DAFF"),
         Color.parseColor("#D9BCE9"),
     )
@@ -153,82 +148,17 @@ object SettingsUi {
                 if (stroke.toFloat() > 0f) setStroke(dp(stroke), strokeColor)
             }
 
-        // frosted fill: bright top light falling off to a faint base, hairline rim
-        fun glassFill(
-            radius: Number = 22,
-            topAlpha: Int = 26,
-            bottomAlpha: Int = 10,
-            stroke: Int = GLASS_STROKE,
-        ): GradientDrawable =
-            GradientDrawable(
-                GradientDrawable.Orientation.TOP_BOTTOM,
-                intArrayOf(Color.argb(topAlpha, 255, 255, 255), Color.argb(bottomAlpha, 255, 255, 255)),
-            ).apply {
-                shape = GradientDrawable.RECTANGLE
-                cornerRadius = dp(radius).toFloat()
-                setStroke(dp(1), stroke)
-            }
-
-        fun sheetFill(): GradientDrawable =
-            GradientDrawable(
-                GradientDrawable.Orientation.TOP_BOTTOM,
-                intArrayOf(Color.parseColor("#171A21"), Color.parseColor("#0E1116")),
-            ).apply {
-                shape = GradientDrawable.RECTANGLE
-                cornerRadius = dp(32).toFloat()
-                setStroke(dp(1), Color.argb(36, 255, 255, 255))
-            }
-
-        fun glassPanel(radius: Number = 24): GradientDrawable =
-            GradientDrawable(
-                GradientDrawable.Orientation.TOP_BOTTOM,
-                intArrayOf(Color.parseColor("#1D2026"), Color.parseColor("#14171D")),
-            ).apply {
-                shape = GradientDrawable.RECTANGLE
-                cornerRadius = dp(radius).toFloat()
-                setStroke(dp(1), BORDER)
-            }
-
         fun withAlpha(color: Int, alpha: Int): Int =
             Color.argb(alpha, Color.red(color), Color.green(color), Color.blue(color))
 
-        fun iconChip(tone: Tone, radius: Number): Drawable {
-            val base = GradientDrawable(
-                GradientDrawable.Orientation.TOP_BOTTOM,
-                intArrayOf(tone.top, tone.bottom),
-            ).apply {
-                shape = GradientDrawable.RECTANGLE
-                cornerRadius = dp(radius).toFloat()
-                setStroke(dp(1), withAlpha(tone.glyph, 36))
-            }
-            val aura = GradientDrawable().apply {
-                shape = GradientDrawable.OVAL
-                gradientType = GradientDrawable.RADIAL_GRADIENT
-                gradientRadius = dp(30).toFloat()
-                setGradientCenter(0.5f, 0.34f)
-                setColors(intArrayOf(withAlpha(tone.glyph, 30), Color.TRANSPARENT))
-            }
-            val sheen = GradientDrawable(
-                GradientDrawable.Orientation.TOP_BOTTOM,
-                intArrayOf(Color.argb(18, 255, 255, 255), Color.TRANSPARENT),
-            ).apply { cornerRadius = dp(radius).toFloat() }
-            return LayerDrawable(arrayOf(base, aura, sheen))
-        }
+        fun iconChip(tone: Tone, radius: Number): Drawable = rounded(tone.container, radius)
 
-        fun inputFill(focused: Boolean): GradientDrawable =
-            GradientDrawable(
-                GradientDrawable.Orientation.TOP_BOTTOM,
-                if (focused) {
-                    intArrayOf(Color.argb(34, 255, 255, 255), Color.argb(16, 255, 255, 255))
-                } else {
-                    intArrayOf(Color.argb(16, 255, 255, 255), Color.argb(8, 255, 255, 255))
-                },
-            ).apply {
-                shape = GradientDrawable.RECTANGLE
-                cornerRadius = dp(16).toFloat()
-                if (focused) setStroke(dp(1.4f).coerceAtLeast(1), ACCENT)
-                else setStroke(dp(1), GLASS_STROKE)
-            }
+        fun inputFill(focused: Boolean): GradientDrawable = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            setColor(if (focused) SURFACE_HIGH else SURFACE_LOW)
+            cornerRadius = dp(16).toFloat()
+            if (focused) setStroke(dp(2), CONTROL) else setStroke(dp(1), HAIRLINE)
+        }
 
         fun inputBackground(): StateListDrawable = StateListDrawable().apply {
             addState(intArrayOf(android.R.attr.state_focused), inputFill(true))
@@ -237,18 +167,6 @@ object SettingsUi {
 
         fun ripple(content: Drawable, color: Int = Color.argb(30, 255, 255, 255)): RippleDrawable =
             RippleDrawable(ColorStateList.valueOf(color), content, null)
-
-        fun glow(color: Int, radius: Int): View {
-            val view = View(context)
-            view.background = GradientDrawable().apply {
-                shape = GradientDrawable.OVAL
-                gradientType = GradientDrawable.RADIAL_GRADIENT
-                gradientRadius = dp(radius).toFloat()
-                setGradientCenter(0.5f, 0.5f)
-                setColors(intArrayOf(color, Color.TRANSPARENT))
-            }
-            return view
-        }
 
         val control = dp(44)
         val gap = dp(8)
@@ -378,15 +296,13 @@ object SettingsUi {
                         line(0.75f, 0.3f, 0.75f, 0.66f)
                     }
                     "subs" -> {
-                        rr(0.12f, 0.16f, 0.88f, 0.66f, 5f)
-                        val tail = Path().apply {
-                            moveTo(w * 0.3f, h * 0.66f)
-                            lineTo(w * 0.3f, h * 0.86f)
-                            lineTo(w * 0.48f, h * 0.66f)
-                        }
-                        canvas.drawPath(tail, pen)
-                        line(0.28f, 0.33f, 0.72f, 0.33f)
-                        line(0.28f, 0.5f, 0.6f, 0.5f)
+                        rr(0.10f, 0.20f, 0.90f, 0.80f, 5f)
+                        fill.typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                        fill.textSize = w * 0.30f
+                        fill.textAlign = Paint.Align.CENTER
+                        val bounds = Rect()
+                        fill.getTextBounds("CC", 0, 2, bounds)
+                        canvas.drawText("CC", w * 0.5f, h * 0.5f - bounds.exactCenterY(), fill)
                     }
                     "tmdb" -> {
                         canvas.drawCircle(w * 0.31f, h * 0.31f, w * 0.17f, pen)
@@ -467,19 +383,22 @@ object SettingsUi {
         }
 
         fun pill(value: String, primary: Boolean = false): TextView =
-            label(value, 12f, if (primary) ON_PRIMARY else TEXT_DIM, medium = true).apply {
+            label(value, 12f, if (primary) ON_CONTROL else TEXT_DIM, medium = true).apply {
                 gravity = Gravity.CENTER
                 setPadding(dp(16), 0, dp(16), 0)
                 background = ripple(
-                    if (primary) {
-                        rounded(ACCENT_TOP, 999)
-                    } else {
-                        rounded(Color.TRANSPARENT, 999, 1, BORDER)
+                    StateListDrawable().apply {
+                        if (primary) {
+                            addState(intArrayOf(android.R.attr.state_focused), rounded(CONTROL, 999, 2, ON_CONTROL))
+                            addState(intArrayOf(), rounded(CONTROL, 999))
+                        } else {
+                            addState(intArrayOf(android.R.attr.state_focused), rounded(Color.TRANSPARENT, 999, 2, CONTROL))
+                            addState(intArrayOf(), rounded(Color.TRANSPARENT, 999, 1, BORDER))
+                        }
                     },
                 )
                 isClickable = true
                 isFocusable = true
-                if (primary) elevation = dp(3).toFloat()
                 layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT, control,
                 ).apply { rightMargin = gap }
@@ -488,10 +407,15 @@ object SettingsUi {
         fun chip(value: String): TextView = pill(value)
 
         fun textButton(value: String): TextView =
-            label(value, 12f, ACCENT_PALE, medium = true).apply {
+            label(value, 12f, TEXT, medium = true).apply {
                 gravity = Gravity.CENTER
                 setPadding(dp(14), 0, dp(14), 0)
-                background = ripple(rounded(Color.TRANSPARENT, 999))
+                background = ripple(
+                    StateListDrawable().apply {
+                        addState(intArrayOf(android.R.attr.state_focused), rounded(Color.TRANSPARENT, 999, 2, CONTROL))
+                        addState(intArrayOf(), rounded(Color.TRANSPARENT, 999))
+                    },
+                )
                 isClickable = true
                 isFocusable = true
                 layoutParams = LinearLayout.LayoutParams(
@@ -500,15 +424,39 @@ object SettingsUi {
             }
 
         fun markChip(target: TextView, on: Boolean) {
-            target.setTextColor(if (on) ON_SECONDARY_CONTAINER else TEXT_DIM)
+            target.setTextColor(if (on) ON_CONTROL else TEXT_DIM)
             target.background = ripple(
-                if (on) rounded(SECONDARY_CONTAINER, 999) else rounded(Color.TRANSPARENT, 999, 1, BORDER),
+                StateListDrawable().apply {
+                    if (on) {
+                        addState(intArrayOf(android.R.attr.state_focused), rounded(CONTROL, 999, 2, ON_CONTROL))
+                        addState(intArrayOf(), rounded(CONTROL, 999))
+                    } else {
+                        addState(intArrayOf(android.R.attr.state_focused), rounded(Color.TRANSPARENT, 999, 2, CONTROL))
+                        addState(intArrayOf(), rounded(Color.TRANSPARENT, 999, 1, BORDER))
+                    }
+                },
             )
         }
 
         fun action(value: String, primary: Boolean): TextView = pill(value, primary).apply {
-            setTextColor(if (primary) ON_PRIMARY else TEXT)
+            setTextColor(if (primary) ON_CONTROL else TEXT)
         }
+
+        fun filledAction(value: String, iconKind: String): TextView =
+            label(value, 13f, ON_CONTROL, medium = true).apply {
+                gravity = Gravity.CENTER
+                setPadding(dp(18), 0, dp(18), 0)
+                background = ripple(
+                    StateListDrawable().apply {
+                        addState(intArrayOf(android.R.attr.state_focused), rounded(CONTROL, 999, 2, ON_CONTROL))
+                        addState(intArrayOf(), rounded(CONTROL, 999))
+                    },
+                )
+                isClickable = true
+                isFocusable = true
+                setCompoundDrawablesWithIntrinsicBounds(icon(iconKind, ON_CONTROL, 18), null, null, null)
+                compoundDrawablePadding = dp(8)
+            }
 
         fun field(value: String, hint: String): EditText = EditText(context).apply {
             setText(value)
@@ -552,7 +500,7 @@ object SettingsUi {
             }
             val toggle = ImageView(context).apply {
                 scaleType = ImageView.ScaleType.CENTER
-                background = ripple(circle(Color.argb(16, 255, 255, 255), 1, GLASS_STROKE))
+                background = ripple(circle(SURFACE_HIGH))
                 isClickable = true
                 isFocusable = true
                 layoutParams = LinearLayout.LayoutParams(control, control).apply { leftMargin = gap }
@@ -573,7 +521,7 @@ object SettingsUi {
                     if (visible) null else PasswordTransformationMethod.getInstance()
                 input.typeface = Typeface.MONOSPACE
                 input.setSelection(input.text.length)
-                toggle.setImageDrawable(eyeIcon(visible, if (visible) ACCENT_PALE else TEXT_DIM))
+                toggle.setImageDrawable(eyeIcon(visible, if (visible) TEXT else TEXT_DIM))
                 toggle.contentDescription = if (visible) "Hide key" else "Show key"
             }
             var visible = false
@@ -628,14 +576,17 @@ object SettingsUi {
 
         fun paintOption(opt: Option, on: Boolean) {
             opt.root.background = ripple(
-                if (on) {
-                    rounded(SECONDARY_CONTAINER, 16)
-                } else {
-                    rounded(Color.TRANSPARENT, 16, 1, BORDER)
+                StateListDrawable().apply {
+                    val fill = if (on) SURFACE_HIGH else Color.TRANSPARENT
+                    addState(intArrayOf(android.R.attr.state_focused), rounded(fill, 16, 2, CONTROL))
+                    addState(
+                        intArrayOf(),
+                        if (on) rounded(SURFACE_HIGH, 16) else rounded(Color.TRANSPARENT, 16, 1, BORDER),
+                    )
                 },
             )
             opt.dot.background = if (on) {
-                LayerDrawable(arrayOf(circle(Color.TRANSPARENT, 2, ACCENT), circle(ACCENT))).apply {
+                LayerDrawable(arrayOf(circle(Color.TRANSPARENT, 2, CONTROL), circle(CONTROL))).apply {
                     setLayerInset(1, dp(5), dp(5), dp(5), dp(5))
                 }
             } else {
@@ -646,6 +597,12 @@ object SettingsUi {
         fun smallToggle(initial: Boolean, onChange: (Boolean) -> Unit): View {
             val root = FrameLayout(context).apply {
                 layoutParams = LinearLayout.LayoutParams(dp(52), dp(32))
+                background = ripple(
+                    StateListDrawable().apply {
+                        addState(intArrayOf(android.R.attr.state_focused), rounded(Color.TRANSPARENT, 999, 2, CONTROL))
+                        addState(intArrayOf(), rounded(Color.TRANSPARENT, 999))
+                    },
+                )
                 isClickable = true
                 isFocusable = true
                 contentDescription = if (initial) "Disable" else "Enable"
@@ -663,11 +620,11 @@ object SettingsUi {
             var checked = initial
             fun paint() {
                 track.background = if (checked) {
-                    rounded(ACCENT, 999)
+                    rounded(CONTROL, 999)
                 } else {
-                    rounded(Color.argb(20, 255, 255, 255), 999, 1, BORDER)
+                    rounded(SURFACE_HIGH, 999)
                 }
-                thumb.background = circle(if (checked) ON_PRIMARY else TEXT_FAINT)
+                thumb.background = circle(if (checked) ON_CONTROL else TEXT_FAINT)
                 root.contentDescription = if (checked) "Disable" else "Enable"
             }
             paint()
@@ -675,8 +632,8 @@ object SettingsUi {
                 checked = !checked
                 paint()
                 thumb.animate().translationX(if (checked) dp(20).toFloat() else 0f)
-                    .setDuration(220)
-                    .setInterpolator(OvershootInterpolator(0.7f))
+                    .setDuration(200)
+                    .setInterpolator(PathInterpolator(0.2f, 0f, 0f, 1f))
                     .start()
                 onChange(checked)
             }
@@ -685,7 +642,12 @@ object SettingsUi {
 
         fun deleteIcon(description: String = "Delete", onClick: () -> Unit): FrameLayout {
             val root = FrameLayout(context).apply {
-                background = ripple(circle(Color.argb(12, 255, 255, 255), 1, GLASS_STROKE_SOFT))
+                background = ripple(
+                    StateListDrawable().apply {
+                        addState(intArrayOf(android.R.attr.state_focused), circle(SURFACE_HIGH, 2, CONTROL))
+                        addState(intArrayOf(), circle(SURFACE_HIGH))
+                    },
+                )
                 isClickable = true
                 isFocusable = true
                 contentDescription = description
@@ -704,19 +666,43 @@ object SettingsUi {
             return root
         }
 
+        fun iconButton(kind: String, description: String): FrameLayout {
+            val root = FrameLayout(context).apply {
+                background = ripple(
+                    StateListDrawable().apply {
+                        addState(intArrayOf(android.R.attr.state_focused), circle(SURFACE_HIGH, 2, CONTROL))
+                        addState(intArrayOf(), circle(SURFACE_HIGH))
+                    },
+                )
+                isClickable = true
+                isFocusable = true
+                contentDescription = description
+                layoutParams = LinearLayout.LayoutParams(dp(44), dp(44))
+            }
+            root.addView(
+                ImageView(context).apply {
+                    scaleType = ImageView.ScaleType.CENTER
+                    setImageDrawable(icon(kind, TEXT, 18))
+                    layoutParams = FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT,
+                    )
+                },
+            )
+            return root
+        }
+
         fun reportDialog(
             title: String,
             subtitle: String,
             rows: List<Triple<String, String, Int>> = emptyList(),
-            accent: Int = ACCENT,
+            accent: Int = TEXT_FAINT,
             actionLabel: String = "Done",
             onAction: (() -> Unit)? = null,
         ) {
             val panel = LinearLayout(context).apply {
                 orientation = LinearLayout.VERTICAL
-                setPadding(dp(20), dp(18), dp(20), dp(16))
-                background = glassPanel(24)
-                elevation = dp(10).toFloat()
+                setPadding(dp(24), dp(28), dp(24), dp(24))
+                background = ColorDrawable(SURFACE)
             }
             val head = LinearLayout(context).apply {
                 orientation = LinearLayout.HORIZONTAL
@@ -725,31 +711,39 @@ object SettingsUi {
             head.addView(
                 View(context).apply {
                     background = circle(accent)
-                    layoutParams = LinearLayout.LayoutParams(dp(9), dp(9)).apply { rightMargin = dp(9) }
+                    layoutParams = LinearLayout.LayoutParams(dp(8), dp(8)).apply { rightMargin = dp(10) }
                 },
             )
-            head.addView(label(title, 18f, TEXT, medium = true))
+            head.addView(
+                label(title, 24f, TEXT, medium = true),
+                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+            )
+            val close = iconButton("close", "Close")
+            head.addView(close)
             panel.addView(head)
             panel.addView(
-                label(subtitle, 11f, TEXT_DIM).apply { setPadding(0, dp(6), 0, 0) },
+                label(subtitle, 13f, TEXT_DIM).apply {
+                    setPadding(0, dp(8), 0, 0)
+                    setLineSpacing(dp(2).toFloat(), 1f)
+                },
             )
             if (rows.isNotEmpty()) {
                 val list = LinearLayout(context).apply {
                     orientation = LinearLayout.VERTICAL
-                    setPadding(0, dp(14), 0, 0)
+                    setPadding(0, dp(18), 0, 0)
                 }
                 rows.forEachIndexed { index, (name, value, tone) ->
                     list.addView(
                         LinearLayout(context).apply {
                             orientation = LinearLayout.HORIZONTAL
                             gravity = Gravity.CENTER_VERTICAL
-                            setPadding(dp(12), dp(11), dp(12), dp(11))
-                            background = glassFill(12, 18, 9)
+                            setPadding(dp(14), dp(13), dp(14), dp(13))
+                            background = rounded(SURFACE_LOW, 16)
                             addView(
-                                label(name, 12f, TEXT_DIM),
+                                label(name, 13f, TEXT_DIM),
                                 LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
                             )
-                            addView(label(value, 13f, tone, medium = true))
+                            addView(label(value, 14f, tone, medium = true))
                         },
                         LinearLayout.LayoutParams(
                             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -758,25 +752,41 @@ object SettingsUi {
                 }
                 panel.addView(list)
             }
+            panel.addView(
+                View(context),
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f),
+            )
             val done = action(actionLabel, primary = true).apply {
                 layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, dp(44),
-                ).apply { topMargin = dp(16) }
+                    ViewGroup.LayoutParams.MATCH_PARENT, dp(48),
+                )
             }
             panel.addView(done)
 
-            val report = AlertDialog.Builder(context, android.R.style.Theme_Material_Dialog)
-                .setView(panel)
-                .create()
+            val report = Dialog(context, android.R.style.Theme_Material_Dialog)
+            report.setContentView(
+                panel,
+                ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                ),
+            )
             report.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-            report.window?.setDimAmount(0.6f)
+            report.window?.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+            report.window?.setDimAmount(0f)
+            report.window?.setWindowAnimations(0)
+            report.window?.setLayout(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+            )
+            close.setOnClickListener { report.dismiss() }
             done.setOnClickListener {
                 report.dismiss()
                 onAction?.invoke()
             }
             report.show()
-            val width = (context.resources.displayMetrics.widthPixels * 0.86f).roundToInt()
-            report.window?.setLayout(width, ViewGroup.LayoutParams.WRAP_CONTENT)
+            panel.alpha = 0f
+            panel.animate().alpha(1f).setDuration(200).withLayer().start()
         }
 
         fun showRowOrderEditor() {
@@ -795,23 +805,45 @@ object SettingsUi {
 
             val panel = LinearLayout(context).apply {
                 orientation = LinearLayout.VERTICAL
-                setPadding(dp(18), dp(16), dp(18), dp(14))
-                background = glassPanel(24)
-                elevation = dp(10).toFloat()
+                setPadding(dp(24), dp(28), dp(24), dp(24))
+                background = ColorDrawable(SURFACE)
             }
-            panel.addView(label("Home Row Order", 18f, TEXT, medium = true))
+            val head = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            val headTexts = LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            }
+            headTexts.addView(label("Home Row Order", 24f, TEXT, medium = true))
+            headTexts.addView(
+                label("Use the arrows to set the order.", 13f, TEXT_DIM)
+                    .apply { setPadding(0, dp(4), 0, 0) },
+            )
+            head.addView(headTexts)
+            val close = iconButton("close", "Close")
+            head.addView(close)
+            panel.addView(head)
 
             val list = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
             val listScroll = ScrollView(context).apply {
                 overScrollMode = View.OVER_SCROLL_NEVER
                 isFillViewport = false
-                addView(list)
+                isVerticalScrollBarEnabled = false
+                addView(
+                    list,
+                    ViewGroup.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ),
+                )
             }
             panel.addView(
                 listScroll,
                 LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-                ).apply { topMargin = dp(10) },
+                    ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f,
+                ).apply { topMargin = dp(16) },
             )
 
             val status = label("", 12f, TEXT_DIM, medium = true).apply {
@@ -836,11 +868,23 @@ object SettingsUi {
             }
             panel.addView(actions)
 
-            val editor = AlertDialog.Builder(context, android.R.style.Theme_Material_Dialog)
-                .setView(panel)
-                .create()
+            val editor = Dialog(context, android.R.style.Theme_Material_Dialog)
+            editor.setContentView(
+                panel,
+                ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                ),
+            )
             editor.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-            editor.window?.setDimAmount(0.65f)
+            editor.window?.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+            editor.window?.setDimAmount(0f)
+            editor.window?.setWindowAnimations(0)
+            editor.window?.setLayout(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+            )
+            close.setOnClickListener { editor.dismiss() }
 
             fun savedKeys(): List<String> = Catalogue.homeRows().map { it.first }
 
@@ -849,25 +893,11 @@ object SettingsUi {
             fun paintStatus() {
                 if (currentKeys() != savedKeys()) {
                     status.visibility = View.VISIBLE
-                    status.setTextColor(ACCENT_PALE)
+                    status.setTextColor(TEXT)
                     status.text = "Unsaved changes"
                 } else {
                     status.visibility = View.GONE
                 }
-            }
-
-            fun measureList() {
-                val metrics = context.resources.displayMetrics
-                val width = ((metrics.widthPixels * 0.9f).roundToInt() - dp(36)).coerceAtLeast(dp(180))
-                list.measure(
-                    View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
-                    View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
-                )
-                val maxHeight = (metrics.heightPixels * 0.52f).roundToInt()
-                listScroll.layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    list.measuredHeight.coerceAtMost(maxHeight).coerceAtLeast(dp(80)),
-                ).apply { topMargin = dp(10) }
             }
 
             fun render() {
@@ -876,7 +906,12 @@ object SettingsUi {
 
                 fun step(kind: String, description: String, enabled: Boolean, onClick: () -> Unit): FrameLayout {
                     val root = FrameLayout(context).apply {
-                        background = ripple(glassFill(12, 18, 9))
+                        background = ripple(
+                            StateListDrawable().apply {
+                                addState(intArrayOf(android.R.attr.state_focused), rounded(SURFACE_HIGH, 12, 2, CONTROL))
+                                addState(intArrayOf(), rounded(SURFACE_HIGH, 12))
+                            },
+                        )
                         layoutParams = LinearLayout.LayoutParams(dp(36), dp(36)).apply { leftMargin = dp(6) }
                         isClickable = enabled
                         isFocusable = enabled
@@ -900,8 +935,8 @@ object SettingsUi {
                     val item = LinearLayout(context).apply {
                         orientation = LinearLayout.HORIZONTAL
                         gravity = Gravity.CENTER_VERTICAL
-                        setPadding(dp(10), dp(8), dp(8), dp(8))
-                        background = ripple(glassFill(12, 18, 9))
+                        setPadding(dp(12), dp(10), dp(10), dp(10))
+                        background = ripple(rounded(SURFACE_LOW, 16))
                         layoutParams = LinearLayout.LayoutParams(
                             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
                         ).apply { bottomMargin = dp(6) }
@@ -909,11 +944,11 @@ object SettingsUi {
                     val number = label(
                         "${index + 1}",
                         12f,
-                        ACCENT_PALE,
+                        TEXT,
                         medium = true,
                     ).apply {
                         gravity = Gravity.CENTER
-                        background = rounded(Color.TRANSPARENT, 12, 1, GLASS_STROKE)
+                        background = rounded(SURFACE_HIGH, 12)
                         layoutParams = LinearLayout.LayoutParams(dp(32), dp(32))
                         contentDescription = "Position ${index + 1}"
                     }
@@ -942,7 +977,6 @@ object SettingsUi {
                     list.addView(item)
                 }
                 paintStatus()
-                measureList()
                 listScroll.post { listScroll.scrollTo(0, scrollY) }
             }
 
@@ -970,14 +1004,11 @@ object SettingsUi {
 
             render()
             editor.show()
-            val metrics = context.resources.displayMetrics
-            editor.window?.setLayout(
-                (metrics.widthPixels * 0.9f).roundToInt(),
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            )
+            panel.alpha = 0f
+            panel.animate().alpha(1f).setDuration(200).withLayer().start()
         }
 
-        var dialog: AlertDialog? = null
+        var dialog: Dialog? = null
         var providerProbeJob: Job? = null
 
         // state bus: detail toolbars and home tiles both paint from this
@@ -1002,14 +1033,14 @@ object SettingsUi {
 
         fun paintStatePill(pill: StatePill, value: String, on: Boolean) {
             pill.text.text = value
-            pill.text.setTextColor(if (on) ACCENT_PALE else TEXT_MUTED)
+            pill.text.setTextColor(if (on) CONTROL else TEXT_MUTED)
             pill.root.background = if (on) {
-                rounded(withAlpha(ACCENT, 41), 999)
+                rounded(withAlpha(CONTROL, 26), 999)
             } else {
                 rounded(Color.argb(14, 255, 255, 255), 999)
             }
             pill.dot.background =
-                if (on) circle(ACCENT) else circle(Color.TRANSPARENT, 1, TEXT_FAINT)
+                if (on) circle(CONTROL) else circle(Color.TRANSPARENT, 1, TEXT_FAINT)
         }
 
         fun statePill(): StatePill {
@@ -1025,26 +1056,6 @@ object SettingsUi {
             root.addView(dot)
             root.addView(text)
             return StatePill(root, dot, text)
-        }
-
-        fun glassCircleButton(kind: String, description: String): FrameLayout {
-            val root = FrameLayout(context).apply {
-                background = ripple(circle(Color.parseColor("#1D2026"), 1, BORDER))
-                isClickable = true
-                isFocusable = true
-                contentDescription = description
-                layoutParams = LinearLayout.LayoutParams(dp(42), dp(42))
-            }
-            root.addView(
-                ImageView(context).apply {
-                    scaleType = ImageView.ScaleType.CENTER
-                    setImageDrawable(icon(kind, TEXT, 18))
-                    layoutParams = FrameLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT,
-                    )
-                },
-            )
-            return root
         }
 
         fun add(target: LinearLayout, child: View, top: Int = 0) {
@@ -1142,8 +1153,8 @@ object SettingsUi {
                 groupChips[group] = groupChip
                 chipRow.addView(groupChip)
             }
-            val sheetWidth = (context.resources.displayMetrics.widthPixels * 0.94f).roundToInt()
-            val rowWidth = (sheetWidth - dp(18) * 2 - dp(16) * 2 - dp(2)).coerceAtLeast(0)
+            val sheetWidth = context.resources.displayMetrics.widthPixels
+            val rowWidth = (sheetWidth - dp(18) * 2).coerceAtLeast(0)
             val naturalWidths = groupEntries.map { group ->
                 val chipView = groupChips.getValue(group)
                 chipView.measure(
@@ -1328,12 +1339,61 @@ object SettingsUi {
                     paintModes()
                 }
             }
-            val refreshNow = action("Refresh now", primary = false).apply {
-                layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, dp(42),
-                )
+            val buildCard = LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(16), dp(16), dp(16), dp(16))
+                background = rounded(SURFACE_LOW, 24)
             }
-            add(content, refreshNow, 6)
+            val buildHead = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            val buildIcon = FrameLayout(context).apply {
+                background = iconChip(TONE_PRIMARY, 14)
+                layoutParams = LinearLayout.LayoutParams(dp(44), dp(44)).apply { rightMargin = dp(12) }
+            }
+            buildIcon.addView(
+                ImageView(context).apply {
+                    scaleType = ImageView.ScaleType.CENTER_INSIDE
+                    setImageDrawable(icon("foryou", TONE_PRIMARY.glyph, 22))
+                    setPadding(dp(11), dp(11), dp(11), dp(11))
+                    layoutParams = FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT,
+                    )
+                },
+            )
+            buildHead.addView(buildIcon)
+            val buildTexts = LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            }
+            buildTexts.addView(label("AI catalogue build", 16f, TEXT, medium = true))
+            buildTexts.addView(
+                label("Rebuilds Made for You from your watch history", 12f, TEXT_FAINT)
+                    .apply { setPadding(0, dp(3), 0, 0) },
+            )
+            buildHead.addView(buildTexts)
+            val buildPill = statePill()
+            paintStatePill(buildPill, "Ready", true)
+            buildHead.addView(buildPill.root)
+            buildCard.addView(buildHead)
+            buildCard.addView(
+                label(
+                    "With a key saved, your model ranks the shortlist. Without one, a local score picks the rows.",
+                    12f,
+                    TEXT_DIM,
+                ).apply {
+                    setPadding(0, dp(14), 0, 0)
+                    setLineSpacing(dp(2).toFloat(), 1f)
+                },
+            )
+            val refreshNow = filledAction("Refresh now", "foryou").apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, dp(48),
+                ).apply { topMargin = dp(16) }
+            }
+            buildCard.addView(refreshNow)
+            add(content, buildCard, 16)
             refreshNow.setOnClickListener {
                 if (!SimklHistory.isSignedIn()) {
                     reportDialog(
@@ -1345,7 +1405,9 @@ object SettingsUi {
                     return@setOnClickListener
                 }
                 refreshNow.isEnabled = false
-                refreshNow.text = "Rebuilding..."
+                refreshNow.alpha = 0.6f
+                refreshNow.text = "Building..."
+                paintStatePill(buildPill, "Building", true)
                 CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
                     var result: ForYouEngine.RebuildResult? = null
                     try {
@@ -1359,6 +1421,8 @@ object SettingsUi {
                         refreshNow.post {
                             refreshNow.text = "Refresh now"
                             refreshNow.isEnabled = true
+                            refreshNow.alpha = 1f
+                            paintStatePill(buildPill, if (rebuilt != null) "Ready" else "Failed", rebuilt != null)
                             val movies = rebuilt?.movies ?: 0
                             val series = rebuilt?.series ?: 0
                             val total = movies + series
@@ -1476,14 +1540,14 @@ object SettingsUi {
                 val on = Settings.serverEnabled(tile.spec.id)
                 val probeState = providerProbeStates.getValue(tile.spec.id)
                 tile.root.background = ripple(
-                    if (on) {
-                        rounded(Color.argb(12, 255, 255, 255), 16, 1, Color.argb(20, 255, 255, 255))
-                    } else {
-                        rounded(Color.TRANSPARENT, 16, 1, Color.argb(12, 255, 255, 255))
+                    StateListDrawable().apply {
+                        val fill = if (on) SURFACE_HIGH else SURFACE_LOW
+                        addState(intArrayOf(android.R.attr.state_focused), rounded(fill, 16, 2, CONTROL))
+                        addState(intArrayOf(), rounded(fill, 16))
                     },
                 )
                 tile.root.alpha = if (on) 1f else 0.58f
-                tile.dot.background = if (on) circle(SUCCESS) else circle(Color.TRANSPARENT, 2, GLASS_STROKE)
+                tile.dot.background = if (on) circle(SUCCESS) else circle(Color.TRANSPARENT, 2, HAIRLINE)
                 tile.probeStatus.text = when (probeState) {
                     ProviderProbeState.NOT_TESTED -> "Not tested"
                     ProviderProbeState.TESTING -> "Testing"
@@ -1494,7 +1558,7 @@ object SettingsUi {
                     when (probeState) {
                         ProviderProbeState.UP -> SUCCESS
                         ProviderProbeState.DOWN -> WARNING
-                        ProviderProbeState.TESTING -> ACCENT_PALE
+                        ProviderProbeState.TESTING -> TEXT_DIM
                         ProviderProbeState.NOT_TESTED -> TEXT_FAINT
                     },
                 )
@@ -1789,7 +1853,7 @@ object SettingsUi {
                         orientation = LinearLayout.HORIZONTAL
                         gravity = Gravity.CENTER_VERTICAL
                         setPadding(dp(12), dp(10), dp(10), dp(10))
-                        background = glassFill(16, 20, 12)
+                        background = rounded(SURFACE_LOW, 16)
                         addView(input)
                         addView(
                             remove,
@@ -1991,7 +2055,7 @@ object SettingsUi {
                         orientation = LinearLayout.HORIZONTAL
                         gravity = Gravity.CENTER_VERTICAL
                         setPadding(dp(12), dp(10), dp(10), dp(10))
-                        background = glassFill(16, 20, 12)
+                        background = rounded(SURFACE_LOW, 16)
                         addView(input)
                         addView(
                             cancel,
@@ -2381,24 +2445,9 @@ object SettingsUi {
             )
         }
 
-        // faint aurora from the top corners: primary on one side, tertiary on the other
-        val glowStart = glow(withAlpha(ACCENT, 26), 190)
-        glowStart.layoutParams = FrameLayout.LayoutParams(dp(380), dp(380)).apply {
-            gravity = Gravity.TOP or Gravity.START
-            leftMargin = dp(-140)
-            topMargin = dp(-140)
-        }
-        pages.addView(glowStart)
-        val glowEnd = glow(withAlpha(TONE_TERTIARY.bead, 20), 190)
-        glowEnd.layoutParams = FrameLayout.LayoutParams(dp(380), dp(380)).apply {
-            gravity = Gravity.TOP or Gravity.END
-            rightMargin = dp(-150)
-            topMargin = dp(-120)
-        }
-        pages.addView(glowEnd)
-
         val homePage = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
+            setBackgroundColor(SURFACE)
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -2407,32 +2456,32 @@ object SettingsUi {
 
         val homeHeader = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(14), dp(14), dp(4))
+            setPadding(dp(24), dp(20), dp(16), dp(6))
         }
-        homeHeader.addView(label("INDFLIX", 10f, TEXT_FAINT, medium = true, spacing = 0.26f))
         val homeTitleRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { topMargin = dp(2) }
+            )
         }
         homeTitleRow.addView(
-            label("Settings", 30f, TEXT, medium = true),
+            label("IndStream", 22f, TEXT, medium = true),
             LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
         )
-        val close = glassCircleButton("close", "Close")
+        val close = iconButton("close", "Close")
         homeTitleRow.addView(close)
         homeHeader.addView(homeTitleRow)
         homeHeader.addView(
-            label("Catalogue, sources, keys and playback", 12f, TEXT_FAINT)
-                .apply { setPadding(0, dp(5), 0, 0) },
+            label("Catalogue, sources, keys and playback", 13f, TEXT_DIM)
+                .apply { setPadding(0, dp(6), 0, 0) },
         )
         homePage.addView(homeHeader)
+        homePage.addView(dividerRow())
 
         val homeContent = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(2), dp(16), dp(30))
+            setPadding(dp(20), dp(4), dp(20), dp(32))
         }
         val homeScroll = ScrollView(context).apply {
             overScrollMode = View.OVER_SCROLL_NEVER
@@ -2458,28 +2507,22 @@ object SettingsUi {
 
         val detailPages = LinkedHashMap<String, View>()
         var currentDetail: View? = null
-        // shared-axis motion: emphasized decel in, symmetric ease-out back
+        // opaque shared-axis slide: one hardware layer, no alpha or scale churn
         val enterInterpolator = PathInterpolator(0.05f, 0.7f, 0.1f, 1.0f)
-        val exitInterpolator = PathInterpolator(0.3f, 0.0f, 0.8f, 1.0f)
+        val exitInterpolator = PathInterpolator(0.4f, 0.0f, 1.0f, 1.0f)
 
         fun openSection(id: String) {
             val page = detailPages[id] ?: return
             if (currentDetail != null) return
             currentDetail = page
-            val full = (pages.width.takeIf { it > 0 }
-                ?: (context.resources.displayMetrics.widthPixels * 0.94f).roundToInt()).toFloat()
+            val full = pages.width.takeIf { it > 0 }?.toFloat()
+                ?: context.resources.displayMetrics.widthPixels.toFloat()
             page.translationX = full
-            page.alpha = 0.05f
-            page.scaleX = 0.98f
-            page.scaleY = 0.98f
             page.visibility = View.VISIBLE
-            page.animate().translationX(0f).alpha(1f).scaleX(1f).scaleY(1f)
-                .setDuration(360)
+            page.animate().translationX(0f)
+                .setDuration(300)
                 .setInterpolator(enterInterpolator)
-                .start()
-            homePage.animate().translationX(-full * 0.22f).alpha(0.3f)
-                .setDuration(360)
-                .setInterpolator(enterInterpolator)
+                .withLayer()
                 .withEndAction { if (currentDetail != null) homePage.visibility = View.GONE }
                 .start()
         }
@@ -2487,24 +2530,16 @@ object SettingsUi {
         fun navigateBack(): Boolean {
             val page = currentDetail ?: return false
             currentDetail = null
-            val full = (pages.width.takeIf { it > 0 }
-                ?: (context.resources.displayMetrics.widthPixels * 0.94f).roundToInt()).toFloat()
             homePage.visibility = View.VISIBLE
-            homePage.translationX = -full * 0.22f
-            homePage.alpha = 0.3f
-            homePage.animate().translationX(0f).alpha(1f)
-                .setDuration(320)
+            val full = pages.width.takeIf { it > 0 }?.toFloat()
+                ?: context.resources.displayMetrics.widthPixels.toFloat()
+            page.animate().translationX(full)
+                .setDuration(260)
                 .setInterpolator(exitInterpolator)
-                .start()
-            page.animate().translationX(full).alpha(0.05f)
-                .setDuration(320)
-                .setInterpolator(exitInterpolator)
+                .withLayer()
                 .withEndAction {
                     page.visibility = View.GONE
                     page.translationX = 0f
-                    page.alpha = 1f
-                    page.scaleX = 1f
-                    page.scaleY = 1f
                 }
                 .start()
             return true
@@ -2513,6 +2548,7 @@ object SettingsUi {
         sections.forEach { spec ->
             val page = LinearLayout(context).apply {
                 orientation = LinearLayout.VERTICAL
+                setBackgroundColor(SURFACE)
                 visibility = View.GONE
                 layoutParams = FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
@@ -2522,21 +2558,20 @@ object SettingsUi {
             val toolbar = LinearLayout(context).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(10), dp(10), dp(14), dp(10))
+                setPadding(dp(12), dp(12), dp(16), dp(12))
             }
-            val back = glassCircleButton("back", "Back")
+            val back = iconButton("back", "Back")
             back.setOnClickListener { navigateBack() }
             toolbar.addView(back)
             val miniTile = FrameLayout(context).apply {
-                layoutParams = LinearLayout.LayoutParams(dp(40), dp(40)).apply { leftMargin = dp(12) }
-                background = iconChip(spec.tone, 12)
-                elevation = dp(1).toFloat()
+                layoutParams = LinearLayout.LayoutParams(dp(44), dp(44)).apply { leftMargin = dp(14) }
+                background = iconChip(spec.tone, 14)
             }
             miniTile.addView(
                 ImageView(context).apply {
                     scaleType = ImageView.ScaleType.CENTER_INSIDE
-                    setImageDrawable(icon(spec.icon, spec.tone.glyph, 20))
-                    setPadding(dp(10), dp(10), dp(10), dp(10))
+                    setImageDrawable(icon(spec.icon, spec.tone.glyph, 22))
+                    setPadding(dp(11), dp(11), dp(11), dp(11))
                     layoutParams = FrameLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT,
                     )
@@ -2548,7 +2583,7 @@ object SettingsUi {
                 setPadding(dp(10), 0, dp(8), 0)
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
             }
-            titleWrap.addView(label(spec.title, 18f, TEXT, medium = true))
+            titleWrap.addView(label(spec.title, 22f, TEXT, medium = true))
             val overline = LinearLayout(context).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
@@ -2556,7 +2591,7 @@ object SettingsUi {
             }
             overline.addView(beadView(spec.tone))
             overline.addView(
-                label(spec.group.uppercase(), 10f, TEXT_DIM, medium = true, spacing = 0.12f),
+                label(spec.group.uppercase(), 11f, TEXT_DIM, medium = true, spacing = 0.12f),
             )
             titleWrap.addView(overline)
             toolbar.addView(titleWrap)
@@ -2596,30 +2631,16 @@ object SettingsUi {
             pages.addView(page)
         }
 
-        // soft bottom edge so content dissolves instead of being cut
-        val bottomScrim = View(context).apply {
-            background = GradientDrawable(
-                GradientDrawable.Orientation.TOP_BOTTOM,
-                intArrayOf(Color.TRANSPARENT, Color.argb(235, 0x0E, 0x11, 0x16)),
-            )
-            isClickable = false
-            layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(30), Gravity.BOTTOM,
-            )
-        }
-        pages.addView(bottomScrim)
-
         fun iconTile(spec: SectionSpec): View {
             val holder = FrameLayout(context).apply {
-                layoutParams = LinearLayout.LayoutParams(dp(48), dp(48)).apply { rightMargin = dp(12) }
-                background = iconChip(spec.tone, 16)
-                elevation = dp(2).toFloat()
+                layoutParams = LinearLayout.LayoutParams(dp(52), dp(52)).apply { rightMargin = dp(14) }
+                background = iconChip(spec.tone, 18)
             }
             holder.addView(
                 ImageView(context).apply {
                     scaleType = ImageView.ScaleType.CENTER_INSIDE
-                    setImageDrawable(icon(spec.icon, spec.tone.glyph, 24))
-                    setPadding(dp(12), dp(12), dp(12), dp(12))
+                    setImageDrawable(icon(spec.icon, spec.tone.glyph, 26))
+                    setPadding(dp(13), dp(13), dp(13), dp(13))
                     layoutParams = FrameLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT,
                     )
@@ -2636,14 +2657,14 @@ object SettingsUi {
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
             }
             texts.addView(
-                label(spec.title, 15f, TEXT, medium = true).apply {
+                label(spec.title, 16f, TEXT, medium = true).apply {
                     maxLines = 1
                     ellipsize = TextUtils.TruncateAt.END
                 },
             )
             texts.addView(
-                label(spec.subtitle, 12f, TEXT_FAINT).apply {
-                    setPadding(0, dp(3), 0, 0)
+                label(spec.subtitle, 13f, TEXT_FAINT).apply {
+                    setPadding(0, dp(4), 0, 0)
                     maxLines = 1
                     ellipsize = TextUtils.TruncateAt.END
                 },
@@ -2652,23 +2673,28 @@ object SettingsUi {
             cached?.let { (value, on) -> paintStatePill(pill, value, on) }
             val chevron = ImageView(context).apply {
                 scaleType = ImageView.ScaleType.CENTER
-                setImageDrawable(icon("chevron", TEXT_FAINT, 18))
-                layoutParams = LinearLayout.LayoutParams(dp(18), dp(18)).apply { leftMargin = dp(8) }
+                setImageDrawable(icon("chevron", TEXT_FAINT, 20))
+                layoutParams = LinearLayout.LayoutParams(dp(20), dp(20)).apply { leftMargin = dp(10) }
             }
             val root = LinearLayout(context).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(12), dp(12), dp(12), dp(12))
+                setPadding(dp(14), dp(14), dp(14), dp(14))
                 isClickable = true
                 isFocusable = true
-                background = ripple(rounded(Color.argb(12, 255, 255, 255), 24, 1, Color.argb(20, 255, 255, 255)))
+                background = ripple(
+                    StateListDrawable().apply {
+                        addState(intArrayOf(android.R.attr.state_focused), rounded(SURFACE_LOW, 24, 2, CONTROL))
+                        addState(intArrayOf(), rounded(SURFACE_LOW, 24))
+                    },
+                )
                 addView(tile)
                 addView(texts)
                 addView(pill.root)
                 addView(chevron)
                 layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-                ).apply { bottomMargin = dp(8) }
+                ).apply { bottomMargin = dp(10) }
                 contentDescription = spec.title
             }
             stateListeners += { id, value, on ->
@@ -2682,11 +2708,17 @@ object SettingsUi {
         groupOrder.forEach { group ->
             val groupRow = LinearLayout(context).apply {
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(8), dp(14), 0, dp(8))
+                setPadding(dp(6), dp(18), dp(6), dp(8))
             }
             groupRow.addView(beadView(toneForGroup(group)))
             groupRow.addView(
-                label(group.uppercase(), 10f, TEXT_DIM, medium = true, spacing = 0.12f),
+                label(group.uppercase(), 11f, TEXT_DIM, medium = true, spacing = 0.14f),
+            )
+            groupRow.addView(
+                View(context).apply {
+                    background = ColorDrawable(HAIRLINE_SOFT)
+                    layoutParams = LinearLayout.LayoutParams(0, dp(1), 1f).apply { leftMargin = dp(12) }
+                },
             )
             homeContent.addView(groupRow)
             sections.filter { it.group == group }.forEach { spec ->
@@ -2700,28 +2732,8 @@ object SettingsUi {
             },
         )
 
-        // specular highlight along the top edge of the glass sheet
-        val specular = View(context).apply {
-            background = GradientDrawable(
-                GradientDrawable.Orientation.LEFT_RIGHT,
-                intArrayOf(
-                    Color.TRANSPARENT,
-                    Color.argb(72, 255, 255, 255),
-                    Color.argb(72, 255, 255, 255),
-                    Color.TRANSPARENT,
-                ),
-            )
-            layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(1),
-            ).apply { topMargin = dp(1) }
-            isClickable = false
-        }
-        pages.addView(specular)
-
         val sheet = FrameLayout(context).apply {
-            background = sheetFill()
-            clipToOutline = true
-            elevation = dp(18).toFloat()
+            background = ColorDrawable(SURFACE)
             addView(
                 pages,
                 FrameLayout.LayoutParams(
@@ -2731,17 +2743,23 @@ object SettingsUi {
             )
         }
 
-        val built = AlertDialog.Builder(context, android.R.style.Theme_Material_Dialog)
-            .setView(sheet)
-            .create()
+        val built = Dialog(context, android.R.style.Theme_Material_Dialog)
+        built.setContentView(
+            sheet,
+            ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+            ),
+        )
         dialog = built
         built.setOnDismissListener { providerProbeJob?.cancel() }
         var closing = false
         fun dismissSheet() {
             if (closing) return
             closing = true
-            sheet.animate().scaleX(0.97f).scaleY(0.97f).alpha(0f)
-                .setDuration(170)
+            pages.animate().alpha(0f)
+                .setDuration(140)
+                .setInterpolator(exitInterpolator)
                 .withEndAction { built.dismiss() }
                 .start()
         }
@@ -2755,32 +2773,23 @@ object SettingsUi {
             }
         }
         built.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-        built.window?.setDimAmount(0.55f)
-        built.show()
-        val metrics = context.resources.displayMetrics
+        built.window?.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+        built.window?.setDimAmount(0f)
+        built.window?.setWindowAnimations(0)
         built.window?.setLayout(
-            minOf((metrics.widthPixels * 0.94f).roundToInt(), dp(720)),
-            minOf((metrics.heightPixels * 0.92f).roundToInt(), dp(880)),
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT,
         )
+        built.show()
 
-        // expressive entrance: the sheet settles, home content staggers up
-        sheet.scaleX = 0.96f
-        sheet.scaleY = 0.96f
-        sheet.alpha = 0f
-        sheet.animate().scaleX(1f).scaleY(1f).alpha(1f)
-            .setDuration(300)
+        // opaque entrance: the page surface is painted first, then content settles in
+        pages.alpha = 0f
+        pages.translationY = dp(12).toFloat()
+        pages.animate().alpha(1f).translationY(0f)
+            .setDuration(260)
             .setInterpolator(enterInterpolator)
+            .withLayer()
             .start()
-        for (index in 0 until homeContent.childCount) {
-            val child = homeContent.getChildAt(index)
-            child.translationY = dp(14).toFloat()
-            child.alpha = 0f
-            child.animate().translationY(0f).alpha(1f)
-                .setStartDelay((index * 24).toLong())
-                .setDuration(260)
-                .setInterpolator(DecelerateInterpolator(1.6f))
-                .start()
-        }
 
         Thread {
             SimklHistory.refresh()
