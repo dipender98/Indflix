@@ -368,6 +368,11 @@ object SettingsUi {
                         line(0.32f, 0.52f, 0.5f, 0.7f)
                         line(0.68f, 0.52f, 0.5f, 0.7f)
                     }
+                    "reset" -> {
+                        canvas.drawArc(w * 0.2f, h * 0.2f, w * 0.8f, h * 0.8f, 40f, 280f, false, pen)
+                        line(0.8f, 0.2f, 0.8f, 0.42f)
+                        line(0.8f, 0.2f, 0.58f, 0.2f)
+                    }
                 }
             }
 
@@ -1021,6 +1026,55 @@ object SettingsUi {
         val dirtyChecks = mutableListOf<() -> Boolean>()
         val resetActions = mutableListOf<() -> Unit>()
         val saveActions = mutableListOf<() -> Unit>()
+        fun hasUnsavedChanges(): Boolean = dirtyChecks.any { runCatching { it() }.getOrDefault(false) }
+        fun showUnsavedPopup(onProceed: () -> Unit) {
+            if (!hasUnsavedChanges()) { onProceed(); return }
+            val popup = Dialog(context)
+            val panel = LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(24), dp(24), dp(24), dp(24))
+                background = rounded(SURFACE, 24)
+            }
+            panel.addView(label("Unsaved changes", 20f, TEXT, medium = true))
+            panel.addView(
+                label("You have unsaved changes. Save or discard them?", 14f, TEXT_DIM).apply {
+                    setPadding(0, dp(8), 0, 0)
+                },
+            )
+            val row = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.END
+                setPadding(0, dp(16), 0, 0)
+            }
+            val discard = label("Discard", 14f, WARNING, medium = true).apply {
+                setPadding(dp(12), dp(10), dp(12), dp(10))
+                isClickable = true
+                isFocusable = true
+            }
+            val save = action("Save", primary = true).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, control,
+                ).apply { leftMargin = gap }
+            }
+            discard.setOnClickListener {
+                resetActions.forEach { runCatching { it() } }
+                popup.dismiss()
+                onProceed()
+            }
+            save.setOnClickListener {
+                saveActions.forEach { runCatching { it() } }
+                if (!hasUnsavedChanges()) {
+                    popup.dismiss()
+                    onProceed()
+                }
+            }
+            row.addView(discard)
+            row.addView(save)
+            panel.addView(row)
+            popup.setContentView(panel)
+            popup.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            popup.show()
+        }
 
         fun setState(id: String, value: String, on: Boolean) {
             stateCache[id] = value to on
@@ -1730,23 +1784,28 @@ object SettingsUi {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
             }
-            listOf(
-                pill("All", primary = true).apply {
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                    ellipsize = TextUtils.TruncateAt.END
-                    setOnClickListener { providerPreset = "All"; applyProviderPreset() }
-                },
-                pill("4K", primary = true).apply {
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                    ellipsize = TextUtils.TruncateAt.END
-                    setOnClickListener { providerPreset = "4K"; applyProviderPreset() }
-                },
-                pill("Downloadable", primary = true).apply {
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                    ellipsize = TextUtils.TruncateAt.END
-                    setOnClickListener { providerPreset = "Downloadable"; applyProviderPreset() }
-                },
-            ).forEachIndexed { index, view ->
+            val allPresetChip = chip("All").apply {
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                ellipsize = TextUtils.TruncateAt.END
+            }
+            val fourKPresetChip = chip("4K").apply {
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                ellipsize = TextUtils.TruncateAt.END
+            }
+            val downloadablePresetChip = chip("Downloadable").apply {
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                ellipsize = TextUtils.TruncateAt.END
+            }
+            fun paintPresetChips() {
+                markChip(allPresetChip, providerPreset == "All")
+                markChip(fourKPresetChip, providerPreset == "4K")
+                markChip(downloadablePresetChip, providerPreset == "Downloadable")
+            }
+            allPresetChip.setOnClickListener { providerPreset = "All"; paintPresetChips(); applyProviderPreset() }
+            fourKPresetChip.setOnClickListener { providerPreset = "4K"; paintPresetChips(); applyProviderPreset() }
+            downloadablePresetChip.setOnClickListener { providerPreset = "Downloadable"; paintPresetChips(); applyProviderPreset() }
+            paintPresetChips()
+            listOf(allPresetChip, fourKPresetChip, downloadablePresetChip).forEachIndexed { index, view ->
                 view.maxLines = 1
                 view.layoutParams = LinearLayout.LayoutParams(0, control, 1f).apply {
                     if (index > 0) leftMargin = gap
@@ -2628,23 +2687,15 @@ object SettingsUi {
                 setPadding(dp(12), dp(12), dp(16), dp(12))
             }
             val back = iconButton("back", "Back")
-            back.setOnClickListener { navigateBack() }
-            toolbar.addView(back)
-            val miniTile = FrameLayout(context).apply {
-                layoutParams = LinearLayout.LayoutParams(dp(44), dp(44)).apply { leftMargin = dp(14) }
-                background = iconChip(spec.tone, 14)
+            back.setOnClickListener {
+                if (hasUnsavedChanges()) showUnsavedPopup { navigateBack() } else navigateBack()
             }
-            miniTile.addView(
-                ImageView(context).apply {
-                    scaleType = ImageView.ScaleType.CENTER_INSIDE
-                    setImageDrawable(icon(spec.icon, spec.tone.glyph, 22))
-                    setPadding(dp(11), dp(11), dp(11), dp(11))
-                    layoutParams = FrameLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT,
-                    )
-                },
-            )
-            toolbar.addView(miniTile)
+            toolbar.addView(back)
+            val resetIcon = iconButton("reset", "Reset")
+            resetIcon.setOnClickListener {
+                resetActions.forEach { runCatching { it() } }
+            }
+            toolbar.addView(resetIcon)
             val titleWrap = LinearLayout(context).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(dp(10), 0, dp(8), 0)
@@ -2805,55 +2856,6 @@ object SettingsUi {
                 .setInterpolator(exitInterpolator)
                 .withEndAction { built.dismiss() }
                 .start()
-        }
-        fun hasUnsavedChanges(): Boolean = dirtyChecks.any { runCatching { it() }.getOrDefault(false) }
-        fun showUnsavedPopup(onProceed: () -> Unit) {
-            if (!hasUnsavedChanges()) { onProceed(); return }
-            val popup = Dialog(context)
-            val panel = LinearLayout(context).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(dp(24), dp(24), dp(24), dp(24))
-                background = rounded(SURFACE, 24)
-            }
-            panel.addView(label("Unsaved changes", 20f, TEXT, medium = true))
-            panel.addView(
-                label("You have unsaved changes. Save or discard them?", 14f, TEXT_DIM).apply {
-                    setPadding(0, dp(8), 0, 0)
-                },
-            )
-            val row = LinearLayout(context).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.END
-                setPadding(0, dp(16), 0, 0)
-            }
-            val discard = label("Discard", 14f, WARNING, medium = true).apply {
-                setPadding(dp(12), dp(10), dp(12), dp(10))
-                isClickable = true
-                isFocusable = true
-            }
-            val save = action("Save", primary = true).apply {
-                layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT, control,
-                ).apply { leftMargin = gap }
-            }
-            discard.setOnClickListener {
-                resetActions.forEach { runCatching { it() } }
-                popup.dismiss()
-                onProceed()
-            }
-            save.setOnClickListener {
-                saveActions.forEach { runCatching { it() } }
-                if (!hasUnsavedChanges()) {
-                    popup.dismiss()
-                    onProceed()
-                }
-            }
-            row.addView(discard)
-            row.addView(save)
-            panel.addView(row)
-            popup.setContentView(panel)
-            popup.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-            popup.show()
         }
         close.setOnClickListener {
             if (hasUnsavedChanges()) showUnsavedPopup { dismissSheet() } else dismissSheet()
