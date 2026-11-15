@@ -103,20 +103,20 @@ object Settings {
     fun openSettings(context: Context) {
         fun dp(v: Number): Int = (v.toFloat() * context.resources.displayMetrics.density).roundToInt()
 
-        val SURFACE = Color.parseColor("#101319")
-        val SURFACE_LOW = Color.parseColor("#161A21")
-        val SURFACE_HIGH = Color.parseColor("#1E232B")
-        val BORDER = Color.parseColor("#3B414B")
-        val TEXT = Color.parseColor("#E3E4EA")
-        val TEXT_DIM = Color.parseColor("#C1C6D1")
-        val TEXT_MUTED = Color.parseColor("#AAB0BC")
-        val TEXT_FAINT = Color.parseColor("#8B929E")
-        val CONTROL = Color.parseColor("#DFDFDF")
-        val ON_CONTROL = Color.parseColor("#14171C")
+        val SURFACE = Color.parseColor("#0F0F0F")
+        val SURFACE_LOW = Color.parseColor("#1F1F1F")
+        val SURFACE_HIGH = Color.parseColor("#2A2A2A")
+        val BORDER = Color.parseColor("#3F3F3F")
+        val TEXT = Color.parseColor("#F1F1F1")
+        val TEXT_DIM = Color.parseColor("#AAAAAA")
+        val TEXT_MUTED = Color.parseColor("#909090")
+        val TEXT_FAINT = Color.parseColor("#717171")
+        val CONTROL = Color.parseColor("#E4E4E4")
+        val ON_CONTROL = Color.parseColor("#0F0F0F")
         val HAIRLINE = Color.argb(28, 255, 255, 255)
-        val TONE_CONTAINER = Color.parseColor("#4E3766")
-        val TONE_GLYPH = Color.parseColor("#F2DAFF")
-        val TONE_BEAD = Color.parseColor("#D9BCE9")
+        val TONE_CONTAINER = Color.parseColor("#2A2A2A")
+        val TONE_GLYPH = Color.parseColor("#F1F1F1")
+        val TONE_BEAD = Color.parseColor("#AAAAAA")
 
         fun withAlpha(color: Int, alpha: Int): Int =
             Color.argb(alpha, Color.red(color), Color.green(color), Color.blue(color))
@@ -622,9 +622,15 @@ object Settings {
                     ViewGroup.LayoutParams.MATCH_PARENT,
                 ),
             )
+            // full-page window: the content stays clear of the system bars
+            setOnApplyWindowInsetsListener { view, insets ->
+                @Suppress("DEPRECATION")
+                view.setPadding(0, insets.systemWindowInsetTop, 0, insets.systemWindowInsetBottom)
+                insets
+            }
         }
 
-        val dialog = Dialog(context, android.R.style.Theme_Material_Dialog)
+        val dialog = Dialog(context, android.R.style.Theme_Material_NoActionBar)
         dialog.setContentView(
             sheet,
             ViewGroup.LayoutParams(
@@ -681,7 +687,7 @@ object Settings {
             }
         }
         close.setOnClickListener { dismissSheet() }
-        dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        dialog.window?.setBackgroundDrawable(ColorDrawable(SURFACE))
         dialog.window?.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
         dialog.window?.setDimAmount(0f)
         dialog.window?.setWindowAnimations(0)
@@ -689,6 +695,8 @@ object Settings {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT,
         )
+        dialog.window?.statusBarColor = SURFACE
+        dialog.window?.navigationBarColor = SURFACE
         dialog.show()
 
         // opaque entrance: the page surface is painted first, then content settles in

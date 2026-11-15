@@ -24,7 +24,6 @@ import android.text.TextUtils
 import android.text.method.PasswordTransformationMethod
 import android.util.TypedValue
 import android.view.Gravity
-import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -59,16 +58,16 @@ import kotlin.math.roundToInt
 
 object SettingsUi {
 
-    private val SURFACE = Color.parseColor("#101319")
-    private val SURFACE_LOW = Color.parseColor("#161A21")
-    private val SURFACE_HIGH = Color.parseColor("#1E232B")
-    private val BORDER = Color.parseColor("#3B414B")
-    private val TEXT = Color.parseColor("#E3E4EA")
-    private val TEXT_DIM = Color.parseColor("#C1C6D1")
-    private val TEXT_MUTED = Color.parseColor("#AAB0BC")
-    private val TEXT_FAINT = Color.parseColor("#8B929E")
-    private val CONTROL = Color.parseColor("#DFDFDF")
-    private val ON_CONTROL = Color.parseColor("#14171C")
+    private val SURFACE = Color.parseColor("#0F0F0F")
+    private val SURFACE_LOW = Color.parseColor("#1F1F1F")
+    private val SURFACE_HIGH = Color.parseColor("#2A2A2A")
+    private val BORDER = Color.parseColor("#3F3F3F")
+    private val TEXT = Color.parseColor("#F1F1F1")
+    private val TEXT_DIM = Color.parseColor("#AAAAAA")
+    private val TEXT_MUTED = Color.parseColor("#909090")
+    private val TEXT_FAINT = Color.parseColor("#717171")
+    private val CONTROL = Color.parseColor("#E4E4E4")
+    private val ON_CONTROL = Color.parseColor("#0F0F0F")
     private val SUCCESS = Color.parseColor("#7FD9A0")
     private val WARNING = Color.parseColor("#FFB4AB")
 
@@ -82,19 +81,19 @@ object SettingsUi {
     )
 
     private val TONE_PRIMARY = Tone(
-        Color.parseColor("#2B4F86"),
-        Color.parseColor("#D7E3FF"),
-        Color.parseColor("#A9C7FF"),
+        Color.parseColor("#2A2A2A"),
+        Color.parseColor("#F1F1F1"),
+        Color.parseColor("#E4E4E4"),
     )
     private val TONE_SECONDARY = Tone(
-        Color.parseColor("#374C64"),
-        Color.parseColor("#D8E3F6"),
-        Color.parseColor("#BCC7DA"),
+        Color.parseColor("#2A2A2A"),
+        Color.parseColor("#F1F1F1"),
+        Color.parseColor("#AAAAAA"),
     )
     private val TONE_TERTIARY = Tone(
-        Color.parseColor("#4E3766"),
-        Color.parseColor("#F2DAFF"),
-        Color.parseColor("#D9BCE9"),
+        Color.parseColor("#2A2A2A"),
+        Color.parseColor("#F1F1F1"),
+        Color.parseColor("#717171"),
     )
 
     private class SectionSpec(
@@ -122,6 +121,18 @@ object SettingsUi {
     private class Secret(val root: LinearLayout, val input: EditText)
 
     private class RankedRow(val key: String, val title: String)
+
+    // Back is routed here so it works on both legacy key handling and the back dispatcher
+    private class SheetDialog(context: Context) :
+        Dialog(context, android.R.style.Theme_Material_NoActionBar) {
+
+        var onBack: (() -> Boolean)? = null
+
+        @Suppress("DEPRECATION")
+        override fun onBackPressed() {
+            if (onBack?.invoke() != true) super.onBackPressed()
+        }
+    }
 
     private enum class ProviderProbeState { NOT_TESTED, TESTING, UP, DOWN }
 
@@ -406,22 +417,7 @@ object SettingsUi {
 
         fun chip(value: String): TextView = pill(value)
 
-        fun textButton(value: String): TextView =
-            label(value, 12f, TEXT, medium = true).apply {
-                gravity = Gravity.CENTER
-                setPadding(dp(14), 0, dp(14), 0)
-                background = ripple(
-                    StateListDrawable().apply {
-                        addState(intArrayOf(android.R.attr.state_focused), rounded(Color.TRANSPARENT, 999, 2, CONTROL))
-                        addState(intArrayOf(), rounded(Color.TRANSPARENT, 999))
-                    },
-                )
-                isClickable = true
-                isFocusable = true
-                layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT, dp(36),
-                )
-            }
+        fun textButton(value: String): TextView = chip(value)
 
         fun markChip(target: TextView, on: Boolean) {
             target.setTextColor(if (on) ON_CONTROL else TEXT_DIM)
@@ -702,7 +698,7 @@ object SettingsUi {
             val panel = LinearLayout(context).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(dp(24), dp(28), dp(24), dp(24))
-                background = ColorDrawable(SURFACE)
+                background = rounded(SURFACE, 24)
             }
             val head = LinearLayout(context).apply {
                 orientation = LinearLayout.HORIZONTAL
@@ -752,14 +748,10 @@ object SettingsUi {
                 }
                 panel.addView(list)
             }
-            panel.addView(
-                View(context),
-                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f),
-            )
             val done = action(actionLabel, primary = true).apply {
                 layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, dp(48),
-                )
+                ).apply { topMargin = dp(16) }
             }
             panel.addView(done)
 
@@ -768,16 +760,15 @@ object SettingsUi {
                 panel,
                 ViewGroup.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
                 ),
             )
             report.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-            report.window?.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
-            report.window?.setDimAmount(0f)
+            report.window?.setDimAmount(0.6f)
             report.window?.setWindowAnimations(0)
             report.window?.setLayout(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT,
+                (context.resources.displayMetrics.widthPixels * 0.86f).roundToInt(),
+                ViewGroup.LayoutParams.WRAP_CONTENT,
             )
             close.setOnClickListener { report.dismiss() }
             done.setOnClickListener {
@@ -806,7 +797,7 @@ object SettingsUi {
             val panel = LinearLayout(context).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(dp(24), dp(28), dp(24), dp(24))
-                background = ColorDrawable(SURFACE)
+                background = rounded(SURFACE, 24)
             }
             val head = LinearLayout(context).apply {
                 orientation = LinearLayout.HORIZONTAL
@@ -877,12 +868,12 @@ object SettingsUi {
                 ),
             )
             editor.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-            editor.window?.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
-            editor.window?.setDimAmount(0f)
+            editor.window?.setDimAmount(0.65f)
             editor.window?.setWindowAnimations(0)
+            val editorMetrics = context.resources.displayMetrics
             editor.window?.setLayout(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT,
+                (editorMetrics.widthPixels * 0.9f).roundToInt(),
+                (editorMetrics.heightPixels * 0.8f).roundToInt(),
             )
             close.setOnClickListener { editor.dismiss() }
 
@@ -1190,7 +1181,7 @@ object SettingsUi {
             }
             listOf(enableAll, disableAll).forEachIndexed { index, view ->
                 view.layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT, dp(36),
+                    ViewGroup.LayoutParams.WRAP_CONTENT, control,
                 ).apply { if (index > 0) leftMargin = gap }
                 quick.addView(view)
             }
@@ -1589,7 +1580,7 @@ object SettingsUi {
             }
             listOf(enableAll, disableAll).forEachIndexed { index, view ->
                 view.layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT, dp(36),
+                    ViewGroup.LayoutParams.WRAP_CONTENT, control,
                 ).apply { if (index > 0) leftMargin = gap }
                 quickRow.addView(view)
             }
@@ -2741,9 +2732,15 @@ object SettingsUi {
                     ViewGroup.LayoutParams.MATCH_PARENT,
                 ),
             )
+            // full-page window: the content stays clear of the system bars
+            setOnApplyWindowInsetsListener { view, insets ->
+                @Suppress("DEPRECATION")
+                view.setPadding(0, insets.systemWindowInsetTop, 0, insets.systemWindowInsetBottom)
+                insets
+            }
         }
 
-        val built = Dialog(context, android.R.style.Theme_Material_Dialog)
+        val built = SheetDialog(context)
         built.setContentView(
             sheet,
             ViewGroup.LayoutParams(
@@ -2764,15 +2761,11 @@ object SettingsUi {
                 .start()
         }
         close.setOnClickListener { dismissSheet() }
-        built.setOnKeyListener { _, keyCode, event ->
-            if (keyCode == KeyEvent.KEYCODE_BACK && event.action == KeyEvent.ACTION_UP) {
-                if (!navigateBack()) dismissSheet()
-                true
-            } else {
-                false
-            }
+        built.onBack = {
+            if (!navigateBack()) dismissSheet()
+            true
         }
-        built.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        built.window?.setBackgroundDrawable(ColorDrawable(SURFACE))
         built.window?.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
         built.window?.setDimAmount(0f)
         built.window?.setWindowAnimations(0)
@@ -2780,6 +2773,8 @@ object SettingsUi {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT,
         )
+        built.window?.statusBarColor = SURFACE
+        built.window?.navigationBarColor = SURFACE
         built.show()
 
         // opaque entrance: the page surface is painted first, then content settles in
