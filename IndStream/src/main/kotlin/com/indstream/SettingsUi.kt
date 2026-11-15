@@ -72,7 +72,6 @@ object SettingsUi {
     private val WARNING = Color.parseColor("#FFB4AB")
 
     private val HAIRLINE = Color.argb(28, 255, 255, 255)
-    private val HAIRLINE_SOFT = Color.argb(16, 255, 255, 255)
 
     private class Tone(
         val container: Int,
@@ -98,7 +97,6 @@ object SettingsUi {
 
     private class SectionSpec(
         val id: String,
-        val group: String,
         val title: String,
         val subtitle: String,
         val icon: String,
@@ -341,6 +339,15 @@ object SettingsUi {
                         val d = 0.29f
                         line(0.5f - d, 0.5f - d, 0.5f + d, 0.5f + d)
                         line(0.5f - d, 0.5f + d, 0.5f + d, 0.5f - d)
+                    }
+                    "trash" -> {
+                        line(0.16f, 0.28f, 0.84f, 0.28f)
+                        line(0.38f, 0.28f, 0.38f, 0.17f)
+                        line(0.38f, 0.17f, 0.62f, 0.17f)
+                        line(0.62f, 0.17f, 0.62f, 0.28f)
+                        rr(0.27f, 0.37f, 0.73f, 0.86f, 2f)
+                        line(0.44f, 0.51f, 0.44f, 0.73f)
+                        line(0.56f, 0.51f, 0.56f, 0.73f)
                     }
                     "back" -> {
                         line(0.78f, 0.5f, 0.22f, 0.5f)
@@ -636,7 +643,7 @@ object SettingsUi {
             return root
         }
 
-        fun deleteIcon(description: String = "Delete", onClick: () -> Unit): FrameLayout {
+        fun compactIcon(kind: String, description: String, onClick: () -> Unit): FrameLayout {
             val root = FrameLayout(context).apply {
                 background = ripple(
                     StateListDrawable().apply {
@@ -653,7 +660,7 @@ object SettingsUi {
             root.addView(
                 ImageView(context).apply {
                     scaleType = ImageView.ScaleType.CENTER
-                    setImageDrawable(icon("close", TEXT_FAINT, 14))
+                    setImageDrawable(icon(kind, TEXT_FAINT, 14))
                     layoutParams = FrameLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT,
                     )
@@ -661,6 +668,12 @@ object SettingsUi {
             )
             return root
         }
+
+        fun deleteIcon(description: String = "Delete", onClick: () -> Unit): FrameLayout =
+            compactIcon("trash", description, onClick)
+
+        fun cancelIcon(description: String = "Cancel", onClick: () -> Unit): FrameLayout =
+            compactIcon("close", description, onClick)
 
         fun iconButton(kind: String, description: String): FrameLayout {
             val root = FrameLayout(context).apply {
@@ -1011,17 +1024,6 @@ object SettingsUi {
             stateListeners.forEach { it(id, value, on) }
         }
 
-        fun toneForGroup(group: String): Tone = when (group) {
-            "Sources" -> TONE_SECONDARY
-            "Keys & Services" -> TONE_TERTIARY
-            else -> TONE_PRIMARY
-        }
-
-        fun beadView(tone: Tone): View = View(context).apply {
-            background = circle(tone.bead)
-            layoutParams = LinearLayout.LayoutParams(dp(6), dp(6)).apply { rightMargin = dp(7) }
-        }
-
         fun paintStatePill(pill: StatePill, value: String, on: Boolean) {
             pill.text.text = value
             pill.text.setTextColor(if (on) CONTROL else TEXT_MUTED)
@@ -1081,11 +1083,6 @@ object SettingsUi {
         // ---------- section pages ----------
 
         val providerBody: (LinearLayout) -> Unit = { content ->
-            add(
-                content,
-                label("Pick one source at a time — selecting another turns off the current one.", 14f, TEXT_DIM),
-                2,
-            )
             val options = LinkedHashMap<String, Option>()
             val list = optionList()
             Catalogue.Provider.entries.forEach { provider ->
@@ -1117,7 +1114,7 @@ object SettingsUi {
             }
         }
         sections += SectionSpec(
-            "provider", "Content", "Catalogue Provider",
+            "provider", "Catalogue Provider",
             "Pick one source at a time",
             "provider", TONE_PRIMARY, providerBody,
         )
@@ -1128,11 +1125,6 @@ object SettingsUi {
             fun enabledCount(): Int = Catalogue.enabledRows().size
             fun totalCount(): Int = Catalogue.allRows().size
 
-            add(
-                content,
-                label("Toggle rows by group, or reorder every row at once.", 14f, TEXT_DIM),
-                2,
-            )
             val groupChips = LinkedHashMap<Catalogue.Group, TextView>()
             val chipRow = LinearLayout(context).apply {
                 orientation = LinearLayout.HORIZONTAL
@@ -1264,18 +1256,12 @@ object SettingsUi {
             renderRows()
         }
         sections += SectionSpec(
-            "catalogue", "Content", "Catalogue",
+            "catalogue", "Catalogue",
             "Rows and Home order",
             "catalogue", TONE_PRIMARY, catalogueBody,
         )
 
         val forYouBody: (LinearLayout) -> Unit = { content ->
-            add(
-                content,
-                label("Rows built from your watch history.", 14f, TEXT_DIM),
-                2,
-            )
-
             val forYouRowOptions = LinkedHashMap<String, Option>()
             val forYouRowList = optionList()
             add(
@@ -1446,7 +1432,7 @@ object SettingsUi {
             }
         }
         sections += SectionSpec(
-            "foryou", "Content", "Made for You",
+            "foryou", "Made for You",
             "Rows built from your watch history",
             "foryou", TONE_PRIMARY, forYouBody,
         )
@@ -1460,12 +1446,6 @@ object SettingsUi {
                 setState("servers", providersStateText(), enabledCount > 0)
             }
             refreshProvidersState()
-
-            add(
-                content,
-                label("Choose which providers supply streams.", 14f, TEXT_DIM),
-                2,
-            )
 
             class ProviderTile(
                 val spec: ServerSpec,
@@ -1504,22 +1484,24 @@ object SettingsUi {
 
             fun providerTile(spec: ServerSpec): ProviderTile {
                 val dot = View(context).apply {
-                    layoutParams = LinearLayout.LayoutParams(dp(9), dp(9)).apply { leftMargin = dp(8) }
+                    layoutParams = LinearLayout.LayoutParams(dp(6), dp(6)).apply { leftMargin = dp(5) }
                 }
-                val name = label(spec.name, 14f, TEXT, medium = true).apply {
+                val name = label(spec.name, 12.75f, TEXT, medium = true).apply {
                     maxLines = 1
                     ellipsize = TextUtils.TruncateAt.END
-                    layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                    layoutParams = LinearLayout.LayoutParams(
+                        0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f,
+                    )
                 }
-                val probeStatus = label("Not tested", 12f, TEXT_FAINT, medium = true).apply {
+                val probeStatus = label("Not tested", 9.35f, TEXT_FAINT, medium = true).apply {
                     maxLines = 1
                     layoutParams = LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-                    ).apply { leftMargin = dp(6) }
+                    ).apply { leftMargin = dp(5) }
                 }
                 val initialChecked = Settings.serverEnabled(spec.id)
                 val toggleRoot = FrameLayout(context).apply {
-                    layoutParams = LinearLayout.LayoutParams(dp(46), dp(28)).apply { leftMargin = dp(6) }
+                    layoutParams = LinearLayout.LayoutParams(dp(39), dp(24)).apply { leftMargin = dp(5) }
                     background = ripple(
                         StateListDrawable().apply {
                             addState(intArrayOf(android.R.attr.state_focused), rounded(Color.TRANSPARENT, 999, 2, CONTROL))
@@ -1530,49 +1512,66 @@ object SettingsUi {
                     isFocusable = true
                 }
                 val toggleTrack = View(context).apply {
-                    layoutParams = FrameLayout.LayoutParams(dp(46), dp(28))
+                    layoutParams = FrameLayout.LayoutParams(dp(39), dp(24))
                 }
                 val toggleThumb = View(context).apply {
-                    layoutParams = FrameLayout.LayoutParams(dp(20), dp(20), Gravity.START or Gravity.CENTER_VERTICAL)
-                        .apply { leftMargin = dp(4) }
-                    translationX = if (initialChecked) dp(18).toFloat() else 0f
+                    layoutParams = FrameLayout.LayoutParams(dp(17), dp(17), Gravity.START or Gravity.CENTER_VERTICAL)
+                        .apply { leftMargin = dp(3) }
+                    translationX = if (initialChecked) dp(16).toFloat() else 0f
                 }
                 toggleRoot.addView(toggleTrack)
                 toggleRoot.addView(toggleThumb)
+                val tags = label(providerTags(spec), 8.5f, TEXT, medium = true).apply {
+                    maxLines = 1
+                    ellipsize = TextUtils.TruncateAt.END
+                    gravity = Gravity.CENTER
+                    setPadding(dp(6), 0, dp(6), 0)
+                    background = rounded(Color.argb(20, 255, 255, 255), 999, 1, Color.argb(38, 255, 255, 255))
+                    layoutParams = LinearLayout.LayoutParams(
+                        0, dp(19), 1f,
+                    )
+                }
                 fun paintToggle(checked: Boolean, animate: Boolean) {
                     toggleTrack.background = if (checked) rounded(CONTROL, 999) else rounded(SURFACE_HIGH, 999)
                     toggleThumb.background = circle(if (checked) ON_CONTROL else TEXT_FAINT)
                     toggleRoot.contentDescription = if (checked) "Disable" else "Enable"
                     if (animate) {
-                        toggleThumb.animate().translationX(if (checked) dp(18).toFloat() else 0f)
+                        toggleThumb.animate().translationX(if (checked) dp(16).toFloat() else 0f)
                             .setDuration(200)
                             .setInterpolator(PathInterpolator(0.2f, 0f, 0f, 1f))
                             .start()
                     } else {
-                        toggleThumb.translationX = if (checked) dp(18).toFloat() else 0f
+                        toggleThumb.translationX = if (checked) dp(16).toFloat() else 0f
                     }
                 }
                 paintToggle(initialChecked, false)
-                val titleRow = LinearLayout(context).apply {
+                val headRow = LinearLayout(context).apply {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = Gravity.CENTER_VERTICAL
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                    )
                     addView(name)
                     addView(probeStatus)
                     addView(dot)
                     addView(toggleRoot)
                 }
-                val tags = label(providerTags(spec), 11f, TEXT_FAINT).apply {
-                    maxLines = 1
-                    ellipsize = TextUtils.TruncateAt.END
-                    setPadding(0, dp(2), 0, 0)
+                val tagRow = LinearLayout(context).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ).apply { topMargin = dp(7) }
+                    addView(tags)
                 }
                 val root = LinearLayout(context).apply {
                     orientation = LinearLayout.VERTICAL
-                    setPadding(dp(8), dp(4), dp(8), dp(4))
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(dp(9), dp(7), dp(9), dp(8))
                     isClickable = true
                     isFocusable = true
-                    addView(titleRow)
-                    addView(tags)
+                    addView(headRow)
+                    addView(tagRow)
                 }
                 return ProviderTile(spec, root, dot, probeStatus, toggleRoot, toggleTrack, toggleThumb, initialChecked, ::paintToggle)
             }
@@ -1631,24 +1630,23 @@ object SettingsUi {
                 providerTiles.forEach(::paintProvider)
             }
 
-            add(content, sectionLabel("All servers", 16))
-            val testAllButton = chip("Test all servers")
-
-            val testSummary = label(
-                "Test (2 movies + 1 series) on every provider. Up means at least one sample returned streams.",
-                13f,
-                TEXT_FAINT,
-            ).apply {
-                setPadding(0, dp(8), 0, 0)
+            // Pill holds the action; its sample details live next to it, not inside it
+            val testAllPill = chip("Test all servers").apply {
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
             }
-            testAllButton.setOnClickListener {
+            val testDetail = label("2 movies + 1 series", 13f, TEXT_FAINT).apply {
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+                maxWidth = dp(140)
+            }
+            testAllPill.setOnClickListener {
                 if (providerProbeJob?.isActive == true) return@setOnClickListener
 
-                testAllButton.isEnabled = false
-                testAllButton.text = "Testing..."
+                testAllPill.isEnabled = false
+                testDetail.text = "Testing 0 of ${allServers.size}"
                 providerProbeStates.keys.forEach { providerProbeStates[it] = ProviderProbeState.TESTING }
                 paintServerTiles()
-                testSummary.text = "Testing 0 of ${allServers.size} providers..."
 
                 providerProbeJob = CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
                     val completed = java.util.concurrent.atomic.AtomicInteger()
@@ -1663,8 +1661,8 @@ object SettingsUi {
                                         providerProbeStates[spec.id] =
                                             if (isUp) ProviderProbeState.UP else ProviderProbeState.DOWN
                                         providerTiles.firstOrNull { it.spec.id == spec.id }?.let(::paintProvider)
-                                        testSummary.text =
-                                            "Testing $tested of ${allServers.size} providers..."
+                                        testDetail.text =
+                                            "Testing $tested of ${allServers.size}"
                                     }
                                     isUp
                                 }
@@ -1674,9 +1672,8 @@ object SettingsUi {
                     val upCount = results.count { it }
                     val downCount = results.size - upCount
                     withContext(Dispatchers.Main) {
-                        testAllButton.isEnabled = true
-                        testAllButton.text = "Test all servers"
-                        testSummary.text = "Complete: $upCount up, $downCount down"
+                        testAllPill.isEnabled = true
+                        testDetail.text = "$upCount up, $downCount down"
                         reportDialog(
                             title = "Server test complete",
                             subtitle = "Checked ${results.size} providers just now.",
@@ -1690,74 +1687,86 @@ object SettingsUi {
                 }
             }
 
+            val providerGrid = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
             var providerPreset = "All"
             fun applyProviderPreset() {
-                providerTiles.forEach { tile ->
-                    val visible = when (providerPreset) {
-                        "Recommended" -> tile.spec.reliable
-                        "Downloadable" -> tile.spec.downloadFriendly
-                        "4K" -> tile.spec.supports4k
+                providerGrid.removeAllViews()
+                val visible = providerTiles.filter {
+                    val matches = when (providerPreset) {
+                        "Downloadable" -> it.spec.downloadFriendly
+                        "4K" -> it.spec.supports4k
                         else -> true
                     }
-                    tile.root.visibility = if (visible) View.VISIBLE else View.GONE
+                    matches
+                }
+                val rows = visible.chunked(2)
+                rows.forEachIndexed { rowIndex, pair ->
+                    val row = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
+                    pair.forEachIndexed { index, tile ->
+                        tile.root.layoutParams = LinearLayout.LayoutParams(0, dp(63), 1f).apply {
+                            if (index > 0) leftMargin = gap
+                        }
+                        row.addView(tile.root)
+                    }
+                    if (pair.size == 1) {
+                        row.addView(View(context), LinearLayout.LayoutParams(0, dp(63), 1f))
+                    }
+                    providerGrid.addView(
+                        row,
+                        LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ).apply { if (rowIndex < rows.lastIndex) bottomMargin = gap },
+                    )
                 }
             }
-            // one helper for both rows: even gaps, no trailing margin, perfectly centered
-            fun presetRow(vararg views: TextView): LinearLayout = LinearLayout(context).apply {
+            val testRow = LinearLayout(context).apply {
                 orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_HORIZONTAL or Gravity.CENTER_VERTICAL
-                views.forEachIndexed { index, view ->
-                    view.layoutParams = LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.WRAP_CONTENT, control,
-                    ).apply { if (index > 0) leftMargin = gap }
-                    addView(view)
-                }
+                gravity = Gravity.CENTER_VERTICAL
             }
-            val row1 = presetRow(
-                testAllButton,
+            testAllPill.layoutParams = LinearLayout.LayoutParams(0, control, 1f)
+            testRow.addView(testAllPill)
+            testDetail.gravity = Gravity.START
+            testDetail.maxLines = 1
+            testDetail.layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                gravity = Gravity.CENTER_VERTICAL
+                leftMargin = gap
+            }
+            testRow.addView(testDetail)
+            add(content, testRow, 10)
+            val row1 = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            listOf(
                 chip("All").apply {
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                    ellipsize = TextUtils.TruncateAt.END
                     setOnClickListener { providerPreset = "All"; applyProviderPreset() }
                 },
-                chip("Recommended").apply {
-                    setOnClickListener { providerPreset = "Recommended"; applyProviderPreset() }
-                },
-            )
-            add(content, row1, 6)
-            val row2 = presetRow(
-                chip("Downloadable").apply {
-                    setOnClickListener { providerPreset = "Downloadable"; applyProviderPreset() }
-                },
                 chip("4K").apply {
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                    ellipsize = TextUtils.TruncateAt.END
                     setOnClickListener { providerPreset = "4K"; applyProviderPreset() }
                 },
-                chip("Reset").apply {
-                    setOnClickListener {
-                        providerPreset = "All"
-                        Settings.resetAllServers(context)
-                        paintServerTiles()
-                        refreshProvidersState()
-                    }
+                chip("Downloadable").apply {
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                    ellipsize = TextUtils.TruncateAt.END
+                    setOnClickListener { providerPreset = "Downloadable"; applyProviderPreset() }
                 },
-            )
-            add(content, row2, 6)
-            add(content, testSummary, 10)
-
-            val providerGrid = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
-            providerTiles.forEachIndexed { rowIndex, tile ->
-                val row = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
-                tile.root.layoutParams = LinearLayout.LayoutParams(0, dp(52), 1f)
-                row.addView(tile.root)
-                providerGrid.addView(
-                    row,
-                    LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-                    ).apply { if (rowIndex < providerTiles.lastIndex) bottomMargin = gap },
-                )
+            ).forEachIndexed { index, view ->
+                view.maxLines = 1
+                view.layoutParams = LinearLayout.LayoutParams(0, control, 1f).apply {
+                    if (index > 0) leftMargin = gap
+                }
+                row1.addView(view)
             }
+            add(content, row1, 6)
+
+            applyProviderPreset()
             add(content, providerGrid, 10)
         }
         sections += SectionSpec(
-            "servers", "Sources", "Servers / Providers",
+            "servers", "Servers / Providers",
             "Choose which providers supply streams",
             "servers", TONE_SECONDARY, serversBody,
         )
@@ -1781,14 +1790,8 @@ object SettingsUi {
             }
             refreshAddonState()
 
-            add(
-                content,
-                label("Load streams from addon manifests.", 14f, TEXT_DIM),
-                2,
-            )
-
             val addonStatus = label(
-                "Only direct HTTP(S) streams are played. Torrent and external links are detected but skipped.",
+                "Only direct HTTP(S) streams play. Torrent and external links are skipped.",
                 13f, TEXT_DIM,
             ).apply { setPadding(0, dp(10), 0, 0) }
             val addonMore = chip("Add More")
@@ -1898,7 +1901,7 @@ object SettingsUi {
                     }
                     draftField = input
                     input.setSelection(input.text.length)
-                    val remove = deleteIcon {
+                    val remove = cancelIcon {
                         draftVisible = false
                         draftField = null
                         draftText = ""
@@ -1998,7 +2001,7 @@ object SettingsUi {
             renderAddons()
         }
         sections += SectionSpec(
-            "addons", "Sources", "Stremio / Nuvio",
+            "addons", "Stremio / Nuvio",
             "Streams from addon manifests",
             "addons", TONE_SECONDARY, addonsBody,
         )
@@ -2019,14 +2022,8 @@ object SettingsUi {
             }
             refreshM3uState()
 
-            add(
-                content,
-                label("Home rows from playlists - live, film or series.", 14f, TEXT_DIM),
-                2,
-            )
-
             val m3uStatus = label(
-                "Items keep the quality their name or link states, so pick what your connection handles.",
+                "Quality follows the item's name or link.",
                 13f, TEXT_DIM,
             ).apply { setPadding(0, dp(10), 0, 0) }
 
@@ -2101,7 +2098,7 @@ object SettingsUi {
                     }
                     m3uDraftField = input
                     input.setSelection(input.text.length)
-                    val cancel = deleteIcon("Cancel") {
+                    val cancel = cancelIcon {
                         m3uDraftVisible = false
                         m3uDraftField = null
                         m3uDraftText = ""
@@ -2183,7 +2180,7 @@ object SettingsUi {
             renderM3u()
         }
         sections += SectionSpec(
-            "m3u", "Sources", "M3U Playlists",
+            "m3u", "M3U Playlists",
             "Home rows from playlists",
             "m3u", TONE_SECONDARY, m3uBody,
         )
@@ -2248,7 +2245,7 @@ object SettingsUi {
             }
         }
         sections += SectionSpec(
-            "subtitles", "Keys & Services", "Subtitles Key",
+            "subtitles", "Subtitles Key",
             "Wyzie key - optional",
             "subs", TONE_TERTIARY, wyzieBody,
         )
@@ -2313,7 +2310,7 @@ object SettingsUi {
             }
         }
         sections += SectionSpec(
-            "tmdb", "Keys & Services", "TMDB API Key",
+            "tmdb", "TMDB API Key",
             "Your own metadata key",
             "tmdb", TONE_TERTIARY, tmdbBody,
         )
@@ -2324,7 +2321,7 @@ object SettingsUi {
 
             add(
                 content,
-                label("Optional - reorders the rows you already match.", 14f, TEXT_DIM),
+                label("Optional - reorders your matched rows.", 14f, TEXT_DIM),
                 2,
             )
             var selectedProvider = Settings.aiProviderId()
@@ -2487,7 +2484,7 @@ object SettingsUi {
             }
         }
         sections += SectionSpec(
-            "ai", "Keys & Services", "AI API Keys",
+            "ai", "AI API Keys",
             "Reorders rows with your own model",
             "ai", TONE_TERTIARY, aiBody,
         )
@@ -2528,16 +2525,12 @@ object SettingsUi {
         val close = iconButton("close", "Close")
         homeTitleRow.addView(close)
         homeHeader.addView(homeTitleRow)
-        homeHeader.addView(
-            label("Catalogue, sources, keys and playback", 13f, TEXT_DIM)
-                .apply { setPadding(0, dp(6), 0, 0) },
-        )
         homePage.addView(homeHeader)
         homePage.addView(dividerRow())
 
         val homeContent = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(4), dp(20), dp(32))
+            setPadding(dp(20), dp(14), dp(20), dp(32))
         }
         val homeScroll = ScrollView(context).apply {
             overScrollMode = View.OVER_SCROLL_NEVER
@@ -2640,16 +2633,6 @@ object SettingsUi {
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
             }
             titleWrap.addView(label(spec.title, 22f, TEXT, medium = true))
-            val overline = LinearLayout(context).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                setPadding(0, dp(2), 0, 0)
-            }
-            overline.addView(beadView(spec.tone))
-            overline.addView(
-                label(spec.group.uppercase(), 11f, TEXT_DIM, medium = true, spacing = 0.12f),
-            )
-            titleWrap.addView(overline)
             toolbar.addView(titleWrap)
             val pill = statePill()
             toolbar.addView(pill.root)
@@ -2760,27 +2743,7 @@ object SettingsUi {
             return root
         }
 
-        val groupOrder = listOf("Content", "Sources", "Keys & Services")
-        groupOrder.forEach { group ->
-            val groupRow = LinearLayout(context).apply {
-                gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(6), dp(18), dp(6), dp(8))
-            }
-            groupRow.addView(beadView(toneForGroup(group)))
-            groupRow.addView(
-                label(group.uppercase(), 11f, TEXT_DIM, medium = true, spacing = 0.14f),
-            )
-            groupRow.addView(
-                View(context).apply {
-                    background = ColorDrawable(HAIRLINE_SOFT)
-                    layoutParams = LinearLayout.LayoutParams(0, dp(1), 1f).apply { leftMargin = dp(12) }
-                },
-            )
-            homeContent.addView(groupRow)
-            sections.filter { it.group == group }.forEach { spec ->
-                homeContent.addView(sectionTile(spec))
-            }
-        }
+        sections.forEach { homeContent.addView(sectionTile(it)) }
         homeContent.addView(
             label("Settings are stored on this device", 10f, TEXT_FAINT).apply {
                 gravity = Gravity.CENTER
