@@ -1013,26 +1013,42 @@ object StreamEngine {
         )
 
     internal suspend fun probeServer(spec: ServerSpec): Boolean {
-        val sampleId = if (spec.animeOnly) PROBE_ANIME_TMDB_ID else PROBE_TMDB_ID
+        // A provider is considered up when at least one of the sample titles
+        // (2 movies + 1 series) returns streams; down only if all return nothing.
+        val targets = if (spec.animeOnly) listOf(
+            Triple(PROBE_ANIME_TMDB_ID.toInt(), null, "movie"),
+            Triple(PROBE_ANIME_MOVIE2_TMDB_ID, null, "movie"),
+            Triple(PROBE_ANIME_SERIES_TMDB_ID, null, "tv"),
+        ) else listOf(
+            Triple(PROBE_TMDB_ID.toInt(), PROBE_IMDB_ID, "movie"),
+            Triple(PROBE_MOVIE2_TMDB_ID, PROBE_MOVIE2_IMDB_ID, "movie"),
+            Triple(PROBE_SERIES_TMDB_ID, PROBE_SERIES_IMDB_ID, "tv"),
+        )
         val budget = spec.timeoutSec.coerceIn(20, 70).toLong() * 1000L
-        return withTimeoutOrNull(budget) {
-            val streams = catching {
-                resolveOne(
-                    spec.copy(recordHealth = false),
-                    sampleId.toInt(),
-                    PROBE_IMDB_ID,
-                    "movie",
-                    0,
-                    0,
-                )
-            }.getOrNull()
-            !streams.isNullOrEmpty()
-        } ?: false
+        val probeSpec = spec.copy(recordHealth = false)
+        for ((tmdbId, imdbId, type) in targets) {
+            val season = if (type == "tv") 1 else 0
+            val episode = if (type == "tv") 1 else 0
+            val streams = withTimeoutOrNull(budget) {
+                catching {
+                    resolveOne(probeSpec, tmdbId, imdbId, type, season, episode)
+                }.getOrNull()
+            }
+            // Up if at least one sample title returns streams.
+            if (!streams.isNullOrEmpty()) return true
+        }
+        return false
     }
 
     private const val PROBE_TMDB_ID = "27205"
     private const val PROBE_IMDB_ID = "tt1375666"
+    private const val PROBE_MOVIE2_TMDB_ID = 550
+    private const val PROBE_MOVIE2_IMDB_ID = "tt0137523"
+    private const val PROBE_SERIES_TMDB_ID = 1399
+    private const val PROBE_SERIES_IMDB_ID = "tt0944947"
     private const val PROBE_ANIME_TMDB_ID = "129"
+    private const val PROBE_ANIME_MOVIE2_TMDB_ID = 372058
+    private const val PROBE_ANIME_SERIES_TMDB_ID = 31911
 
     private fun hexToBytes(hex: String): ByteArray {
         val out = ByteArray(hex.length / 2)
