@@ -1695,30 +1695,37 @@ object SettingsUi {
                     tile.root.visibility = if (visible) View.VISIBLE else View.GONE
                 }
             }
-            val presetRow = LinearLayout(context).apply {
+            val row1 = LinearLayout(context).apply {
                 orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.END or Gravity.CENTER_VERTICAL
+                gravity = Gravity.CENTER_HORIZONTAL or Gravity.CENTER_VERTICAL
             }
-            listOf(testAllButton).forEach { presetRow.addView(it) }
-            listOf("All", "Recommended", "Downloadable", "4K").forEach { name ->
-                val chipView = chip(name).apply {
-                    setOnClickListener {
-                        providerPreset = name
-                        applyProviderPreset()
-                    }
-                }
-                presetRow.addView(chipView)
+            row1.addView(testAllButton)
+            row1.addView(chip("All").apply {
+                setOnClickListener { providerPreset = "All"; applyProviderPreset() }
+            })
+            row1.addView(chip("Recommended").apply {
+                setOnClickListener { providerPreset = "Recommended"; applyProviderPreset() }
+            })
+            add(content, row1, 6)
+            val row2 = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_HORIZONTAL or Gravity.CENTER_VERTICAL
             }
-            val resetAllButton = chip("Reset").apply {
+            row2.addView(chip("Downloadable").apply {
+                setOnClickListener { providerPreset = "Downloadable"; applyProviderPreset() }
+            })
+            row2.addView(chip("4K").apply {
+                setOnClickListener { providerPreset = "4K"; applyProviderPreset() }
+            })
+            row2.addView(chip("Reset").apply {
                 setOnClickListener {
                     providerPreset = "All"
                     Settings.resetAllServers(context)
                     paintServerTiles()
                     refreshProvidersState()
                 }
-            }
-            presetRow.addView(resetAllButton)
-            add(content, presetRow, 6)
+            })
+            add(content, row2, 4)
             add(content, testSummary, 10)
 
             val providerGrid = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
