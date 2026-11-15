@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>IndStream Settings — UI Preview</title>
+<title>IndStream Settings — Servers Preview</title>
 <style>
   :root {
     --surface: #0F0F0F;
@@ -12,327 +12,80 @@
     --border: #3F3F3F;
     --text: #F1F1F1;
     --text-dim: #AAAAAA;
-    --text-muted: #909090;
     --text-faint: #717171;
     --control: #E4E4E4;
     --on-control: #0F0F0F;
+    --success: #4ADE80;
   }
   * { box-sizing: border-box; }
-  body {
-    margin: 0;
-    background: #050505;
-    font-family: "Roboto", "Segoe UI", system-ui, sans-serif;
-    color: var(--text);
-  }
-  .phone {
-    width: 360px;
-    margin: 24px auto;
-    background: var(--surface);
-    border-radius: 28px;
-    overflow: hidden;
-    box-shadow: 0 20px 60px rgba(0,0,0,.6);
-  }
-  .statusbar {
-    height: 24px;
-    background: var(--surface);
-    display: flex;
-    align-items: center;
-    padding: 0 14px;
-    font-size: 11px;
-    color: var(--text-dim);
-  }
-  .header {
-    padding: 20px 24px 6px;
-  }
-  .header-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-  }
+  body { margin: 0; background: #050505; font-family: "Roboto", "Segoe UI", system-ui, sans-serif; color: var(--text); }
+  .phone { width: 360px; margin: 24px auto; background: var(--surface); border-radius: 28px; overflow: hidden; box-shadow: 0 20px 60px rgba(0,0,0,.6); }
+  .header { padding: 20px 24px 6px; }
   .title { font-size: 22px; font-weight: 600; color: var(--text); }
-  .close-btn {
-    width: 44px; height: 44px; border-radius: 50%;
-    background: var(--surface-high);
-    display: flex; align-items: center; justify-content: center;
-    color: var(--text); font-size: 18px;
-  }
   .subtitle { margin-top: 6px; font-size: 13px; color: var(--text-dim); }
-  .hairline { height: 1px; background: rgba(255,255,255,.16); margin: 6px 0 4px; }
-  .group {
-    padding: 18px 6px 8px;
-    display: flex; align-items: center;
-  }
+  .hairline { height: 1px; background: rgba(255,255,255,.16); margin: 12px 0 4px; }
+  .group { padding: 18px 6px 8px; display: flex; align-items: center; }
   .bead { width: 6px; height: 6px; border-radius: 50%; margin-right: 7px; }
-  .bead-primary { background: #E4E4E4; }
   .bead-secondary { background: #AAAAAA; }
-  .bead-tertiary { background: #717171; }
   .group-label { font-size: 11px; font-weight: 600; letter-spacing: .14em; color: var(--text-dim); }
   .group-rule { flex: 1; height: 1px; background: rgba(255,255,255,.06); margin-left: 12px; }
-  .tile {
-    margin: 0 20px 10px;
-    padding: 14px;
-    background: var(--surface-low);
-    border: 1px solid var(--border);
-    border-radius: 24px;
-    display: flex;
-    align-items: center;
-    gap: 14px;
-  }
-  .icon-chip {
-    width: 52px; height: 52px; border-radius: 18px;
-    background: var(--surface-high);
-    display: flex; align-items: center; justify-content: center;
-    flex-shrink: 0;
-  }
-  .icon-chip svg { width: 26px; height: 26px; stroke: #F1F1F1; fill: none; stroke-width: 1.7; }
-  .tile-text { flex: 1; min-width: 0; }
-  .tile-title { font-size: 16px; font-weight: 500; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .tile-sub { margin-top: 4px; font-size: 13px; color: var(--text-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .pill {
-    display: inline-flex; align-items: center; gap: 6px;
-    padding: 6px 11px;
-    border-radius: 999px;
-    background: rgba(255,255,255,.06);
-    border: 1px solid var(--border);
-    font-size: 11px; font-weight: 600;
-    color: var(--text-muted);
-    white-space: nowrap;
-  }
-  .pill.on {
-    background: rgba(228,228,228,.16);
-    border-color: var(--control);
-    color: var(--control);
-  }
-  .pill .dot { width: 6px; height: 6px; border-radius: 50%; }
-  .pill .dot.on { background: var(--control); }
-  .pill .dot.off { background: transparent; border: 1px solid var(--text-faint); }
-  .chevron { color: var(--text-faint); font-size: 18px; margin-left: 10px; }
-  .footer { text-align: center; padding: 12px 0 16px; font-size: 10px; color: var(--text-faint); }
-  .popup-stage {
-    width: 360px;
-    margin: 24px auto;
-    position: relative;
-    height: 780px;
-    overflow: hidden;
-    border-radius: 28px;
-    background: var(--surface);
-  }
-  .popup-dim { position: absolute; inset: 0; background: rgba(0,0,0,.6); }
-  .popup {
-    position: absolute;
-    top: 50%; left: 50%;
-    transform: translate(-50%, -50%);
-    width: 86%;
-    background: var(--surface-low);
-    border-radius: 24px;
-    padding: 28px 24px 24px;
-    box-shadow: 0 8px 30px rgba(0,0,0,.4);
-  }
-  .popup-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
-  .popup-dot { width: 8px; height: 8px; border-radius: 50%; background: #7FD9A0; }
-  .popup-title { font-size: 24px; font-weight: 600; color: var(--text); flex: 1; }
-  .popup-close {
-    width: 44px; height: 44px; border-radius: 50%;
-    background: var(--surface-high);
-    display: flex; align-items: center; justify-content: center;
-    color: var(--text);
-  }
-  .popup-sub { font-size: 13px; color: var(--text-dim); line-height: 1.3; }
-  .popup-row {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 13px 14px;
-    background: var(--surface);
-    border-radius: 16px;
-    margin-top: 8px;
-  }
-  .popup-row-name { font-size: 13px; color: var(--text-dim); }
-  .popup-row-val { font-size: 14px; font-weight: 600; color: #7FD9A0; }
-  .popup-done {
-    margin-top: 16px;
-    height: 48px; border-radius: 999px;
-    background: var(--control);
-    color: var(--on-control);
-    display: flex; align-items: center; justify-content: center;
-    font-weight: 600; font-size: 13px;
-  }
-  .label { font-size: 10px; letter-spacing: .12em; font-weight: 600; color: var(--text-faint); text-transform: uppercase; }
-  h2 { text-align: center; color: #999; font-size: 14px; font-weight: 500; margin: 32px 0 12px; }
+  .section-title { font-size: 16px; font-weight: 600; padding: 0 20px 6px; }
+  .row { display: flex; align-items: center; gap: 8px; padding: 0 20px 10px; justify-content: flex-end; flex-wrap: wrap; }
+  .chip { height: 44px; padding: 0 16px; border-radius: 999px; border: 1px solid #3F3F3F; font-size: 12px; font-weight: 600; font-family: inherit; display: flex; align-items: center; justify-content: center; background: rgba(255,255,255,.04); color: #AAAAAA; }
+  .chip.primary { color: #E4E4E4; background: rgba(255,255,255,.08); }
+  .summary { font-size: 11px; color: var(--text-faint); padding: 0 20px 10px; }
+  .provider { background: var(--surface-low); border: 1px solid var(--border); border-radius: 12px; padding: 4px 10px; height: 42px; box-sizing: border-box; }
+  .provider-row { display: flex; align-items: center; gap: 6px; height: 100%; }
+  .provider-name { flex: 1; font-size: 12px; font-weight: 600; color: var(--text); }
+  .provider-status { font-size: 10px; font-weight: 600; color: var(--success); }
+  .provider-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); }
+  .provider-toggle { display: inline-block; width: 46px; height: 28px; border-radius: 999px; background: #E4E4E4; position: relative; }
+  .provider-thumb { position: absolute; top: 4px; left: 22px; width: 20px; height: 20px; border-radius: 50%; background: #0F0F0F; }
+  .provider-tags { font-size: 9px; color: var(--text-faint); margin-top: -2px; }
+  .provider-list { display: flex; flex-direction: column; gap: 8px; padding: 0 20px 16px; }
 </style>
 </head>
 <body>
-
-<h2>1. Settings — full-screen page (YouTube dark neutral)</h2>
 <div class="phone">
-  <div class="statusbar">12:34</div>
   <div class="header">
-    <div class="header-row">
-      <span class="title">IndStream</span>
-      <div class="close-btn">✕</div>
-    </div>
+    <div class="title">IndStream</div>
     <div class="subtitle">Catalogue, sources, keys and playback</div>
   </div>
   <div class="hairline"></div>
-
-  <div class="group">
-    <span class="bead bead-primary"></span>
-    <span class="group-label">Content</span>
-    <span class="group-rule"></span>
-  </div>
-  <div class="tile">
-    <div class="icon-chip"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 6v6l4 2"/></svg></div>
-    <div class="tile-text">
-      <div class="tile-title">Catalogue Provider</div>
-      <div class="tile-sub">Pick one source at a time</div>
-    </div>
-    <span class="pill on"><span class="dot on"></span>IMDB · Saved</span>
-    <span class="chevron">›</span>
-  </div>
-  <div class="tile">
-    <div class="icon-chip"><svg viewBox="0 0 24 24"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="14" y2="18"/></svg></div>
-    <div class="tile-text">
-      <div class="tile-title">Catalogue</div>
-      <div class="tile-sub">Rows and Home order</div>
-    </div>
-    <span class="pill"><span class="dot off"></span>3 of 8 enabled</span>
-    <span class="chevron">›</span>
-  </div>
-  <div class="tile">
-    <div class="icon-chip"><svg viewBox="0 0 24 24"><path d="M12 2l2.4 5.4 5.6 1-4 3.9.9 5.7-4.9-2.6-4.9 2.6.9-5.7-4-3.9 5.6-1z"/></svg></div>
-    <div class="tile-text">
-      <div class="tile-title">Made for You</div>
-      <div class="tile-sub">Rows built from your watch history</div>
-    </div>
-    <span class="pill on"><span class="dot on"></span>On</span>
-    <span class="chevron">›</span>
-  </div>
-
   <div class="group">
     <span class="bead bead-secondary"></span>
     <span class="group-label">Sources</span>
     <span class="group-rule"></span>
   </div>
-  <div class="tile">
-    <div class="icon-chip"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="6" rx="2"/><rect x="3" y="14" width="18" height="6" rx="2"/><circle cx="17" cy="7" r="1"/><circle cx="17" cy="17" r="1"/></svg></div>
-    <div class="tile-text">
-      <div class="tile-title">Servers / Providers</div>
-      <div class="tile-sub">Choose which providers supply streams</div>
-    </div>
-    <span class="pill on"><span class="dot on"></span>12 of 22 enabled</span>
-    <span class="chevron">›</span>
+  <div class="section-title">All servers</div>
+  <div class="row">
+    <button class="chip primary">Test all servers</button>
+    <button class="chip primary">All</button>
+    <button class="chip">Recommended</button>
+    <button class="chip">Downloadable</button>
+    <button class="chip">4K</button>
+    <button class="chip">Reset</button>
   </div>
-  <div class="tile">
-    <div class="icon-chip"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="4"/><path d="M10 8l6 4-6 4z"/></svg></div>
-    <div class="tile-text">
-      <div class="tile-title">Stremio / Nuvio</div>
-      <div class="tile-sub">Streams from addon manifests</div>
-    </div>
-    <span class="pill on"><span class="dot on"></span>2 of 2 enabled</span>
-    <span class="chevron">›</span>
-  </div>
-  <div class="tile">
-    <div class="icon-chip"><svg viewBox="0 0 24 24"><line x1="4" y1="6" x2="12" y2="6"/><line x1="4" y1="11" x2="12" y2="11"/><line x1="4" y1="16" x2="10" y2="16"/><circle cx="17" cy="17" r="4"/><line x1="17" y1="14" x2="17" y2="17"/></svg></div>
-    <div class="tile-text">
-      <div class="tile-title">M3U Playlists</div>
-      <div class="tile-sub">Home rows from playlists</div>
-    </div>
-    <span class="pill"><span class="dot off"></span>1 playlist</span>
-    <span class="chevron">›</span>
-  </div>
-
-  <div class="group">
-    <span class="bead bead-tertiary"></span>
-    <span class="group-label">Keys &amp; Services</span>
-    <span class="group-rule"></span>
-  </div>
-  <div class="tile">
-    <div class="icon-chip"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3"/><text x="12" y="15" text-anchor="middle" font-size="9" fill="#F1F1F1" font-family="sans-serif" font-weight="500">CC</text></svg></div>
-    <div class="tile-text">
-      <div class="tile-title">Subtitles Key</div>
-      <div class="tile-sub">Wyzie key - optional</div>
-    </div>
-    <span class="pill on"><span class="dot on"></span>Saved</span>
-    <span class="chevron">›</span>
-  </div>
-  <div class="tile">
-    <div class="icon-chip"><svg viewBox="0 0 24 24"><circle cx="10" cy="10" r="5"/><line x1="14" y1="14" x2="20" y2="20"/></svg></div>
-    <div class="tile-text">
-      <div class="tile-title">TMDB API Key</div>
-      <div class="tile-sub">Your own metadata key</div>
-    </div>
-    <span class="pill"><span class="dot off"></span>Not set</span>
-    <span class="chevron">›</span>
-  </div>
-  <div class="tile">
-    <div class="icon-chip"><svg viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2"/><rect x="8" y="8" width="8" height="8" rx="1"/></svg></div>
-    <div class="tile-text">
-      <div class="tile-title">AI API Keys</div>
-      <div class="tile-sub">Reorders rows with your own model</div>
-    </div>
-    <span class="pill"><span class="dot off"></span>Not set</span>
-    <span class="chevron">›</span>
-  </div>
-  <div class="footer">Settings are stored on this device</div>
-</div>
-
-<h2>2. Popup — floating style (build-catalogue / test-servers result)</h2>
-<div class="popup-stage">
-  <div class="popup-dim"></div>
-  <div class="popup">
-    <div class="popup-head">
-      <span class="popup-dot"></span>
-      <span class="popup-title">Server test complete</span>
-      <div class="popup-close">✕</div>
-    </div>
-    <div class="popup-sub">Checked 22 providers just now.</div>
-    <div class="popup-row">
-      <span class="popup-row-name">Working</span>
-      <span class="popup-row-val">19</span>
-    </div>
-    <div class="popup-row">
-      <span class="popup-row-name">Down</span>
-      <span class="popup-row-val" style="color:#FFB4AB">3</span>
-    </div>
-    <div class="popup-done">Done</div>
+  <div class="summary">Test (2 movies + 1 series) on every provider. Up means at least one sample returned streams.</div>
+  <div class="provider-list">
+    <div class="provider"><div class="provider-row"><span class="provider-name">Vidy</span><span class="provider-status">Up</span><span class="provider-dot"></span><span class="provider-toggle"><span class="provider-thumb"></span></span></div><div class="provider-tags">4K · Stream only</div></div>
+    <div class="provider"><div class="provider-row"><span class="provider-name">VidBolt</span><span class="provider-status">Up</span><span class="provider-dot"></span><span class="provider-toggle"><span class="provider-thumb"></span></span></div><div class="provider-tags">Fast · Stream only</div></div>
+    <div class="provider"><div class="provider-row"><span class="provider-name">Vidly</span><span class="provider-status">Up</span><span class="provider-dot"></span><span class="provider-toggle"><span class="provider-thumb"></span></span></div><div class="provider-tags">Fast · Stream only</div></div>
+    <div class="provider"><div class="provider-row"><span class="provider-name">VidLink</span><span class="provider-status">Up</span><span class="provider-dot"></span><span class="provider-toggle"><span class="provider-thumb"></span></span></div><div class="provider-tags">Very fast · Multi audio</div></div>
+    <div class="provider"><div class="provider-row"><span class="provider-name">MovieBox</span><span class="provider-status">Up</span><span class="provider-dot"></span><span class="provider-toggle"><span class="provider-thumb"></span></span></div><div class="provider-tags">Fast · Reliable · Download</div></div>
+    <div class="provider"><div class="provider-row"><span class="provider-name">NetMirror</span><span class="provider-status">Up</span><span class="provider-dot"></span><span class="provider-toggle"><span class="provider-thumb"></span></span></div><div class="provider-tags">Fast · Reliable · Download</div></div>
+    <div class="provider"><div class="provider-row"><span class="provider-name">Bingr</span><span class="provider-status">Up</span><span class="provider-dot"></span><span class="provider-toggle"><span class="provider-thumb"></span></span></div><div class="provider-tags">Fast · Stream only</div></div>
+    <div class="provider"><div class="provider-row"><span class="provider-name">Vidrift</span><span class="provider-status">Up</span><span class="provider-dot"></span><span class="provider-toggle"><span class="provider-thumb"></span></span></div><div class="provider-tags">Fast · Stream only</div></div>
+    <div class="provider"><div class="provider-row"><span class="provider-name">Movy</span><span class="provider-status">Up</span><span class="provider-dot"></span><span class="provider-toggle"><span class="provider-thumb"></span></span></div><div class="provider-tags">Fast · 4K · Stream only</div></div>
+    <div class="provider"><div class="provider-row"><span class="provider-name">Atlantic</span><span class="provider-status">Up</span><span class="provider-dot"></span><span class="provider-toggle"><span class="provider-thumb"></span></span></div><div class="provider-tags">Very fast · Reliable</div></div>
+    <div class="provider"><div class="provider-row"><span class="provider-name">4KHDHub</span><span class="provider-status">Up</span><span class="provider-dot"></span><span class="provider-toggle"><span class="provider-thumb"></span></span></div><div class="provider-tags">Slow start · Download · 4K</div></div>
+    <div class="provider"><div class="provider-row"><span class="provider-name">FSL</span><span class="provider-status">Up</span><span class="provider-dot"></span><span class="provider-toggle"><span class="provider-thumb"></span></span></div><div class="provider-tags">Slow start · Download · Multi audio</div></div>
+    <div class="provider"><div class="provider-row"><span class="provider-name">HindMoviez</span><span class="provider-status">Up</span><span class="provider-dot"></span><span class="provider-toggle"><span class="provider-thumb"></span></span></div><div class="provider-tags">Slow start · Download</div></div>
+    <div class="provider"><div class="provider-row"><span class="provider-name">HDHub4u</span><span class="provider-status">Up</span><span class="provider-dot"></span><span class="provider-toggle"><span class="provider-thumb"></span></span></div><div class="provider-tags">Slow start · Download · 4K</div></div>
+    <div class="provider"><div class="provider-row"><span class="provider-name">MoviesDrive</span><span class="provider-status">Up</span><span class="provider-dot"></span><span class="provider-toggle"><span class="provider-thumb"></span></span></div><div class="provider-tags">Slow start · Download</div></div>
+    <div class="provider"><div class="provider-row"><span class="provider-name">AnimeWorld</span><span class="provider-status">Up</span><span class="provider-dot"></span><span class="provider-toggle"><span class="provider-thumb"></span></span></div><div class="provider-tags">Anime · Multi audio</div></div>
+    <div class="provider"><div class="provider-row"><span class="provider-name">HiAnime</span><span class="provider-status">Up</span><span class="provider-dot"></span><span class="provider-toggle"><span class="provider-thumb"></span></span></div><div class="provider-tags">Anime · Stream only</div></div>
   </div>
 </div>
-
-<h2>3. Servers / Providers — action + filter rows (shared row height, vertically centered)</h2>
-<div style="width:360px;margin:0 auto 40px;background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:16px 20px;">
-  <div style="display:flex;justify-content:flex-end;align-items:center;height:44px;">
-    <button style="all:unset;box-sizing:border-box;height:44px;padding:0 16px;border-radius:999px;border:1px solid #3F3F3F;color:#E4E4E4;background:rgba(255,255,255,.08);font-size:12px;font-weight:600;font-family:inherit;display:flex;align-items:center;justify-content:center;">Test all servers</button>
-  </div>
-  <div style="display:flex;justify-content:flex-end;align-items:center;gap:8px;height:44px;">
-    <button style="all:unset;box-sizing:border-box;height:44px;padding:0 16px;border-radius:999px;border:1px solid #3F3F3F;color:#E4E4E4;background:rgba(255,255,255,.08);font-size:12px;font-weight:600;font-family:inherit;display:flex;align-items:center;justify-content:center;">All</button>
-    <button style="all:unset;box-sizing:border-box;height:44px;padding:0 16px;border-radius:999px;border:1px solid #3F3F3F;color:#AAAAAA;background:rgba(255,255,255,.04);font-size:12px;font-weight:600;font-family:inherit;display:flex;align-items:center;justify-content:center;">Recommended</button>
-    <button style="all:unset;box-sizing:border-box;height:44px;padding:0 16px;border-radius:999px;border:1px solid #3F3F3F;color:#AAAAAA;background:rgba(255,255,255,.04);font-size:12px;font-weight:600;font-family:inherit;display:flex;align-items:center;justify-content:center;">Downloadable</button>
-    <button style="all:unset;box-sizing:border-box;height:44px;padding:0 16px;border-radius:999px;border:1px solid #3F3F3F;color:#AAAAAA;background:rgba(255,255,255,.04);font-size:12px;font-weight:600;font-family:inherit;display:flex;align-items:center;justify-content:center;">4K</button>
-    <button style="all:unset;box-sizing:border-box;height:44px;padding:0 16px;border-radius:999px;border:1px solid #3F3F3F;color:#AAAAAA;background:rgba(255,255,255,.04);font-size:12px;font-weight:600;font-family:inherit;display:flex;align-items:center;justify-content:center;">Reset</button>
-  </div>
-  <div style="font-size:11px;color:var(--text-faint);margin-top:12px;line-height:1.4;">Test (2 movies + 1 series) on every provider. Up means at least one sample returned streams.</div>
-</div>
-
-<h2>4. Servers / Providers — full list (single column, compact, 4K tagged)</h2>
-<div style="width:360px;margin:0 auto 40px;background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:16px 20px;">
-  <div style="display:flex;flex-direction:column;gap:8px;">
-    <div style="background:var(--surface-low);border:1px solid var(--border);border-radius:12px;padding:4px 10px;height:42px;box-sizing:border-box;"><div style="display:flex;align-items:center;gap:6px;height:100%;"><span style="flex:1;font-size:12px;font-weight:600;color:var(--text);">Vidy</span><span style="font-size:10px;font-weight:600;color:#4ADE80;">Up</span><span style="width:8px;height:8px;border-radius:50%;background:#4ADE80;"></span><span style="display:inline-block;width:46px;height:28px;border-radius:999px;background:#E4E4E4;position:relative;"><span style="position:absolute;top:4px;left:22px;width:20px;height:20px;border-radius:50%;background:#0F0F0F;"></span></span></div><div style="font-size:10px;color:var(--text-faint);margin-top:-2px;">4K · Stream only</div></div>
-    <div style="background:var(--surface-low);border:1px solid var(--border);border-radius:12px;padding:4px 10px;height:42px;box-sizing:border-box;"><div style="display:flex;align-items:center;gap:6px;height:100%;"><span style="flex:1;font-size:12px;font-weight:600;color:var(--text);">VidBolt</span><span style="font-size:10px;font-weight:600;color:#4ADE80;">Up</span><span style="width:8px;height:8px;border-radius:50%;background:#4ADE80;"></span><span style="display:inline-block;width:46px;height:28px;border-radius:999px;background:#E4E4E4;position:relative;"><span style="position:absolute;top:4px;left:22px;width:20px;height:20px;border-radius:50%;background:#0F0F0F;"></span></span></div><div style="font-size:10px;color:var(--text-faint);margin-top:-2px;">Fast · Stream only</div></div>
-    <div style="background:var(--surface-low);border:1px solid var(--border);border-radius:12px;padding:4px 10px;height:42px;box-sizing:border-box;"><div style="display:flex;align-items:center;gap:6px;height:100%;"><span style="flex:1;font-size:12px;font-weight:600;color:var(--text);">Vidly</span><span style="font-size:10px;font-weight:600;color:#4ADE80;">Up</span><span style="width:8px;height:8px;border-radius:50%;background:#4ADE80;"></span><span style="display:inline-block;width:46px;height:28px;border-radius:999px;background:#E4E4E4;position:relative;"><span style="position:absolute;top:4px;left:22px;width:20px;height:20px;border-radius:50%;background:#0F0F0F;"></span></span></div><div style="font-size:10px;color:var(--text-faint);margin-top:-2px;">Fast · Stream only</div></div>
-    <div style="background:var(--surface-low);border:1px solid var(--border);border-radius:12px;padding:4px 10px;height:42px;box-sizing:border-box;"><div style="display:flex;align-items:center;gap:6px;height:100%;"><span style="flex:1;font-size:12px;font-weight:600;color:var(--text);">VidLink</span><span style="font-size:10px;font-weight:600;color:#4ADE80;">Up</span><span style="width:8px;height:8px;border-radius:50%;background:#4ADE80;"></span><span style="display:inline-block;width:46px;height:28px;border-radius:999px;background:#E4E4E4;position:relative;"><span style="position:absolute;top:4px;left:22px;width:20px;height:20px;border-radius:50%;background:#0F0F0F;"></span></span></div><div style="font-size:10px;color:var(--text-faint);margin-top:-2px;">Very fast · Multi audio</div></div>
-    <div style="background:var(--surface-low);border:1px solid var(--border);border-radius:12px;padding:4px 10px;height:42px;box-sizing:border-box;"><div style="display:flex;align-items:center;gap:6px;height:100%;"><span style="flex:1;font-size:12px;font-weight:600;color:var(--text);">MovieBox</span><span style="font-size:10px;font-weight:600;color:#4ADE80;">Up</span><span style="width:8px;height:8px;border-radius:50%;background:#4ADE80;"></span><span style="display:inline-block;width:46px;height:28px;border-radius:999px;background:#E4E4E4;position:relative;"><span style="position:absolute;top:4px;left:22px;width:20px;height:20px;border-radius:50%;background:#0F0F0F;"></span></span></div><div style="font-size:10px;color:var(--text-faint);margin-top:-2px;">Fast · Reliable · Download</div></div>
-    <div style="background:var(--surface-low);border:1px solid var(--border);border-radius:12px;padding:4px 10px;height:42px;box-sizing:border-box;"><div style="display:flex;align-items:center;gap:6px;height:100%;"><span style="flex:1;font-size:12px;font-weight:600;color:var(--text);">NetMirror</span><span style="font-size:10px;font-weight:600;color:#4ADE80;">Up</span><span style="width:8px;height:8px;border-radius:50%;background:#4ADE80;"></span><span style="display:inline-block;width:46px;height:28px;border-radius:999px;background:#E4E4E4;position:relative;"><span style="position:absolute;top:4px;left:22px;width:20px;height:20px;border-radius:50%;background:#0F0F0F;"></span></span></div><div style="font-size:10px;color:var(--text-faint);margin-top:-2px;">Fast · Reliable · Download</div></div>
-    <div style="background:var(--surface-low);border:1px solid var(--border);border-radius:12px;padding:4px 10px;height:42px;box-sizing:border-box;"><div style="display:flex;align-items:center;gap:6px;height:100%;"><span style="flex:1;font-size:12px;font-weight:600;color:var(--text);">Bingr</span><span style="font-size:10px;font-weight:600;color:#4ADE80;">Up</span><span style="width:8px;height:8px;border-radius:50%;background:#4ADE80;"></span><span style="display:inline-block;width:46px;height:28px;border-radius:999px;background:#E4E4E4;position:relative;"><span style="position:absolute;top:4px;left:22px;width:20px;height:20px;border-radius:50%;background:#0F0F0F;"></span></span></div><div style="font-size:10px;color:var(--text-faint);margin-top:-2px;">Fast · Stream only</div></div>
-    <div style="background:var(--surface-low);border:1px solid var(--border);border-radius:12px;padding:4px 10px;height:42px;box-sizing:border-box;"><div style="display:flex;align-items:center;gap:6px;height:100%;"><span style="flex:1;font-size:12px;font-weight:600;color:var(--text);">Vidrift</span><span style="font-size:10px;font-weight:600;color:#4ADE80;">Up</span><span style="width:8px;height:8px;border-radius:50%;background:#4ADE80;"></span><span style="display:inline-block;width:46px;height:28px;border-radius:999px;background:#E4E4E4;position:relative;"><span style="position:absolute;top:4px;left:22px;width:20px;height:20px;border-radius:50%;background:#0F0F0F;"></span></span></div><div style="font-size:10px;color:var(--text-faint);margin-top:-2px;">Fast · Stream only</div></div>
-    <div style="background:var(--surface-low);border:1px solid var(--border);border-radius:12px;padding:4px 10px;height:42px;box-sizing:border-box;"><div style="display:flex;align-items:center;gap:6px;height:100%;"><span style="flex:1;font-size:12px;font-weight:600;color:var(--text);">Movy</span><span style="font-size:10px;font-weight:600;color:#4ADE80;">Up</span><span style="width:8px;height:8px;border-radius:50%;background:#4ADE80;"></span><span style="display:inline-block;width:46px;height:28px;border-radius:999px;background:#E4E4E4;position:relative;"><span style="position:absolute;top:4px;left:22px;width:20px;height:20px;border-radius:50%;background:#0F0F0F;"></span></span></div><div style="font-size:10px;color:var(--text-faint);margin-top:-2px;">Fast · 4K · Stream only</div></div>
-    <div style="background:var(--surface-low);border:1px solid var(--border);border-radius:12px;padding:4px 10px;height:42px;box-sizing:border-box;"><div style="display:flex;align-items:center;gap:6px;height:100%;"><span style="flex:1;font-size:12px;font-weight:600;color:var(--text);">Atlantic</span><span style="font-size:10px;font-weight:600;color:#4ADE80;">Up</span><span style="width:8px;height:8px;border-radius:50%;background:#4ADE80;"></span><span style="display:inline-block;width:46px;height:28px;border-radius:999px;background:#E4E4E4;position:relative;"><span style="position:absolute;top:4px;left:22px;width:20px;height:20px;border-radius:50%;background:#0F0F0F;"></span></span></div><div style="font-size:10px;color:var(--text-faint);margin-top:-2px;">Very fast · Reliable</div></div>
-    <div style="background:var(--surface-low);border:1px solid var(--border);border-radius:12px;padding:4px 10px;height:42px;box-sizing:border-box;"><div style="display:flex;align-items:center;gap:6px;height:100%;"><span style="flex:1;font-size:12px;font-weight:600;color:var(--text);">4KHDHub</span><span style="font-size:10px;font-weight:600;color:#4ADE80;">Up</span><span style="width:8px;height:8px;border-radius:50%;background:#4ADE80;"></span><span style="display:inline-block;width:46px;height:28px;border-radius:999px;background:#E4E4E4;position:relative;"><span style="position:absolute;top:4px;left:22px;width:20px;height:20px;border-radius:50%;background:#0F0F0F;"></span></span></div><div style="font-size:10px;color:var(--text-faint);margin-top:-2px;">Slow start · Download · 4K</div></div>
-    <div style="background:var(--surface-low);border:1px solid var(--border);border-radius:12px;padding:4px 10px;height:42px;box-sizing:border-box;"><div style="display:flex;align-items:center;gap:6px;height:100%;"><span style="flex:1;font-size:12px;font-weight:600;color:var(--text);">FSL</span><span style="font-size:10px;font-weight:600;color:#4ADE80;">Up</span><span style="width:8px;height:8px;border-radius:50%;background:#4ADE80;"></span><span style="display:inline-block;width:46px;height:28px;border-radius:999px;background:#E4E4E4;position:relative;"><span style="position:absolute;top:4px;left:22px;width:20px;height:20px;border-radius:50%;background:#0F0F0F;"></span></span></div><div style="font-size:10px;color:var(--text-faint);margin-top:-2px;">Slow start · Download · Multi audio</div></div>
-    <div style="background:var(--surface-low);border:1px solid var(--border);border-radius:12px;padding:4px 10px;height:42px;box-sizing:border-box;"><div style="display:flex;align-items:center;gap:6px;height:100%;"><span style="flex:1;font-size:12px;font-weight:600;color:var(--text);">HindMoviez</span><span style="font-size:10px;font-weight:600;color:#4ADE80;">Up</span><span style="width:8px;height:8px;border-radius:50%;background:#4ADE80;"></span><span style="display:inline-block;width:46px;height:28px;border-radius:999px;background:#E4E4E4;position:relative;"><span style="position:absolute;top:4px;left:22px;width:20px;height:20px;border-radius:50%;background:#0F0F0F;"></span></span></div><div style="font-size:10px;color:var(--text-faint);margin-top:-2px;">Slow start · Download</div></div>
-    <div style="background:var(--surface-low);border:1px solid var(--border);border-radius:12px;padding:4px 10px;height:42px;box-sizing:border-box;"><div style="display:flex;align-items:center;gap:6px;height:100%;"><span style="flex:1;font-size:12px;font-weight:600;color:var(--text);">HDHub4u</span><span style="font-size:10px;font-weight:600;color:#4ADE80;">Up</span><span style="width:8px;height:8px;border-radius:50%;background:#4ADE80;"></span><span style="display:inline-block;width:46px;height:28px;border-radius:999px;background:#E4E4E4;position:relative;"><span style="position:absolute;top:4px;left:22px;width:20px;height:20px;border-radius:50%;background:#0F0F0F;"></span></span></div><div style="font-size:10px;color:var(--text-faint);margin-top:-2px;">Slow start · Download · 4K</div></div>
-    <div style="background:var(--surface-low);border:1px solid var(--border);border-radius:12px;padding:4px 10px;height:42px;box-sizing:border-box;"><div style="display:flex;align-items:center;gap:6px;height:100%;"><span style="flex:1;font-size:12px;font-weight:600;color:var(--text);">MoviesDrive</span><span style="font-size:10px;font-weight:600;color:#4ADE80;">Up</span><span style="width:8px;height:8px;border-radius:50%;background:#4ADE80;"></span><span style="display:inline-block;width:46px;height:28px;border-radius:999px;background:#E4E4E4;position:relative;"><span style="position:absolute;top:4px;left:22px;width:20px;height:20px;border-radius:50%;background:#0F0F0F;"></span></span></div><div style="font-size:10px;color:var(--text-faint);margin-top:-2px;">Slow start · Download</div></div>
-    <div style="background:var(--surface-low);border:1px solid var(--border);border-radius:12px;padding:4px 10px;height:42px;box-sizing:border-box;"><div style="display:flex;align-items:center;gap:6px;height:100%;"><span style="flex:1;font-size:12px;font-weight:600;color:var(--text);">AnimeWorld</span><span style="font-size:10px;font-weight:600;color:#4ADE80;">Up</span><span style="width:8px;height:8px;border-radius:50%;background:#4ADE80;"></span><span style="display:inline-block;width:46px;height:28px;border-radius:999px;background:#E4E4E4;position:relative;"><span style="position:absolute;top:4px;left:22px;width:20px;height:20px;border-radius:50%;background:#0F0F0F;"></span></span></div><div style="font-size:10px;color:var(--text-faint);margin-top:-2px;">Anime · Multi audio</div></div>
-    <div style="background:var(--surface-low);border:1px solid var(--border);border-radius:12px;padding:4px 10px;height:42px;box-sizing:border-box;"><div style="display:flex;align-items:center;gap:6px;height:100%;"><span style="flex:1;font-size:12px;font-weight:600;color:var(--text);">HiAnime</span><span style="font-size:10px;font-weight:600;color:#4ADE80;">Up</span><span style="width:8px;height:8px;border-radius:50%;background:#4ADE80;"></span><span style="display:inline-block;width:46px;height:28px;border-radius:999px;background:#E4E4E4;position:relative;"><span style="position:absolute;top:4px;left:22px;width:20px;height:20px;border-radius:50%;background:#0F0F0F;"></span></span></div><div style="font-size:10px;color:var(--text-faint);margin-top:-2px;">Anime · Stream only</div></div>
-  </div>
-</div>
-
 </body>
 </html>
