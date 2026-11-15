@@ -296,47 +296,54 @@
   </div>
 </div>
 
-<h2>3. Enable / Disable all — pills (was plain text)</h2>
-<div style="width:360px;margin:0 auto 40px;display:flex;justify-content:flex-end;gap:8px;padding:0 20px;">
-  <div style="padding:6px 16px;border-radius:999px;border:1px solid #3F3F3F;color:#AAAAAA;font-size:12px;font-weight:600;background:rgba(255,255,255,.04);">Enable all</div>
-  <div style="padding:6px 16px;border-radius:999px;border:1px solid #3F3F3F;color:#AAAAAA;font-size:12px;font-weight:600;background:rgba(255,255,255,.04);">Disable all</div>
+<h2>3. Servers / Providers — action + filter rows (shared row height, vertically centered)</h2>
+<div style="width:360px;margin:0 auto 40px;background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:16px 20px;">
+  <div style="display:flex;justify-content:flex-end;align-items:center;height:44px;">
+    <button style="all:unset;box-sizing:border-box;height:44px;padding:0 16px;border-radius:999px;border:1px solid #3F3F3F;color:#E4E4E4;background:rgba(255,255,255,.08);font-size:12px;font-weight:600;font-family:inherit;display:flex;align-items:center;justify-content:center;">Test all servers</button>
+  </div>
+  <div style="display:flex;justify-content:flex-end;align-items:center;gap:8px;height:44px;">
+    <button style="all:unset;box-sizing:border-box;height:44px;padding:0 16px;border-radius:999px;border:1px solid #3F3F3F;color:#E4E4E4;background:rgba(255,255,255,.08);font-size:12px;font-weight:600;font-family:inherit;display:flex;align-items:center;justify-content:center;">All</button>
+    <button style="all:unset;box-sizing:border-box;height:44px;padding:0 16px;border-radius:999px;border:1px solid #3F3F3F;color:#AAAAAA;background:rgba(255,255,255,.04);font-size:12px;font-weight:600;font-family:inherit;display:flex;align-items:center;justify-content:center;">Recommended</button>
+    <button style="all:unset;box-sizing:border-box;height:44px;padding:0 16px;border-radius:999px;border:1px solid #3F3F3F;color:#AAAAAA;background:rgba(255,255,255,.04);font-size:12px;font-weight:600;font-family:inherit;display:flex;align-items:center;justify-content:center;">Downloadable</button>
+    <button style="all:unset;box-sizing:border-box;height:44px;padding:0 16px;border-radius:999px;border:1px solid #3F3F3F;color:#AAAAAA;background:rgba(255,255,255,.04);font-size:12px;font-weight:600;font-family:inherit;display:flex;align-items:center;justify-content:center;">4K</button>
+    <button style="all:unset;box-sizing:border-box;height:44px;padding:0 16px;border-radius:999px;border:1px solid #3F3F3F;color:#AAAAAA;background:rgba(255,255,255,.04);font-size:12px;font-weight:600;font-family:inherit;display:flex;align-items:center;justify-content:center;">Reset</button>
+  </div>
+  <div style="font-size:11px;color:var(--text-faint);margin-top:12px;line-height:1.4;">Test (2 movies + 1 series) on every provider. Up means at least one sample returned streams.</div>
 </div>
 
 <h2>4. Servers / Providers — expanded (single column + toggles)</h2>
 <div style="width:360px;margin:0 auto 40px;background:var(--surface);border-radius:24px;padding:16px 0;">
-  <div style="display:flex;justify-content:flex-end;gap:8px;padding:0 20px 12px;flex-wrap:wrap;">
-    <div style="padding:6px 16px;border-radius:999px;border:1px solid #3F3F3F;color:#AAAAAA;font-size:12px;font-weight:600;background:rgba(255,255,255,.04);">Enable all</div>
-    <div style="padding:6px 16px;border-radius:999px;border:1px solid #3F3F3F;color:#AAAAAA;font-size:12px;font-weight:600;background:rgba(255,255,255,.04);">Disable all</div>
-    <div style="padding:6px 16px;border-radius:999px;border:1px solid #3F3F3F;color:#E4E4E4;font-size:12px;font-weight:600;background:rgba(255,255,255,.08);">Test all servers</div>
-  </div>
-  <div style="display:flex;gap:8px;padding:0 20px 12px;">
-    <div style="padding:4px 12px;border-radius:999px;border:1px solid #3F3F3F;color:#E4E4E4;font-size:11px;font-weight:600;background:rgba(255,255,255,.08);">All</div>
-    <div style="padding:4px 12px;border-radius:999px;border:1px solid #3F3F3F;color:#AAAAAA;font-size:11px;font-weight:600;background:rgba(255,255,255,.04);">Recommended</div>
-    <div style="padding:4px 12px;border-radius:999px;border:1px solid #3F3F3F;color:#AAAAAA;font-size:11px;font-weight:600;background:rgba(255,255,255,.04);">Downloadable</div>
+  <div style="display:flex;gap:8px;padding:0 20px 12px;justify-content:flex-end;flex-wrap:wrap;">
+    <div style="height:44px;padding:0 16px;border-radius:999px;border:1px solid #3F3F3F;color:#E4E4E4;font-size:12px;font-weight:600;background:rgba(255,255,255,.08);display:flex;align-items:center;">Test all servers</div>
+    <div style="height:44px;padding:0 16px;border-radius:999px;border:1px solid #3F3F3F;color:#E4E4E4;font-size:12px;font-weight:600;background:rgba(255,255,255,.08);display:flex;align-items:center;">All</div>
+    <div style="height:44px;padding:0 16px;border-radius:999px;border:1px solid #3F3F3F;color:#AAAAAA;font-size:12px;font-weight:600;background:rgba(255,255,255,.04);display:flex;align-items:center;">Recommended</div>
+    <div style="height:44px;padding:0 16px;border-radius:999px;border:1px solid #3F3F3F;color:#AAAAAA;font-size:12px;font-weight:600;background:rgba(255,255,255,.04);display:flex;align-items:center;">Downloadable</div>
+    <div style="height:44px;padding:0 16px;border-radius:999px;border:1px solid #3F3F3F;color:#AAAAAA;font-size:12px;font-weight:600;background:rgba(255,255,255,.04);display:flex;align-items:center;">4K</div>
+    <div style="height:44px;padding:0 16px;border-radius:999px;border:1px solid #3F3F3F;color:#AAAAAA;font-size:12px;font-weight:600;background:rgba(255,255,255,.04);display:flex;align-items:center;">Reset</div>
   </div>
   <div style="font-size:11px;color:var(--text-faint);padding:0 20px 12px;">Test (2 movies + 1 series) on every provider. Up means at least one sample returned streams.</div>
-  <div style="display:flex;flex-direction:column;gap:10px;padding:0 20px;">
-    <div style="background:var(--surface-low);border:1px solid var(--border);border-radius:20px;padding:12px 14px;">
-      <div style="display:flex;align-items:center;gap:8px;">
-        <span style="flex:1;font-size:13px;font-weight:600;color:var(--text);">VidLink</span>
+  <div style="display:flex;flex-direction:column;gap:8px;padding:0 20px;">
+    <div style="background:var(--surface-low);border:1px solid var(--border);border-radius:16px;padding:4px 10px;height:42px;box-sizing:border-box;">
+      <div style="display:flex;align-items:center;gap:6px;height:100%;">
+        <span style="flex:1;font-size:12px;font-weight:600;color:var(--text);">VidLink</span>
         <span style="font-size:10px;font-weight:600;color:#4ADE80;">Up</span>
-        <span style="width:9px;height:9px;border-radius:50%;background:#4ADE80;"></span>
-        <span style="display:inline-block;width:52px;height:32px;border-radius:999px;background:#E4E4E4;position:relative;">
-          <span style="position:absolute;top:4px;left:24px;width:24px;height:24px;border-radius:50%;background:#0F0F0F;"></span>
+        <span style="width:8px;height:8px;border-radius:50%;background:#4ADE80;"></span>
+        <span style="display:inline-block;width:46px;height:28px;border-radius:999px;background:#E4E4E4;position:relative;">
+          <span style="position:absolute;top:4px;left:22px;width:20px;height:20px;border-radius:50%;background:#0F0F0F;"></span>
         </span>
       </div>
-      <div style="font-size:11px;color:var(--text-faint);margin-top:4px;">Very fast · Reliable · Multi audio</div>
+      <div style="font-size:10px;color:var(--text-faint);margin-top:-2px;">4K · Very fast · Multi audio</div>
     </div>
-    <div style="background:var(--surface-low);border:1px solid var(--border);border-radius:20px;padding:12px 14px;opacity:.58;">
-      <div style="display:flex;align-items:center;gap:8px;">
-        <span style="flex:1;font-size:13px;font-weight:600;color:var(--text);">VaPlayer</span>
-        <span style="font-size:10px;font-weight:600;color:#FFB4AB;">Down</span>
-        <span style="width:9px;height:9px;border-radius:50%;border:2px solid var(--border);"></span>
-        <span style="display:inline-block;width:52px;height:32px;border-radius:999px;background:var(--surface-high);position:relative;">
-          <span style="position:absolute;top:4px;left:4px;width:24px;height:24px;border-radius:50%;background:var(--text-faint);"></span>
+    <div style="background:var(--surface-low);border:1px solid var(--border);border-radius:16px;padding:4px 10px;height:42px;box-sizing:border-box;opacity:.58;">
+      <div style="display:flex;align-items:center;gap:6px;height:100%;">
+        <span style="flex:1;font-size:12px;font-weight:600;color:var(--text);">Atlantic</span>
+        <span style="font-size:10px;font-weight:600;color:#4ADE80;">Up</span>
+        <span style="width:8px;height:8px;border-radius:50%;background:#4ADE80;"></span>
+        <span style="display:inline-block;width:46px;height:28px;border-radius:999px;background:#E4E4E4;position:relative;">
+          <span style="position:absolute;top:4px;left:22px;width:20px;height:20px;border-radius:50%;background:#0F0F0F;"></span>
         </span>
       </div>
-      <div style="font-size:11px;color:var(--text-faint);margin-top:4px;">Very fast · Reliable · Multi audio</div>
+      <div style="font-size:10px;color:var(--text-faint);margin-top:-2px;">Very fast · Reliable · Multi audio</div>
     </div>
   </div>
 </div>

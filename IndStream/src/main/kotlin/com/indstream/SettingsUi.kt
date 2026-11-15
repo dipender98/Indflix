@@ -1478,6 +1478,7 @@ object SettingsUi {
 
             fun providerTags(spec: ServerSpec): String {
                 val tags = ArrayList<String>()
+                if (spec.supports4k) tags += "4K"
                 if (spec.animeOnly) tags += "Anime"
                 when (spec.speed) {
                     ServerSpeed.VERY_FAST -> tags += "Very fast"
@@ -1498,7 +1499,7 @@ object SettingsUi {
                 val dot = View(context).apply {
                     layoutParams = LinearLayout.LayoutParams(dp(9), dp(9)).apply { leftMargin = dp(8) }
                 }
-                val name = label(spec.name, 13f, TEXT, medium = true).apply {
+                val name = label(spec.name, 12f, TEXT, medium = true).apply {
                     maxLines = 1
                     ellipsize = TextUtils.TruncateAt.END
                     layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
@@ -1511,7 +1512,7 @@ object SettingsUi {
                 }
                 val initialChecked = Settings.serverEnabled(spec.id)
                 val toggleRoot = FrameLayout(context).apply {
-                    layoutParams = LinearLayout.LayoutParams(dp(52), dp(32)).apply { leftMargin = dp(8) }
+                    layoutParams = LinearLayout.LayoutParams(dp(46), dp(28)).apply { leftMargin = dp(6) }
                     background = ripple(
                         StateListDrawable().apply {
                             addState(intArrayOf(android.R.attr.state_focused), rounded(Color.TRANSPARENT, 999, 2, CONTROL))
@@ -1522,12 +1523,12 @@ object SettingsUi {
                     isFocusable = true
                 }
                 val toggleTrack = View(context).apply {
-                    layoutParams = FrameLayout.LayoutParams(dp(52), dp(32))
+                    layoutParams = FrameLayout.LayoutParams(dp(46), dp(28))
                 }
                 val toggleThumb = View(context).apply {
-                    layoutParams = FrameLayout.LayoutParams(dp(24), dp(24), Gravity.START or Gravity.CENTER_VERTICAL)
+                    layoutParams = FrameLayout.LayoutParams(dp(20), dp(20), Gravity.START or Gravity.CENTER_VERTICAL)
                         .apply { leftMargin = dp(4) }
-                    translationX = if (initialChecked) dp(20).toFloat() else 0f
+                    translationX = if (initialChecked) dp(18).toFloat() else 0f
                 }
                 toggleRoot.addView(toggleTrack)
                 toggleRoot.addView(toggleThumb)
@@ -1536,12 +1537,12 @@ object SettingsUi {
                     toggleThumb.background = circle(if (checked) ON_CONTROL else TEXT_FAINT)
                     toggleRoot.contentDescription = if (checked) "Disable" else "Enable"
                     if (animate) {
-                        toggleThumb.animate().translationX(if (checked) dp(20).toFloat() else 0f)
+                        toggleThumb.animate().translationX(if (checked) dp(18).toFloat() else 0f)
                             .setDuration(200)
                             .setInterpolator(PathInterpolator(0.2f, 0f, 0f, 1f))
                             .start()
                     } else {
-                        toggleThumb.translationX = if (checked) dp(20).toFloat() else 0f
+                        toggleThumb.translationX = if (checked) dp(18).toFloat() else 0f
                     }
                 }
                 paintToggle(initialChecked, false)
@@ -1560,7 +1561,7 @@ object SettingsUi {
                 }
                 val root = LinearLayout(context).apply {
                     orientation = LinearLayout.VERTICAL
-                    setPadding(dp(10), dp(6), dp(10), dp(6))
+                    setPadding(dp(8), dp(4), dp(8), dp(4))
                     isClickable = true
                     isFocusable = true
                     addView(titleRow)
@@ -1624,34 +1625,7 @@ object SettingsUi {
             }
 
             add(content, sectionLabel("All servers", 16))
-            val enableAll = textButton("Enable all")
-            val disableAll = textButton("Disable all")
             val testAllButton = chip("Test all servers")
-            val quickRow = LinearLayout(context).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.END or Gravity.CENTER_VERTICAL
-            }
-            enableAll.layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, control,
-            )
-            disableAll.layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, control,
-            ).apply { leftMargin = gap }
-            testAllButton.layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, dp(44),
-            ).apply { leftMargin = gap }
-            listOf(enableAll, disableAll, testAllButton).forEach { quickRow.addView(it) }
-            add(content, quickRow, 6)
-            enableAll.setOnClickListener {
-                Settings.saveAllServersEnabled(context, allServers.map { it.id }, true)
-                paintServerTiles()
-                refreshProvidersState()
-            }
-            disableAll.setOnClickListener {
-                Settings.saveAllServersEnabled(context, allServers.map { it.id }, false)
-                paintServerTiles()
-                refreshProvidersState()
-            }
 
             val testSummary = label(
                 "Test (2 movies + 1 series) on every provider. Up means at least one sample returned streams.",
@@ -1660,7 +1634,6 @@ object SettingsUi {
             ).apply {
                 setPadding(0, dp(8), 0, 0)
             }
-            add(content, testSummary, 10)
             testAllButton.setOnClickListener {
                 if (providerProbeJob?.isActive == true) return@setOnClickListener
 
@@ -1716,6 +1689,7 @@ object SettingsUi {
                     val visible = when (providerPreset) {
                         "Recommended" -> tile.spec.reliable
                         "Downloadable" -> tile.spec.downloadFriendly
+                        "4K" -> tile.spec.supports4k
                         else -> true
                     }
                     tile.root.visibility = if (visible) View.VISIBLE else View.GONE
@@ -1725,24 +1699,32 @@ object SettingsUi {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.END or Gravity.CENTER_VERTICAL
             }
-            listOf("All", "Recommended", "Downloadable").forEachIndexed { index, name ->
+            listOf(testAllButton).forEach { presetRow.addView(it) }
+            listOf("All", "Recommended", "Downloadable", "4K").forEach { name ->
                 val chipView = chip(name).apply {
-                    layoutParams = LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.WRAP_CONTENT, dp(36),
-                    ).apply { if (index > 0) leftMargin = gap }
-                }
-                chipView.setOnClickListener {
-                    providerPreset = name
-                    applyProviderPreset()
+                    setOnClickListener {
+                        providerPreset = name
+                        applyProviderPreset()
+                    }
                 }
                 presetRow.addView(chipView)
             }
+            val resetAllButton = chip("Reset").apply {
+                setOnClickListener {
+                    providerPreset = "All"
+                    Settings.resetAllServers(context)
+                    paintServerTiles()
+                    refreshProvidersState()
+                }
+            }
+            presetRow.addView(resetAllButton)
             add(content, presetRow, 6)
+            add(content, testSummary, 10)
 
             val providerGrid = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
             providerTiles.forEachIndexed { rowIndex, tile ->
                 val row = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
-                tile.root.layoutParams = LinearLayout.LayoutParams(0, dp(48), 1f)
+                tile.root.layoutParams = LinearLayout.LayoutParams(0, dp(42), 1f)
                 row.addView(tile.root)
                 providerGrid.addView(
                     row,

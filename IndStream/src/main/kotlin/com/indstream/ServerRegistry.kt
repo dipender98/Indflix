@@ -23,6 +23,7 @@ data class ServerSpec(
     val speed: ServerSpeed = ServerSpeed.NORMAL,
     val reliable: Boolean = false,
     val downloadFriendly: Boolean = false,
+    val supports4k: Boolean = false,
 ) {
     fun supportsImdb(type: String): Boolean =
         if (type == "movie") supportsImdbMovie else supportsImdbTv
@@ -38,6 +39,7 @@ object ServerFarm {
             tvUrl = "https://www.vidy.st/tv/{id}/{season}/{episode}?color=DC2626",
             referer = "https://www.vidy.st/",
             hasSubtitles = false, timeoutSec = 40,
+            supports4k = true,
         ),
         ServerSpec(
             id = "vidbolt", name = "VidBolt",
@@ -66,15 +68,6 @@ object ServerFarm {
             isJsonApi = true, referer = "https://vidlink.pro/",
             hasSubtitles = true, timeoutSec = 15,
             declaredLanguages = emptySet(),
-            speed = ServerSpeed.VERY_FAST,
-        ),
-        ServerSpec(
-            id = "vaplayer", name = "VaPlayer",
-            idType = ServerIdType.IMDB,
-            movieUrl = "https://streamdata.vaplayer.ru/api.php?imdb={id}&type=movie",
-            tvUrl = "https://streamdata.vaplayer.ru/api.php?imdb={id}&type=tv&season={season}&episode={episode}",
-            isJsonApi = true, referer = "https://nextgencloudfabric.com/",
-            hasSubtitles = true, timeoutSec = 12,
             speed = ServerSpeed.VERY_FAST,
         ),
         ServerSpec(
@@ -122,6 +115,7 @@ object ServerFarm {
             referer = "https://www.movy.sx/",
             hasSubtitles = true, timeoutSec = 25,
             speed = ServerSpeed.FAST,
+            supports4k = true,
         ),
         ServerSpec(
             id = "atlantic", name = "Atlantic",
@@ -141,6 +135,7 @@ object ServerFarm {
             referer = "https://4khdhub.one/",
             hasSubtitles = false, timeoutSec = 70,
             speed = ServerSpeed.SLOW, downloadFriendly = true,
+            supports4k = true,
         ),
         ServerSpec(
             id = "fsl", name = "FSL",
@@ -169,6 +164,7 @@ object ServerFarm {
             referer = "https://new8.hdhub4u.cl/",
             hasSubtitles = false, timeoutSec = 60,
             speed = ServerSpeed.SLOW, downloadFriendly = true,
+            supports4k = true,
         ),
         ServerSpec(
             id = "moviesdrive", name = "MoviesDrive",

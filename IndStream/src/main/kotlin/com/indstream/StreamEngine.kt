@@ -711,12 +711,6 @@ object StreamEngine {
             return emptyList()
         }
 
-        if (spec.id == "vaplayer") {
-            val result = resolveVaplayer(spec, imdbId, type, season, episode)
-            if (result.isNotEmpty()) { okServer(spec, start, "vaplayer", result.size); return result }
-            failServer(spec, "vaplayer returned no streams")
-            return emptyList()
-        }
         if (spec.id == "videm") {
             val result = resolveVidem(spec, tmdbId, imdbId, type, season, episode)
             if (result.isNotEmpty()) { okServer(spec, start, "videm", result.size); return result }
@@ -1172,23 +1166,53 @@ object StreamEngine {
             )
         }
 
+        // New Atlantic networks expose JSON with direct source URLs (hls) plus subtitle
+        // tracks. Try the whole provider list; first usable HLS source wins.
+        val providers = listOf("vidbox", "q62", "amnesty", "shegu", "moscow", "mbox")
+        for (provider in providers) {
+            val base = if (type == "tv")
+                "https://stream.hls.lol/$provider?tmdbId=$tmdbId&type=tv&seasonId=$season&episodeId=$episode"
+            else
+                "https://stream.hls.lol/$provider?tmdbId=$tmdbId&type=movie"
+            val jsonText = withTimeoutOrNull(8_000L) {
+                catching { app.get(base, timeout = 8, headers = headers).text }.getOrNull()
+            } ?: continue
+            val root = catching { org.json.JSONObject(jsonText) }.getOrNull() ?: continue
+            val sources = root.optJSONObject("sources")
+            var bestUrl: String? = null
+            if (sources != null) {
+                val names = sources.names() ?: continue
+                for (i in 0 until names.length()) {
+                    val o = sources.optJSONObject(names.optString(i)) ?: continue
+                    val u = o.optString("url").takeIf { it.startsWith("http") } ?: continue
+                    val t = o.optString("type")
+                    if (t == "hls") { bestUrl = u; break }
+                    if (bestUrl == null) bestUrl = u
+                }
+            }
+            val url = bestUrl ?: root.optString("url").takeIf { it.startsWith("http") }
+            if (url == null) continue
+            val subs = mutableListOf<SubtitleKit.Track>()
+            root.optJSONArray("subtitles")?.let { arr ->
+                for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    val f = o.optString("file").takeIf { it.startsWith("http") } ?: continue
+                    subs += SubtitleKit.Track(o.optString("label").ifBlank { o.optString("language") }, f)
+                }
+            }
+            val stream = masterStream(url, provider)
+            if (stream != null) {
+                return listOf(stream.copy(subtitles = subs))
+            }
+        }
+
+        // Legacy primary/fetchback for older deployments.
         val primaryJson = withTimeoutOrNull(8_000L) {
             catching { app.get(embedUrl, timeout = 8, headers = headers).text }.getOrNull()
         }
         atlanticCdnUrl(primaryJson)?.let { primary ->
             masterStream(primary, "primary")?.let { return listOf(it) }
         }
-
-        val fallbackUrl = if (type == "movie") {
-            "https://stream.hls.lol/moscow?tmdbId=$tmdbId&type=movie"
-        } else {
-            "https://stream.hls.lol/moscow?tmdbId=$tmdbId&type=tv&seasonId=$season&episodeId=$episode"
-        }
-        val fallbackJson = withTimeoutOrNull(8_000L) {
-            catching { app.get(fallbackUrl, timeout = 8, headers = headers).text }.getOrNull()
-        }
-        val resolved = atlanticDecryptSource(atlanticSourceUrl(fallbackJson))
-        if (resolved != null) masterStream(resolved, "fallback")?.let { return listOf(it) }
         return emptyList()
     }
 
@@ -1677,53 +1701,6 @@ object StreamEngine {
 
         Log.d("MovieBox", "got ${out.size} streams from ${subjects.size} subjects")
         return out
-    }
-
-    private suspend fun resolveVaplayer(
-        spec: ServerSpec,
-        imdbId: String?,
-        type: String,
-        season: Int,
-        episode: Int,
-    ): List<RawStream> {
-        val imdb = imdbId ?: throw CleanMissException("vaplayer: IMDB id unavailable (TMDB lookup miss)")
-        val apiUrl = if (type == "movie")
-            "https://streamdata.vaplayer.ru/api.php?imdb=$imdb&type=movie"
-        else
-            "https://streamdata.vaplayer.ru/api.php?imdb=$imdb&type=tv&season=$season&episode=$episode"
-        val referer = "https://nextgencloudfabric.com/"
-        val headers = okHeaders(referer)
-        Log.d("VaPlayer", "GET $apiUrl")
-
-        val jsonText = withTimeoutOrNull(10_000L) {
-            catching { app.get(apiUrl, timeout = 10, headers = headers).text }.getOrNull()
-        } ?: run { Log.w("VaPlayer", "no API response"); return emptyList() }
-        val root = catching { org.json.JSONObject(jsonText) }.getOrElse {
-            Log.w("VaPlayer", "non-JSON response: ${safeSnippet(jsonText)}")
-            return emptyList()
-        }
-        val statusCode = root.optInt("status_code", 0)
-        if (statusCode != 200) {
-            if (statusCode == 404) throw CleanMissException("not in VaPlayer catalog (404)")
-            Log.w("VaPlayer", "status_code=$statusCode")
-            return emptyList()
-        }
-        val data = root.optJSONObject("data") ?: return emptyList()
-        val urls = data.optJSONArray("stream_urls") ?: return emptyList()
-        val fileName = data.optString("file_name", "")
-        val fileNameHeight = FILE_NAME_HEIGHT.find(fileName)?.groupValues?.get(1)?.toIntOrNull() ?: 0
-
-        val out = mutableListOf<RawStream>()
-        for (i in 0 until urls.length()) {
-            val u = urls.optString(i).takeIf { it.isNotBlank() } ?: continue
-            out += RawStream(
-                serverId = spec.id, serverName = spec.name,
-                url = u, isM3u8 = true, referer = referer,
-                qualityHint = fileNameHeight,
-            )
-        }
-        Log.d("VaPlayer", "got ${out.size} master playlists")
-        return withJsonSubtitles(out, root, apiUrl)
     }
 
     private suspend fun resolveNetmirror(

@@ -41,15 +41,8 @@ class ServerFarmHindiTest {
     }
 
     @Test
-    fun vaplayer_presentAndImdbKeyed() {
-        val s = ServerFarm.allServers.first { it.id == "vaplayer" }
-        assertEquals("VaPlayer", s.name)
-        assertEquals(ServerIdType.IMDB, s.idType)
-        assertEquals("https://nextgencloudfabric.com/", s.referer)
-        val m = ServerFarm.buildMovieUrl(s, "tt0137523")
-        assertTrue(m.contains("imdb=tt0137523") && m.contains("type=movie"))
-        val tv = ServerFarm.buildTvUrl(s, "tt0944947", 1, 1)
-        assertTrue(tv.contains("type=tv") && tv.contains("season=1") && tv.contains("episode=1"))
+    fun vaplayer_removed_api_dead() {
+        assertNull(ServerFarm.allServers.firstOrNull { it.id == "vaplayer" })
     }
 
     @Test
@@ -168,7 +161,7 @@ class ServerFarmHindiTest {
 
     @Test
     fun bulletTrainServers_present() {
-        val ids = setOf("vidlink", "vaplayer", "moviebox", "netmirror")
+        val ids = setOf("vidlink", "moviebox", "netmirror")
         for (id in ids) {
             assertNotNull(
                 ServerFarm.allServers.firstOrNull { it.id == id },

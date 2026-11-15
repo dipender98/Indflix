@@ -329,6 +329,18 @@ object Settings {
         appContext = context.applicationContext
     }
 
+    fun resetAllServers(context: Context) {
+        runCatching {
+            val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            val edit = prefs.edit()
+            prefs.all.keys.filter { it.startsWith(SERVER_OFF_PREFIX) }.forEach { edit.remove(it) }
+            edit.apply()
+        }
+        serverOff = emptySet()
+        serversLoaded = true
+        appContext = context.applicationContext
+    }
+
     private fun loadServers() {
         val ctx = appContext ?: return
         serverOff = runCatching {
