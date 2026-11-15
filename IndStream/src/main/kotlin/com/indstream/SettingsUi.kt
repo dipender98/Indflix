@@ -394,9 +394,9 @@ object SettingsUi {
         }
 
         fun pill(value: String, primary: Boolean = false): TextView =
-            label(value, 12f, if (primary) ON_CONTROL else TEXT_DIM, medium = true).apply {
+            label(value, 11f, if (primary) ON_CONTROL else TEXT_DIM, medium = true).apply {
                 gravity = Gravity.CENTER
-                setPadding(dp(16), 0, dp(16), 0)
+                setPadding(dp(12), 0, dp(12), 0)
                 background = ripple(
                     StateListDrawable().apply {
                         if (primary) {
