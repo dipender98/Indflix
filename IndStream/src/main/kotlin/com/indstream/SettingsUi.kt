@@ -1026,9 +1026,15 @@ object SettingsUi {
         val dirtyChecks = mutableListOf<() -> Boolean>()
         val resetActions = mutableListOf<() -> Unit>()
         val saveActions = mutableListOf<() -> Unit>()
-        fun hasUnsavedChanges(): Boolean = dirtyChecks.any { runCatching { it() }.getOrDefault(false) }
+        val snapshotActions = mutableListOf<() -> Unit>()
+        val restoreActions = mutableListOf<() -> Unit>()
+        val savedRestoreActions = mutableListOf<() -> Unit>()
+        val snapshots = mutableMapOf<String, String>()
+        var savedChangesPending = false
+        fun hasUnsavedChanges(): Boolean = dirtyChecks.any { runCatching { it() }.getOrDefault(false) } || savedChangesPending
         fun showUnsavedPopup(onProceed: () -> Unit) {
             if (!hasUnsavedChanges()) { onProceed(); return }
+            val savedMode = savedChangesPending && !dirtyChecks.any { runCatching { it() }.getOrDefault(false) }
             val popup = Dialog(context)
             val panel = LinearLayout(context).apply {
                 orientation = LinearLayout.VERTICAL
@@ -1037,14 +1043,26 @@ object SettingsUi {
             }
             panel.addView(label("Unsaved changes", 20f, TEXT, medium = true))
             panel.addView(
-                label("You have unsaved changes. Save or discard them?", 14f, TEXT_DIM).apply {
-                    setPadding(0, dp(8), 0, 0)
-                },
+                label(
+                    if (savedMode) "You saved these changes. Keep them or restore?" else "You have unsaved changes. Save or discard them?",
+                    14f,
+                    TEXT_DIM,
+                ).apply { setPadding(0, dp(8), 0, 0) },
             )
             val row = LinearLayout(context).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.END
                 setPadding(0, dp(16), 0, 0)
+            }
+            val keep = label("Keep", 14f, CONTROL, medium = true).apply {
+                setPadding(dp(12), dp(10), dp(12), dp(10))
+                isClickable = true
+                isFocusable = true
+            }
+            val restore = label("Restore", 14f, WARNING, medium = true).apply {
+                setPadding(dp(12), dp(10), dp(12), dp(10))
+                isClickable = true
+                isFocusable = true
             }
             val discard = label("Discard", 14f, WARNING, medium = true).apply {
                 setPadding(dp(12), dp(10), dp(12), dp(10))
@@ -1056,20 +1074,38 @@ object SettingsUi {
                     ViewGroup.LayoutParams.WRAP_CONTENT, control,
                 ).apply { leftMargin = gap }
             }
-            discard.setOnClickListener {
-                resetActions.forEach { runCatching { it() } }
-                popup.dismiss()
-                onProceed()
-            }
-            save.setOnClickListener {
-                saveActions.forEach { runCatching { it() } }
-                if (!hasUnsavedChanges()) {
+            if (savedMode) {
+                keep.setOnClickListener {
+                    savedChangesPending = false
                     popup.dismiss()
                     onProceed()
                 }
+                restore.setOnClickListener {
+                    savedRestoreActions.forEach { runCatching { it() } }
+                    savedChangesPending = false
+                    popup.dismiss()
+                    onProceed()
+                }
+                row.addView(keep)
+                row.addView(restore)
+            } else {
+                discard.setOnClickListener {
+                    resetActions.forEach { runCatching { it() } }
+                    savedChangesPending = false
+                    popup.dismiss()
+                    onProceed()
+                }
+                save.setOnClickListener {
+                    val wasDirty = dirtyChecks.any { runCatching { it() }.getOrDefault(false) }
+                    snapshotActions.forEach { runCatching { it() } }
+                    saveActions.forEach { runCatching { it() } }
+                    savedChangesPending = wasDirty
+                    popup.dismiss()
+                    onProceed()
+                }
+                row.addView(discard)
+                row.addView(save)
             }
-            row.addView(discard)
-            row.addView(save)
             panel.addView(row)
             popup.setContentView(panel)
             popup.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
@@ -1578,12 +1614,18 @@ object SettingsUi {
                 }
                 toggleRoot.addView(toggleTrack)
                 toggleRoot.addView(toggleThumb)
-                val tags = label(providerTags(spec), 9.75f, ON_CONTROL, medium = true).apply {
+                val tags = label(providerTags(spec), 9.75f, TEXT, medium = true).apply {
                     maxLines = 1
                     ellipsize = TextUtils.TruncateAt.END
                     gravity = Gravity.CENTER
                     setPadding(dp(8), 0, dp(8), 0)
-                    background = rounded(CONTROL, 999)
+                    background = GradientDrawable().apply {
+                        shape = GradientDrawable.RECTANGLE
+                        cornerRadius = dp(999).toFloat()
+                        orientation = GradientDrawable.Orientation.TL_BR
+                        colors = intArrayOf(Color.argb(42, 255, 255, 255), Color.argb(14, 255, 255, 255))
+                        setStroke(dp(1), Color.argb(38, 255, 255, 255))
+                    }
                     layoutParams = LinearLayout.LayoutParams(
                         0, dp(22), 1f,
                     ).apply { leftMargin = dp(6); rightMargin = dp(6) }
@@ -2053,6 +2095,8 @@ object SettingsUi {
             renderAddons()
             dirtyChecks += { draftVisible && draftText.isNotBlank() }
             resetActions += { draftVisible = false; draftText = ""; draftField = null; renderAddons() }
+            snapshotActions += { snapshots["addons"] = draftText }
+            restoreActions += { draftVisible = false; draftText = snapshots["addons"].orEmpty(); draftField?.setText(snapshots["addons"].orEmpty()) }
             saveActions += { draftField?.let { commitDraft(it) } }
         }
         sections += SectionSpec(
@@ -2235,6 +2279,8 @@ object SettingsUi {
             renderM3u()
             dirtyChecks += { m3uDraftVisible && m3uDraftText.isNotBlank() }
             resetActions += { m3uDraftVisible = false; m3uDraftText = ""; m3uDraftField = null; renderM3u() }
+            snapshotActions += { snapshots["m3u"] = m3uDraftText }
+            restoreActions += { m3uDraftVisible = false; m3uDraftText = snapshots["m3u"].orEmpty(); m3uDraftField?.setText(snapshots["m3u"].orEmpty()) }
             saveActions += { m3uDraftField?.let(::commitM3uDraft) }
         }
         sections += SectionSpec(
@@ -2290,6 +2336,8 @@ object SettingsUi {
                 setState("subtitles", "Not set", false)
             }
             wyzieSave.setOnClickListener {
+                val prevKey = Settings.apiKey().orEmpty()
+                val hadPrev = Settings.apiKey() != null
                 val typed = wyzieKeyInput.text.toString()
                 if (!Settings.save(context, typed)) {
                     wyzieKeyInput.error = "That key looks too short"
@@ -2300,9 +2348,20 @@ object SettingsUi {
                 wyzieStatus.text =
                     if (on) "Your key is used for subtitle lookups." else "Built-in subtitles are in use."
                 setState("subtitles", if (on) "Saved" else "Not set", on)
+                savedRestoreActions += {
+                    if (hadPrev) Settings.save(context, prevKey) else Settings.clear(context)
+                    wyzieKeyInput.setText(Settings.apiKey().orEmpty())
+                    wyzieKeyInput.error = null
+                    val now = Settings.apiKey() != null
+                    wyzieStatus.text = if (now) "Your key is used for subtitle lookups." else "Built-in subtitles are in use."
+                    setState("subtitles", if (now) "Saved" else "Not set", now)
+                }
+                savedChangesPending = true
             }
             dirtyChecks += { wyzieKeyInput.text.toString() != Settings.apiKey().orEmpty() }
             resetActions += { wyzieKeyInput.setText(Settings.apiKey().orEmpty()); wyzieKeyInput.error = null }
+            snapshotActions += { snapshots["wyzie"] = wyzieKeyInput.text.toString() }
+            restoreActions += { wyzieKeyInput.setText(snapshots["wyzie"] ?: Settings.apiKey().orEmpty()); wyzieKeyInput.error = null }
             saveActions += { wyzieSave.performClick() }
         }
         sections += SectionSpec(
@@ -2358,6 +2417,8 @@ object SettingsUi {
                 setState("tmdb", "Not set", false)
             }
             tmdbSave.setOnClickListener {
+                val prevKey = Settings.tmdbApiKey().orEmpty()
+                val hadPrev = Settings.tmdbApiKey() != null
                 val typed = tmdbKeyInput.text.toString()
                 if (!Settings.saveTmdb(context, typed)) {
                     tmdbKeyInput.error = Settings.tmdbKeyProblem(typed) ?: "That key looks too short"
@@ -2368,9 +2429,20 @@ object SettingsUi {
                 tmdbStatus.text =
                     if (on) "Your key is used for metadata first." else "Built-in keys are in use."
                 setState("tmdb", if (on) "Saved" else "Not set", on)
+                savedRestoreActions += {
+                    if (hadPrev) Settings.saveTmdb(context, prevKey) else Settings.clearTmdb(context)
+                    tmdbKeyInput.setText(Settings.tmdbApiKey().orEmpty())
+                    tmdbKeyInput.error = null
+                    val now = Settings.tmdbApiKey() != null
+                    tmdbStatus.text = if (now) "Your key is used for metadata first." else "Built-in keys are in use."
+                    setState("tmdb", if (now) "Saved" else "Not set", now)
+                }
+                savedChangesPending = true
             }
             dirtyChecks += { tmdbKeyInput.text.toString() != Settings.tmdbApiKey().orEmpty() }
             resetActions += { tmdbKeyInput.setText(Settings.tmdbApiKey().orEmpty()); tmdbKeyInput.error = null }
+            snapshotActions += { snapshots["tmdb"] = tmdbKeyInput.text.toString() }
+            restoreActions += { tmdbKeyInput.setText(snapshots["tmdb"] ?: Settings.tmdbApiKey().orEmpty()); tmdbKeyInput.error = null }
             saveActions += { tmdbSave.performClick() }
         }
         sections += SectionSpec(
@@ -2537,6 +2609,10 @@ object SettingsUi {
                 setState("ai", "Not set", false)
             }
             aiSave.setOnClickListener {
+                val savingProvider = selectedProvider
+                val prevKey = Settings.aiApiKey(savingProvider)
+                val prevModel = Settings.aiModel(savingProvider)
+                val prevBase = Settings.aiBaseUrl(savingProvider)
                 Settings.saveAi(
                     context, selectedProvider,
                     aiKeyInput.text.toString(), aiModelInput.text.toString(), aiBaseInput.text.toString(),
@@ -2545,6 +2621,21 @@ object SettingsUi {
                 aiStatus.visibility = View.VISIBLE
                 aiStatus.text = if (on) "Saved - the model reorders your rows." else "Cleared - rows use the local score."
                 setState("ai", if (on) "Saved" else "Not set", on)
+                savedRestoreActions += {
+                    if (prevKey.isNullOrBlank()) {
+                        Settings.clearAi(context, savingProvider)
+                    } else {
+                        Settings.saveAi(context, savingProvider, prevKey, prevModel, prevBase)
+                    }
+                    aiKeyInput.setText(Settings.aiApiKey(savingProvider).orEmpty())
+                    aiModelInput.setText(
+                        Settings.aiModel(savingProvider).ifBlank { AiService.Provider.from(savingProvider).defaultModel },
+                    )
+                    aiBaseInput.setText(Settings.aiBaseUrl(savingProvider))
+                    val now = Settings.aiApiKey(savingProvider) != null
+                    setState("ai", if (now) "Saved" else "Not set", now)
+                }
+                savedChangesPending = true
             }
             dirtyChecks += {
                 aiKeyInput.text.toString() != Settings.aiApiKey(selectedProvider).orEmpty() ||
@@ -2556,6 +2647,16 @@ object SettingsUi {
                 aiKeyInput.setText(Settings.aiApiKey(p).orEmpty())
                 aiModelInput.setText(Settings.aiModel(p).ifBlank { AiService.Provider.from(p).defaultModel })
                 aiBaseInput.setText(Settings.aiBaseUrl(p))
+                aiKeyInput.error = null
+            }
+            snapshotActions += { snapshots["ai"] = aiKeyInput.text.toString() + "\n" + aiModelInput.text.toString() + "\n" + aiBaseInput.text.toString() }
+            restoreActions += {
+                val p = selectedProvider
+                val snap = snapshots["ai"].orEmpty()
+                val parts = snap.split("\n")
+                aiKeyInput.setText(parts.getOrNull(0).orEmpty())
+                aiModelInput.setText(parts.getOrNull(1).orEmpty())
+                aiBaseInput.setText(parts.getOrNull(2).orEmpty())
                 aiKeyInput.error = null
             }
             saveActions += { aiSave.performClick() }
