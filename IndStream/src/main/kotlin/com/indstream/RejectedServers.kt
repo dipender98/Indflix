@@ -8,8 +8,8 @@ package com.indstream
  * here was already evaluated and rejected for the recorded reason. Re-add only
  * with fresh live-probe evidence that the underlying issue is fixed.
  *
- * Machine-readable (for agents/tools): use [RejectedServers.ids], [RejectedServers.find],
- * [RejectedServers.isRejected]. Human-readable detail: REJECTED_SERVERS.md.
+ * Single source of truth (machine/agent-readable): [RejectedServers.ids],
+ * [RejectedServers.find], [RejectedServers.isRejected]. Do not maintain mirrors.
  */
 data class RejectedServer(
     val id: String,
@@ -128,6 +128,9 @@ object RejectedServers {
         RejectedServer("vidplay-one", "VidPlay.one", "not-reachable", "DNS failure.", "NXDOMAIN", "2026-sweep"),
         RejectedServer("vidplay-io", "VidPlay.io", "not-reachable", "TLS failure.", "TLS", "2026-sweep"),
         RejectedServer("vidbinge", "VidBinge", "not-reachable", "DNS/TLS failure across fronts.", "NXDOMAIN/TLS", "2026-sweep"),
+        RejectedServer("vidsrc-sh", "Vidsrc.sh", "unverified",
+            "Chain works end-to-end but 1080p max only (no real 4K); needs 7.2 KB wasm decryptor; CST captcha gate after ~15-20 rapid resolves; title-mismatch risk (cross-check data.title).",
+            "1080p ceiling", "2026-sweep"),
     )
 
     val ids: Set<String> = all.map { it.id }.toSet()

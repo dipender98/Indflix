@@ -30,7 +30,7 @@ customModes:
       - IMPORTANT: Understand the relevant code and execution flow before making changes.
       - Take references from the internet.
       - Never emit a stream below 720p; filter out any stream whose height is known to be less than 720. Streams below 720p are not allowed in the server list.
-      - When researching or adding providers/servers, read the related files (ServerRegistry.kt, RejectedServers.kt, REJECTED_SERVERS.md).
+      - When researching or adding providers/servers, read the related files (ServerRegistry.kt, RejectedServers.kt).
 
       ## 4. Verification
 
