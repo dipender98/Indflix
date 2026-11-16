@@ -304,6 +304,26 @@ class ManifestKitTest {
     }
 
     @Test
+    fun audioLanguageLabel_declaresAnyKnownLanguage() {
+        val french = masterWithAudio(
+            """#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="Français",LANGUAGE="fr",URI="fr.m3u8"""",
+        )
+        assertNotNull(french)
+        assertEquals("French", ManifestKit.audioLanguageLabel(french))
+        val mixed = masterWithAudio(
+            """#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="English",LANGUAGE="en-US",URI="en.m3u8"""",
+            """#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="Español",LANGUAGE="es-MX",URI="es.m3u8"""",
+        )
+        assertNotNull(mixed)
+        assertEquals("English, Spanish", ManifestKit.audioLanguageLabel(mixed))
+        val codes = masterWithAudio(
+            """#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="日本語",LANGUAGE="jpn",URI="ja.m3u8"""",
+        )
+        assertNotNull(codes)
+        assertEquals("Japanese", ManifestKit.audioLanguageLabel(codes))
+    }
+
+    @Test
     fun audioLanguageLabel_unknownDefaultStaysUnknown() {
         val master = masterWithAudio(
             """#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="Track 1",LANGUAGE="und",URI="t1.m3u8",DEFAULT=YES""",

@@ -61,6 +61,15 @@ object LinkNaming {
         }
     }
 
+    fun languageNameOrNull(raw: String?): String? {
+        val s = raw?.trim().orEmpty()
+        if (s.isBlank()) return null
+        return canonicalSubtitleName(s).takeIf { it in LANGUAGE_NAMES }
+    }
+
+    internal fun hasMultiMarker(text: String?): Boolean =
+        text != null && MULTI_MARKER.containsMatchIn(text)
+
     fun languageTag(raw: String?): String {
         if (raw.isNullOrBlank()) return "Unknown"
         val label = languageLabel(raw).ifBlank { return "Unknown" }
@@ -113,13 +122,13 @@ object LinkNaming {
         subIndicator: String? = null,
         sizeLabel: String? = null,
         mediaLabel: String? = null,
+        originalLang: String? = null,
     ): String {
         val rawName = serverName.trim().ifBlank { "Server" }
         val named = baseName(rawName, subIndicator)
 
         val names = displayLanguageNames(audioLabel, mediaLabel)
-        val tag = displayLanguageTag(names, audioLabel, mediaLabel)
-        val tagPart = languageTagPart(tag, names)
+        val tagPart = languageTagPart(names, audioLabel, mediaLabel, originalLang)
 
         val tokens = renditionTokens(listOfNotNull(mediaLabel, rawName).joinToString(" "))
             .filterNot { containsToken(named, it) }
@@ -133,13 +142,13 @@ object LinkNaming {
         serverName: String,
         audioLabel: String? = "",
         mediaLabel: String? = null,
+        originalLang: String? = null,
     ): String {
         val base = baseName(serverName.trim().ifBlank { "Server" }, null)
         val named = stripRendition(base).ifBlank { base }
 
         val names = displayLanguageNames(audioLabel, mediaLabel)
-        val tag = displayLanguageTag(names, audioLabel, mediaLabel)
-        return listOf(named, languageTagPart(tag, names))
+        return listOf(named, languageTagPart(names, audioLabel, mediaLabel, originalLang))
             .filter { it.isNotBlank() }.joinToString(" ")
     }
 
@@ -217,20 +226,50 @@ object LinkNaming {
         }
     }
 
-    private fun displayLanguageTag(
+    private const val MAX_DISPLAY_LANGUAGES = 3
+
+    private fun orderedDisplayNames(names: List<String>, originalLang: String?): List<String> {
+        val anchor = originalLang?.let { languageLabel(it) }?.takeIf { it in LANGUAGE_NAMES }
+        val priority = listOfNotNull(anchor, "Hindi", "English")
+        val out = ArrayList<String>(names.size)
+        for (p in priority) if (p in names && p !in out) out += p
+        for (n in names) if (n !in out) out += n
+        return out
+    }
+
+    private fun displayTagAndNames(
         names: List<String>,
         audioLabel: String?,
         mediaLabel: String?,
-    ): String = when {
-        names.size == 1 -> names[0]
-        names.size > 1 -> names.joinToString(", ")
-        else -> languageLabel(audioLabel)
-            .ifBlank { languageLabel(mediaLabel) }
-            .ifBlank { "Unknown" }
+        originalLang: String?,
+    ): Pair<String, List<String>> = when {
+        names.size > MAX_DISPLAY_LANGUAGES -> "Multi" to emptyList()
+        names.isNotEmpty() -> {
+            val shown = orderedDisplayNames(names, originalLang)
+            shown.joinToString(", ") to shown
+        }
+        else -> {
+            // "Original" resolves via originalLang; a blank label stays Unknown.
+            val a = if (explicitOriginalMarker(audioLabel)) languageLabel(audioLabel, originalLang)
+                else languageLabel(audioLabel)
+            val b = if (explicitOriginalMarker(mediaLabel)) languageLabel(mediaLabel, originalLang)
+                else languageLabel(mediaLabel)
+            a.ifBlank { b }.ifBlank { "Unknown" } to emptyList()
+        }
     }
 
-    private fun languageTagPart(label: String, names: List<String>): String {
-        val parts = if (names.isNotEmpty()) names else label.split(',').map { it.trim() }.filter { it.isNotEmpty() }
+    private fun explicitOriginalMarker(raw: String?): Boolean =
+        raw?.trim()?.lowercase().let { it == "original" || it == "orig" || it == "org" }
+
+    private fun languageTagPart(
+        names: List<String>,
+        audioLabel: String?,
+        mediaLabel: String?,
+        originalLang: String?,
+    ): String {
+        val (label, shown) = displayTagAndNames(names, audioLabel, mediaLabel, originalLang)
+        val parts = if (shown.isNotEmpty()) shown
+            else label.split(',').map { it.trim() }.filter { it.isNotEmpty() }
         if (parts.size >= 2 && parts.none { it == "Multi" || it == "Unknown" || it == "Original" }) {
             return "(" + parts.map { p ->
                 languageFlag(p).takeIf { it.isNotBlank() }?.let { "$it $p" } ?: p

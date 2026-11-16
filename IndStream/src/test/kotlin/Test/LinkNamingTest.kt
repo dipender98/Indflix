@@ -11,6 +11,7 @@ class LinkNamingTest {
     private val IN = "\uD83C\uDDEE\uD83C\uDDF3"
     private val GB = "\uD83C\uDDEC\uD83C\uDDE7"
     private val JP = "\uD83C\uDDEF\uD83C\uDDF5"
+    private val FR = "\uD83C\uDDEB\uD83C\uDDF7"
 
 
     @Test
@@ -570,13 +571,89 @@ class LinkNamingTest {
 
     @Test
     fun displayName_prefersRicherLanguageSet() {
-        // audio declares 2 languages, media metadata declares 5 -> all 5 must show.
+        // audio declares 2 languages, media metadata declares 3 -> all 3 must show.
+        val name = LinkNaming.displayName(
+            serverName = "VidLink",
+            audioLabel = "English, Hindi",
+            mediaLabel = "Hindi, English, Tamil",
+        )
+        assertEquals("VidLink ($IN Hindi, $GB English, $IN Tamil)", name)
+    }
+
+    @Test
+    fun displayName_moreThanThreeLanguages_rendersMulti() {
+        // detected set larger than 3 -> Multi instead of listing every language.
         val name = LinkNaming.displayName(
             serverName = "VidLink",
             audioLabel = "Hindi, English",
             mediaLabel = "Hindi, English, Tamil, Telugu, Malayalam",
         )
-        assertEquals("VidLink ($IN Hindi, $GB English, $IN Tamil, $IN Telugu, $IN Malayalam)", name)
+        assertEquals("VidLink (Multi)", name)
+        assertEquals(
+            "VidLink (Multi)",
+            LinkNaming.priorityName(
+                serverName = "VidLink",
+                audioLabel = "Hindi, English",
+                mediaLabel = "Hindi, English, Tamil, Telugu, Malayalam",
+            ),
+        )
+    }
+
+    @Test
+    fun displayName_originalLanguageShownFirst() {
+        val name = LinkNaming.displayName(
+            serverName = "VidLink",
+            audioLabel = "Hindi+English+Tamil",
+            originalLang = "Tamil",
+        )
+        assertEquals("VidLink ($IN Tamil, $IN Hindi, $GB English)", name)
+    }
+
+    @Test
+    fun displayName_originalLanguageAnchorMatchesTmdbCode() {
+        val name = LinkNaming.displayName(
+            serverName = "VidLink",
+            audioLabel = "Hindi+English+Japanese",
+            originalLang = "ja",
+        )
+        assertEquals("VidLink ($JP Japanese, $IN Hindi, $GB English)", name)
+    }
+
+    @Test
+    fun displayName_unknownShowsFlagsForDeclaredLanguage() {
+        assertEquals(
+            "VidLink ($FR French)",
+            LinkNaming.displayName("VidLink", audioLabel = "French"),
+        )
+    }
+
+    @Test
+    fun displayName_originalResolvesToOriginalLanguageName() {
+        assertEquals(
+            "VidLink ($IN Tamil)",
+            LinkNaming.displayName("VidLink", audioLabel = "Original", originalLang = "ta"),
+        )
+        assertEquals(
+            "VidLink (Unknown)",
+            LinkNaming.displayName("VidLink", audioLabel = "", originalLang = "ta"),
+        )
+    }
+
+    @Test
+    fun groupAudioLabel_prefersPostListWhenHeadingSignalsMulti() {
+        val postAudio = "Hindi, Tamil, Telugu, Malayalam, Kannada"
+        assertEquals(
+            postAudio,
+            StreamEngine.groupAudioLabel("Jailer 2 (2026) [Hindi ORG. + Multi Audio] 1080p", postAudio),
+        )
+        assertEquals(
+            "Punjabi",
+            StreamEngine.groupAudioLabel("Punjabi ORG DD 5.1", "Punjabi, Hindi, English, Tamil"),
+        )
+        assertEquals(
+            "Hindi, English",
+            StreamEngine.groupAudioLabel("1080p", "Hindi, English"),
+        )
     }
 
     @Test

@@ -358,6 +358,21 @@ object StreamEngine {
                             val tag = manifestAudioTag(master).ifBlank { raw.audioLabel }
                             ResolvedEmit(raw, h, tag, fetchMs, masterText)
                         }
+                        raw.isDash && probeManifests -> {
+                            val t0 = System.currentTimeMillis()
+                            val mpdText = fetchMasterText(raw, timeoutSec = 4)
+                            val measured = mpdText?.let { ManifestKit.bestHeightOf(it, raw.url) } ?: 0
+                            val fetchMs = System.currentTimeMillis() - t0
+                            val h = maxOf(measured, raw.qualityHint).takeIf { it > 0 }
+                                ?: run {
+                                val fromUrl = ManifestKit.resolutionFromUrl(raw.url)
+                                if (fromUrl > 0) fromUrl else -1
+                            }
+                            val langs = ManifestKit.mpdAudioLanguages(mpdText).distinct()
+                            val tag = langs.takeIf { it.isNotEmpty() }?.joinToString(", ")
+                                ?: raw.audioLabel
+                            ResolvedEmit(raw, h, tag, fetchMs)
+                        }
                         !raw.isM3u8 && probeManifests -> {
                             val t0 = System.currentTimeMillis()
                             val measured = HttpKit.resolveHeight(raw.url, raw.referer, raw.extraHeaders)
@@ -419,11 +434,13 @@ object StreamEngine {
                 audioLabel = r.tagLabel,
                 sizeLabel = raw.sizeLabel.takeIf { it.isNotBlank() },
                 mediaLabel = raw.mediaLabel.takeIf { it.isNotBlank() },
+                originalLang = originalLang,
             )
             val sourceLabel = LinkNaming.priorityName(
                 serverName = raw.serverName,
                 audioLabel = r.tagLabel,
                 mediaLabel = raw.mediaLabel.takeIf { it.isNotBlank() },
+                originalLang = originalLang,
             )
 
             val linkType = if (raw.isDash) ExtractorLinkType.DASH
@@ -2854,6 +2871,14 @@ object StreamEngine {
         return null
     }
 
+    // Prefer the post's concrete language list when the heading only signals multi audio.
+    internal fun groupAudioLabel(heading: String, postAudio: String): String {
+        val headingAudio = LinkNaming.languageLabel(heading)
+        val richerPost = LinkNaming.languageNames(postAudio).size > LinkNaming.languageNames(headingAudio).size
+        return if (richerPost && (headingAudio.isBlank() || LinkNaming.hasMultiMarker(heading)))
+            postAudio else headingAudio.ifBlank { postAudio }
+    }
+
     private suspend fun fileLinksFor(
         spec: ServerSpec,
         links: List<String>,
@@ -2942,7 +2967,7 @@ object StreamEngine {
             val linksPageCache = mutableMapOf<String, List<FileGroup>>()
             if (type == "movie") {
                 for (group in groups.sortedByDescending { releaseHeightOf(it.heading) }.take(2)) {
-                    val audio = LinkNaming.languageLabel(group.heading).ifBlank { postAudio }
+                    val audio = groupAudioLabel(group.heading, postAudio)
                     val size = normalizeSizeToken(group.heading)
                     val direct = group.links.filter { HUB_GATEWAY_HOST_ALT.containsMatchIn(it) }
                     val targets = if (direct.isNotEmpty()) {
@@ -2974,7 +2999,7 @@ object StreamEngine {
                     .sortedByDescending { releaseHeightOf(it.heading) }
                     .firstOrNull()
                 if (chosen != null) {
-                    val audio = LinkNaming.languageLabel(chosen.heading).ifBlank { postAudio }
+                    val audio = groupAudioLabel(chosen.heading, postAudio)
                     val size = normalizeSizeToken(chosen.heading)
                     val direct = chosen.links.filter { HUB_GATEWAY_HOST_ALT.containsMatchIn(it) }
                     if (direct.isNotEmpty()) {
@@ -3124,7 +3149,7 @@ object StreamEngine {
                 val mipMeta = Jsoup.parse(mipPage).selectFirst("p.meta")?.text()?.trim().orEmpty()
                 val quality = listOf(box.label, mipMeta).firstOrNull { releaseHeightOf(it) > 0 } ?: box.label
                 val size = normalizeSizeToken(box.size).ifBlank { normalizeSizeToken(mipMeta) }
-                val audio = LinkNaming.languageLabel(box.label).ifBlank { postAudio }
+                val audio = groupAudioLabel(box.label, postAudio)
                 out += fileLinksFor(spec, hosts, postUrl, audio, quality, size)
                 if (out.size >= 6) break
             }
