@@ -88,6 +88,7 @@ object StreamEngine {
     private val NON_CONTENT_PATH = Regex("""/(category|tag|author|page|feed|search)/""", RegexOption.IGNORE_CASE)
     private val NON_CONTENT_PATH_BASIC = Regex("""/(category|tag|author|page|search)/""", RegexOption.IGNORE_CASE)
     private val HEADING_TAG = Regex("""h[1-6]""")
+    private val FC_POST_PATH = Regex("""/20\d\d/\d\d/\d\d/""")
     private val OG_TITLE = Regex("""<meta\s+property="og:title"\s+content="([^"]+)"""", RegexOption.IGNORE_CASE)
     private val HTML_TITLE = Regex("""<title>([^<]+)</title>""", RegexOption.IGNORE_CASE)
     private val HUB_GATEWAY_HOST = Regex("""greenmotors|hubcloud|hubdrive""", RegexOption.IGNORE_CASE)
@@ -769,6 +770,18 @@ object StreamEngine {
             val result = resolveRecoverFiles(spec, tmdbId, type, season, episode)
             if (result.isNotEmpty()) { okServer(spec, start, "recover search files", result.size); return result }
             failServer(spec, "recover search returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
+            return emptyList()
+        }
+        if (spec.id == "movies4u") {
+            val result = resolveMovies4u(spec, tmdbId, type, season, episode)
+            if (result.isNotEmpty()) { okServer(spec, start, "movies4u lookup files", result.size); return result }
+            failServer(spec, "movies4u returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
+            return emptyList()
+        }
+        if (spec.id == "filmycab") {
+            val result = resolveFilmyCab(spec, tmdbId, type, season, episode)
+            if (result.isNotEmpty()) { okServer(spec, start, "filmycab mip files", result.size); return result }
+            failServer(spec, "filmycab returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
             return emptyList()
         }
         if (spec.id == "bingr") {
@@ -2759,6 +2772,306 @@ object StreamEngine {
                 }
                 if (out.isNotEmpty()) return out.distinctBy { it.url }
             }
+        }
+        throw CleanMissException("no file links")
+    }
+
+    internal data class FileGroup(val heading: String, val links: List<String>)
+
+    /** Splits a download page into "heading -> file host links" groups (h4/h5 followed by a buttons div). */
+    internal fun m4uGroups(html: String, base: String): List<FileGroup> {
+        val doc = Jsoup.parse(html, base)
+        val out = mutableListOf<FileGroup>()
+        for (heading in doc.select("h4, h5")) {
+            val box = heading.nextElementSibling() ?: continue
+            if (!box.hasClass("downloads-btns-div")) continue
+            val links = box.select("a[href]").map { it.attr("abs:href").trim() }
+                .filter { it.startsWith("http") }
+                .distinct()
+            if (links.isEmpty()) continue
+            out += FileGroup(heading.text().trim(), links)
+        }
+        return out
+    }
+
+    internal fun m4uSearchHits(json: String, base: String): List<Pair<String, String>> {
+        val root = catching { org.json.JSONObject(json) }.getOrNull() ?: return emptyList()
+        val arr = root.optJSONArray("hits") ?: return emptyList()
+        val out = ArrayList<Pair<String, String>>(arr.length())
+        for (i in 0 until arr.length()) {
+            val hit = arr.optJSONObject(i) ?: continue
+            val title = hit.optString("post_title").trim()
+            val permalink = hit.optString("permalink").replace("\\/", "/").trim()
+            if (title.isBlank() || permalink.isBlank()) continue
+            val url = if (permalink.startsWith("http")) permalink
+            else base.trimEnd('/') + "/" + permalink.trimStart('/')
+            out += url to title
+        }
+        return out
+    }
+
+    /** Episode number from headings such as "-:Episodes: 4:-" or "S02E04". */
+    internal fun m4uEpisodeOf(heading: String): Int? {
+        Regex("""(?i)episodes?[\s._:\-]*0?(\d{1,4})""").find(heading)?.let {
+            return it.groupValues[1].toIntOrNull()
+        }
+        Regex("""(?i)\bS\d{1,2}[\s._-]*E0?(\d{1,3})\b""").find(heading)?.let {
+            return it.groupValues[1].toIntOrNull()
+        }
+        Regex("""(?i)\bE(?:P|PISODE)?[\s._-]*0?(\d{1,3})\b""").find(heading)?.let {
+            return it.groupValues[1].toIntOrNull()
+        }
+        return null
+    }
+
+    private suspend fun fileLinksFor(
+        spec: ServerSpec,
+        links: List<String>,
+        referer: String,
+        audio: String,
+        qualityLabel: String,
+        size: String,
+        limit: Int = 6,
+    ): List<RawStream> {
+        val out = mutableListOf<RawStream>()
+        val gateways = links.filter { HUB_GATEWAY_HOST_ALT.containsMatchIn(it) }
+        for (gateway in gateways) {
+            val files = hubDriveFiles(gateway, referer)
+            for ((url, q, fileLang) in files) {
+                val qText = q.ifBlank { HUB_QUALITY.find(qualityLabel)?.value ?: qualityLabel }
+                val fileAudio = LinkNaming.languageLabel(fileLang)
+                val label = fileAudio.ifBlank { audio }
+                out += RawStream(
+                    spec.id,
+                    listOf(spec.name, qualityText(qText.ifBlank { qualityLabel }))
+                        .filter { it.isNotBlank() }.joinToString(" "),
+                    url,
+                    url.contains(".m3u8", ignoreCase = true),
+                    ORIGIN.find(gateway)?.value ?: spec.referer,
+                    releaseHeightOf(qText.ifBlank { qualityLabel }),
+                    audioPriority = when {
+                        label.contains(',') || label == "Multi" -> 2
+                        label.startsWith("Hindi") -> 4
+                        else -> 1
+                    },
+                    audioLabel = label,
+                    sizeLabel = size,
+                    mediaLabel = qualityLabel,
+                )
+                if (out.size >= limit) return out
+            }
+        }
+        return out
+    }
+
+    private suspend fun resolveMovies4u(
+        spec: ServerSpec,
+        tmdbId: Int,
+        type: String,
+        season: Int,
+        episode: Int,
+    ): List<RawStream> {
+        val (title, year) = titleYear(tmdbId, type)
+        fun enc(s: String) = java.net.URLEncoder.encode(s, "UTF-8")
+        val bases = (listOfNotNull(Domains.base("movies4u")) + listOf("https://new8.movies4u.garden"))
+            .map { it.trimEnd('/') }
+            .filter { it.contains("movies4u", ignoreCase = true) }
+            .distinct()
+        var base = bases.firstOrNull().orEmpty()
+        var hits: List<Pair<String, String>> = emptyList()
+        for (candidate in bases) {
+            val json = fetchText(
+                "$candidate/lookup.php?q=${enc(title)}", candidate, timeoutSec = 12,
+                headers = mapOf("Accept" to "application/json"),
+            ) ?: continue
+            val parsed = m4uSearchHits(json, candidate)
+            if (parsed.isNotEmpty()) {
+                base = candidate
+                hits = parsed
+                break
+            }
+        }
+        if (hits.isEmpty()) throw CleanMissException("no search hits")
+        val posts = rankedHits(hits, title, year).take(2)
+        if (posts.isEmpty()) throw CleanMissException("no match")
+        val expectedYear = year?.toIntOrNull()
+
+        for (postUrl in posts) {
+            val post = fetchText(postUrl, base, timeoutSec = 14) ?: continue
+            val postTitle = (HTML_TITLE.find(post)?.groupValues?.get(1)?.trim().orEmpty())
+                .ifBlank { hits.firstOrNull { it.first == postUrl }?.second.orEmpty() }
+            val postYear = TitleMatch.parseYear(postTitle)
+            if (expectedYear != null && postYear != null &&
+                !TitleMatch.yearMatches(expectedYear, postYear, tolerance = 1)
+            ) continue
+            val groups = m4uGroups(post, postUrl).filter { releaseHeightOf(it.heading) >= 720 }
+            if (groups.isEmpty()) continue
+            val postAudio = LinkNaming.languageLabel(postTitle)
+            val out = mutableListOf<RawStream>()
+            if (type == "movie") {
+                for (group in groups.sortedByDescending { releaseHeightOf(it.heading) }.take(2)) {
+                    val audio = LinkNaming.languageLabel(group.heading).ifBlank { postAudio }
+                    out += fileLinksFor(
+                        spec, group.links, postUrl, audio, group.heading,
+                        normalizeSizeToken(group.heading),
+                    )
+                    if (out.size >= 6) break
+                }
+            } else {
+                val chosen = groups.filter { seasonPackMatches(it.heading, season) }
+                    .sortedByDescending { releaseHeightOf(it.heading) }
+                    .firstOrNull()
+                if (chosen != null) {
+                    val episodeUrl = chosen.links.firstOrNull()
+                    val episodePage = episodeUrl?.let { fetchText(it, postUrl, timeoutSec = 14) }
+                    if (episodeUrl != null && episodePage != null) {
+                        val epGroups = m4uGroups(episodePage, episodeUrl)
+                        val targets = epGroups.filter { m4uEpisodeOf(it.heading) == episode }
+                            .ifEmpty { epGroups.filter { m4uEpisodeOf(it.heading) == null } }
+                        val audio = LinkNaming.languageLabel(chosen.heading).ifBlank { postAudio }
+                        for (target in targets) {
+                            out += fileLinksFor(
+                                spec, target.links, postUrl, audio, chosen.heading,
+                                normalizeSizeToken(chosen.heading),
+                            )
+                            if (out.size >= 6) break
+                        }
+                    }
+                }
+            }
+            if (out.isNotEmpty()) return out.distinctBy { it.url }
+        }
+        throw CleanMissException("no file links")
+    }
+
+    internal data class FcBox(val label: String, val size: String, val url: String)
+
+    /** FilmyCab post download boxes: quality label + size + the ?mip_server links page. */
+    internal fun fcBoxes(html: String, base: String): List<FcBox> {
+        val doc = Jsoup.parse(html, base)
+        val out = mutableListOf<FcBox>()
+        for (box in doc.select("div.quality-download-box")) {
+            val href = box.selectFirst("a[href]")?.attr("abs:href")?.trim().orEmpty()
+            if (!href.startsWith("http") || !href.contains("mip_server", ignoreCase = true)) continue
+            out += FcBox(
+                label = box.selectFirst(".quality-name-white")?.text()?.trim().orEmpty(),
+                size = box.selectFirst(".quality-size-light")?.text()?.trim().orEmpty(),
+                url = href,
+            )
+        }
+        return out
+    }
+
+    /** FilmyCab search results: post anchors of the form /yyyy/mm/dd/slug/. */
+    internal fun fcHits(html: String, base: String): List<Pair<String, String>> {
+        val doc = Jsoup.parse(html, base)
+        val out = LinkedHashMap<String, String>()
+        for (a in doc.select("a[href]")) {
+            val href = a.attr("abs:href").trim()
+            if (!FC_POST_PATH.containsMatchIn(href)) continue
+            val title = a.text().trim()
+                .ifBlank { a.selectFirst("p")?.text()?.trim().orEmpty() }
+                .ifBlank { a.selectFirst("img")?.attr("alt")?.trim().orEmpty() }
+            if (title.length < 8) continue
+            out.putIfAbsent(href, title)
+        }
+        return out.map { it.key to it.value }
+    }
+
+    /** "EP 1 TO 3 1080p HQ" followed by "= 1080p" boxes: the "=" boxes belong to the same episode batch. */
+    internal fun fcResolveBatchLabels(boxes: List<FcBox>): List<FcBox> {
+        var batch = ""
+        return boxes.map { box ->
+            if (box.label.startsWith("=")) {
+                val own = box.label.trimStart('=', ' ').trim()
+                if (batch.isBlank()) box else box.copy(label = "$batch $own".trim())
+            } else {
+                batch = box.label
+                box
+            }
+        }
+    }
+
+    internal fun fcEpisodeCovers(label: String, episode: Int): Boolean {
+        val range = Regex("""(?i)\bE(?:P|PISODE)?[\s._-]*0?(\d{1,3})\s*(?:-|–|to)\s*0?(\d{1,4})\b""").find(label)
+        if (range != null) {
+            val from = range.groupValues[1].toIntOrNull() ?: return false
+            val to = range.groupValues[2].toIntOrNull() ?: return false
+            return episode in from..to
+        }
+        val single = Regex("""(?i)\bE(?:P|PISODE)?[\s._-]*0?(\d{1,4})\b""").find(label) ?: return true
+        return single.groupValues[1].toIntOrNull() == episode
+    }
+
+    internal fun fcSeasonOf(text: String): Int? =
+        Regex("""(?i)\bSeason[\s._-]*0?(\d{1,2})\b""").find(text)?.groupValues?.get(1)?.toIntOrNull()
+            ?: Regex("""(?i)\bS(\d{1,2})(?:\b|E\d)""").find(text)?.groupValues?.get(1)?.toIntOrNull()
+
+    internal fun fcMipHosts(html: String, base: String): List<String> =
+        Jsoup.parse(html, base).select("div.server a[href], a.btn[href]").mapNotNull { a ->
+            val href = a.attr("abs:href").trim()
+            href.takeIf { it.startsWith("http") && HUB_GATEWAY_HOST_ALT.containsMatchIn(it) }
+        }.distinct()
+
+    private suspend fun resolveFilmyCab(
+        spec: ServerSpec,
+        tmdbId: Int,
+        type: String,
+        season: Int,
+        episode: Int,
+    ): List<RawStream> {
+        val (title, year) = titleYear(tmdbId, type)
+        fun enc(s: String) = java.net.URLEncoder.encode(s, "UTF-8")
+        val bases = (listOfNotNull(Domains.base("filmycab")) + listOf("https://filmycab.store"))
+            .map { it.trimEnd('/') }
+            .filter { it.contains("filmycab", ignoreCase = true) }
+            .distinct()
+        var base = bases.firstOrNull().orEmpty()
+        var hits: List<Pair<String, String>> = emptyList()
+        for (candidate in bases) {
+            val html = fetchText("$candidate/?s=${enc(title)}", candidate, timeoutSec = 12) ?: continue
+            val parsed = fcHits(html, candidate)
+            if (parsed.isNotEmpty()) {
+                base = candidate
+                hits = parsed
+                break
+            }
+        }
+        if (hits.isEmpty()) throw CleanMissException("no search hits")
+        val posts = rankedHits(hits, title, year).take(2)
+        if (posts.isEmpty()) throw CleanMissException("no match")
+        val expectedYear = year?.toIntOrNull()
+
+        for (postUrl in posts) {
+            val post = fetchText(postUrl, base, timeoutSec = 14) ?: continue
+            val doc = Jsoup.parse(post, postUrl)
+            val postTitle = doc.selectFirst("h1")?.text()?.trim().orEmpty()
+            val postYear = TitleMatch.parseYear(postTitle)
+            if (expectedYear != null && postYear != null &&
+                !TitleMatch.yearMatches(expectedYear, postYear, tolerance = 1)
+            ) continue
+            if (type != "movie") {
+                val postSeason = fcSeasonOf(postTitle)
+                if (postSeason != null && postSeason != season) continue
+            }
+            val boxes = fcResolveBatchLabels(fcBoxes(post, postUrl))
+                .filter { releaseHeightOf(it.label) >= 720 }
+                .filter { type == "movie" || fcEpisodeCovers(it.label, episode) }
+            if (boxes.isEmpty()) continue
+            val postAudio = LinkNaming.languageLabel(postTitle)
+            val out = mutableListOf<RawStream>()
+            for (box in boxes.sortedByDescending { releaseHeightOf(it.label) }.take(2)) {
+                val mipPage = fetchText(box.url, postUrl, timeoutSec = 12) ?: continue
+                val hosts = fcMipHosts(mipPage, box.url)
+                if (hosts.isEmpty()) continue
+                val mipMeta = Jsoup.parse(mipPage).selectFirst("p.meta")?.text()?.trim().orEmpty()
+                val quality = listOf(box.label, mipMeta).firstOrNull { releaseHeightOf(it) > 0 } ?: box.label
+                val size = normalizeSizeToken(box.size).ifBlank { normalizeSizeToken(mipMeta) }
+                val audio = LinkNaming.languageLabel(box.label).ifBlank { postAudio }
+                out += fileLinksFor(spec, hosts, postUrl, audio, quality, size)
+                if (out.size >= 6) break
+            }
+            if (out.isNotEmpty()) return out.distinctBy { it.url }
         }
         throw CleanMissException("no file links")
     }

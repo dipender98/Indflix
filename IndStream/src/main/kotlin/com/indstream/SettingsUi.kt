@@ -24,6 +24,7 @@ import android.text.TextUtils
 import android.text.method.PasswordTransformationMethod
 import android.util.TypedValue
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -95,14 +96,54 @@ object SettingsUi {
         Color.parseColor("#717171"),
     )
 
+    private class SectionHooks(val id: String) {
+        val dirtyChecks = mutableListOf<() -> Boolean>()
+        val saveActions = mutableListOf<() -> Boolean>()
+        val resetActions = mutableListOf<() -> Unit>()
+        val savedRestoreActions = mutableListOf<() -> Unit>()
+        var savedChangesPending = false
+        var baseline: String? = null
+        var state: (() -> String)? = null
+        var restore: (() -> Unit)? = null
+        var reset: (() -> Unit)? = null
+        var onBegin: (() -> Unit)? = null
+        var touched = false
+
+        fun isDirty(): Boolean = dirtyChecks.any { runCatching { it() }.getOrDefault(false) }
+
+        fun autoChanged(): Boolean {
+            if (touched) return true
+            val read = state ?: return false
+            val base = baseline ?: return false
+            return runCatching { read() != base }.getOrDefault(false)
+        }
+
+        fun begin() {
+            savedChangesPending = false
+            touched = false
+            savedRestoreActions.clear()
+            onBegin?.invoke()
+            baseline = state?.let { runCatching { it() }.getOrDefault("") }
+        }
+
+        fun settle() {
+            savedChangesPending = false
+            touched = false
+            savedRestoreActions.clear()
+            baseline = state?.let { runCatching { it() }.getOrDefault("") }
+        }
+    }
+
     private class SectionSpec(
         val id: String,
         val title: String,
         val subtitle: String,
         val icon: String,
         val tone: Tone,
-        val build: (LinearLayout) -> Unit,
+        val build: (LinearLayout, SectionHooks) -> Unit,
     )
+
+    private class Toggle(val root: FrameLayout, val setChecked: (Boolean, Boolean) -> Unit)
 
     private class StatePill(
         val root: LinearLayout,
@@ -129,6 +170,16 @@ object SettingsUi {
         @Suppress("DEPRECATION")
         override fun onBackPressed() {
             if (onBack?.invoke() != true) super.onBackPressed()
+        }
+
+        override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+            if (event.keyCode == KeyEvent.KEYCODE_BACK) {
+                if (event.action == KeyEvent.ACTION_UP && onBack?.invoke() != true) {
+                    super.onBackPressed()
+                }
+                return true
+            }
+            return super.dispatchKeyEvent(event)
         }
     }
 
@@ -341,13 +392,21 @@ object SettingsUi {
                         line(0.5f - d, 0.5f + d, 0.5f + d, 0.5f - d)
                     }
                     "trash" -> {
-                        line(0.16f, 0.28f, 0.84f, 0.28f)
-                        line(0.38f, 0.28f, 0.38f, 0.17f)
-                        line(0.38f, 0.17f, 0.62f, 0.17f)
-                        line(0.62f, 0.17f, 0.62f, 0.28f)
-                        rr(0.27f, 0.37f, 0.73f, 0.86f, 2f)
-                        line(0.44f, 0.51f, 0.44f, 0.73f)
-                        line(0.56f, 0.51f, 0.56f, 0.73f)
+                        line(0.17f, 0.29f, 0.83f, 0.29f)
+                        line(0.38f, 0.29f, 0.38f, 0.18f)
+                        line(0.38f, 0.18f, 0.62f, 0.18f)
+                        line(0.62f, 0.18f, 0.62f, 0.29f)
+                        val corner = dp(2).toFloat()
+                        val body = Path().apply {
+                            moveTo(w * 0.26f, h * 0.37f)
+                            lineTo(w * 0.74f, h * 0.37f)
+                            lineTo(w * 0.74f, h * 0.86f - corner)
+                            quadTo(w * 0.74f, h * 0.86f, w * 0.74f - corner, h * 0.86f)
+                            lineTo(w * 0.26f + corner, h * 0.86f)
+                            quadTo(w * 0.26f, h * 0.86f, w * 0.26f, h * 0.86f - corner)
+                            close()
+                        }
+                        canvas.drawPath(body, pen)
                     }
                     "back" -> {
                         line(0.78f, 0.5f, 0.22f, 0.5f)
@@ -369,9 +428,35 @@ object SettingsUi {
                         line(0.68f, 0.52f, 0.5f, 0.7f)
                     }
                     "reset" -> {
-                        canvas.drawArc(w * 0.2f, h * 0.2f, w * 0.8f, h * 0.8f, 40f, 280f, false, pen)
-                        line(0.8f, 0.2f, 0.8f, 0.42f)
-                        line(0.8f, 0.2f, 0.58f, 0.2f)
+                        val cx = w * 0.5f
+                        val cy = h * 0.5f
+                        val radius = w * 0.30f
+                        canvas.drawArc(
+                            cx - radius, cy - radius, cx + radius, cy + radius,
+                            55f, 275f, false, pen,
+                        )
+                        val head = w * 0.19f
+                        val angle = Math.toRadians(55.0)
+                        val tipX = cx + radius * Math.cos(angle).toFloat()
+                        val tipY = cy + radius * Math.sin(angle).toFloat()
+                        val tangent = Math.toRadians(55.0 - 90.0)
+                        val dx = Math.cos(tangent).toFloat()
+                        val dy = Math.sin(tangent).toFloat()
+                        val px = -dy
+                        val py = dx
+                        val arrow = Path().apply {
+                            moveTo(tipX + dx * head * 0.35f, tipY + dy * head * 0.35f)
+                            lineTo(
+                                tipX - dx * head * 0.55f + px * head * 0.62f,
+                                tipY - dy * head * 0.55f + py * head * 0.62f,
+                            )
+                            lineTo(
+                                tipX - dx * head * 0.55f - px * head * 0.62f,
+                                tipY - dy * head * 0.55f - py * head * 0.62f,
+                            )
+                            close()
+                        }
+                        canvas.drawPath(arrow, fill)
                     }
                 }
             }
@@ -602,7 +687,7 @@ object SettingsUi {
             }
         }
 
-        fun smallToggle(initial: Boolean, onChange: (Boolean) -> Unit): View {
+        fun smallToggleState(initial: Boolean, onChange: (Boolean) -> Unit): Toggle {
             val root = FrameLayout(context).apply {
                 layoutParams = LinearLayout.LayoutParams(dp(52), dp(32))
                 background = ripple(
@@ -626,7 +711,7 @@ object SettingsUi {
             root.addView(track)
             root.addView(thumb)
             var checked = initial
-            fun paint() {
+            fun paint(animate: Boolean) {
                 track.background = if (checked) {
                     rounded(CONTROL, 999)
                 } else {
@@ -634,19 +719,29 @@ object SettingsUi {
                 }
                 thumb.background = circle(if (checked) ON_CONTROL else TEXT_FAINT)
                 root.contentDescription = if (checked) "Disable" else "Enable"
+                if (animate) {
+                    thumb.animate().translationX(if (checked) dp(20).toFloat() else 0f)
+                        .setDuration(200)
+                        .setInterpolator(PathInterpolator(0.2f, 0f, 0f, 1f))
+                        .start()
+                } else {
+                    thumb.translationX = if (checked) dp(20).toFloat() else 0f
+                }
             }
-            paint()
+            paint(false)
             root.setOnClickListener {
                 checked = !checked
-                paint()
-                thumb.animate().translationX(if (checked) dp(20).toFloat() else 0f)
-                    .setDuration(200)
-                    .setInterpolator(PathInterpolator(0.2f, 0f, 0f, 1f))
-                    .start()
+                paint(true)
                 onChange(checked)
             }
-            return root
+            return Toggle(root) { value, animate ->
+                checked = value
+                paint(animate)
+            }
         }
+
+        fun smallToggle(initial: Boolean, onChange: (Boolean) -> Unit): View =
+            smallToggleState(initial, onChange).root
 
         fun compactIcon(kind: String, description: String, onClick: () -> Unit): FrameLayout {
             val root = FrameLayout(context).apply {
@@ -665,7 +760,7 @@ object SettingsUi {
             root.addView(
                 ImageView(context).apply {
                     scaleType = ImageView.ScaleType.CENTER
-                    setImageDrawable(icon(kind, TEXT_FAINT, 14))
+                    setImageDrawable(icon(kind, TEXT_FAINT, 15))
                     layoutParams = FrameLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT,
                     )
@@ -1023,93 +1118,143 @@ object SettingsUi {
         // state bus: detail toolbars and home tiles both paint from this
         val stateCache = LinkedHashMap<String, Pair<String, Boolean>>()
         val stateListeners = mutableListOf<(String, String, Boolean) -> Unit>()
-        val dirtyChecks = mutableListOf<() -> Boolean>()
-        val resetActions = mutableListOf<() -> Unit>()
-        val saveActions = mutableListOf<() -> Unit>()
-        val snapshotActions = mutableListOf<() -> Unit>()
-        val restoreActions = mutableListOf<() -> Unit>()
-        val savedRestoreActions = mutableListOf<() -> Unit>()
-        val snapshots = mutableMapOf<String, String>()
-        var savedChangesPending = false
-        fun hasUnsavedChanges(): Boolean = dirtyChecks.any { runCatching { it() }.getOrDefault(false) } || savedChangesPending
-        fun showUnsavedPopup(onProceed: () -> Unit) {
-            if (!hasUnsavedChanges()) { onProceed(); return }
-            val savedMode = savedChangesPending && !dirtyChecks.any { runCatching { it() }.getOrDefault(false) }
+        val sectionHooks = LinkedHashMap<String, SectionHooks>()
+
+        fun showDialogPanel(
+            title: String,
+            message: String,
+            primaryLabel: String,
+            secondaryLabel: String,
+            primaryDanger: Boolean = false,
+            onPrimary: () -> Unit,
+            onSecondary: () -> Unit,
+        ) {
             val popup = Dialog(context)
             val panel = LinearLayout(context).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(dp(24), dp(24), dp(24), dp(24))
                 background = rounded(SURFACE, 24)
             }
-            panel.addView(label("Unsaved changes", 20f, TEXT, medium = true))
+            panel.addView(label(title, 20f, TEXT, medium = true))
             panel.addView(
-                label(
-                    if (savedMode) "You saved these changes. Keep them or restore?" else "You have unsaved changes. Save or discard them?",
-                    14f,
-                    TEXT_DIM,
-                ).apply { setPadding(0, dp(8), 0, 0) },
+                label(message, 14f, TEXT_DIM).apply {
+                    setPadding(0, dp(8), 0, 0)
+                    setLineSpacing(dp(2).toFloat(), 1f)
+                },
             )
             val row = LinearLayout(context).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.END
                 setPadding(0, dp(16), 0, 0)
             }
-            val keep = label("Keep", 14f, CONTROL, medium = true).apply {
-                setPadding(dp(12), dp(10), dp(12), dp(10))
-                isClickable = true
-                isFocusable = true
-            }
-            val restore = label("Restore", 14f, WARNING, medium = true).apply {
-                setPadding(dp(12), dp(10), dp(12), dp(10))
-                isClickable = true
-                isFocusable = true
-            }
-            val discard = label("Discard", 14f, WARNING, medium = true).apply {
-                setPadding(dp(12), dp(10), dp(12), dp(10))
-                isClickable = true
-                isFocusable = true
-            }
-            val save = action("Save", primary = true).apply {
-                layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT, control,
-                ).apply { leftMargin = gap }
-            }
-            if (savedMode) {
-                keep.setOnClickListener {
-                    savedChangesPending = false
-                    popup.dismiss()
-                    onProceed()
+            fun textAction(value: String, danger: Boolean): TextView =
+                label(value, 14f, if (danger) WARNING else CONTROL, medium = true).apply {
+                    setPadding(dp(12), dp(10), dp(12), dp(10))
+                    isClickable = true
+                    isFocusable = true
                 }
-                restore.setOnClickListener {
-                    savedRestoreActions.forEach { runCatching { it() } }
-                    savedChangesPending = false
-                    popup.dismiss()
-                    onProceed()
-                }
-                row.addView(keep)
-                row.addView(restore)
+            val primary = if (primaryDanger) {
+                textAction(primaryLabel, true)
             } else {
-                discard.setOnClickListener {
-                    resetActions.forEach { runCatching { it() } }
-                    savedChangesPending = false
-                    popup.dismiss()
-                    onProceed()
+                action(primaryLabel, primary = true).apply {
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT, control,
+                    ).apply { leftMargin = gap }
                 }
-                save.setOnClickListener {
-                    val wasDirty = dirtyChecks.any { runCatching { it() }.getOrDefault(false) }
-                    snapshotActions.forEach { runCatching { it() } }
-                    saveActions.forEach { runCatching { it() } }
-                    savedChangesPending = wasDirty
-                    popup.dismiss()
-                    onProceed()
-                }
-                row.addView(discard)
-                row.addView(save)
             }
+            val secondary = if (primaryDanger) {
+                action(secondaryLabel, primary = true).apply {
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT, control,
+                    ).apply { leftMargin = gap }
+                }
+            } else {
+                textAction(secondaryLabel, true)
+            }
+            secondary.setOnClickListener {
+                popup.dismiss()
+                onSecondary()
+            }
+            primary.setOnClickListener {
+                popup.dismiss()
+                onPrimary()
+            }
+            row.addView(secondary)
+            row.addView(primary)
             panel.addView(row)
             popup.setContentView(panel)
+            popup.setCanceledOnTouchOutside(false)
+            popup.setCancelable(false)
             popup.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             popup.show()
+        }
+
+        fun showExitConfirm(scope: SectionHooks, onProceed: () -> Unit) {
+            val dirty = scope.isDirty()
+            if (!dirty && !scope.savedChangesPending && !scope.autoChanged()) {
+                scope.settle()
+                onProceed()
+                return
+            }
+            when {
+                dirty -> showDialogPanel(
+                    "Unsaved changes",
+                    "Save your edits before leaving, or discard them.",
+                    "Save",
+                    "Discard",
+                    onPrimary = {
+                        val saved = scope.saveActions.all {
+                            runCatching { it() }.getOrDefault(false)
+                        }
+                        if (saved || scope.saveActions.isEmpty()) {
+                            scope.settle()
+                            onProceed()
+                        }
+                    },
+                    onSecondary = {
+                        scope.resetActions.forEach { runCatching { it() } }
+                        scope.restore?.let { runCatching { it() } }
+                        scope.settle()
+                        onProceed()
+                    },
+                )
+                scope.savedChangesPending -> showDialogPanel(
+                    "Changes saved",
+                    "Keep the changes you saved, or restore the previous values.",
+                    "Keep",
+                    "Restore",
+                    onPrimary = {
+                        scope.settle()
+                        onProceed()
+                    },
+                    onSecondary = {
+                        if (scope.savedRestoreActions.isNotEmpty()) {
+                            scope.savedRestoreActions.forEach { runCatching { it() } }
+                        } else {
+                            scope.restore?.let { runCatching { it() } }
+                        }
+                        scope.resetActions.forEach { runCatching { it() } }
+                        scope.settle()
+                        onProceed()
+                    },
+                )
+                else -> showDialogPanel(
+                    "Changes applied",
+                    "Keep these settings, or restore the values from before.",
+                    "Keep",
+                    "Restore",
+                    onPrimary = {
+                        scope.settle()
+                        onProceed()
+                    },
+                    onSecondary = {
+                        scope.resetActions.forEach { runCatching { it() } }
+                        scope.restore?.let { runCatching { it() } }
+                        scope.settle()
+                        onProceed()
+                    },
+                )
+            }
         }
 
         fun setState(id: String, value: String, on: Boolean) {
@@ -1175,7 +1320,7 @@ object SettingsUi {
 
         // ---------- section pages ----------
 
-        val providerBody: (LinearLayout) -> Unit = { content ->
+        val providerBody: (LinearLayout, SectionHooks) -> Unit = { content, scope ->
             val options = LinkedHashMap<String, Option>()
             val list = optionList()
             Catalogue.Provider.entries.forEach { provider ->
@@ -1205,6 +1350,15 @@ object SettingsUi {
                     }
                 }
             }
+            scope.state = { Catalogue.activeProvider().id }
+            scope.restore = {
+                Catalogue.setProvider(context, Catalogue.Provider.from(scope.baseline))
+                paint()
+            }
+            scope.reset = {
+                Catalogue.setProvider(context, Catalogue.Provider.TMDB)
+                paint()
+            }
         }
         sections += SectionSpec(
             "provider", "Catalogue Provider",
@@ -1212,7 +1366,7 @@ object SettingsUi {
             "provider", TONE_PRIMARY, providerBody,
         )
 
-        val catalogueBody: (LinearLayout) -> Unit = { content ->
+        val catalogueBody: (LinearLayout, SectionHooks) -> Unit = { content, scope ->
             var selected = Catalogue.Group.GLOBAL
             fun rowsOf(group: Catalogue.Group): List<Pair<String, String>> = Catalogue.rowsFor(group)
             fun enabledCount(): Int = Catalogue.enabledRows().size
@@ -1266,14 +1420,14 @@ object SettingsUi {
             shuffleOpt.dot.visibility = View.GONE
             shuffleOpt.root.isClickable = false
             paintOption(shuffleOpt, shuffleOn)
-            val shuffleToggle = smallToggle(shuffleOn) { on ->
+            val shuffleToggle = smallToggleState(shuffleOn) { on ->
                 Settings.saveShuffleRows(context, on)
                 shuffleOpt.summary.text =
                     if (on) "Items in every row appear in random order" else "Rows keep their normal order"
                 paintOption(shuffleOpt, on)
             }
             shuffleOpt.root.addView(
-                shuffleToggle,
+                shuffleToggle.root,
                 LinearLayout.LayoutParams(dp(52), dp(32)).apply { leftMargin = dp(6) },
             )
             add(content, shuffleOpt.root, 10)
@@ -1346,6 +1500,47 @@ object SettingsUi {
                 Settings.saveAllCatalogueEnabled(context, rowsOf(selected).map { it.first }, false)
                 renderRows()
             }
+            fun applyCatalogueState(
+                enabled: Map<String, Boolean>,
+                order: List<String>,
+                shuffle: Boolean,
+            ) {
+                Catalogue.allRows().forEach { (key, _) ->
+                    Settings.saveCatalogueEnabled(context, key, enabled[key] ?: true)
+                }
+                Settings.saveCatalogueOrder(context, order)
+                Settings.saveShuffleRows(context, shuffle)
+                shuffleToggle.setChecked(shuffle, false)
+                shuffleOpt.summary.text =
+                    if (shuffle) "Items in every row appear in random order" else "Rows keep their normal order"
+                paintOption(shuffleOpt, shuffle)
+                renderRows()
+            }
+            var baseCatalogueEnabled = mapOf<String, Boolean>()
+            var baseCatalogueOrder = listOf<String>()
+            var baseCatalogueShuffle = false
+            scope.onBegin = {
+                baseCatalogueEnabled = Catalogue.allRows().associate {
+                    it.first to Settings.catalogueEnabled(it.first)
+                }
+                baseCatalogueOrder = Settings.catalogueOrder()
+                baseCatalogueShuffle = Settings.shuffleRows()
+            }
+            scope.state = {
+                Catalogue.allRows().joinToString(",") {
+                    "${it.first}=${Settings.catalogueEnabled(it.first)}"
+                } + "#" + Settings.catalogueOrder().joinToString(",") + "#" + Settings.shuffleRows()
+            }
+            scope.restore = {
+                applyCatalogueState(baseCatalogueEnabled, baseCatalogueOrder, baseCatalogueShuffle)
+            }
+            scope.reset = {
+                applyCatalogueState(
+                    Catalogue.allRows().associate { it.first to true },
+                    emptyList(),
+                    false,
+                )
+            }
             renderRows()
         }
         sections += SectionSpec(
@@ -1354,7 +1549,7 @@ object SettingsUi {
             "catalogue", TONE_PRIMARY, catalogueBody,
         )
 
-        val forYouBody: (LinearLayout) -> Unit = { content ->
+        val forYouBody: (LinearLayout, SectionHooks) -> Unit = { content, scope ->
             val forYouRowOptions = LinkedHashMap<String, Option>()
             val forYouRowList = optionList()
             add(
@@ -1523,6 +1718,32 @@ object SettingsUi {
                     }
                 }
             }
+            var baseRows = mapOf<String, Boolean>()
+            var baseMode = ForYouRefresh.Mode.EVERY_OPEN
+            fun applyForYouState(rows: Map<String, Boolean>, mode: ForYouRefresh.Mode) {
+                rows.forEach { (key, on) -> Settings.saveCatalogueEnabled(context, key, on) }
+                Settings.saveForYouRefreshMode(context, mode)
+                selectedMode = mode
+                paintModes()
+                doRefreshForYouState()
+            }
+            scope.onBegin = {
+                baseRows = Catalogue.forYouRowTitles().associate {
+                    it.first to Settings.catalogueEnabled(it.first)
+                }
+                baseMode = Settings.forYouRefreshMode()
+            }
+            scope.state = {
+                Catalogue.forYouRowTitles().joinToString(",") { "${it.first}=${Settings.catalogueEnabled(it.first)}" } +
+                    "#" + Settings.forYouRefreshMode().id
+            }
+            scope.restore = { applyForYouState(baseRows, baseMode) }
+            scope.reset = {
+                applyForYouState(
+                    Catalogue.forYouRowTitles().associate { it.first to true },
+                    ForYouRefresh.Mode.EVERY_OPEN,
+                )
+            }
         }
         sections += SectionSpec(
             "foryou", "Made for You",
@@ -1530,7 +1751,7 @@ object SettingsUi {
             "foryou", TONE_PRIMARY, forYouBody,
         )
 
-        val serversBody: (LinearLayout) -> Unit = { content ->
+        val serversBody: (LinearLayout, SectionHooks) -> Unit = { content, scope ->
             val allServers = ServerFarm.allServers
             var enabledCount = allServers.count { Settings.serverEnabled(it.id) }
             fun providersStateText(): String = "$enabledCount of ${allServers.size} enabled"
@@ -1858,6 +2079,25 @@ object SettingsUi {
 
             applyProviderPreset()
             add(content, providerGrid, 10)
+
+            fun applyServersState(saved: Map<String, Boolean>) {
+                allServers.forEach { Settings.saveServerEnabled(context, it.id, saved[it.id] ?: true) }
+                paintServerTiles()
+                refreshProvidersState()
+            }
+            var baseServers = mapOf<String, Boolean>()
+            scope.onBegin = {
+                baseServers = allServers.associate { it.id to Settings.serverEnabled(it.id) }
+            }
+            scope.state = {
+                allServers.joinToString(",") { "${it.id}=${Settings.serverEnabled(it.id)}" }
+            }
+            scope.restore = { applyServersState(baseServers) }
+            scope.reset = {
+                Settings.resetAllServers(context)
+                paintServerTiles()
+                refreshProvidersState()
+            }
         }
         sections += SectionSpec(
             "servers", "Servers / Providers",
@@ -1865,7 +2105,7 @@ object SettingsUi {
             "servers", TONE_SECONDARY, serversBody,
         )
 
-        val addonsBody: (LinearLayout) -> Unit = { content ->
+        val addonsBody: (LinearLayout, SectionHooks) -> Unit = { content, scope ->
             var addonUrls = StremioNuvioAddons.urls()
             val addonChecks = LinkedHashMap<String, String>()
             var draftVisible = false
@@ -2093,11 +2333,56 @@ object SettingsUi {
             }
 
             renderAddons()
-            dirtyChecks += { draftVisible && draftText.isNotBlank() }
-            resetActions += { draftVisible = false; draftText = ""; draftField = null; renderAddons() }
-            snapshotActions += { snapshots["addons"] = draftText }
-            restoreActions += { draftVisible = false; draftText = snapshots["addons"].orEmpty(); draftField?.setText(snapshots["addons"].orEmpty()) }
-            saveActions += { draftField?.let { commitDraft(it) } }
+
+            fun applyAddonsState(urls: List<String>, enabled: Map<String, Boolean>) {
+                Settings.saveStremioNuvioAddons(context, urls)
+                urls.forEach { Settings.saveStremioNuvioAddonEnabled(context, it, enabled[it] ?: true) }
+                addonUrls = StremioNuvioAddons.urls()
+                draftVisible = false
+                draftField = null
+                draftText = ""
+                renderAddons()
+            }
+            var baseAddonUrls = listOf<String>()
+            var baseAddonEnabled = mapOf<String, Boolean>()
+            scope.onBegin = {
+                baseAddonUrls = StremioNuvioAddons.urls()
+                baseAddonEnabled = baseAddonUrls.associate { it to StremioNuvioAddons.enabled(it) }
+            }
+            scope.state = {
+                StremioNuvioAddons.urls().joinToString(",") {
+                    "$it=${StremioNuvioAddons.enabled(it)}"
+                }
+            }
+            scope.restore = { applyAddonsState(baseAddonUrls, baseAddonEnabled) }
+            scope.reset = {
+                applyAddonsState(
+                    StremioNuvioAddons.DEFAULT_URLS,
+                    StremioNuvioAddons.DEFAULT_URLS.associateWith { true },
+                )
+            }
+            scope.dirtyChecks += { draftField?.text?.toString()?.isNotBlank() == true }
+            scope.resetActions += {
+                draftVisible = false
+                draftText = ""
+                draftField = null
+                renderAddons()
+            }
+            scope.saveActions += {
+                val input = draftField
+                if (input == null) {
+                    true
+                } else {
+                    val normalized = StremioNuvioAddons.normalizeUrl(input.text.toString())
+                    if (normalized == null) {
+                        input.error = "Enter a valid addon URL"
+                        false
+                    } else {
+                        commitDraft(input)
+                        true
+                    }
+                }
+            }
         }
         sections += SectionSpec(
             "addons", "Stremio / Nuvio",
@@ -2105,7 +2390,7 @@ object SettingsUi {
             "addons", TONE_SECONDARY, addonsBody,
         )
 
-        val m3uBody: (LinearLayout) -> Unit = { content ->
+        val m3uBody: (LinearLayout, SectionHooks) -> Unit = { content, scope ->
             var m3uEnabled = Settings.m3uEnabled()
             var m3uSources = Settings.m3uSources().toMutableList()
 
@@ -2238,7 +2523,7 @@ object SettingsUi {
             m3uToggleOption.dot.visibility = View.GONE
             m3uToggleOption.root.isClickable = false
             paintOption(m3uToggleOption, m3uEnabled)
-            val m3uToggle = smallToggle(m3uEnabled) { on ->
+            val m3uToggle = smallToggleState(m3uEnabled) { on ->
                 m3uEnabled = on
                 if (on && m3uSources.isEmpty()) {
                     m3uSources = M3uPlaylists.DEFAULT_SOURCES.toMutableList()
@@ -2250,7 +2535,7 @@ object SettingsUi {
                 refreshM3uState()
             }
             m3uToggleOption.root.addView(
-                m3uToggle,
+                m3uToggle.root,
                 LinearLayout.LayoutParams(dp(52), dp(32)).apply { leftMargin = dp(6) },
             )
 
@@ -2277,11 +2562,50 @@ object SettingsUi {
             }
 
             renderM3u()
-            dirtyChecks += { m3uDraftVisible && m3uDraftText.isNotBlank() }
-            resetActions += { m3uDraftVisible = false; m3uDraftText = ""; m3uDraftField = null; renderM3u() }
-            snapshotActions += { snapshots["m3u"] = m3uDraftText }
-            restoreActions += { m3uDraftVisible = false; m3uDraftText = snapshots["m3u"].orEmpty(); m3uDraftField?.setText(snapshots["m3u"].orEmpty()) }
-            saveActions += { m3uDraftField?.let(::commitM3uDraft) }
+
+            fun applyM3uState(enabled: Boolean, sources: List<String>) {
+                m3uEnabled = enabled
+                m3uSources = sources.toMutableList()
+                Settings.saveM3uEnabled(context, enabled)
+                Settings.saveM3uSources(context, sources)
+                m3uToggle.setChecked(enabled, false)
+                paintOption(m3uToggleOption, enabled)
+                m3uDraftVisible = false
+                m3uDraftField = null
+                m3uDraftText = ""
+                renderM3u()
+            }
+            var baseM3uEnabled = false
+            var baseM3uSources = listOf<String>()
+            scope.onBegin = {
+                baseM3uEnabled = Settings.m3uEnabled()
+                baseM3uSources = Settings.m3uSources()
+            }
+            scope.state = { "${Settings.m3uEnabled()}#${Settings.m3uSources().joinToString(",")}" }
+            scope.restore = { applyM3uState(baseM3uEnabled, baseM3uSources) }
+            scope.reset = { applyM3uState(Settings.m3uEnabled(), M3uPlaylists.DEFAULT_SOURCES) }
+            scope.dirtyChecks += { m3uDraftField?.text?.toString()?.isNotBlank() == true }
+            scope.resetActions += {
+                m3uDraftVisible = false
+                m3uDraftText = ""
+                m3uDraftField = null
+                renderM3u()
+            }
+            scope.saveActions += {
+                val input = m3uDraftField
+                if (input == null) {
+                    true
+                } else {
+                    val normalized = M3uPlaylists.normalizeSource(input.text.toString())
+                    if (normalized == null) {
+                        input.error = "Enter a valid playlist URL"
+                        false
+                    } else {
+                        commitM3uDraft(input)
+                        true
+                    }
+                }
+            }
         }
         sections += SectionSpec(
             "m3u", "M3U Playlists",
@@ -2289,7 +2613,7 @@ object SettingsUi {
             "m3u", TONE_SECONDARY, m3uBody,
         )
 
-        val wyzieBody: (LinearLayout) -> Unit = { content ->
+        val wyzieBody: (LinearLayout, SectionHooks) -> Unit = { content, scope ->
             val wyzieSaved = Settings.apiKey() != null
             setState("subtitles", if (wyzieSaved) "Saved" else "Not set", wyzieSaved)
 
@@ -2328,13 +2652,16 @@ object SettingsUi {
                     wyzieKeyInput.post { wyzieStatus.text = msg }
                 }.start()
             }
-            wyzieClear.setOnClickListener {
-                Settings.clear(context)
-                wyzieKeyInput.setText("")
+            fun applyWyzieKey(key: String?) {
+                if (key != null) Settings.save(context, key) else Settings.clear(context)
+                wyzieKeyInput.setText(Settings.apiKey().orEmpty())
                 wyzieKeyInput.error = null
-                wyzieStatus.text = "Built-in subtitles are in use."
-                setState("subtitles", "Not set", false)
+                val on = Settings.apiKey() != null
+                wyzieStatus.text =
+                    if (on) "Your key is used for subtitle lookups." else "Built-in subtitles are in use."
+                setState("subtitles", if (on) "Saved" else "Not set", on)
             }
+            wyzieClear.setOnClickListener { applyWyzieKey(null) }
             wyzieSave.setOnClickListener {
                 val prevKey = Settings.apiKey().orEmpty()
                 val hadPrev = Settings.apiKey() != null
@@ -2348,7 +2675,7 @@ object SettingsUi {
                 wyzieStatus.text =
                     if (on) "Your key is used for subtitle lookups." else "Built-in subtitles are in use."
                 setState("subtitles", if (on) "Saved" else "Not set", on)
-                savedRestoreActions += {
+                scope.savedRestoreActions += {
                     if (hadPrev) Settings.save(context, prevKey) else Settings.clear(context)
                     wyzieKeyInput.setText(Settings.apiKey().orEmpty())
                     wyzieKeyInput.error = null
@@ -2356,13 +2683,22 @@ object SettingsUi {
                     wyzieStatus.text = if (now) "Your key is used for subtitle lookups." else "Built-in subtitles are in use."
                     setState("subtitles", if (now) "Saved" else "Not set", now)
                 }
-                savedChangesPending = true
+                scope.savedChangesPending = true
             }
-            dirtyChecks += { wyzieKeyInput.text.toString() != Settings.apiKey().orEmpty() }
-            resetActions += { wyzieKeyInput.setText(Settings.apiKey().orEmpty()); wyzieKeyInput.error = null }
-            snapshotActions += { snapshots["wyzie"] = wyzieKeyInput.text.toString() }
-            restoreActions += { wyzieKeyInput.setText(snapshots["wyzie"] ?: Settings.apiKey().orEmpty()); wyzieKeyInput.error = null }
-            saveActions += { wyzieSave.performClick() }
+            scope.dirtyChecks += { wyzieKeyInput.text.toString() != Settings.apiKey().orEmpty() }
+            scope.resetActions += {
+                wyzieKeyInput.setText(Settings.apiKey().orEmpty())
+                wyzieKeyInput.error = null
+            }
+            scope.saveActions += {
+                wyzieSave.performClick()
+                !scope.isDirty()
+            }
+            scope.reset = { applyWyzieKey(null) }
+            var baseWyzieKey: String? = null
+            scope.onBegin = { baseWyzieKey = Settings.apiKey() }
+            scope.state = { Settings.apiKey().orEmpty() }
+            scope.restore = { applyWyzieKey(baseWyzieKey) }
         }
         sections += SectionSpec(
             "subtitles", "Subtitles Key",
@@ -2370,7 +2706,7 @@ object SettingsUi {
             "subs", TONE_TERTIARY, wyzieBody,
         )
 
-        val tmdbBody: (LinearLayout) -> Unit = { content ->
+        val tmdbBody: (LinearLayout, SectionHooks) -> Unit = { content, scope ->
             val tmdbSaved = Settings.tmdbApiKey() != null
             setState("tmdb", if (tmdbSaved) "Saved" else "Not set", tmdbSaved)
 
@@ -2409,13 +2745,15 @@ object SettingsUi {
                     tmdbKeyInput.post { tmdbStatus.text = msg }
                 }.start()
             }
-            tmdbClear.setOnClickListener {
-                Settings.clearTmdb(context)
-                tmdbKeyInput.setText("")
+            fun applyTmdbKey(key: String?) {
+                if (key != null) Settings.saveTmdb(context, key) else Settings.clearTmdb(context)
+                tmdbKeyInput.setText(Settings.tmdbApiKey().orEmpty())
                 tmdbKeyInput.error = null
-                tmdbStatus.text = "Built-in keys are in use."
-                setState("tmdb", "Not set", false)
+                val on = Settings.tmdbApiKey() != null
+                tmdbStatus.text = if (on) "Your key is used for metadata first." else "Built-in keys are in use."
+                setState("tmdb", if (on) "Saved" else "Not set", on)
             }
+            tmdbClear.setOnClickListener { applyTmdbKey(null) }
             tmdbSave.setOnClickListener {
                 val prevKey = Settings.tmdbApiKey().orEmpty()
                 val hadPrev = Settings.tmdbApiKey() != null
@@ -2429,7 +2767,7 @@ object SettingsUi {
                 tmdbStatus.text =
                     if (on) "Your key is used for metadata first." else "Built-in keys are in use."
                 setState("tmdb", if (on) "Saved" else "Not set", on)
-                savedRestoreActions += {
+                scope.savedRestoreActions += {
                     if (hadPrev) Settings.saveTmdb(context, prevKey) else Settings.clearTmdb(context)
                     tmdbKeyInput.setText(Settings.tmdbApiKey().orEmpty())
                     tmdbKeyInput.error = null
@@ -2437,13 +2775,22 @@ object SettingsUi {
                     tmdbStatus.text = if (now) "Your key is used for metadata first." else "Built-in keys are in use."
                     setState("tmdb", if (now) "Saved" else "Not set", now)
                 }
-                savedChangesPending = true
+                scope.savedChangesPending = true
             }
-            dirtyChecks += { tmdbKeyInput.text.toString() != Settings.tmdbApiKey().orEmpty() }
-            resetActions += { tmdbKeyInput.setText(Settings.tmdbApiKey().orEmpty()); tmdbKeyInput.error = null }
-            snapshotActions += { snapshots["tmdb"] = tmdbKeyInput.text.toString() }
-            restoreActions += { tmdbKeyInput.setText(snapshots["tmdb"] ?: Settings.tmdbApiKey().orEmpty()); tmdbKeyInput.error = null }
-            saveActions += { tmdbSave.performClick() }
+            scope.dirtyChecks += { tmdbKeyInput.text.toString() != Settings.tmdbApiKey().orEmpty() }
+            scope.resetActions += {
+                tmdbKeyInput.setText(Settings.tmdbApiKey().orEmpty())
+                tmdbKeyInput.error = null
+            }
+            scope.saveActions += {
+                tmdbSave.performClick()
+                !scope.isDirty()
+            }
+            scope.reset = { applyTmdbKey(null) }
+            var baseTmdbKey: String? = null
+            scope.onBegin = { baseTmdbKey = Settings.tmdbApiKey() }
+            scope.state = { Settings.tmdbApiKey().orEmpty() }
+            scope.restore = { applyTmdbKey(baseTmdbKey) }
         }
         sections += SectionSpec(
             "tmdb", "TMDB API Key",
@@ -2451,7 +2798,7 @@ object SettingsUi {
             "tmdb", TONE_TERTIARY, tmdbBody,
         )
 
-        val aiBody: (LinearLayout) -> Unit = { content ->
+        val aiBody: (LinearLayout, SectionHooks) -> Unit = { content, scope ->
             val aiSaved = Settings.aiApiKey() != null
             setState("ai", if (aiSaved) "Saved" else "Not set", aiSaved)
 
@@ -2600,13 +2947,31 @@ object SettingsUi {
                 }.start()
             }
             aiClear.setOnClickListener {
-                Settings.clearAi(context, selectedProvider)
+                val p = selectedProvider
+                val prevKey = Settings.aiApiKey(p)
+                val prevModel = Settings.aiModel(p)
+                val prevBase = Settings.aiBaseUrl(p)
+                Settings.clearAi(context, p)
                 aiKeyInput.setText("")
                 aiModelInput.setAdapter(null)
-                aiModelInput.setText(AiService.Provider.from(selectedProvider).defaultModel)
+                aiModelInput.setText(AiService.Provider.from(p).defaultModel)
                 aiBaseInput.setText("")
                 aiStatus.visibility = View.GONE
                 setState("ai", "Not set", false)
+                if (!prevKey.isNullOrBlank()) {
+                    scope.touched = true
+                    scope.restore = {
+                        Settings.saveAi(context, p, prevKey, prevModel, prevBase)
+                        if (p == selectedProvider) {
+                            aiKeyInput.setText(Settings.aiApiKey(p).orEmpty())
+                            aiModelInput.setText(
+                                Settings.aiModel(p).ifBlank { AiService.Provider.from(p).defaultModel },
+                            )
+                            aiBaseInput.setText(Settings.aiBaseUrl(p))
+                        }
+                        setState("ai", "Saved", true)
+                    }
+                }
             }
             aiSave.setOnClickListener {
                 val savingProvider = selectedProvider
@@ -2621,7 +2986,7 @@ object SettingsUi {
                 aiStatus.visibility = View.VISIBLE
                 aiStatus.text = if (on) "Saved - the model reorders your rows." else "Cleared - rows use the local score."
                 setState("ai", if (on) "Saved" else "Not set", on)
-                savedRestoreActions += {
+                scope.savedRestoreActions += {
                     if (prevKey.isNullOrBlank()) {
                         Settings.clearAi(context, savingProvider)
                     } else {
@@ -2635,31 +3000,35 @@ object SettingsUi {
                     val now = Settings.aiApiKey(savingProvider) != null
                     setState("ai", if (now) "Saved" else "Not set", now)
                 }
-                savedChangesPending = true
+                scope.savedChangesPending = true
             }
-            dirtyChecks += {
+            scope.dirtyChecks += {
                 aiKeyInput.text.toString() != Settings.aiApiKey(selectedProvider).orEmpty() ||
                     aiModelInput.text.toString() != Settings.aiModel(selectedProvider).ifBlank { AiService.Provider.from(selectedProvider).defaultModel } ||
                     aiBaseInput.text.toString() != Settings.aiBaseUrl(selectedProvider)
             }
-            resetActions += {
+            scope.resetActions += {
                 val p = selectedProvider
                 aiKeyInput.setText(Settings.aiApiKey(p).orEmpty())
                 aiModelInput.setText(Settings.aiModel(p).ifBlank { AiService.Provider.from(p).defaultModel })
                 aiBaseInput.setText(Settings.aiBaseUrl(p))
                 aiKeyInput.error = null
             }
-            snapshotActions += { snapshots["ai"] = aiKeyInput.text.toString() + "\n" + aiModelInput.text.toString() + "\n" + aiBaseInput.text.toString() }
-            restoreActions += {
-                val p = selectedProvider
-                val snap = snapshots["ai"].orEmpty()
-                val parts = snap.split("\n")
-                aiKeyInput.setText(parts.getOrNull(0).orEmpty())
-                aiModelInput.setText(parts.getOrNull(1).orEmpty())
-                aiBaseInput.setText(parts.getOrNull(2).orEmpty())
-                aiKeyInput.error = null
+            scope.saveActions += {
+                aiSave.performClick()
+                !scope.isDirty()
             }
-            saveActions += { aiSave.performClick() }
+            scope.reset = {
+                val p = selectedProvider
+                Settings.clearAi(context, p)
+                aiKeyInput.setText("")
+                aiModelInput.setAdapter(null)
+                aiModelInput.setText(AiService.Provider.from(p).defaultModel)
+                aiBaseInput.setText("")
+                aiStatus.visibility = View.GONE
+                val saved = Settings.aiApiKey(p) != null
+                setState("ai", if (saved) "Saved" else "Not set", saved)
+            }
         }
         sections += SectionSpec(
             "ai", "AI API Keys",
@@ -2734,6 +3103,7 @@ object SettingsUi {
 
         val detailPages = LinkedHashMap<String, View>()
         var currentDetail: View? = null
+        var currentSectionId: String? = null
         // opaque shared-axis slide: one hardware layer, no alpha or scale churn
         val enterInterpolator = PathInterpolator(0.05f, 0.7f, 0.1f, 1.0f)
         val exitInterpolator = PathInterpolator(0.4f, 0.0f, 1.0f, 1.0f)
@@ -2742,6 +3112,8 @@ object SettingsUi {
             val page = detailPages[id] ?: return
             if (currentDetail != null) return
             currentDetail = page
+            currentSectionId = id
+            sectionHooks[id]?.begin()
             val full = pages.width.takeIf { it > 0 }?.toFloat()
                 ?: context.resources.displayMetrics.widthPixels.toFloat()
             page.translationX = full
@@ -2757,6 +3129,7 @@ object SettingsUi {
         fun navigateBack(): Boolean {
             val page = currentDetail ?: return false
             currentDetail = null
+            currentSectionId = null
             homePage.visibility = View.VISIBLE
             val full = pages.width.takeIf { it > 0 }?.toFloat()
                 ?: context.resources.displayMetrics.widthPixels.toFloat()
@@ -2787,14 +3160,28 @@ object SettingsUi {
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(dp(12), dp(12), dp(16), dp(12))
             }
+            val hooks = SectionHooks(spec.id)
+            sectionHooks[spec.id] = hooks
             val back = iconButton("back", "Back")
             back.setOnClickListener {
-                if (hasUnsavedChanges()) showUnsavedPopup { navigateBack() } else navigateBack()
+                showExitConfirm(hooks) { navigateBack() }
             }
             toolbar.addView(back)
             val resetIcon = iconButton("reset", "Reset")
             resetIcon.setOnClickListener {
-                resetActions.forEach { runCatching { it() } }
+                val resetAction = hooks.reset ?: return@setOnClickListener
+                showDialogPanel(
+                    "Reset ${spec.title}?",
+                    "This restores the default settings for this section.",
+                    "Reset",
+                    "Cancel",
+                    primaryDanger = true,
+                    onPrimary = {
+                        runCatching { resetAction() }
+                        hooks.settle()
+                    },
+                    onSecondary = {},
+                )
             }
             toolbar.addView(resetIcon)
             val titleWrap = LinearLayout(context).apply {
@@ -2835,7 +3222,7 @@ object SettingsUi {
                     ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f,
                 ),
             )
-            spec.build(body)
+            spec.build(body, hooks)
             detailPages[spec.id] = page
             pages.addView(page)
         }
@@ -2948,6 +3335,7 @@ object SettingsUi {
         )
         dialog = built
         built.setOnDismissListener { providerProbeJob?.cancel() }
+        built.setCanceledOnTouchOutside(false)
         var closing = false
         fun dismissSheet() {
             if (closing) return
@@ -2958,14 +3346,22 @@ object SettingsUi {
                 .withEndAction { built.dismiss() }
                 .start()
         }
+        fun pendingSection(): SectionHooks? =
+            sectionHooks.values.firstOrNull {
+                it.isDirty() || it.savedChangesPending || it.autoChanged()
+            }
         close.setOnClickListener {
-            if (hasUnsavedChanges()) showUnsavedPopup { dismissSheet() } else dismissSheet()
+            val pending = pendingSection()
+            if (pending != null) showExitConfirm(pending) { dismissSheet() } else dismissSheet()
         }
         built.onBack = {
-            if (currentDetail != null) {
-                if (hasUnsavedChanges()) showUnsavedPopup { navigateBack() } else navigateBack()
+            val sectionId = currentSectionId
+            if (sectionId != null) {
+                val hooks = sectionHooks[sectionId]
+                if (hooks != null) showExitConfirm(hooks) { navigateBack() } else navigateBack()
             } else {
-                if (hasUnsavedChanges()) showUnsavedPopup { dismissSheet() } else dismissSheet()
+                val pending = pendingSection()
+                if (pending != null) showExitConfirm(pending) { dismissSheet() } else dismissSheet()
             }
             true
         }
