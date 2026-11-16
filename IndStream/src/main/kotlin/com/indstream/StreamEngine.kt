@@ -89,6 +89,9 @@ object StreamEngine {
     private val NON_CONTENT_PATH_BASIC = Regex("""/(category|tag|author|page|search)/""", RegexOption.IGNORE_CASE)
     private val HEADING_TAG = Regex("""h[1-6]""")
     private val FC_POST_PATH = Regex("""/20\d\d/\d\d/\d\d/""")
+    private val FC_EP_PREFIX = Regex(
+        """(?i)^\s*E(?:P|PISODE)?[\s._-]*\d{1,3}(?:\s*(?:-|–|to)\s*\d{1,4})?\b""",
+    )
     private val OG_TITLE = Regex("""<meta\s+property="og:title"\s+content="([^"]+)"""", RegexOption.IGNORE_CASE)
     private val HTML_TITLE = Regex("""<title>([^<]+)</title>""", RegexOption.IGNORE_CASE)
     private val HUB_GATEWAY_HOST = Regex("""greenmotors|hubcloud|hubdrive""", RegexOption.IGNORE_CASE)
@@ -2070,13 +2073,40 @@ object StreamEngine {
         return TitleMatch.yearMatches(expected, actual, tolerance = 1)
     }
 
-    private fun rankedHits(hits: List<Pair<String, String>>, title: String, year: String?): List<String> {
+    /**
+     * Movies must land on the right year. TV posts are labelled with the air year of the
+     * latest season, which can be several years after the show started, so only reject a post
+     * that is older than the show.
+     */
+    internal fun postYearMatches(expectedYear: Int?, candidateYear: Int?, type: String): Boolean {
+        if (expectedYear == null || candidateYear == null) return true
+        if (type == "movie") return TitleMatch.yearMatches(expectedYear, candidateYear, tolerance = 1)
+        return candidateYear >= expectedYear - 1
+    }
+
+    private fun rankedHits(
+        hits: List<Pair<String, String>>,
+        title: String,
+        year: String?,
+        limit: Int = 2,
+    ): List<String> {
         val y = year?.toIntOrNull()
         return hits.map { it to TitleMatch.titleDistance(title, it.second) }
             .filter { (hit, _) -> TitleMatch.isRelevant(title, hit.second, y, TitleMatch.parseYear(hit.second)) }
             .sortedByDescending { it.second }
             .map { it.first.first }
-            .take(2)
+            .take(limit)
+    }
+
+    /** Download listings pack quality and size into titles, so distance alone misranks them: exact year wins first. */
+    private fun rankedPosts(hits: List<Pair<String, String>>, title: String, year: String?): List<String> {
+        val y = year?.toIntOrNull()
+        return rankedHits(hits, title, year, limit = 6)
+            .sortedByDescending { url ->
+                val label = hits.firstOrNull { it.first == url }?.second.orEmpty()
+                if (y != null && TitleMatch.parseYear(label) == y) 1 else 0
+            }
+            .take(4)
     }
 
     internal fun hubPostYearOk(html: String, year: String?): Boolean {
@@ -2871,6 +2901,9 @@ object StreamEngine {
         season: Int,
         episode: Int,
     ): List<RawStream> {
+        if (type != "movie" && (season <= 0 || episode <= 0)) {
+            throw CleanMissException("tv request without season/episode")
+        }
         val (title, year) = titleYear(tmdbId, type)
         fun enc(s: String) = java.net.URLEncoder.encode(s, "UTF-8")
         val bases = (listOfNotNull(Domains.base("movies4u")) + listOf("https://new8.movies4u.garden"))
@@ -2892,7 +2925,7 @@ object StreamEngine {
             }
         }
         if (hits.isEmpty()) throw CleanMissException("no search hits")
-        val posts = rankedHits(hits, title, year).take(2)
+        val posts = rankedPosts(hits, title, year)
         if (posts.isEmpty()) throw CleanMissException("no match")
         val expectedYear = year?.toIntOrNull()
 
@@ -2901,20 +2934,39 @@ object StreamEngine {
             val postTitle = (HTML_TITLE.find(post)?.groupValues?.get(1)?.trim().orEmpty())
                 .ifBlank { hits.firstOrNull { it.first == postUrl }?.second.orEmpty() }
             val postYear = TitleMatch.parseYear(postTitle)
-            if (expectedYear != null && postYear != null &&
-                !TitleMatch.yearMatches(expectedYear, postYear, tolerance = 1)
-            ) continue
+            if (!postYearMatches(expectedYear, postYear, type)) continue
             val groups = m4uGroups(post, postUrl).filter { releaseHeightOf(it.heading) >= 720 }
             if (groups.isEmpty()) continue
             val postAudio = LinkNaming.languageLabel(postTitle)
             val out = mutableListOf<RawStream>()
+            val linksPageCache = mutableMapOf<String, List<FileGroup>>()
             if (type == "movie") {
                 for (group in groups.sortedByDescending { releaseHeightOf(it.heading) }.take(2)) {
                     val audio = LinkNaming.languageLabel(group.heading).ifBlank { postAudio }
-                    out += fileLinksFor(
-                        spec, group.links, postUrl, audio, group.heading,
-                        normalizeSizeToken(group.heading),
-                    )
+                    val size = normalizeSizeToken(group.heading)
+                    val direct = group.links.filter { HUB_GATEWAY_HOST_ALT.containsMatchIn(it) }
+                    val targets = if (direct.isNotEmpty()) {
+                        listOf(direct)
+                    } else {
+                        val linksPageUrl = group.links.firstOrNull() ?: continue
+                        // Every quality on a movie post points at the same links page; fetch once.
+                        val fileGroups = linksPageCache[linksPageUrl] ?: m4uGroups(
+                            fetchText(linksPageUrl, postUrl, timeoutSec = 14) ?: continue,
+                            linksPageUrl,
+                        ).also { linksPageCache[linksPageUrl] = it }
+                        val height = releaseHeightOf(group.heading)
+                        val exact = fileGroups.firstOrNull {
+                            size.isNotBlank() && normalizeSizeToken(it.heading) == size
+                        }
+                        val target = exact
+                            ?: fileGroups.filter { releaseHeightOf(it.heading) == height }.firstOrNull()
+                            ?: fileGroups.sortedByDescending { releaseHeightOf(it.heading) }.firstOrNull()
+                            ?: continue
+                        listOf(target.links)
+                    }
+                    for (links in targets) {
+                        out += fileLinksFor(spec, links, postUrl, audio, group.heading, size)
+                    }
                     if (out.size >= 6) break
                 }
             } else {
@@ -2922,19 +2974,22 @@ object StreamEngine {
                     .sortedByDescending { releaseHeightOf(it.heading) }
                     .firstOrNull()
                 if (chosen != null) {
-                    val episodeUrl = chosen.links.firstOrNull()
-                    val episodePage = episodeUrl?.let { fetchText(it, postUrl, timeoutSec = 14) }
-                    if (episodeUrl != null && episodePage != null) {
-                        val epGroups = m4uGroups(episodePage, episodeUrl)
-                        val targets = epGroups.filter { m4uEpisodeOf(it.heading) == episode }
-                            .ifEmpty { epGroups.filter { m4uEpisodeOf(it.heading) == null } }
-                        val audio = LinkNaming.languageLabel(chosen.heading).ifBlank { postAudio }
-                        for (target in targets) {
-                            out += fileLinksFor(
-                                spec, target.links, postUrl, audio, chosen.heading,
-                                normalizeSizeToken(chosen.heading),
-                            )
-                            if (out.size >= 6) break
+                    val audio = LinkNaming.languageLabel(chosen.heading).ifBlank { postAudio }
+                    val size = normalizeSizeToken(chosen.heading)
+                    val direct = chosen.links.filter { HUB_GATEWAY_HOST_ALT.containsMatchIn(it) }
+                    if (direct.isNotEmpty()) {
+                        out += fileLinksFor(spec, direct, postUrl, audio, chosen.heading, size)
+                    } else {
+                        val episodeUrl = chosen.links.firstOrNull()
+                        val episodePage = episodeUrl?.let { fetchText(it, postUrl, timeoutSec = 14) }
+                        if (episodeUrl != null && episodePage != null) {
+                            val epGroups = m4uGroups(episodePage, episodeUrl)
+                            val targets = epGroups.filter { m4uEpisodeOf(it.heading) == episode }
+                                .ifEmpty { epGroups.filter { m4uEpisodeOf(it.heading) == null } }
+                            for (target in targets) {
+                                out += fileLinksFor(spec, target.links, postUrl, audio, chosen.heading, size)
+                                if (out.size >= 6) break
+                            }
                         }
                     }
                 }
@@ -2984,7 +3039,8 @@ object StreamEngine {
         return boxes.map { box ->
             if (box.label.startsWith("=")) {
                 val own = box.label.trimStart('=', ' ').trim()
-                if (batch.isBlank()) box else box.copy(label = "$batch $own".trim())
+                val episode = FC_EP_PREFIX.find(batch)?.value?.trim().orEmpty()
+                box.copy(label = if (episode.isNotBlank()) "$episode $own".trim() else own.ifBlank { batch })
             } else {
                 batch = box.label
                 box
@@ -3020,6 +3076,9 @@ object StreamEngine {
         season: Int,
         episode: Int,
     ): List<RawStream> {
+        if (type != "movie" && (season <= 0 || episode <= 0)) {
+            throw CleanMissException("tv request without season/episode")
+        }
         val (title, year) = titleYear(tmdbId, type)
         fun enc(s: String) = java.net.URLEncoder.encode(s, "UTF-8")
         val bases = (listOfNotNull(Domains.base("filmycab")) + listOf("https://filmycab.store"))
@@ -3038,7 +3097,7 @@ object StreamEngine {
             }
         }
         if (hits.isEmpty()) throw CleanMissException("no search hits")
-        val posts = rankedHits(hits, title, year).take(2)
+        val posts = rankedPosts(hits, title, year)
         if (posts.isEmpty()) throw CleanMissException("no match")
         val expectedYear = year?.toIntOrNull()
 
@@ -3047,9 +3106,7 @@ object StreamEngine {
             val doc = Jsoup.parse(post, postUrl)
             val postTitle = doc.selectFirst("h1")?.text()?.trim().orEmpty()
             val postYear = TitleMatch.parseYear(postTitle)
-            if (expectedYear != null && postYear != null &&
-                !TitleMatch.yearMatches(expectedYear, postYear, tolerance = 1)
-            ) continue
+            if (!postYearMatches(expectedYear, postYear, type)) continue
             if (type != "movie") {
                 val postSeason = fcSeasonOf(postTitle)
                 if (postSeason != null && postSeason != season) continue

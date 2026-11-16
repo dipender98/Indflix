@@ -85,7 +85,7 @@ class ServerBingrShowboxTest {
     fun bingr_present_removedServersAbsent() {
         val gone = setOf(
             "primesrc", "vidrock", "videm", "vixsrc",
-            "showbox", "vidspark", "hdmovie2", "olamovies", "filmycab",
+            "showbox", "vidspark", "hdmovie2", "olamovies",
         )
         for (id in gone) assertNull(ServerFarm.allServers.firstOrNull { it.id == id }, "$id must be absent")
         assertNotNull(ServerFarm.allServers.firstOrNull { it.id == "bingr" })
