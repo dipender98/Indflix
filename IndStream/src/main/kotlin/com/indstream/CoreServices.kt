@@ -1800,10 +1800,20 @@ object TitleMatch {
     }
 
     fun isRelevant(query: String, title: String, queryYear: Int?, candidateYear: Int?): Boolean {
-        if (!yearMatches(queryYear, candidateYear)) return false
+        if (!yearMatches(queryYear, candidateYear, tolerance = 2)) return false
         val q = stripYearTokens(normalizeTitle(query))
         val t = stripYearTokens(normalizeTitle(title))
-        return titleDistance(q, t) >= 0.7
+        if (q.isBlank() || t.isBlank()) return q == t
+        val qTokens = q.split(" ")
+        val tTokens = t.split(" ")
+        // Sequel/number tokens must match a candidate token exactly, not just as a prefix,
+        // so "Jailer" cannot satisfy a "Jailer 2" query (and vice versa).
+        val qNums = qTokens.filter { it.all { c -> c.isDigit() } }
+        if (qNums.isNotEmpty() && !qNums.all { n -> tTokens.contains(n) }) return false
+        val dist = titleDistance(q, t)
+        // Without a year to disambiguate, require a strong title match.
+        val threshold = if (queryYear == null) 0.85 else 0.7
+        return dist >= threshold
     }
 
     private fun stripYearTokens(normalized: String): String {

@@ -67,6 +67,13 @@ object LinkNaming {
         return canonicalSubtitleName(s).takeIf { it in LANGUAGE_NAMES }
     }
 
+    fun richerLanguageLabel(primary: String?, fallback: String?): String {
+        val p = languageNames(primary).size
+        val f = languageNames(fallback).size
+        return if (f > p) fallback.orEmpty().ifBlank { primary.orEmpty() }
+        else primary.orEmpty().ifBlank { fallback.orEmpty() }
+    }
+
     internal fun hasMultiMarker(text: String?): Boolean =
         text != null && MULTI_MARKER.containsMatchIn(text)
 

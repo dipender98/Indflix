@@ -2097,7 +2097,7 @@ object StreamEngine {
      */
     internal fun postYearMatches(expectedYear: Int?, candidateYear: Int?, type: String): Boolean {
         if (expectedYear == null || candidateYear == null) return true
-        if (type == "movie") return TitleMatch.yearMatches(expectedYear, candidateYear, tolerance = 1)
+        if (type == "movie") return TitleMatch.yearMatches(expectedYear, candidateYear, tolerance = 0)
         return candidateYear >= expectedYear - 1
     }
 
@@ -2895,7 +2895,7 @@ object StreamEngine {
             for ((url, q, fileLang) in files) {
                 val qText = q.ifBlank { HUB_QUALITY.find(qualityLabel)?.value ?: qualityLabel }
                 val fileAudio = LinkNaming.languageLabel(fileLang)
-                val label = fileAudio.ifBlank { audio }
+                val label = LinkNaming.richerLanguageLabel(fileAudio, audio)
                 out += RawStream(
                     spec.id,
                     listOf(spec.name, qualityText(qText.ifBlank { qualityLabel }))
