@@ -1413,9 +1413,12 @@ object StreamEngine {
         url.contains("macdn.aoneroom.com/other/", ignoreCase = true)
 
     private const val MOVIEBOX_MOBILE_SIGN_KEY = "NzZpUmwwN3MweFNOOWpxbUVXQXQ3OUVCSlp1bElRSXNWNjRGWnIyTw=="
+    // MovieBox api hosts: apig.inmoviebox.com, apii.inmoviebox.com, api7.aoneroom.com
     private val MOVIEBOX_MOBILE_HOSTS = listOf(
         "https://api6.aoneroom.com", "https://api5.aoneroom.com", "https://api4.aoneroom.com",
         "https://api4sg.aoneroom.com", "https://api3.aoneroom.com", "https://api6sg.aoneroom.com",
+        "https://apig.inmoviebox.com", "https://apii.inmoviebox.com", "https://api7.aoneroom.com",
+        "https://api.inmoviebox.com",
     )
     private const val MOVIEBOX_MOBILE_UA =
         "com.community.oneroom/50020042 (Linux; U; Android 14; en_IN; 22101316G; " +
