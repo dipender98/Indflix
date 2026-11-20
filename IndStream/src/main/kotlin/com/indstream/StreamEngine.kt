@@ -1471,12 +1471,13 @@ object StreamEngine {
             method.uppercase(), accept, contentType, bodyLength, ts.toString(), bodyHash,
             movieBoxCanonicalUrl(url),
         ).joinToString("\n")
-        val outer = String(java.util.Base64.getDecoder().decode(MOVIEBOX_MOBILE_SIGN_KEY), Charsets.UTF_8)
-        val key = java.util.Base64.getDecoder().decode(outer)
+        val outer = String(android.util.Base64.decode(MOVIEBOX_MOBILE_SIGN_KEY, android.util.Base64.DEFAULT), Charsets.UTF_8)
+        val key = android.util.Base64.decode(outer, android.util.Base64.DEFAULT)
         val mac = javax.crypto.Mac.getInstance("HmacMD5")
         mac.init(javax.crypto.spec.SecretKeySpec(key, "HmacMD5"))
-        return "$ts|2|" + java.util.Base64.getEncoder().encodeToString(
+        return "$ts|2|" + android.util.Base64.encodeToString(
             mac.doFinal(canonical.toByteArray(Charsets.UTF_8)),
+            android.util.Base64.NO_WRAP,
         )
     }
 
@@ -1487,7 +1488,7 @@ object StreamEngine {
         bootstrap: Boolean = false,
     ): org.json.JSONObject? {
         val accept = "application/json"
-        val contentType = if (body == null) "application/json" else "application/json; charset=utf-8"
+        val contentType = "application/json; charset=utf-8"
         for (host in MOVIEBOX_MOBILE_HOSTS) {
             val url = host + pathWithQuery
             val ts = System.currentTimeMillis()
