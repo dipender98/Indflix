@@ -144,8 +144,8 @@ class NewSourcesTest {
             "]};</script>"
         val out = StreamEngine.vidriftStreams(html)
         assertEquals(2, out.size)
-        assertEquals("/api/orion/abc/master.m3u8" to "Original", out[0])
-        assertEquals("/api/orion/def/master.m3u8" to "Hindi", out[1])
+        assertEquals(Triple("/api/orion/abc/master.m3u8", "Original", 0), out[0])
+        assertEquals(Triple("/api/orion/def/master.m3u8", "Hindi", 0), out[1])
         assertTrue(StreamEngine.vidriftStreams("<html>no config</html>").isEmpty())
     }
 

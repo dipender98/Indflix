@@ -14,6 +14,8 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.jsoup.Jsoup
 
 object StreamEngine {
@@ -1410,6 +1412,242 @@ object StreamEngine {
     internal fun isMovieboxNoticeUrl(url: String): Boolean =
         url.contains("macdn.aoneroom.com/other/", ignoreCase = true)
 
+    private const val MOVIEBOX_MOBILE_SIGN_KEY = "NzZpUmwwN3MweFNOOWpxbUVXQXQ3OUVCSlp1bElRSXNWNjRGWnIyTw=="
+    private val MOVIEBOX_MOBILE_HOSTS = listOf(
+        "https://api6.aoneroom.com", "https://api5.aoneroom.com", "https://api4.aoneroom.com",
+        "https://api4sg.aoneroom.com", "https://api3.aoneroom.com", "https://api6sg.aoneroom.com",
+    )
+    private const val MOVIEBOX_MOBILE_UA =
+        "com.community.oneroom/50020042 (Linux; U; Android 14; en_IN; 22101316G; " +
+            "Build/UD1A.230803.041; Cronet/145.0.7582.0)"
+    private val MOVIEBOX_MOBILE_CLIENT_INFO = org.json.JSONObject()
+        .put("package_name", "com.community.oneroom")
+        .put("version_name", "3.0.03.0529.03")
+        .put("version_code", 50020042)
+        .put("os", "android")
+        .put("os_version", "14")
+        .put("device_id", (1..32).map { "0123456789abcdef"[(0..15).random()] }.joinToString(""))
+        .put("install_store", "official")
+        .put("gaid", "1b2212c1-dadf-43c3-a0c8-bd6ce48ae22d")
+        .put("brand", "xiaomi")
+        .put("model", "22101316G")
+        .put("system_language", "en")
+        .put("net", "NETWORK_WIFI")
+        .put("region", "IN")
+        .put("timezone", "Asia/Calcutta")
+        .put("sp_code", "")
+        .toString()
+    @Volatile private var movieBoxMobileToken: String? = null
+    @Volatile private var movieBoxMobileTokenAt = 0L
+    private const val MOVIEBOX_MOBILE_TOKEN_TTL_MS = 6 * 60 * 60 * 1000L
+
+    private fun movieBoxMd5Hex(bytes: ByteArray): String =
+        java.security.MessageDigest.getInstance("MD5").digest(bytes)
+            .joinToString("") { "%02x".format(it) }
+
+    internal fun movieBoxCanonicalUrl(url: String): String {
+        val uri = java.net.URI.create(url)
+        val path = uri.path.ifBlank { "/" }
+        val query = uri.rawQuery ?: return path
+        val pairs = query.split('&').filter { it.isNotEmpty() }.map { part ->
+            val cut = part.indexOf('=')
+            if (cut < 0) part to "" else part.substring(0, cut) to part.substring(cut + 1)
+        }.sortedWith(compareBy({ it.first }, { it.second }))
+        return if (pairs.isEmpty()) path else "$path?" + pairs.joinToString("&") { "${it.first}=${it.second}" }
+    }
+
+    private fun movieBoxSignature(
+        method: String,
+        accept: String,
+        contentType: String,
+        url: String,
+        body: String?,
+        ts: Long,
+    ): String {
+        val bytes = body?.takeIf { it.isNotEmpty() }?.toByteArray(Charsets.UTF_8)
+        val bodyHash = bytes?.let { movieBoxMd5Hex(it.copyOfRange(0, minOf(it.size, 102400))) }.orEmpty()
+        val bodyLength = bytes?.size?.toString().orEmpty()
+        val canonical = listOf(
+            method.uppercase(), accept, contentType, bodyLength, ts.toString(), bodyHash,
+            movieBoxCanonicalUrl(url),
+        ).joinToString("\n")
+        val outer = String(java.util.Base64.getDecoder().decode(MOVIEBOX_MOBILE_SIGN_KEY), Charsets.UTF_8)
+        val key = java.util.Base64.getDecoder().decode(outer)
+        val mac = javax.crypto.Mac.getInstance("HmacMD5")
+        mac.init(javax.crypto.spec.SecretKeySpec(key, "HmacMD5"))
+        return "$ts|2|" + java.util.Base64.getEncoder().encodeToString(
+            mac.doFinal(canonical.toByteArray(Charsets.UTF_8)),
+        )
+    }
+
+    private suspend fun movieBoxMobileRequest(
+        pathWithQuery: String,
+        method: String = "GET",
+        body: String? = null,
+        bootstrap: Boolean = false,
+    ): org.json.JSONObject? {
+        val accept = "application/json"
+        val contentType = if (body == null) "application/json" else "application/json; charset=utf-8"
+        for (host in MOVIEBOX_MOBILE_HOSTS) {
+            val url = host + pathWithQuery
+            val ts = System.currentTimeMillis()
+            val headers = LinkedHashMap<String, String>()
+            headers["User-Agent"] = MOVIEBOX_MOBILE_UA
+            headers["Accept"] = accept
+            headers["Content-Type"] = contentType
+            headers["x-client-token"] = "$ts," + movieBoxMd5Hex(ts.toString().reversed().toByteArray(Charsets.UTF_8))
+            headers["x-tr-signature"] = movieBoxSignature(method, accept, contentType, url, body, ts)
+            headers["x-client-info"] = MOVIEBOX_MOBILE_CLIENT_INFO
+            headers["x-client-status"] = "0"
+            if (!bootstrap) movieBoxMobileToken?.let { headers["Authorization"] = "Bearer $it" }
+            val resp = catching {
+                if (method == "POST") {
+                    app.post(url, timeout = 12, headers = headers,
+                        requestBody = body.orEmpty().toRequestBody(contentType.toMediaType()))
+                } else {
+                    app.get(url, timeout = 12, headers = headers)
+                }
+            }.getOrNull() ?: continue
+            resp.headers["x-user"]?.let { raw ->
+                catching { org.json.JSONObject(raw).optString("token", "") }.getOrNull()
+                    ?.takeIf { it.isNotBlank() }?.let {
+                        movieBoxMobileToken = it
+                        movieBoxMobileTokenAt = System.currentTimeMillis()
+                    }
+            }
+            if (resp.code == 200) return catching { org.json.JSONObject(resp.text) }.getOrNull()
+            if (resp.code !in setOf(403, 407, 429, 500, 502, 503, 504)) break
+        }
+        return null
+    }
+
+    private suspend fun movieBoxMobileBearer(): String? {
+        movieBoxMobileToken?.takeIf {
+            System.currentTimeMillis() - movieBoxMobileTokenAt < MOVIEBOX_MOBILE_TOKEN_TTL_MS
+        }?.let { return it }
+        movieBoxMobileRequest(
+            "/wefeed-mobile-bff/tab-operating?page=1&tabId=0&version=",
+            bootstrap = true,
+        ) ?: return null
+        return movieBoxMobileToken
+    }
+
+    private val MOVIEBOX_DUB_LANGUAGES = mapOf(
+        "hi" to "Hindi", "ta" to "Tamil", "te" to "Telugu", "bn" to "Bengali",
+        "mr" to "Marathi", "pa" to "Punjabi", "ml" to "Malayalam", "kn" to "Kannada", "en" to "English",
+    )
+
+    private fun movieBoxDubLanguage(detail: org.json.JSONObject, subjectId: String): String {
+        val dubs = detail.optJSONArray("dubs") ?: return ""
+        for (i in 0 until dubs.length()) {
+            val dub = dubs.optJSONObject(i) ?: continue
+            if (dub.optString("subjectId", "") != subjectId) continue
+            if (dub.optBoolean("original", false)) return ""
+            MOVIEBOX_DUB_LANGUAGES[dub.optString("lanCode", "").lowercase()]?.let { return it }
+            val named = dub.optString("lanName", "")
+                .replace(Regex("""\s*dub\b""", RegexOption.IGNORE_CASE), "").trim()
+            return LinkNaming.canonicalSubtitleName(named)
+                .takeIf { it in MOVIEBOX_DUB_LANGUAGES.values } ?: ""
+        }
+        return ""
+    }
+
+    internal fun movieBoxMobileStreams(
+        detail: org.json.JSONObject,
+        spec: ServerSpec,
+        language: String,
+    ): Pair<List<RawStream>, org.json.JSONArray> {
+        val out = mutableListOf<RawStream>()
+        val captions = org.json.JSONArray()
+        val detectors = detail.optJSONArray("resourceDetectors") ?: return out to captions
+        val seen = HashSet<String>()
+        for (i in 0 until detectors.length()) {
+            val rungs = detectors.optJSONObject(i)?.optJSONArray("resolutionList") ?: continue
+            for (j in 0 until rungs.length()) {
+                val rung = rungs.optJSONObject(j) ?: continue
+                val url = rung.optString("resourceLink", "").takeIf { it.startsWith("http") } ?: continue
+                val height = rung.optInt("resolution", 0)
+                if (height < 720 || rung.optInt("requireMemberType", 0) != 0) continue
+                if (isMovieboxNoticeUrl(url) || !seen.add(url)) continue
+                rung.optJSONArray("extCaptions")?.let { caps ->
+                    for (k in 0 until caps.length()) caps.optJSONObject(k)?.let { captions.put(it) }
+                }
+                val bytes = rung.optString("size", "").toLongOrNull() ?: 0L
+                val sizeLabel = when {
+                    bytes >= 1_000_000_000L -> java.lang.String.format(
+                        java.util.Locale.US, "%.1fGB", bytes / 1_000_000_000.0,
+                    )
+                    bytes >= 1_000_000L -> java.lang.String.format(
+                        java.util.Locale.US, "%.0fMB", bytes / 1_000_000.0,
+                    )
+                    else -> ""
+                }
+                out += RawStream(
+                    serverId = spec.id,
+                    serverName = spec.name,
+                    url = url,
+                    isM3u8 = false,
+                    qualityHint = height,
+                    audioPriority = if (language.equals("Hindi", ignoreCase = true)) 4 else 2,
+                    audioLabel = language,
+                    sizeLabel = sizeLabel,
+                    extraHeaders = mapOf("User-Agent" to HttpKit.userAgent),
+                )
+            }
+        }
+        return out to captions
+    }
+
+    private suspend fun resolveMovieBoxMobile(
+        spec: ServerSpec,
+        title: String,
+    ): List<RawStream> = withTimeoutOrNull(45_000L) {
+        if (movieBoxMobileBearer() == null) return@withTimeoutOrNull emptyList()
+        val searchBody = org.json.JSONObject()
+            .put("page", 1).put("perPage", 20).put("keyword", title).toString()
+        val root = movieBoxMobileRequest("/wefeed-mobile-bff/subject-api/search/v2", "POST", searchBody)
+            ?: return@withTimeoutOrNull emptyList()
+        val data = root.optJSONObject("data") ?: root
+        val subjects = mutableListOf<org.json.JSONObject>()
+        data.optJSONArray("items")?.let { arr ->
+            for (i in 0 until arr.length()) arr.optJSONObject(i)?.let { subjects += it }
+        }
+        data.optJSONArray("results")?.let { results ->
+            for (i in 0 until results.length()) {
+                results.optJSONObject(i)?.optJSONArray("subjects")?.let { arr ->
+                    for (j in 0 until arr.length()) arr.optJSONObject(j)?.let { subjects += it }
+                }
+            }
+        }
+        val norm: (String) -> String = { t -> t.lowercase().replace(NON_ALNUM_LOWER, "") }
+        val titleNorm = norm(title)
+        val matched = subjects.filter { item ->
+            val clean = item.optString("title", "")
+                .replace(MOVIEBOX_SEASON_SUFFIX, "")
+                .replace(MOVIEBOX_BRACKET_REMOVE, "")
+                .replace(MOVIEBOX_YEAR, "")
+                .trim()
+            val candidate = norm(clean)
+            candidate == titleNorm || (titleNorm.length >= 4 && candidate.startsWith(titleNorm))
+        }.mapNotNull { it.optString("subjectId", "").takeIf { id -> id.isNotBlank() } }.distinct()
+        if (matched.isEmpty()) return@withTimeoutOrNull emptyList()
+
+        val out = java.util.Collections.synchronizedList(mutableListOf<RawStream>())
+        val captions = org.json.JSONArray()
+        coroutineScope {
+            matched.take(6).map { sid ->
+                async {
+                    val detail = movieBoxMobileRequest("/wefeed-mobile-bff/subject-api/get?subjectId=$sid")
+                        ?.let { it.optJSONObject("data") ?: it } ?: return@async
+                    val (streams, subs) = movieBoxMobileStreams(detail, spec, movieBoxDubLanguage(detail, sid))
+                    out += streams
+                    for (i in 0 until subs.length()) captions.put(subs.opt(i))
+                }
+            }.awaitAll()
+        }
+        withJsonSubtitles(out.toList(), captions, "https://movie-box.co/")
+    } ?: emptyList()
+
     internal fun decodeBase64Standard(input: String): ByteArray? = catching {
         val alpha = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
         val rev = IntArray(128) { -1 }
@@ -1491,6 +1729,21 @@ object StreamEngine {
         }
         val seasonKey = if (season > 0) season else 1
         val episodeKey = if (episode > 0) episode else 1
+
+        if (type == "movie") {
+            val mobile = try {
+                resolveMovieBoxMobile(spec, title)
+            } catch (c: kotlinx.coroutines.CancellationException) {
+                throw c
+            } catch (t: Throwable) {
+                Log.w("MovieBox", "direct source failed: ${t.javaClass.simpleName}")
+                emptyList()
+            }
+            if (mobile.isNotEmpty()) {
+                Log.d("MovieBox", "direct source got ${mobile.size} streams")
+                return mobile
+            }
+        }
 
         val host = "h5-api.aoneroom.com"
         val base = "https://$host"
@@ -1767,13 +2020,20 @@ object StreamEngine {
                 else append("?type=movie")
                 if (dub != null) { append("&dub=").append(dub); append("&dubdp=").append(dubdp) }
             }
-            val jsonText = withTimeoutOrNull(12_000L) {
-                catching {
-                    app.get("$base/api/embed-tmdb/$id$query",
-                        timeout = 12, headers = headers).text
-                }.getOrNull()
-            } ?: return null
-            return catching { org.json.JSONObject(jsonText) }.getOrNull()
+            repeat(2) { attempt ->
+                val jsonText = withTimeoutOrNull(12_000L) {
+                    catching {
+                        app.get("$base/api/embed-tmdb/$id$query",
+                            timeout = 12, headers = headers).text
+                    }.getOrNull()
+                }
+                if (jsonText != null) {
+                    val obj = catching { org.json.JSONObject(jsonText) }.getOrNull()
+                    if (obj != null) return obj
+                }
+                if (attempt == 0) kotlinx.coroutines.delay(400L)
+            }
+            return null
         }
 
         fun streamsOf(root: org.json.JSONObject?, label: String?): List<RawStream> {
@@ -1808,13 +2068,19 @@ object StreamEngine {
         val (defaultRoot, vText) = coroutineScope {
             val rootA = async { fetchEmbed(null, null) }
             val varsA = async {
-                withTimeoutOrNull(6_000L) {
-                    catching {
-                        val vQuery = if (type == "tv") "?se=$season&ep=$episode" else ""
-                        app.get("$base/api/variants-tmdb/$type/$id$vQuery",
-                            timeout = 6, headers = headers).text
-                    }.getOrNull()
+                var text: String? = null
+                val vQuery = if (type == "tv") "?se=$season&ep=$episode" else ""
+                repeat(2) { attempt ->
+                    text = withTimeoutOrNull(6_000L) {
+                        catching {
+                            app.get("$base/api/variants-tmdb/$type/$id$vQuery",
+                                timeout = 6, headers = headers).text
+                        }.getOrNull()
+                    }
+                    if (text != null) return@repeat
+                    if (attempt == 0) kotlinx.coroutines.delay(300L)
                 }
+                text
             }
             rootA.await() to varsA.await()
         }
@@ -1828,7 +2094,7 @@ object StreamEngine {
                     val sid = v.optString("dubSubjectId")
                     val dp = v.optString("detailPath")
                     val label = netmirrorDubLabel(lang, v.optBoolean("isOriginal", false))
-                    if (label != null && sid.isNotBlank() && dp.isNotBlank()) Triple(sid, dp, label) else null
+                    if (sid.isNotBlank() && dp.isNotBlank()) Triple(sid, dp, label ?: "") else null
                 }
             }
         }.getOrDefault(emptyList())
@@ -1872,12 +2138,14 @@ object StreamEngine {
 
     internal fun netmirrorDubLabel(language: String?, isOriginal: Boolean): String? {
         if (isOriginal) return "Original"
-        val m = Regex("""^(.*\S)\s+dub$""", RegexOption.IGNORE_CASE)
-            .find(language?.trim().orEmpty())?.groupValues?.get(1)?.trim().orEmpty()
-        if (m.isBlank()) return null
-        if (m.equals("english", true) || m.equals("eng", true) || m.equals("en", true)) return "English"
+        val raw = language?.trim().orEmpty()
+        if (raw.isBlank()) return null
+        val m = Regex("""^(.*\S)\s+(?:dub|sub)$""", RegexOption.IGNORE_CASE)
+            .find(raw)?.groupValues?.get(1)?.trim().orEmpty()
+        val base = if (m.isNotBlank()) m else raw
+        if (base.equals("english", true) || base.equals("eng", true) || base.equals("en", true)) return "English"
         return ManifestKit.INDIAN_DUB_LANGUAGES.firstOrNull { d ->
-            d.names.any { it.equals(m, ignoreCase = true) }
+            d.canonical.equals(base, ignoreCase = true) || d.names.any { it.equals(base, ignoreCase = true) }
         }?.canonical
     }
 
@@ -3288,7 +3556,7 @@ object StreamEngine {
                 val post = fslGet(permalink, 10)?.first ?: continue
                 val groups = episodeOrSeason(
                     fslGroups(post), { it.heading }, type, season, episode,
-                )
+                ).sortedByDescending { releaseHeightOf(it.heading) }
                 for (group in groups.take(4)) {
                     val size = headingSizeOf(group.heading)
                     val priorityLang = releaseLanguageOf(group.heading)
@@ -3920,12 +4188,12 @@ object StreamEngine {
             catching { app.get(page, timeout = 12, headers = okHeaders("$base/")).text }.getOrNull()
         } ?: run { Log.w("Vidrift", "embed no response"); return emptyList() }
         val found = vidriftStreams(html)
-        val out = found.map { (rel, label) ->
+        val out = found.map { (rel, label, height) ->
             val abs = if (rel.startsWith("http", true)) rel else base + rel
             RawStream(
                 serverId = spec.id, serverName = spec.name,
                 url = abs, isM3u8 = abs.contains(".m3u8", true),
-                referer = "$base/", qualityHint = 0, audioLabel = label,
+                referer = "$base/", qualityHint = height, audioLabel = label,
                 extraHeaders = mapOf("User-Agent" to HttpKit.userAgent, "Referer" to "$base/"),
             )
         }
@@ -3933,22 +4201,28 @@ object StreamEngine {
         return out
     }
 
-    internal fun vidriftStreams(html: String): List<Pair<String, String>> {
+    internal fun vidriftStreams(html: String): List<Triple<String, String, Int>> {
         val mi = html.indexOf("var embedMeta")
         val brace = if (mi >= 0) html.indexOf('{', mi) else -1
         val json = if (brace >= 0) extractBalancedJson(html, brace) else null
         val meta = json?.let { catching { org.json.JSONObject(it) }.getOrNull() } ?: return emptyList()
-        val out = ArrayList<Pair<String, String>>()
+        val out = ArrayList<Triple<String, String, Int>>()
         meta.optJSONArray("orionStreams")?.let { arr ->
             for (i in 0 until arr.length()) {
                 val o = arr.optJSONObject(i) ?: continue
                 val u = o.optString("url").takeIf { it.isNotBlank() } ?: continue
                 if (!u.contains(".m3u8", true) && !u.contains(".mp4", true)) continue
-                out += u to vidriftLabel(o.optString("name"))
+                val rungs = o.optJSONArray("rungs")
+                var maxH = 0
+                if (rungs != null) for (j in 0 until rungs.length()) {
+                    val r = rungs.optJSONObject(j) ?: continue
+                    maxH = maxOf(maxH, r.optInt("height"))
+                }
+                out += Triple(u, vidriftLabel(o.optString("name")), maxH)
             }
         }
         if (out.isEmpty()) {
-            meta.optString("evionUrl").takeIf { it.isNotBlank() && it.contains(".m3u8", true) }?.let { out += it to "" }
+            meta.optString("evionUrl").takeIf { it.isNotBlank() && it.contains(".m3u8", true) }?.let { out += Triple(it, "", 0) }
         }
         return out
     }

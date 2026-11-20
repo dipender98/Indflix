@@ -141,7 +141,7 @@ class ServerBingrShowboxTest {
                 referer = "https://videodownloader.site/",
             ),
         )
-        val attached = StreamEngine.withJsonSubtitles(streams, org.json.JSONObject(json), "https://net79.cc")
+        val attached = StreamEngine.withJsonSubtitles(streams, org.json.JSONObject(json), "https://net78.cc")
         assertEquals(1, attached.size)
         assertTrue(
             attached[0].subtitles.any { it.url.contains("/api/proxy/video") },

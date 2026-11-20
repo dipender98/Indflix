@@ -62,6 +62,14 @@ class PracticalResolveTest {
     }
 
     @Test
+    fun moviebox_direct4kChain() = runBlocking {
+        val spec = com.indstream.ServerFarm.allServers.first { it.id == "moviebox" }
+        val out = StreamEngine.resolveOne(spec, 155, "tt0468569", "movie", 1, 1)
+        println("MovieBox direct: ${out.map { it.qualityHint to it.url.take(60) }}")
+        assertTrue(out.any { it.qualityHint >= 2160 }, "must expose a 4K rung")
+    }
+
+    @Test
     fun farmDiagnose_missingServers() = runBlocking {
         val ids = com.indstream.ServerFarm.allServers.map { it.id }
         for (id in ids) {
