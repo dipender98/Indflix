@@ -206,6 +206,21 @@ class NewSourcesTest {
     }
 
     @Test
+    fun vidboltSources_keepsInlineDashManifest() {
+        val json = """
+            {"stream":{"server":"orion","sources":[
+              {"url":"https://cdn.example/dash.mpd","kind":"dash","quality":"1080p",
+               "master":"<MPD><Period><AdaptationSet mimeType=\"audio/mp4\" xml:lang=\"hi\"><Representation codecs=\"mp4a.40.2\"/></AdaptationSet></Period></MPD>"}
+            ]}}
+        """.trimIndent()
+        val src = StreamEngine.vidboltSources(json)
+        assertEquals(1, src.size)
+        assertEquals("dash", src[0].kind)
+        assertTrue(src[0].master.contains("<MPD"))
+        assertEquals("Hindi", StreamEngine.manifestAudioLabel(src[0].master))
+    }
+
+    @Test
     fun vidlyStreams_unescapesAndDedupes() {
         val html = """
             <link rel="preload" href="https://img.example/media/a/index.m3u8?api_key=x">

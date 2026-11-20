@@ -131,6 +131,7 @@ object RejectedServers {
         RejectedServer("vidsrc-sh", "Vidsrc.sh", "unverified",
             "Chain works end-to-end but 1080p max only (no real 4K); needs 7.2 KB wasm decryptor; CST captcha gate after ~15-20 rapid resolves; title-mismatch risk (cross-check data.title).",
             "1080p ceiling", "2026-sweep"),
+        RejectedServer("filmycab", "FilmyCab", "removed-dead", "Removed (dead source)."),
     )
 
     val ids: Set<String> = all.map { it.id }.toSet()

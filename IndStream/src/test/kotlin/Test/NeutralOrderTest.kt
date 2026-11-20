@@ -195,8 +195,11 @@ class NeutralOrderTest {
       <Representation id="1" width="640" height="360" bandwidth="500000"/>
       <Representation id="2" width="1920" height="1080" bandwidth="5000000"/>
     </AdaptationSet>
-    <AdaptationSet mimeType="audio/mp4">
-      <Representation id="3" bandwidth="128000"/>
+    <AdaptationSet mimeType="audio/mp4" xml:lang="hi">
+      <Representation id="3" bandwidth="128000" codecs="mp4a.40.2"/>
+    </AdaptationSet>
+    <AdaptationSet mimeType="audio/mp4" xml:lang="en">
+      <Representation id="4" bandwidth="128000" codecs="mp4a.40.2"/>
     </AdaptationSet>
   </Period>
 </MPD>
@@ -206,9 +209,9 @@ class NeutralOrderTest {
             listOf(
                 RawStream(
                     serverId = "dashHost", serverName = "DashHost",
-                    url = "https://x.example/dash.mpd", isM3u8 = true,
+                    url = "https://x.example/dash.mpd", isM3u8 = true, isDash = true,
                     qualityHint = 0, inlineManifest = mpd,
-                    audioLabel = "Hindi", audioPriority = 4,
+                    audioLabel = "Tamil", audioPriority = 4,
                 ),
             ),
             onLink = { out.add(it) },
@@ -219,6 +222,10 @@ class NeutralOrderTest {
         assertEquals(0, Regex("""\d{3,4}p|4K""", RegexOption.IGNORE_CASE).findAll(out[0].name).count(),
             "quality must live on the link only: ${out[0].name}")
         assertFalse(out[0].name.contains("Auto"), "name must NOT show Auto: ${out[0].name}")
+        // The manifest's own audio tracks override the coarser stamped label.
+        assertTrue(out[0].name.contains("Hindi"), out[0].name)
+        assertTrue(out[0].name.contains("English"), out[0].name)
+        assertFalse(out[0].name.contains("Tamil"), out[0].name)
     }
 
     @Test

@@ -88,10 +88,6 @@ object StreamEngine {
     private val NON_CONTENT_PATH = Regex("""/(category|tag|author|page|feed|search)/""", RegexOption.IGNORE_CASE)
     private val NON_CONTENT_PATH_BASIC = Regex("""/(category|tag|author|page|search)/""", RegexOption.IGNORE_CASE)
     private val HEADING_TAG = Regex("""h[1-6]""")
-    private val FC_POST_PATH = Regex("""/20\d\d/\d\d/\d\d/""")
-    private val FC_EP_PREFIX = Regex(
-        """(?i)^\s*E(?:P|PISODE)?[\s._-]*\d{1,3}(?:\s*(?:-|–|to)\s*\d{1,4})?\b""",
-    )
     private val OG_TITLE = Regex("""<meta\s+property="og:title"\s+content="([^"]+)"""", RegexOption.IGNORE_CASE)
     private val HTML_TITLE = Regex("""<title>([^<]+)</title>""", RegexOption.IGNORE_CASE)
     private val HUB_GATEWAY_HOST = Regex("""greenmotors|hubcloud|hubdrive""", RegexOption.IGNORE_CASE)
@@ -346,18 +342,6 @@ object StreamEngine {
             ranked.map { raw ->
                 async {
                     when {
-                        raw.isM3u8 && probeManifests -> {
-                            val t0 = System.currentTimeMillis()
-                            val masterText = fetchMasterText(raw)
-                            val fetchMs = if (raw.inlineManifest != null) 0
-                            else masterText?.let { System.currentTimeMillis() - t0 }
-                            val h = (ManifestKit.bestHeightOf(masterText, raw.url).takeIf { it > 0 } ?: raw.qualityHint).coerceAtLeast(0)
-                            val master = ManifestKit.parseMaster(masterText, raw.url)
-                            // The manifest's own audio declaration is the most specific data; it
-                            // overrides a coarser label stamped earlier in the chain.
-                            val tag = manifestAudioTag(master).ifBlank { raw.audioLabel }
-                            ResolvedEmit(raw, h, tag, fetchMs, masterText)
-                        }
                         raw.isDash && probeManifests -> {
                             val t0 = System.currentTimeMillis()
                             val mpdText = fetchMasterText(raw, timeoutSec = 4)
@@ -368,10 +352,19 @@ object StreamEngine {
                                 val fromUrl = ManifestKit.resolutionFromUrl(raw.url)
                                 if (fromUrl > 0) fromUrl else -1
                             }
-                            val langs = ManifestKit.mpdAudioLanguages(mpdText).distinct()
-                            val tag = langs.takeIf { it.isNotEmpty() }?.joinToString(", ")
-                                ?: raw.audioLabel
+                            val tag = manifestAudioLabel(mpdText).ifBlank { raw.audioLabel }
                             ResolvedEmit(raw, h, tag, fetchMs)
+                        }
+                        raw.isM3u8 && probeManifests -> {
+                            val t0 = System.currentTimeMillis()
+                            val masterText = fetchMasterText(raw)
+                            val fetchMs = if (raw.inlineManifest != null) 0
+                            else masterText?.let { System.currentTimeMillis() - t0 }
+                            val h = (ManifestKit.bestHeightOf(masterText, raw.url).takeIf { it > 0 } ?: raw.qualityHint).coerceAtLeast(0)
+                            // The manifest's own audio declaration is the most specific data; it
+                            // overrides a coarser label stamped earlier in the chain.
+                            val tag = manifestAudioLabel(masterText).ifBlank { raw.audioLabel }
+                            ResolvedEmit(raw, h, tag, fetchMs, masterText)
                         }
                         !raw.isM3u8 && probeManifests -> {
                             val t0 = System.currentTimeMillis()
@@ -476,7 +469,7 @@ object StreamEngine {
      * replays keep the accurate list instead of the coarser label stamped at harvest.
      */
     suspend fun warmAudioLabels(streams: List<RawStream>, cacheKey: String) {
-        val targets = streams.filter { it.url.isNotBlank() && it.isM3u8 }
+        val targets = streams.filter { it.url.isNotBlank() && (it.isM3u8 || it.isDash) }
         if (targets.isEmpty()) return
         val labels = java.util.concurrent.ConcurrentHashMap<String, String>()
         coroutineScope {
@@ -484,8 +477,8 @@ object StreamEngine {
                 async {
                     warmLabelGate.acquire()
                     try {
-                        val master = ManifestKit.parseMaster(fetchMasterText(raw), raw.url)
-                        manifestAudioTag(master).takeIf { it.isNotBlank() }?.let { labels[raw.url] = it }
+                        manifestAudioLabel(fetchMasterText(raw))
+                            .takeIf { it.isNotBlank() }?.let { labels[raw.url] = it }
                     } finally {
                         warmLabelGate.release()
                     }
@@ -502,6 +495,15 @@ object StreamEngine {
             ManifestKit.audioLanguageLabel(it).orEmpty()
                 .ifBlank { if (it.isMultiAudio) "Multi" else "" }
         }.orEmpty()
+
+    /** Declared audio languages from either manifest format; blank when nothing is declared. */
+    internal fun manifestAudioLabel(text: String?): String {
+        if (text.isNullOrBlank()) return ""
+        if (text.contains("<MPD", ignoreCase = true)) {
+            return ManifestKit.mpdAudioLanguages(text).distinct().joinToString(", ")
+        }
+        return manifestAudioTag(ManifestKit.parseMaster(text, ""))
+    }
 
     private suspend fun fetchMasterText(raw: RawStream, timeoutSec: Int = 3): String? {
         val headers = LinkedHashMap<String, String>()
@@ -798,12 +800,6 @@ object StreamEngine {
             failServer(spec, "movies4u returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
             return emptyList()
         }
-        if (spec.id == "filmycab") {
-            val result = resolveFilmyCab(spec, tmdbId, type, season, episode)
-            if (result.isNotEmpty()) { okServer(spec, start, "filmycab mip files", result.size); return result }
-            failServer(spec, "filmycab returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
-            return emptyList()
-        }
         if (spec.id == "bingr") {
             val result = resolveBingr(spec, tmdbId, type, season, episode)
             if (result.isNotEmpty()) { okServer(spec, start, "bingr cascade", result.size); return result }
@@ -971,7 +967,7 @@ object StreamEngine {
         val tracks = SubtitleKit.fromMaster(master, url)
         if (tracks.isNotEmpty()) FastStartCache.putSubtitles(url, tracks)
         FastStartCache.markSubtitlesProbed(url)
-        val label = master?.let { ManifestKit.audioLanguageLabel(it) }.orEmpty()
+        val label = manifestAudioLabel(text)
         val langs = master?.audio?.map { r -> "lang=${r.language ?: "none"} name=${r.name}" }.orEmpty()
         Log.d("IndStream", "probeAudioHeight url=${url.take(80)} label=$label height=$height renditions=$langs")
         return label to height
@@ -979,8 +975,7 @@ object StreamEngine {
 
     private fun probeAudioInlineHeight(manifestText: String?): Pair<String, Int> {
         if (manifestText.isNullOrBlank()) return "" to 0
-        val master = ManifestKit.parseMaster(manifestText) ?: return "" to 0
-        return ManifestKit.audioLanguageLabel(master).orEmpty() to ManifestKit.bestHeight(master.variants)
+        return manifestAudioLabel(manifestText) to ManifestKit.bestHeightOf(manifestText, "")
     }
 
     private const val VIDLINK_KEY_HEX =
@@ -1959,13 +1954,16 @@ object StreamEngine {
     }
 
     internal fun releaseLanguageOf(text: String?): String {
-        val u = (text ?: "").uppercase()
+        val raw = text.orEmpty()
+        // Release titles are free-form: treat short ISO codes as noise there, so a title
+        // such as "It 2017" is not reported as Italian.
+        val names = LinkNaming.languageNames(raw, includeCodes = false).toSet()
         return when {
-            HINDI_WORD.containsMatchIn(u) -> "Hindi"
-            TAMIL_WORD.containsMatchIn(u) -> "Tamil"
-            TELUGU_WORD.containsMatchIn(u) -> "Telugu"
-            MULTI_WORD.containsMatchIn(u) -> "Multi"
-            ENGLISH_WORD.containsMatchIn(u) -> "English"
+            "Hindi" in names -> "Hindi"
+            "Tamil" in names -> "Tamil"
+            "Telugu" in names -> "Telugu"
+            MULTI_WORD.containsMatchIn(raw.uppercase()) -> "Multi"
+            "English" in names -> "English"
             else -> ""
         }
     }
@@ -2873,7 +2871,7 @@ object StreamEngine {
 
     // Prefer the post's concrete language list when the heading only signals multi audio.
     internal fun groupAudioLabel(heading: String, postAudio: String): String {
-        val headingAudio = LinkNaming.languageLabel(heading)
+        val headingAudio = LinkNaming.languageLabel(heading, includeCodes = false)
         val richerPost = LinkNaming.languageNames(postAudio).size > LinkNaming.languageNames(headingAudio).size
         return if (richerPost && (headingAudio.isBlank() || LinkNaming.hasMultiMarker(heading)))
             postAudio else headingAudio.ifBlank { postAudio }
@@ -3018,140 +3016,6 @@ object StreamEngine {
                         }
                     }
                 }
-            }
-            if (out.isNotEmpty()) return out.distinctBy { it.url }
-        }
-        throw CleanMissException("no file links")
-    }
-
-    internal data class FcBox(val label: String, val size: String, val url: String)
-
-    /** FilmyCab post download boxes: quality label + size + the ?mip_server links page. */
-    internal fun fcBoxes(html: String, base: String): List<FcBox> {
-        val doc = Jsoup.parse(html, base)
-        val out = mutableListOf<FcBox>()
-        for (box in doc.select("div.quality-download-box")) {
-            val href = box.selectFirst("a[href]")?.attr("abs:href")?.trim().orEmpty()
-            if (!href.startsWith("http") || !href.contains("mip_server", ignoreCase = true)) continue
-            out += FcBox(
-                label = box.selectFirst(".quality-name-white")?.text()?.trim().orEmpty(),
-                size = box.selectFirst(".quality-size-light")?.text()?.trim().orEmpty(),
-                url = href,
-            )
-        }
-        return out
-    }
-
-    /** FilmyCab search results: post anchors of the form /yyyy/mm/dd/slug/. */
-    internal fun fcHits(html: String, base: String): List<Pair<String, String>> {
-        val doc = Jsoup.parse(html, base)
-        val out = LinkedHashMap<String, String>()
-        for (a in doc.select("a[href]")) {
-            val href = a.attr("abs:href").trim()
-            if (!FC_POST_PATH.containsMatchIn(href)) continue
-            val title = a.text().trim()
-                .ifBlank { a.selectFirst("p")?.text()?.trim().orEmpty() }
-                .ifBlank { a.selectFirst("img")?.attr("alt")?.trim().orEmpty() }
-            if (title.length < 8) continue
-            out.putIfAbsent(href, title)
-        }
-        return out.map { it.key to it.value }
-    }
-
-    /** "EP 1 TO 3 1080p HQ" followed by "= 1080p" boxes: the "=" boxes belong to the same episode batch. */
-    internal fun fcResolveBatchLabels(boxes: List<FcBox>): List<FcBox> {
-        var batch = ""
-        return boxes.map { box ->
-            if (box.label.startsWith("=")) {
-                val own = box.label.trimStart('=', ' ').trim()
-                val episode = FC_EP_PREFIX.find(batch)?.value?.trim().orEmpty()
-                box.copy(label = if (episode.isNotBlank()) "$episode $own".trim() else own.ifBlank { batch })
-            } else {
-                batch = box.label
-                box
-            }
-        }
-    }
-
-    internal fun fcEpisodeCovers(label: String, episode: Int): Boolean {
-        val range = Regex("""(?i)\bE(?:P|PISODE)?[\s._-]*0?(\d{1,3})\s*(?:-|–|to)\s*0?(\d{1,4})\b""").find(label)
-        if (range != null) {
-            val from = range.groupValues[1].toIntOrNull() ?: return false
-            val to = range.groupValues[2].toIntOrNull() ?: return false
-            return episode in from..to
-        }
-        val single = Regex("""(?i)\bE(?:P|PISODE)?[\s._-]*0?(\d{1,4})\b""").find(label) ?: return true
-        return single.groupValues[1].toIntOrNull() == episode
-    }
-
-    internal fun fcSeasonOf(text: String): Int? =
-        Regex("""(?i)\bSeason[\s._-]*0?(\d{1,2})\b""").find(text)?.groupValues?.get(1)?.toIntOrNull()
-            ?: Regex("""(?i)\bS(\d{1,2})(?:\b|E\d)""").find(text)?.groupValues?.get(1)?.toIntOrNull()
-
-    internal fun fcMipHosts(html: String, base: String): List<String> =
-        Jsoup.parse(html, base).select("div.server a[href], a.btn[href]").mapNotNull { a ->
-            val href = a.attr("abs:href").trim()
-            href.takeIf { it.startsWith("http") && HUB_GATEWAY_HOST_ALT.containsMatchIn(it) }
-        }.distinct()
-
-    private suspend fun resolveFilmyCab(
-        spec: ServerSpec,
-        tmdbId: Int,
-        type: String,
-        season: Int,
-        episode: Int,
-    ): List<RawStream> {
-        if (type != "movie" && (season <= 0 || episode <= 0)) {
-            throw CleanMissException("tv request without season/episode")
-        }
-        val (title, year) = titleYear(tmdbId, type)
-        fun enc(s: String) = java.net.URLEncoder.encode(s, "UTF-8")
-        val bases = (listOfNotNull(Domains.base("filmycab")) + listOf("https://filmycab.store"))
-            .map { it.trimEnd('/') }
-            .filter { it.contains("filmycab", ignoreCase = true) }
-            .distinct()
-        var base = bases.firstOrNull().orEmpty()
-        var hits: List<Pair<String, String>> = emptyList()
-        for (candidate in bases) {
-            val html = fetchText("$candidate/?s=${enc(title)}", candidate, timeoutSec = 12) ?: continue
-            val parsed = fcHits(html, candidate)
-            if (parsed.isNotEmpty()) {
-                base = candidate
-                hits = parsed
-                break
-            }
-        }
-        if (hits.isEmpty()) throw CleanMissException("no search hits")
-        val posts = rankedPosts(hits, title, year)
-        if (posts.isEmpty()) throw CleanMissException("no match")
-        val expectedYear = year?.toIntOrNull()
-
-        for (postUrl in posts) {
-            val post = fetchText(postUrl, base, timeoutSec = 14) ?: continue
-            val doc = Jsoup.parse(post, postUrl)
-            val postTitle = doc.selectFirst("h1")?.text()?.trim().orEmpty()
-            val postYear = TitleMatch.parseYear(postTitle)
-            if (!postYearMatches(expectedYear, postYear, type)) continue
-            if (type != "movie") {
-                val postSeason = fcSeasonOf(postTitle)
-                if (postSeason != null && postSeason != season) continue
-            }
-            val boxes = fcResolveBatchLabels(fcBoxes(post, postUrl))
-                .filter { releaseHeightOf(it.label) >= 720 }
-                .filter { type == "movie" || fcEpisodeCovers(it.label, episode) }
-            if (boxes.isEmpty()) continue
-            val postAudio = LinkNaming.languageLabel(postTitle)
-            val out = mutableListOf<RawStream>()
-            for (box in boxes.sortedByDescending { releaseHeightOf(it.label) }.take(2)) {
-                val mipPage = fetchText(box.url, postUrl, timeoutSec = 12) ?: continue
-                val hosts = fcMipHosts(mipPage, box.url)
-                if (hosts.isEmpty()) continue
-                val mipMeta = Jsoup.parse(mipPage).selectFirst("p.meta")?.text()?.trim().orEmpty()
-                val quality = listOf(box.label, mipMeta).firstOrNull { releaseHeightOf(it) > 0 } ?: box.label
-                val size = normalizeSizeToken(box.size).ifBlank { normalizeSizeToken(mipMeta) }
-                val audio = groupAudioLabel(box.label, postAudio)
-                out += fileLinksFor(spec, hosts, postUrl, audio, quality, size)
-                if (out.size >= 6) break
             }
             if (out.isNotEmpty()) return out.distinctBy { it.url }
         }
@@ -3304,7 +3168,7 @@ object StreamEngine {
     internal fun fslServerLabel(tag: String?, fallback: String): String {
         val label = tag?.trim().orEmpty()
         if (label.isBlank()) return fallback
-        if (LinkNaming.languageLabel(label).isNotBlank()) return fallback
+        if (LinkNaming.languageLabel(label, includeCodes = false).isNotBlank()) return fallback
         if (SERVER_LABEL_ACTION.containsMatchIn(label)) return fallback
         if (QUALITY_TEXT_RE.containsMatchIn(label)) return fallback
         return label.replace(SERVER_LABEL_TRAILING, "").trim().ifBlank { fallback }
@@ -4272,13 +4136,14 @@ object StreamEngine {
                 if (out.containsKey(src.url)) continue
                 val master = src.master.takeIf { it.contains("#EXTM3U") || it.contains("<MPD", true) }
                 val playlist = ManifestKit.parseMaster(master, src.url)
+                val manifestDash = master?.contains("<MPD", ignoreCase = true) == true
                 val height = heightHintOf(src.quality).takeIf { it > 0 }
-                    ?: playlist?.let { ManifestKit.bestHeight(it.variants) } ?: 0
+                    ?: ManifestKit.bestHeightOf(master, src.url)
                 if (height in 1..719) continue
                 val audioRaw = src.language.takeUnless { it.contains("sub", true) }.orEmpty()
                 val audioLabel = LinkNaming.languageLabel(audioRaw)
-                    .ifBlank { playlist?.let { ManifestKit.audioLanguageLabel(it) }.orEmpty() }
-                val isDash = src.kind.equals("dash", true) || src.url.contains(".mpd", true)
+                    .ifBlank { manifestAudioLabel(master) }
+                val isDash = manifestDash || src.kind.equals("dash", true) || src.url.contains(".mpd", true)
                 out[src.url] = RawStream(
                     serverId = spec.id, serverName = spec.name,
                     url = src.url,
@@ -4293,7 +4158,7 @@ object StreamEngine {
                     },
                     audioLabel = audioLabel,
                     mediaLabel = src.label.ifBlank { src.quality },
-                    inlineManifest = master?.takeIf { playlist != null },
+                    inlineManifest = master,
                     extraHeaders = mapOf("User-Agent" to HttpKit.userAgent, "Referer" to "$origin/"),
                     subtitles = playlist?.let { SubtitleKit.fromMaster(it, src.url) }.orEmpty(),
                 )

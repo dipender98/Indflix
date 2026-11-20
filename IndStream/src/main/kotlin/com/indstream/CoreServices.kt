@@ -1268,16 +1268,16 @@ object ManifestKit {
     private fun parseMediaTag(attrStr: String): MediaRendition? {
         val attrs = parseAttrs(attrStr)
         val type = attrs["TYPE"] ?: return null
-        val groupId = attrs["GROUP-ID"] ?: return null
-        val name = attrs["NAME"] ?: return null
+        val groupId = attrs["GROUP-ID"] ?: attrs["GROUP"] ?: return null
+        val name = attrs["NAME"] ?: attrs["LANGUAGE"] ?: attrs["LANG"] ?: "Audio"
         return MediaRendition(
             type = type,
             groupId = groupId,
             name = name,
-            language = attrs["LANGUAGE"],
+            language = attrs["LANGUAGE"] ?: attrs["LANG"] ?: attrs["LANGUAGE-CODE"],
             uri = attrs["URI"],
             forced = attrs["FORCED"] == "YES",
-            default = attrs["DEFAULT"] == "YES",
+            default = attrs["DEFAULT"] == "YES" || attrs["AUTOSELECT"] == "YES",
         )
     }
 
@@ -1330,26 +1330,61 @@ object ManifestKit {
         return reps
     }
 
+    private val AUDIO_CODEC_RE =
+        Regex("""(?i)\b(?:mp4a|ac-3|ec-3|ac3|eac3|opus|vorbis|flac|dtsc|dtsh|dtsl|dtsx|mha1|mhm1)\b""")
+    private val MPD_LABEL_RE =
+        Regex("""<Label\b[^>]*>(.*?)</Label>""", setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE))
+
     fun mpdAudioLanguages(text: String?): List<String> {
         if (text.isNullOrBlank() || !text.contains("<MPD", ignoreCase = true)) return emptyList()
         val out = LinkedHashSet<String>()
         for (setMatch in MPD_SET_RE.findAll(text)) {
             val body = setMatch.groupValues[2]
             val setAttrs = parseXmlAttrs(setMatch.groupValues[1])
-            val isAudio = setAttrs["mimeType"].orEmpty().contains("audio", ignoreCase = true) ||
-                setAttrs["contentType"].orEmpty().contains("audio", ignoreCase = true) ||
+            val reps = MPD_REP_RE.findAll(body).map { parseXmlAttrs(it.groupValues[1]) }.toList()
+            fun isAudioMime(value: String?) = value.orEmpty().contains("audio", ignoreCase = true)
+            val isAudio = isAudioMime(setAttrs["mimeType"]) ||
+                isAudioMime(setAttrs["contentType"]) ||
                 setAttrs.containsKey("audioSamplingRate") ||
+                AUDIO_CODEC_RE.containsMatchIn(setAttrs["codecs"].orEmpty()) ||
+                reps.any {
+                    isAudioMime(it["mimeType"]) ||
+                        it.containsKey("audioSamplingRate") ||
+                        AUDIO_CODEC_RE.containsMatchIn(it["codecs"].orEmpty())
+                } ||
+                body.contains("""contentType="audio"""", ignoreCase = true) ||
                 body.contains("AudioChannelConfiguration", ignoreCase = true)
             if (!isAudio) continue
-            val codes = mutableListOf<String>()
-            setAttrs["lang"]?.let { codes += it }
-            if (codes.isEmpty()) {
-                for (repMatch in MPD_REP_RE.findAll(body)) {
-                    parseXmlAttrs(repMatch.groupValues[1])["lang"]?.let { codes += it }
+
+            // Language tags are the strongest evidence. Repetitions can carry tags the set omits.
+            val declared = LinkedHashSet<String>()
+            fun addDeclared(attrs: Map<String, String>) {
+                for (key in listOf("lang", "xml:lang")) {
+                    val value = attrs[key]?.trim().orEmpty()
+                    if (value.isNotBlank() && !value.equals("und", ignoreCase = true)) declared += value
                 }
             }
-            for (code in codes) {
-                LinkNaming.languageNameOrNull(code.substringBefore('-').trim())?.let { out += it }
+            addDeclared(setAttrs)
+            reps.forEach(::addDeclared)
+            val tagged = declared
+                .flatMap { LinkNaming.languageNames(it.substringBefore('-').trim()) }
+                .distinct()
+            if (tagged.isNotEmpty()) {
+                out += tagged
+                continue
+            }
+
+            // Without usable tags, only explicit human-readable names count.
+            val readable = mutableListOf<String>()
+            setAttrs["name"]?.let { readable += it }
+            setAttrs["label"]?.let { readable += it }
+            for (rep in reps) {
+                rep["name"]?.let { readable += it }
+                rep["label"]?.let { readable += it }
+            }
+            MPD_LABEL_RE.findAll(body).mapTo(readable) { it.groupValues[1].trim() }
+            for (name in readable) {
+                LinkNaming.languageNames(name).takeIf { it.isNotEmpty() }?.let { out += it }
             }
         }
         return out.toList()
@@ -1414,25 +1449,19 @@ object ManifestKit {
         } ?: 0
     }
 
-    private val LANG_HINDI = setOf("hi", "hin")
-    private val LANG_ENGLISH = setOf("en", "eng")
-
-    private val NAME_HINDI = Regex("""\bhindi\b""", RegexOption.IGNORE_CASE)
-    private val NAME_ENGLISH = Regex("""\benglish\b""", RegexOption.IGNORE_CASE)
-
-    fun isHindi(rendition: MediaRendition): Boolean {
-        val lang = rendition.language?.lowercase()
-        if (lang != null && (lang in LANG_HINDI || lang.startsWith("hi"))) return true
-        return NAME_HINDI.containsMatchIn(rendition.name) ||
-            rendition.name.contains("हिन्दी", ignoreCase = true) ||
-            rendition.name.contains("हिंदी", ignoreCase = true)
+    /** First language explicitly declared by a rendition's tag or display name. */
+    private fun declaredLanguageOf(rendition: MediaRendition): String? {
+        val lang = rendition.language?.trim().orEmpty()
+        if (lang.isNotBlank() && !lang.equals("und", ignoreCase = true)) {
+            // Language tags are BCP-47: the primary subtag is the language.
+            LinkNaming.languageNames(lang.substringBefore('-').trim()).firstOrNull()?.let { return it }
+        }
+        return LinkNaming.languageNames(rendition.name).firstOrNull()
     }
 
-    fun isEnglish(rendition: MediaRendition): Boolean {
-        val lang = rendition.language?.lowercase()
-        if (lang != null && (lang in LANG_ENGLISH || lang.startsWith("en"))) return true
-        return NAME_ENGLISH.containsMatchIn(rendition.name)
-    }
+    fun isHindi(rendition: MediaRendition): Boolean = declaredLanguageOf(rendition) == "Hindi"
+
+    fun isEnglish(rendition: MediaRendition): Boolean = declaredLanguageOf(rendition) == "English"
 
     fun hasHindiEnglishAudio(master: MasterPlaylist): Boolean {
         if (master.audio.isEmpty()) return false
@@ -1461,33 +1490,21 @@ object ManifestKit {
         DubLanguage("Gujarati", setOf("gu", "guj"), setOf("gujarati", "ગુજરાતી")),
     )
 
+    private val INDIAN_DUB_CANONICAL = INDIAN_DUB_LANGUAGES.mapTo(HashSet()) { it.canonical }
+
     fun indianLanguageOf(rendition: MediaRendition): String? {
-        val lang = rendition.language?.lowercase()
-        if (!lang.isNullOrBlank()) {
-            val code = lang.substringBefore('-')
-            INDIAN_DUB_LANGUAGES.firstOrNull { code in it.codes }?.let { return it.canonical }
-        }
-        val name = rendition.name.lowercase()
-        if (name.isBlank()) return null
-        return INDIAN_DUB_LANGUAGES.firstOrNull { spec -> spec.names.any { name.contains(it) } }?.canonical
+        val canonical = declaredLanguageOf(rendition) ?: return null
+        return canonical.takeIf { it in INDIAN_DUB_CANONICAL }
     }
 
     fun audioLanguageLabel(master: MasterPlaylist): String? {
         if (master.audio.isEmpty()) return null
-        fun declaredLanguage(t: MediaRendition): String? {
-            val lang = t.language?.lowercase()?.trim().orEmpty()
-            if (lang.isNotBlank() && lang != "und") {
-                LinkNaming.languageNameOrNull(lang.substringBefore('-'))?.let { return it }
-                LinkNaming.languageNameOrNull(lang)?.let { return it }
-            }
-            return LinkNaming.languageNameOrNull(t.name)
-        }
         fun trackLabel(t: MediaRendition): String? = when {
             isHindi(t) -> "Hindi"
             isEnglish(t) -> "English"
             indianLanguageOf(t) != null -> indianLanguageOf(t)
             isOriginal(t) -> "Original"
-            else -> declaredLanguage(t)
+            else -> declaredLanguageOf(t)
         }
         val ordered = (master.audio.filter { it.default } + master.audio).distinct()
         val named = ordered.mapNotNull { trackLabel(it) }.filter { it != "Original" }.distinct()

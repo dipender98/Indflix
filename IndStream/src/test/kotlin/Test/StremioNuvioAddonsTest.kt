@@ -191,6 +191,7 @@ class StremioNuvioAddonsTest {
             ),
         )
         assertEquals("Hindi, English", StremioNuvioAddons.streamAudioLabel(src("1080p", languages = "hin,eng")))
+        assertEquals("French, Korean, Turkish", StremioNuvioAddons.streamAudioLabel(src("1080p", languages = "fr,ko,tr")))
         // Detail text beats a misleading name badge.
         assertEquals("Hindi", StremioNuvioAddons.streamAudioLabel(src("PenguPlay English", description = "Audio: Hindi")))
         // Multi-language list from the detail text is kept whole.

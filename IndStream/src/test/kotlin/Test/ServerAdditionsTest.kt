@@ -109,6 +109,9 @@ class ServerAdditionsTest {
         assertEquals("Hindi", StreamEngine.releaseLanguageOf("Film Dual Audio Hindi-English"))
         assertEquals("Multi", StreamEngine.releaseLanguageOf("Show S01 DUAL"))
         assertEquals("", StreamEngine.releaseLanguageOf("Inception 2010 BluRay"))
+        assertEquals("", StreamEngine.releaseLanguageOf("It 2017 BluRay"))
+        assertEquals("", StreamEngine.releaseLanguageOf("Film German"))
+        assertEquals("Hindi", StreamEngine.releaseLanguageOf("Film हिन्दी"))
     }
 
     @Test

@@ -570,6 +570,56 @@ class LinkNamingTest {
     }
 
     @Test
+    fun languageNames_recognizesBroadDeclaredSet() {
+        assertEquals(
+            listOf("French", "Korean", "Turkish", "Hebrew", "Ukrainian"),
+            LinkNaming.languageNames("French; Korean / Turkish | Hebrew + Ukrainian"),
+        )
+        assertEquals(listOf("Chinese", "Japanese"), LinkNaming.languageNames("Mandarin, Japanese"))
+        assertEquals(listOf("Spanish"), LinkNaming.languageNames("Español"))
+        assertEquals(listOf("German"), LinkNaming.languageNames("Deutsch"))
+    }
+
+    @Test
+    fun languageNames_readsIsoCodesAsWholeTokens() {
+        assertEquals(listOf("French", "German", "Portuguese"), LinkNaming.languageNames("fr, de, pt-BR"))
+        assertEquals(listOf("French"), LinkNaming.languageNames("fr-CA"))
+        assertEquals(listOf("Slovenian"), LinkNaming.languageNames("sl-SI"))
+        assertEquals(listOf("Basque"), LinkNaming.languageNames("eu-ES"))
+        assertEquals(emptyList<String>(), LinkNaming.languageNames("profile"), "codes must not match inside words")
+        assertEquals(emptyList<String>(), LinkNaming.languageNames("This is us", includeCodes = false))
+    }
+
+    @Test
+    fun languageLabel_freeTextIgnoresShortCodes() {
+        assertEquals("", LinkNaming.languageLabel("It 2017", includeCodes = false))
+        assertEquals("", LinkNaming.languageLabel("This Is Us S01", includeCodes = false))
+        assertEquals("Italian", LinkNaming.languageLabel("It 2017"))
+    }
+
+    @Test
+    fun languageLabel_extendedNamesAndAliases() {
+        assertEquals("Hebrew", LinkNaming.languageLabel("עברית"))
+        assertEquals("Ukrainian", LinkNaming.languageLabel("українська"))
+        assertEquals("Vietnamese", LinkNaming.languageLabel("Tiếng Việt"))
+        assertEquals("Malaysian", LinkNaming.languageLabel("Bahasa Melayu"))
+        assertEquals("Filipino", LinkNaming.languageLabel("Tagalog"))
+        assertEquals("Japanese", LinkNaming.languageLabel("jp"))
+        assertEquals("Chinese", LinkNaming.languageLabel("cn"))
+        assertEquals("Korean", LinkNaming.languageLabel("kr"))
+        assertEquals("Filipino", LinkNaming.languageLabel("ph"))
+        assertEquals("Hindi", LinkNaming.canonicalSubtitleName("Devanagari"))
+        assertEquals("Japanese", LinkNaming.canonicalSubtitleName("日本"))
+    }
+
+    @Test
+    fun languageFlag_extendedLanguages() {
+        assertEquals("\uD83C\uDDE9\uD83C\uDDEA", LinkNaming.languageFlag("German"))
+        assertEquals("\uD83C\uDDF0\uD83C\uDDF7", LinkNaming.languageFlag("Korean"))
+        assertEquals("\uD83C\uDDF5\uD83C\uDDF0", LinkNaming.languageFlag("Urdu"))
+    }
+
+    @Test
     fun displayName_prefersRicherLanguageSet() {
         // audio declares 2 languages, media metadata declares 3 -> all 3 must show.
         val name = LinkNaming.displayName(

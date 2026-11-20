@@ -187,17 +187,6 @@ object ServerFarm {
             supports4k = true,
         ),
         ServerSpec(
-            id = "filmycab", name = "FilmyCab",
-            idType = ServerIdType.TMDB,
-            movieUrl = "https://filmycab.store/?s={id}",
-            tvUrl = "https://filmycab.store/?s={id}",
-            referer = "https://filmycab.store/",
-            hasSubtitles = false, timeoutSec = 55,
-            declaredLanguages = setOf("Hindi", "Punjabi"),
-            speed = ServerSpeed.SLOW, downloadFriendly = true,
-            supports4k = true,
-        ),
-        ServerSpec(
             id = "animeworld", name = "AnimeWorld",
             idType = ServerIdType.TMDB,
             movieUrl = "https://watchanimeworld.one/?s={id}",

@@ -292,6 +292,63 @@ class ManifestKitTest {
     }
 
     @Test
+    fun mpdAudioLanguages_readsTagsNamesAndLabels() {
+        val mpd = """
+<?xml version="1.0" encoding="utf-8"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011">
+  <Period>
+    <AdaptationSet mimeType="audio/mp4" xml:lang="hi">
+      <Representation id="a1" bandwidth="128000" codecs="mp4a.40.2"/>
+    </AdaptationSet>
+    <AdaptationSet mimeType="audio/mp4" lang="und" name="English">
+      <Representation id="a2" bandwidth="128000" codecs="ec-3"/>
+    </AdaptationSet>
+    <AdaptationSet contentType="audio" lang="und">
+      <Representation id="a3" bandwidth="128000" codecs="opus">
+        <Label>Japanese</Label>
+      </Representation>
+    </AdaptationSet>
+    <AdaptationSet mimeType="application/mp4" lang="und" name="Track 1">
+      <Representation id="a4" bandwidth="128000" codecs="ec-3"/>
+    </AdaptationSet>
+  </Period>
+</MPD>
+        """.trimIndent()
+        assertEquals(listOf("Hindi", "English", "Japanese"), ManifestKit.mpdAudioLanguages(mpd))
+    }
+
+    @Test
+    fun mpdAudioLanguages_unionsRepresentationTagsAndKeepsUnknownHonest() {
+        val mpd = """
+<?xml version="1.0" encoding="utf-8"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011">
+  <Period>
+    <AdaptationSet mimeType="audio/mp4" lang="und">
+      <Representation id="a1" bandwidth="128000" xml:lang="ta" codecs="mp4a.40.2"/>
+      <Representation id="a2" bandwidth="128000" xml:lang="te" codecs="mp4a.40.2"/>
+    </AdaptationSet>
+    <AdaptationSet mimeType="audio/mp4" lang="und">
+      <Representation id="a3" bandwidth="128000" name="Track 2" codecs="ec-3"/>
+    </AdaptationSet>
+  </Period>
+</MPD>
+        """.trimIndent()
+        assertEquals(listOf("Tamil", "Telugu"), ManifestKit.mpdAudioLanguages(mpd))
+        assertEquals(emptyList<String>(), ManifestKit.mpdAudioLanguages("<MPD><Period><AdaptationSet mimeType=\"audio/mp4\"><Representation codecs=\"ec-3\"/></AdaptationSet></Period></MPD>"))
+    }
+
+    @Test
+    fun audioLanguageLabel_detectsBroadLanguageSet() {
+        val master = masterWithAudio(
+            """#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="Français",LANGUAGE="fr-CA",URI="fr.m3u8"""",
+            """#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="Deutsch",LANGUAGE="de",URI="de.m3u8"""",
+            """#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="한국어",LANGUAGE="ko",URI="ko.m3u8"""",
+        )
+        assertNotNull(master)
+        assertEquals("French, German, Korean", ManifestKit.audioLanguageLabel(master))
+    }
+
+    @Test
     fun audioLanguageLabel_honestUnknowns() {
         val noAudio = masterWithAudio()
         assertNotNull(noAudio)

@@ -824,7 +824,7 @@ object SettingsUi {
                 },
             )
             head.addView(
-                label(title, 29f, TEXT, medium = true),
+                label(title, 17.4f, TEXT, medium = true),
                 LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
             )
             val close = iconButton("close", "Close")
@@ -920,7 +920,7 @@ object SettingsUi {
                 orientation = LinearLayout.VERTICAL
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
             }
-            headTexts.addView(label("Home Row Order", 29f, TEXT, medium = true))
+            headTexts.addView(label("Home Row Order", 25f, TEXT, medium = true))
             headTexts.addView(
                 label("Use the arrows to set the order.", 16f, TEXT_DIM)
                     .apply { setPadding(0, dp(4), 0, 0) },

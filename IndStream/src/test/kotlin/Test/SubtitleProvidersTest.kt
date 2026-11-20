@@ -253,7 +253,7 @@ class SubtitleProvidersTest {
 
     @Test
     fun subtitleMenuName_indianCarriesNativeScript() {
-        assertEquals("Tamil (\u0BA4\u0BAE\u0BB4\u0BCD)", LinkNaming.subtitleMenuName("Tamil", "tam"))
+        assertEquals("Tamil (\u0BA4\u0BAE\u0BBF\u0BB4\u0BCD)", LinkNaming.subtitleMenuName("Tamil", "tam"))
         assertEquals("Telugu (\u0C24\u0C46\u0C32\u0C41\u0C17\u0C41)", LinkNaming.subtitleMenuName("Telugu", "te"))
     }
 

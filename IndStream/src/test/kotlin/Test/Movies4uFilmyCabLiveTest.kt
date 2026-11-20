@@ -32,16 +32,6 @@ class Movies4uFilmyCabLiveTest {
         assertTrue(out.any { it.qualityHint >= 2160 }, "movies4u advertises a real 4K file")
     }
 
-    // FilmyCab's verified 4K movie post is spelled with spaces while the metadata spellings omit
-    // them, so the movie path is covered by the fixture tests and the shared mip/gateway code the
-    // tv test below exercises end to end.
-    @Test
-    fun filmycab_liveTv() = runBlocking {
-        val spec = ServerFarm.allServers.first { it.id == "filmycab" }
-        val out = StreamEngine.resolveOne(spec, 225385, null, "tv", 2, 1)
-        report("filmycab", "Black Doves S02E01", out)
-    }
-
     @Test
     fun movies4u_liveTv() = runBlocking {
         val spec = ServerFarm.allServers.first { it.id == "movies4u" }
