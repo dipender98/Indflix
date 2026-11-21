@@ -390,6 +390,25 @@ class ManifestKitTest {
     }
 
     @Test
+    fun isUndeterminedLanguage_detectsUndTagOnly() {
+        assertTrue(ManifestKit.isUndeterminedLanguage("und"))
+        assertTrue(ManifestKit.isUndeterminedLanguage("Und"))
+        assertTrue(ManifestKit.isUndeterminedLanguage(" und "))
+        assertFalse(ManifestKit.isUndeterminedLanguage("en"))
+        assertFalse(ManifestKit.isUndeterminedLanguage("English"))
+        assertFalse(ManifestKit.isUndeterminedLanguage(null))
+    }
+
+    @Test
+    fun audioLanguageLabel_undWithReadableName_usesDeclaredName() {
+        val master = masterWithAudio(
+            """#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="English",LANGUAGE="und",URI="en.m3u8",DEFAULT=YES""",
+        )
+        assertNotNull(master)
+        assertEquals("English", ManifestKit.audioLanguageLabel(master))
+    }
+
+    @Test
     fun isOriginal_requiresExplicitDeclaration() {
         fun rend(name: String, lang: String?, default: Boolean) =
             ManifestKit.MediaRendition("AUDIO", "a", name, lang, null, default = default)

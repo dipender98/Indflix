@@ -186,6 +186,58 @@ class NeutralOrderTest {
     }
 
     @Test
+    fun emit_hlsUndeterminedAudio_yieldsHonestUnknown_notUndStereo() = runBlocking {
+        val out = mutableListOf<com.lagradost.cloudstream3.utils.ExtractorLink>()
+        StreamEngine.emit(
+            listOf(
+                RawStream(
+                    serverId = "vidyHost", serverName = "VidyHost",
+                    url = "https://x.example/master.m3u8", isM3u8 = true,
+                    qualityHint = 1080,
+                    inlineManifest = """
+                        #EXTM3U
+                        #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="Track 1",LANGUAGE="und",URI="t1.m3u8",DEFAULT=YES
+                        #EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080,AUDIO="a"
+                        1080p.m3u8
+                    """.trimIndent(),
+                    audioLabel = "", audioPriority = 0,
+                ),
+            ),
+            onLink = { out.add(it) },
+            probeManifests = true,
+        )
+        assertEquals(1, out.size)
+        assertFalse(out[0].name.contains("Und"), out[0].name)
+        assertTrue(out[0].name.contains("(Unknown)"), out[0].name)
+    }
+
+    @Test
+    fun emit_hlsUndeterminedMaster_fallsBackToDeclaredSourceLabel() = runBlocking {
+        val out = mutableListOf<com.lagradost.cloudstream3.utils.ExtractorLink>()
+        StreamEngine.emit(
+            listOf(
+                RawStream(
+                    serverId = "vidyHost", serverName = "VidyHost",
+                    url = "https://x.example/master.m3u8", isM3u8 = true,
+                    qualityHint = 1080,
+                    inlineManifest = """
+                        #EXTM3U
+                        #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="Track 1",LANGUAGE="und",URI="t1.m3u8",DEFAULT=YES
+                        #EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080,AUDIO="a"
+                        1080p.m3u8
+                    """.trimIndent(),
+                    audioLabel = "Hindi", audioPriority = 4,
+                ),
+            ),
+            onLink = { out.add(it) },
+            probeManifests = true,
+        )
+        assertEquals(1, out.size)
+        assertTrue(out[0].name.contains("Hindi"), out[0].name)
+        assertFalse(out[0].name.contains("Und"), out[0].name)
+    }
+
+    @Test
     fun emit_dashMpdInlineManifest_labelsPeakResolution() = runBlocking {
         val mpd = """
 <?xml version="1.0" encoding="utf-8"?>

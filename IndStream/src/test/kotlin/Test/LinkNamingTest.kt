@@ -44,6 +44,13 @@ class LinkNamingTest {
         assertEquals("Unknown", LinkNaming.languageTag(null))
     }
 
+    @Test
+    fun languageTag_undIsUnknown_notADetectedLanguage() {
+        assertEquals("Unknown", LinkNaming.languageTag("Und"))
+        assertEquals("Unknown", LinkNaming.languageTag("und"))
+        assertEquals("Unknown", LinkNaming.languageTag("Und Stereo"))
+    }
+
 
     @Test
     fun languageTagFor_originalUsesTmdbCode() {
@@ -168,6 +175,12 @@ class LinkNamingTest {
             serverName = "VidLink", audioLabel = "Multi",
         )
         assertEquals("VidLink (Multi)", name)
+    }
+
+    @Test
+    fun displayName_undAudioLabel_isHonestUnknown() {
+        assertEquals("VidLink (Unknown)", LinkNaming.displayName(serverName = "VidLink", audioLabel = "Und"))
+        assertEquals("VidLink (Unknown)", LinkNaming.displayName(serverName = "VidLink", audioLabel = "und"))
     }
 
     @Test

@@ -55,6 +55,29 @@ class MovieBox4KTest {
         assertEquals("8.7GB", streams.last().sizeLabel)
         assertEquals(0, subs.length())
         assertTrue(streams.all { !it.isM3u8 && !it.isDash && it.url.startsWith("https://cdn.test/") })
+        assertTrue(streams.all { it.extraHeaders["User-Agent"]?.startsWith("com.community.oneroom/") == true })
+    }
+
+    @Test
+    fun mobileStreams_detectsAdaptiveUrls() {
+        val detail = org.json.JSONObject(
+            """
+            {
+              "resourceDetectors": [
+                {"resolutionList":[
+                  {"resourceLink":"https://cdn.test/a720.m3u8","resolution":720,"requireMemberType":0},
+                  {"resourceLink":"https://cdn.test/a1080.mpd","resolution":1080,"requireMemberType":0}
+                ]}
+              ]
+            }
+            """.trimIndent(),
+        )
+        val (streams, _) = StreamEngine.movieBoxMobileStreams(detail, spec, "")
+        assertEquals(2, streams.size)
+        assertTrue(streams[0].isM3u8)
+        assertTrue(!streams[0].isDash)
+        assertTrue(streams[1].isM3u8)
+        assertTrue(streams[1].isDash)
     }
 
     @Test

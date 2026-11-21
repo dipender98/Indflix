@@ -354,7 +354,7 @@ object StreamEngine {
                                 val fromUrl = ManifestKit.resolutionFromUrl(raw.url)
                                 if (fromUrl > 0) fromUrl else -1
                             }
-                            val tag = manifestAudioLabel(mpdText).ifBlank { raw.audioLabel }
+                            val tag = audioTagOf(raw, mpdText)
                             ResolvedEmit(raw, h, tag, fetchMs)
                         }
                         raw.isM3u8 && probeManifests -> {
@@ -365,7 +365,7 @@ object StreamEngine {
                             val h = (ManifestKit.bestHeightOf(masterText, raw.url).takeIf { it > 0 } ?: raw.qualityHint).coerceAtLeast(0)
                             // The manifest's own audio declaration is the most specific data; it
                             // overrides a coarser label stamped earlier in the chain.
-                            val tag = manifestAudioLabel(masterText).ifBlank { raw.audioLabel }
+                            val tag = audioTagOf(raw, masterText)
                             ResolvedEmit(raw, h, tag, fetchMs, masterText)
                         }
                         !raw.isM3u8 && probeManifests -> {
@@ -497,6 +497,13 @@ object StreamEngine {
             ManifestKit.audioLanguageLabel(it).orEmpty()
                 .ifBlank { if (it.isMultiAudio) "Multi" else "" }
         }.orEmpty()
+
+    /**
+     * Audio tag for an emitted stream: the manifest's own declaration first, a declared source
+     * label as fallback. Undetermined declarations resolve to blank, so nothing is guessed.
+     */
+    internal fun audioTagOf(raw: RawStream, masterText: String?): String =
+        manifestAudioLabel(masterText).ifBlank { raw.audioLabel }.orEmpty()
 
     /** Declared audio languages from either manifest format; blank when nothing is declared. */
     internal fun manifestAudioLabel(text: String?): String {
@@ -1586,16 +1593,19 @@ object StreamEngine {
                     )
                     else -> ""
                 }
+                val isHls = url.contains(".m3u8", ignoreCase = true)
+                val isMpd = url.contains(".mpd", ignoreCase = true)
                 out += RawStream(
                     serverId = spec.id,
                     serverName = spec.name,
                     url = url,
-                    isM3u8 = false,
+                    isM3u8 = isHls || isMpd,
                     qualityHint = height,
                     audioPriority = if (language.equals("Hindi", ignoreCase = true)) 4 else 2,
                     audioLabel = language,
                     sizeLabel = sizeLabel,
-                    extraHeaders = mapOf("User-Agent" to HttpKit.userAgent),
+                    extraHeaders = mapOf("User-Agent" to MOVIEBOX_MOBILE_UA),
+                    isDash = isMpd,
                 )
             }
         }
