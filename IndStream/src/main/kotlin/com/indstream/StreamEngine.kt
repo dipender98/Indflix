@@ -429,7 +429,7 @@ object StreamEngine {
             else if (isAdaptive) ExtractorLinkType.M3U8
             else ExtractorLinkType.VIDEO
 
-            val master = r.masterText?.takeIf { !raw.isDash && isAdaptive }
+            val master = (r.masterText ?: raw.inlineManifest)?.takeIf { !raw.isDash && isAdaptive }
             val languages = master?.let { ManifestLanguageProxy.declaredLanguages(it) }.orEmpty()
             val variants = if (languages.size > 1) {
                 languages.map { lang ->
