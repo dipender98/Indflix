@@ -441,9 +441,12 @@ object StreamEngine {
             val linkType = if (raw.isDash) ExtractorLinkType.DASH
             else if (isAdaptive) ExtractorLinkType.M3U8
             else ExtractorLinkType.VIDEO
+            val playUrl = if (!raw.isDash && isAdaptive) {
+                r.masterText?.let { ManifestLanguageProxy.urlFor(it, raw.url) } ?: raw.url
+            } else raw.url
             onLink(newExtractorLink(
                 source = sourceLabel, name = label,
-                url = raw.url, type = linkType,
+                url = playUrl, type = linkType,
             ) {
                 referer = raw.referer ?: ""
                 this.quality = quality

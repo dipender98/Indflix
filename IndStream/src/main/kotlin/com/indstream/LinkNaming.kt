@@ -190,6 +190,8 @@ object LinkNaming {
         "audio", "dub", "dubbed", "version", "track", "sub", "subs", "subtitle", "subtitles",
     )
 
+    private val REGION_QUALIFIERS = setOf("Latin")
+
     private val TRAILING_LANGUAGE: Regex = run {
         val names = LANGUAGES
             .flatMap { it.aliases }
@@ -250,6 +252,14 @@ object LinkNaming {
         val s = raw?.trim().orEmpty()
         if (s.isBlank()) return null
         return canonicalSubtitleName(s).takeIf { it in LANGUAGE_NAMES }
+    }
+
+    fun languageCode(raw: String?): String? {
+        val names = languageNames(raw)
+            .filterIndexed { index, name -> index == 0 || name !in REGION_QUALIFIERS }
+            .distinct()
+        if (names.size != 1) return null
+        return LANGUAGES.firstOrNull { it.canonical == names[0] }?.codes?.firstOrNull()
     }
 
     fun richerLanguageLabel(primary: String?, fallback: String?): String {
