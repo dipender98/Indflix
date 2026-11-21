@@ -3,6 +3,7 @@ package com.indstream
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.net.InetAddress
+import java.net.NetworkInterface
 import java.net.ServerSocket
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.ConcurrentHashMap
@@ -18,13 +19,16 @@ object ManifestLanguageProxy {
     @Volatile
     private var port: Int = -1
 
+    @Volatile
+    private var host: String = "localhost"
+
     fun urlFor(master: String, baseUrl: String, language: String? = null): String? {
         val target = language?.trim()?.takeIf { it.isNotBlank() }
         val rewritten = rewrittenManifest(master, baseUrl, target) ?: return null
         val boundPort = ensureServer() ?: return null
         val key = encodeKey(baseUrl + '\u0000' + target.orEmpty())
         manifests[key] = rewritten
-        return "http://127.0.0.1:$boundPort/$key.m3u8"
+        return "http://${host}:$boundPort/$key.m3u8"
     }
 
     internal fun declaredLanguages(master: String): List<String> {
@@ -91,17 +95,36 @@ object ManifestLanguageProxy {
         return LinkNaming.languageCode(attrs["NAME"])
     }
 
+    private fun reachableHost(): String {
+        try {
+            val ifaces = NetworkInterface.getNetworkInterfaces() ?: return "localhost"
+            for (iface in ifaces) {
+                if (!iface.isUp || iface.isLoopback) continue
+                for (addr in iface.inetAddresses) {
+                    if (addr.isLoopbackAddress || addr.isMulticastAddress) continue
+                    val host = addr.hostAddress?.substringBefore('%') ?: continue
+                    if (host.contains(':')) continue
+                    return host
+                }
+            }
+        } catch (t: Throwable) {
+            Unit
+        }
+        return "localhost"
+    }
+
     private fun ensureServer(): Int? {
         port.takeIf { it > 0 }?.let { return it }
         return synchronized(serverLock) {
             port.takeIf { it > 0 }?.let { return@synchronized it }
             val socket = try {
-                ServerSocket(0, 16, InetAddress.getByName("127.0.0.1"))
+                ServerSocket(0, 16, InetAddress.getByName("0.0.0.0"))
             } catch (t: Throwable) {
                 null
             } ?: return@synchronized null
             server = socket
             port = socket.localPort
+            host = reachableHost()
             Thread({ serve(socket) }, "manifest-language-proxy").apply { isDaemon = true }.start()
             socket.localPort
         }
