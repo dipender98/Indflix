@@ -83,6 +83,37 @@ seg-1.m4s
     }
 
     @Test
+    fun declaredLanguagesFollowsDeclarationOrder() {
+        val master = """
+#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac",NAME="English",URI="track_en.m3u8"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac",NAME="Hindi",URI="track_hi.m3u8"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac",NAME="Hindi",URI="track_hi_alt.m3u8"
+#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English",LANGUAGE="en",URI="sub.m3u8"
+        """.trimIndent()
+
+        assertEquals(listOf("en", "hi"), ManifestLanguageProxy.declaredLanguages(master))
+    }
+
+    @Test
+    fun perLanguageManifestKeepsOnlyThatLanguage() {
+        val master = """
+#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac",NAME="English",DEFAULT=YES,URI="track_en.m3u8"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac",NAME="Hindi",DEFAULT=NO,URI="track_hi.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1920x1080,AUDIO="aac"
+1080p.m3u8
+        """.trimIndent()
+
+        val out = ManifestLanguageProxy.rewrittenManifest(master, base, "hi")
+        assertTrue(out != null)
+        assertTrue(out.contains("LANGUAGE=\"hi\""))
+        assertTrue(!out.contains("track_en.m3u8"))
+        assertTrue(out.contains("DEFAULT=YES"))
+        assertTrue(out.contains("\nhttps://cdn.example.com/media/abc/1080p.m3u8"))
+    }
+
+    @Test
     fun servesRewrittenManifestOverLoopback() {
         val master = """
 #EXTM3U
@@ -96,6 +127,23 @@ seg-1.m4s
         val served = java.net.URL(url).readText()
         assertTrue(served.contains("LANGUAGE=\"hi\""))
         assertTrue(served.contains("https://cdn.example.com/media/abc/1080p.m3u8"))
+    }
+
+    @Test
+    fun servesPerLanguageManifestOverLoopback() {
+        val master = """
+#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac",NAME="English",DEFAULT=YES,URI="track_en.m3u8"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac",NAME="Hindi",DEFAULT=NO,URI="track_hi.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1920x1080,AUDIO="aac"
+1080p.m3u8
+        """.trimIndent()
+
+        val url = ManifestLanguageProxy.urlFor(master, base, "hi")
+        assertTrue(url != null)
+        val served = java.net.URL(url).readText()
+        assertTrue(served.contains("LANGUAGE=\"hi\""))
+        assertTrue(!served.contains("track_en.m3u8"))
     }
 
     @Test

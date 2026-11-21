@@ -411,7 +411,8 @@ object StreamEngine {
                 floorDroppedByServer.merge(raw.serverId, 1, Int::plus)
                 return@forEach
             }
-            if (!emitted.add(raw.url)) return@forEach
+            if (emitted.contains(raw.url)) return@forEach
+            emitted.add(raw.url)
             emittedByServer.merge(raw.serverId, 1, Int::plus)
 
             val linkHeaders = LinkedHashMap<String, String>()
@@ -424,34 +425,44 @@ object StreamEngine {
             val isAdaptive = raw.isM3u8
             val quality = r.fullHeight.takeIf { it > 0 }
                 ?: LinkNaming.qualityHeight(raw.mediaLabel, raw.serverName)
-            val label = LinkNaming.displayName(
-                serverName = raw.serverName,
-                audioLabel = r.tagLabel,
-                sizeLabel = raw.sizeLabel.takeIf { it.isNotBlank() },
-                mediaLabel = raw.mediaLabel.takeIf { it.isNotBlank() },
-                originalLang = originalLang,
-            )
-            val sourceLabel = LinkNaming.priorityName(
-                serverName = raw.serverName,
-                audioLabel = r.tagLabel,
-                mediaLabel = raw.mediaLabel.takeIf { it.isNotBlank() },
-                originalLang = originalLang,
-            )
-
             val linkType = if (raw.isDash) ExtractorLinkType.DASH
             else if (isAdaptive) ExtractorLinkType.M3U8
             else ExtractorLinkType.VIDEO
-            val playUrl = if (!raw.isDash && isAdaptive) {
-                r.masterText?.let { ManifestLanguageProxy.urlFor(it, raw.url) } ?: raw.url
-            } else raw.url
-            onLink(newExtractorLink(
-                source = sourceLabel, name = label,
-                url = playUrl, type = linkType,
-            ) {
-                referer = raw.referer ?: ""
-                this.quality = quality
-                this.headers = linkHeaders
-            })
+
+            val master = r.masterText?.takeIf { !raw.isDash && isAdaptive }
+            val languages = master?.let { ManifestLanguageProxy.declaredLanguages(it) }.orEmpty()
+            val variants = if (languages.size > 1) {
+                languages.map { lang ->
+                    lang to (master?.let { ManifestLanguageProxy.urlFor(it, raw.url, lang) } ?: raw.url)
+                }
+            } else {
+                listOf("" to (master?.let { ManifestLanguageProxy.urlFor(it, raw.url) } ?: raw.url))
+            }
+            variants.forEach { (lang, playUrl) ->
+                emitted.add(playUrl)
+                val audioTag = lang.ifBlank { r.tagLabel }
+                val label = LinkNaming.displayName(
+                    serverName = raw.serverName,
+                    audioLabel = audioTag,
+                    sizeLabel = raw.sizeLabel.takeIf { it.isNotBlank() },
+                    mediaLabel = raw.mediaLabel.takeIf { it.isNotBlank() },
+                    originalLang = originalLang,
+                )
+                val sourceLabel = LinkNaming.priorityName(
+                    serverName = raw.serverName,
+                    audioLabel = audioTag,
+                    mediaLabel = raw.mediaLabel.takeIf { it.isNotBlank() },
+                    originalLang = originalLang,
+                )
+                onLink(newExtractorLink(
+                    source = sourceLabel, name = label,
+                    url = playUrl, type = linkType,
+                ) {
+                    referer = raw.referer ?: ""
+                    this.quality = quality
+                    this.headers = linkHeaders
+                })
+            }
         }
         floorDroppedByServer.forEach { (sid, n) ->
             if ((emittedByServer[sid] ?: 0) == 0) {

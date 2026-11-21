@@ -18,15 +18,32 @@ object ManifestLanguageProxy {
     @Volatile
     private var port: Int = -1
 
-    fun urlFor(master: String, baseUrl: String): String? {
-        val rewritten = rewrittenManifest(master, baseUrl) ?: return null
+    fun urlFor(master: String, baseUrl: String, language: String? = null): String? {
+        val target = language?.trim()?.takeIf { it.isNotBlank() }
+        val rewritten = rewrittenManifest(master, baseUrl, target) ?: return null
         val boundPort = ensureServer() ?: return null
-        val key = encodeKey(baseUrl)
+        val key = encodeKey(baseUrl + '\u0000' + target.orEmpty())
         manifests[key] = rewritten
         return "http://127.0.0.1:$boundPort/$key.m3u8"
     }
 
-    internal fun rewrittenManifest(master: String, baseUrl: String): String? {
+    internal fun declaredLanguages(master: String): List<String> {
+        val out = LinkedHashSet<String>()
+        for (line in master.lineSequence()) {
+            val trimmed = line.trim()
+            if (!trimmed.startsWith("#EXT-X-MEDIA:", true) ||
+                !trimmed.contains("TYPE=AUDIO", true)
+            ) continue
+            languageOf(attributesOf(trimmed))?.let { out += it }
+        }
+        return out.toList()
+    }
+
+    internal fun rewrittenManifest(
+        master: String,
+        baseUrl: String,
+        onlyLanguage: String? = null,
+    ): String? {
         if (!master.contains("#EXT-X-MEDIA:", true)) return null
         val rebuilt = ArrayList<String>()
         var declared = 0
@@ -34,14 +51,23 @@ object ManifestLanguageProxy {
             val line = rawLine.trimEnd('\r')
             val trimmed = line.trim()
             if (trimmed.startsWith("#EXT-X-MEDIA:", true) && trimmed.contains("TYPE=AUDIO", true)) {
-                val attrs = ATTR.findAll(trimmed)
-                    .associate { it.groupValues[1].uppercase() to it.groupValues[2] }
-                val current = attrs["LANGUAGE"]
-                val replaceable = current == null || ManifestKit.isUndeterminedLanguage(current)
-                val code = if (replaceable) LinkNaming.languageCode(attrs["NAME"]) else null
+                val attrs = attributesOf(trimmed)
+                val resolved = languageOf(attrs)
+                if (onlyLanguage != null) {
+                    if (resolved != onlyLanguage) continue
+                    var next = absolutizeUris(line, baseUrl)
+                    next = setAttribute(next, "LANGUAGE", resolved!!)
+                    next = setAttribute(next, "DEFAULT", "YES", quoted = false)
+                    next = setAttribute(next, "AUTOSELECT", "YES", quoted = false)
+                    rebuilt += next
+                    declared++
+                    continue
+                }
+                val declaredTag = attrs["LANGUAGE"]
+                val replaceable = declaredTag == null || ManifestKit.isUndeterminedLanguage(declaredTag)
                 var next = absolutizeUris(line, baseUrl)
-                if (code != null) {
-                    next = setAttribute(next, "LANGUAGE", code)
+                if (replaceable && resolved != null) {
+                    next = setAttribute(next, "LANGUAGE", resolved)
                     declared++
                 }
                 rebuilt += next
@@ -52,6 +78,17 @@ object ManifestLanguageProxy {
             }
         }
         return if (declared > 0) rebuilt.joinToString("\n") else null
+    }
+
+    private fun attributesOf(line: String): Map<String, String> =
+        ATTR.findAll(line).associate { it.groupValues[1].uppercase() to it.groupValues[2] }
+
+    private fun languageOf(attrs: Map<String, String>): String? {
+        val declared = attrs["LANGUAGE"]
+        if (!declared.isNullOrBlank() && !ManifestKit.isUndeterminedLanguage(declared)) {
+            LinkNaming.languageCode(declared)?.let { return it }
+        }
+        return LinkNaming.languageCode(attrs["NAME"])
     }
 
     private fun ensureServer(): Int? {
@@ -107,7 +144,7 @@ object ManifestLanguageProxy {
                     if (!method.equals("HEAD", true)) out.write(bytes)
                 }
                 else -> {
-                    val original = decodeKey(key)
+                    val original = decodeKey(key)?.substringBefore('\u0000')
                     val head = if (original != null && original.startsWith("http")) {
                         "HTTP/1.1 302 Found\r\nLocation: $original\r\nContent-Length: 0\r\n" +
                             "Connection: close\r\n\r\n"
@@ -134,20 +171,25 @@ object ManifestLanguageProxy {
             m.groupValues[1] + ManifestKit.resolveUrl(baseUrl, m.groupValues[2]) + m.groupValues[3]
         }
 
-    private fun setAttribute(line: String, key: String, value: String): String {
-        val pattern = Regex("""(\b$key\s*=\s*")[^"]*(")""", RegexOption.IGNORE_CASE)
-        return if (pattern.containsMatchIn(line)) {
-            pattern.replace(line) { m -> m.groupValues[1] + value + m.groupValues[2] }
-        } else "$line,$key=\"$value\""
+    private fun setAttribute(line: String, key: String, value: String, quoted: Boolean = true): String {
+        val quotedAttr = Regex("""(\b$key\s*=\s*")[^"]*(")""", RegexOption.IGNORE_CASE)
+        if (quotedAttr.containsMatchIn(line)) {
+            return quotedAttr.replace(line) { m -> m.groupValues[1] + value + m.groupValues[2] }
+        }
+        val bareAttr = Regex("""\b$key\s*=\s*[^,\s]+""", RegexOption.IGNORE_CASE)
+        if (bareAttr.containsMatchIn(line)) {
+            return bareAttr.replace(line) { "$key=$value" }
+        }
+        return if (quoted) "$line,$key=\"$value\"" else "$line,$key=$value"
     }
 
-    private fun encodeKey(url: String): String {
-        val bytes = url.toByteArray(StandardCharsets.UTF_8)
+    private fun encodeKey(value: String): String {
+        val bytes = value.toByteArray(StandardCharsets.UTF_8)
         val chars = CharArray(bytes.size * 2)
         for (i in bytes.indices) {
-            val value = bytes[i].toInt() and 0xff
-            chars[i * 2] = HEX[value ushr 4]
-            chars[i * 2 + 1] = HEX[value and 0x0f]
+            val v = bytes[i].toInt() and 0xff
+            chars[i * 2] = HEX[v ushr 4]
+            chars[i * 2 + 1] = HEX[v and 0x0f]
         }
         return String(chars)
     }
