@@ -4411,11 +4411,9 @@ object StreamEngine {
             if (external.isNotEmpty()) {
                 out.clear()
                 out.addAll(external)
+            } else {
+                out.removeAll { it.qualityHint <= 0 }
             }
-        }
-
-        if (out.any { it.qualityHint <= 0 }) {
-            out.clear()
         }
 
         // Fallback: streams baked into the page.
