@@ -2959,7 +2959,13 @@ object StreamEngine {
     }
 
 
+    private const val TITLE_CACHE_TTL_MS = 60 * 60 * 1000L
+    private val titleMetaCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Pair<String, String?>, Long>>()
+
     private suspend fun titleYear(tmdbId: Int, type: String): Pair<String, String?> {
+        val key = "$tmdbId|$type"
+        titleMetaCache[key]?.takeIf { System.currentTimeMillis() - it.second < TITLE_CACHE_TTL_MS }
+            ?.first?.let { return it }
         val meta = try {
             TmdbService.fetchMeta(tmdbId, type)
         } catch (c: kotlinx.coroutines.CancellationException) {
@@ -2969,7 +2975,9 @@ object StreamEngine {
         }
         val title = meta?.name?.takeIf { it.isNotBlank() }
             ?: throw CleanMissException("no title for tmdb=$tmdbId")
-        return title to meta?.year?.take(4)
+        val pair = title to meta?.year?.take(4)
+        titleMetaCache[key] = pair to System.currentTimeMillis()
+        return pair
     }
 
     private val LINK_HOST_RE = Regex("""links\.joshapp\.blog|mvlink\.blog""", RegexOption.IGNORE_CASE)
@@ -3014,7 +3022,7 @@ object StreamEngine {
         val posts = rankedHits(hits, title, year)
         if (posts.isEmpty()) throw CleanMissException("no match")
         val result = withTimeoutOrNull(20_000L) {
-            firstSuccessParallel(posts, limit = 2) { postUrl ->
+            firstSuccessParallel(posts, limit = 3) { postUrl ->
                 linkIndexTryPost(spec, base, postUrl, type, season, episode)
             }
         }
@@ -3064,7 +3072,7 @@ object StreamEngine {
             val ref = if (boldb != null) "https://boldb.site/" else hshare ?: href
             out += hostStreams(spec, hosts, label.ifBlank { name }, ref, language, size)
         }
-        return out.takeIf { it.isNotEmpty() }
+        return pruneDeadStreams(out).takeIf { it.isNotEmpty() }
     }
 
     private suspend fun resolveRotatorFiles(
@@ -3293,6 +3301,26 @@ object StreamEngine {
         return out
     }
 
+    /**
+     * Keeps only streams whose URLs currently answer 2xx/3xx/206; drops 4xx/5xx
+     * and probe timeouts so the player is not handed dead links (bad IO errors).
+     */
+    private suspend fun pruneDeadStreams(streams: List<RawStream>): List<RawStream> {
+        if (streams.size <= 1) return streams
+        val gate = Semaphore(4)
+        return coroutineScope {
+            streams.map { raw -> async {
+                gate.acquire()
+                try {
+                    val alive = withTimeoutOrNull(4_000L) {
+                        HttpKit.aliveCheck(raw.url, raw.referer, raw.extraHeaders) != false
+                    } ?: false
+                    raw to alive
+                } finally { gate.release() }
+            } }.awaitAll().filter { it.second }.map { it.first }
+        }
+    }
+
     private suspend fun resolveMovies4u(
         spec: ServerSpec,
         tmdbId: Int,
@@ -3337,7 +3365,7 @@ object StreamEngine {
             val posts = rankedPosts(hits, title, year)
             if (posts.isEmpty()) throw CleanMissException("no match")
             val expectedYear = year?.toIntOrNull()
-            val result = firstSuccessParallel(posts, limit = 2) { postUrl ->
+            val result = firstSuccessParallel(posts, limit = 3) { postUrl ->
                 m4uTryPost(spec, base, postUrl, hits, expectedYear, type, season, episode)
             }
             result ?: throw CleanMissException("no file links")
@@ -3418,7 +3446,7 @@ object StreamEngine {
                 }
             }
         }
-        return out.takeIf { it.isNotEmpty() }
+        return pruneDeadStreams(out).takeIf { it.isNotEmpty() }
     }
 
     private const val VIDBOLT_ORIGIN = "https://vidbolt.xyz"
