@@ -372,9 +372,12 @@ object StreamEngine {
                             ResolvedEmit(raw, h, tag, fetchMs, masterText)
                         }
                         !raw.isM3u8 && probeManifests -> {
+                            // Skip the network probe when quality is already known from the label.
                             val t0 = System.currentTimeMillis()
-                            val measured = HttpKit.resolveHeight(raw.url, raw.referer, raw.extraHeaders)
-                            val fetchMs = (System.currentTimeMillis() - t0).takeIf { measured > 0 }
+                            val measured = if (raw.qualityHint > 0) 0
+                            else HttpKit.resolveHeight(raw.url, raw.referer, raw.extraHeaders)
+                            val fetchMs = if (raw.qualityHint > 0) 0L
+                            else (System.currentTimeMillis() - t0).takeIf { measured > 0 }
                             val h = maxOf(measured, raw.qualityHint).takeIf { it > 0 }
                                 ?: run {
                                 val fromUrl = ManifestKit.resolutionFromUrl(raw.url)
