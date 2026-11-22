@@ -1051,10 +1051,10 @@ object StreamEngine {
         val origin = h?.optString("origin")?.takeIf { it.isNotBlank() }
         val out = LinkedHashMap<String, String>()
         if (referer == null && origin == null) {
-            // mwVault: the CDN 428-rejects browser UAs and any Referer header.
+            // One CDN rejects browser UAs and any Referer header.
             out["User-Agent"] = "ExoPlayer"
         } else {
-            // mbVault: the CDN requires a browser UA plus the API-provided origin/referer.
+            // Another CDN requires a browser UA plus the API-provided origin/referer.
             out["User-Agent"] = HttpKit.userAgent
             referer?.let { out["Referer"] = it }
             origin?.let { out["Origin"] = it }
@@ -1254,8 +1254,8 @@ object StreamEngine {
             )
         }
 
-        // New Atlantic networks expose JSON with direct source URLs (hls) plus subtitle
-        // tracks. Try the whole provider list; first usable HLS source wins.
+        // These networks expose JSON with direct source URLs (hls) plus subtitle tracks.
+        // Try the whole provider list; first usable HLS source wins.
         val providers = listOf("vidbox", "q62", "amnesty", "shegu", "moscow", "mbox")
         for (provider in providers) {
             val base = if (type == "tv")
@@ -1477,7 +1477,7 @@ object StreamEngine {
         url.contains("macdn.aoneroom.com/other/", ignoreCase = true)
 
     private const val MOVIEBOX_MOBILE_SIGN_KEY = "NzZpUmwwN3MweFNOOWpxbUVXQXQ3OUVCSlp1bElRSXNWNjRGWnIyTw=="
-    // MovieBox api hosts: apig.inmoviebox.com, apii.inmoviebox.com, api7.aoneroom.com
+    // Known API hosts for this provider.
     private val MOVIEBOX_MOBILE_HOSTS = listOf(
         "https://api6.aoneroom.com", "https://api5.aoneroom.com", "https://api4.aoneroom.com",
         "https://api4sg.aoneroom.com", "https://api3.aoneroom.com", "https://api6sg.aoneroom.com",
@@ -2980,62 +2980,88 @@ object StreamEngine {
     ): List<RawStream> {
         val (title, year) = titleYear(tmdbId, type)
         fun enc(s: String) = java.net.URLEncoder.encode(s, "UTF-8")
-        var base = ""
-        var search = ""
-        var fallback: Pair<String, String>? = null
         val bases = (listOfNotNull(Domains.base("hindmoviez")) +
             listOf("https://hindmovie.one")).distinct()
-        for (candidate in bases) {
-            val html = fetchText("$candidate/?s=${enc(title)}", candidate, timeoutSec = 12)
-            if (html.isNullOrBlank()) continue
-            if (titleHits(html, candidate).isNotEmpty()) { base = candidate; search = html; break }
-            if (fallback == null) fallback = candidate to html
-        }
-        if (base.isBlank()) {
-            val f = fallback ?: throw CleanMissException("no search answer")
-            base = f.first
-            search = f.second
-        }
-        val posts = rankedHits(titleHits(search, base), title, year)
-        if (posts.isEmpty()) throw CleanMissException("no match")
-        val out = mutableListOf<RawStream>()
-        for (postUrl in posts) {
-            val post = fetchText(postUrl, base) ?: continue
-            val links = episodeOrSeason(
-                headingAnchorHits(post, postUrl, LINK_HOST_RE),
-                { "${it.second} ${it.first}" }, type, season, episode,
-            ).take(4)
-            for ((href, label) in links) {
-                val linkPage = fetchText(href, postUrl) ?: continue
-                val name = HTML_TITLE.find(linkPage)?.groupValues?.get(1)?.trim().orEmpty()
-                val doc = Jsoup.parse(linkPage, href)
-                val boldb = doc.select("a[href]")
-                    .firstOrNull { it.attr("href").contains("boldb.site/?id=") }
-                    ?.attr("href")
-                val hshare = doc.select("a[href]")
-                    .firstOrNull { it.attr("href").contains("hshare.lol/?id=") }
-                    ?.attr("abs:href")
-                val hosts = if (boldb != null) {
-                    val rawId = java.net.URLDecoder.decode(boldb.substringAfter("id=", ""), "UTF-8")
-                    val token = Base64Kit.encode(rawId.toByteArray(Charsets.UTF_8))
-                        .trimEnd('=').replace('+', '-').replace('/', '_')
-                    val filePage = fetchText("https://boldb.site/dl/$token", "https://boldb.site/")
-                    filePage?.let { fileHostLinks(it, "https://boldb.site/") }.orEmpty()
-                } else if (hshare != null) {
-                    val mirror = fetchText(hshare, href) ?: continue
-                    fileHostLinks(mirror, hshare)
-                } else {
-                    fileHostLinks(linkPage, href)
+        val searchKey = "hindmoviez|$tmdbId|$type"
+        var base = cachedSearchBase("hindmoviez").orEmpty()
+        var hits = if (base.isNotBlank()) cachedSearchHits(searchKey).orEmpty() else emptyList()
+        if (hits.isEmpty()) {
+            val probed = withTimeoutOrNull(14_000L) {
+                coroutineScope {
+                    bases.map { candidate -> async {
+                        candidate to fetchText("$candidate/?s=${enc(title)}", candidate, timeoutSec = 8)
+                    } }.awaitAll()
                 }
-                if (hosts.isEmpty()) continue
-                val language = LinkNaming.languageLabel(label).ifBlank { releaseLanguageOf(name) }
-                val size = normalizeSizeToken(label).ifBlank { normalizeSizeToken(name) }
-                val ref = if (boldb != null) "https://boldb.site/" else hshare ?: href
-                out += hostStreams(spec, hosts, label.ifBlank { name }, ref, language, size)
             }
-            if (out.isNotEmpty()) return out.distinctBy { it.url }
+            val found = probed?.firstOrNull { (candidate, html) ->
+                html.let { it != null && titleHits(it, candidate).isNotEmpty() }
+            }
+            if (found != null) {
+                base = found.first
+                hits = titleHits(found.second.orEmpty(), base)
+            } else {
+                val fallback = probed?.firstOrNull { it.second != null }
+                    ?: throw CleanMissException("no search answer")
+                base = fallback.first
+                hits = titleHits(fallback.second.orEmpty(), base)
+            }
+            rememberSearchBase("hindmoviez", base)
+            rememberSearchHits(searchKey, hits)
         }
+        val posts = rankedHits(hits, title, year)
+        if (posts.isEmpty()) throw CleanMissException("no match")
+        val result = withTimeoutOrNull(20_000L) {
+            firstSuccessParallel(posts, limit = 2) { postUrl ->
+                linkIndexTryPost(spec, base, postUrl, type, season, episode)
+            }
+        }
+        if (result != null) return result.distinctBy { it.url }
         throw CleanMissException("no file links")
+    }
+
+    private suspend fun linkIndexTryPost(
+        spec: ServerSpec,
+        base: String,
+        postUrl: String,
+        type: String,
+        season: Int,
+        episode: Int,
+    ): List<RawStream>? {
+        val post = fetchText(postUrl, base) ?: return null
+        val links = episodeOrSeason(
+            headingAnchorHits(post, postUrl, LINK_HOST_RE),
+            { "${it.second} ${it.first}" }, type, season, episode,
+        ).take(4)
+        val out = mutableListOf<RawStream>()
+        for ((href, label) in links) {
+            val linkPage = fetchText(href, postUrl) ?: continue
+            val name = HTML_TITLE.find(linkPage)?.groupValues?.get(1)?.trim().orEmpty()
+            val doc = Jsoup.parse(linkPage, href)
+            val boldb = doc.select("a[href]")
+                .firstOrNull { it.attr("href").contains("boldb.site/?id=") }
+                ?.attr("href")
+            val hshare = doc.select("a[href]")
+                .firstOrNull { it.attr("href").contains("hshare.lol/?id=") }
+                ?.attr("abs:href")
+            val hosts = if (boldb != null) {
+                val rawId = java.net.URLDecoder.decode(boldb.substringAfter("id=", ""), "UTF-8")
+                val token = Base64Kit.encode(rawId.toByteArray(Charsets.UTF_8))
+                    .trimEnd('=').replace('+', '-').replace('/', '_')
+                val filePage = fetchText("https://boldb.site/dl/$token", "https://boldb.site/")
+                filePage?.let { fileHostLinks(it, "https://boldb.site/") }.orEmpty()
+            } else if (hshare != null) {
+                val mirror = fetchText(hshare, href) ?: continue
+                fileHostLinks(mirror, hshare)
+            } else {
+                fileHostLinks(linkPage, href)
+            }
+            if (hosts.isEmpty()) continue
+            val language = LinkNaming.languageLabel(label).ifBlank { releaseLanguageOf(name) }
+            val size = normalizeSizeToken(label).ifBlank { normalizeSizeToken(name) }
+            val ref = if (boldb != null) "https://boldb.site/" else hshare ?: href
+            out += hostStreams(spec, hosts, label.ifBlank { name }, ref, language, size)
+        }
+        return out.takeIf { it.isNotEmpty() }
     }
 
     private suspend fun resolveRotatorFiles(
@@ -3274,99 +3300,122 @@ object StreamEngine {
         if (type != "movie" && (season <= 0 || episode <= 0)) {
             throw CleanMissException("tv request without season/episode")
         }
-        val (title, year) = titleYear(tmdbId, type)
-        fun enc(s: String) = java.net.URLEncoder.encode(s, "UTF-8")
-        val bases = (listOfNotNull(Domains.base("movies4u")) + listOf("https://new8.movies4u.garden"))
-            .map { it.trimEnd('/') }
-            .filter { it.contains("movies4u", ignoreCase = true) }
-            .distinct()
-        var base = bases.firstOrNull().orEmpty()
-        var hits: List<Pair<String, String>> = emptyList()
-        for (candidate in bases) {
-            val json = fetchText(
-                "$candidate/lookup.php?q=${enc(title)}", candidate, timeoutSec = 12,
-                headers = mapOf("Accept" to "application/json"),
-            ) ?: continue
-            val parsed = m4uSearchHits(json, candidate)
-            if (parsed.isNotEmpty()) {
-                base = candidate
-                hits = parsed
-                break
-            }
-        }
-        if (hits.isEmpty()) throw CleanMissException("no search hits")
-        val posts = rankedPosts(hits, title, year)
-        if (posts.isEmpty()) throw CleanMissException("no match")
-        val expectedYear = year?.toIntOrNull()
-
-        for (postUrl in posts) {
-            val post = fetchText(postUrl, base, timeoutSec = 14) ?: continue
-            val postTitle = (HTML_TITLE.find(post)?.groupValues?.get(1)?.trim().orEmpty())
-                .ifBlank { hits.firstOrNull { it.first == postUrl }?.second.orEmpty() }
-            val postYear = TitleMatch.parseYear(postTitle)
-            if (!postYearMatches(expectedYear, postYear, type)) continue
-            val groups = m4uGroups(post, postUrl).filter { releaseHeightOf(it.heading) >= 720 }
-            if (groups.isEmpty()) continue
-            val postAudio = LinkNaming.languageLabel(postTitle)
-            val out = mutableListOf<RawStream>()
-            val linksPageCache = mutableMapOf<String, List<FileGroup>>()
-            if (type == "movie") {
-                for (group in groups.sortedByDescending { releaseHeightOf(it.heading) }.take(2)) {
-                    val audio = groupAudioLabel(group.heading, postAudio)
-                    val size = normalizeSizeToken(group.heading)
-                    val direct = group.links.filter { HUB_GATEWAY_HOST_ALT.containsMatchIn(it) }
-                    val targets = if (direct.isNotEmpty()) {
-                        listOf(direct)
-                    } else {
-                        val linksPageUrl = group.links.firstOrNull() ?: continue
-                        // Every quality on a movie post points at the same links page; fetch once.
-                        val fileGroups = linksPageCache[linksPageUrl] ?: m4uGroups(
-                            fetchText(linksPageUrl, postUrl, timeoutSec = 14) ?: continue,
-                            linksPageUrl,
-                        ).also { linksPageCache[linksPageUrl] = it }
-                        val height = releaseHeightOf(group.heading)
-                        val exact = fileGroups.firstOrNull {
-                            size.isNotBlank() && normalizeSizeToken(it.heading) == size
-                        }
-                        val target = exact
-                            ?: fileGroups.filter { releaseHeightOf(it.heading) == height }.firstOrNull()
-                            ?: fileGroups.sortedByDescending { releaseHeightOf(it.heading) }.firstOrNull()
-                            ?: continue
-                        listOf(target.links)
-                    }
-                    for (links in targets) {
-                        out += fileLinksFor(spec, links, postUrl, audio, group.heading, size)
-                    }
-                    if (out.size >= 6) break
-                }
-            } else {
-                val chosen = groups.filter { seasonPackMatches(it.heading, season) }
-                    .sortedByDescending { releaseHeightOf(it.heading) }
-                    .firstOrNull()
-                if (chosen != null) {
-                    val audio = groupAudioLabel(chosen.heading, postAudio)
-                    val size = normalizeSizeToken(chosen.heading)
-                    val direct = chosen.links.filter { HUB_GATEWAY_HOST_ALT.containsMatchIn(it) }
-                    if (direct.isNotEmpty()) {
-                        out += fileLinksFor(spec, direct, postUrl, audio, chosen.heading, size)
-                    } else {
-                        val episodeUrl = chosen.links.firstOrNull()
-                        val episodePage = episodeUrl?.let { fetchText(it, postUrl, timeoutSec = 14) }
-                        if (episodeUrl != null && episodePage != null) {
-                            val epGroups = m4uGroups(episodePage, episodeUrl)
-                            val targets = epGroups.filter { m4uEpisodeOf(it.heading) == episode }
-                                .ifEmpty { epGroups.filter { m4uEpisodeOf(it.heading) == null } }
-                            for (target in targets) {
-                                out += fileLinksFor(spec, target.links, postUrl, audio, chosen.heading, size)
-                                if (out.size >= 6) break
+        return withTimeoutOrNull(20_000L) {
+            val (title, year) = titleYear(tmdbId, type)
+            fun enc(s: String) = java.net.URLEncoder.encode(s, "UTF-8")
+            val bases = (listOfNotNull(Domains.base("movies4u")) + listOf("https://new8.movies4u.garden"))
+                .map { it.trimEnd('/') }
+                .filter { it.contains("movies4u", ignoreCase = true) }
+                .distinct()
+            val searchKey = "movies4u|$tmdbId|$type"
+            var base = cachedSearchBase("movies4u").orEmpty()
+            var hits = if (base.isNotBlank()) cachedSearchHits(searchKey).orEmpty() else emptyList()
+            if (hits.isEmpty()) {
+                val probe = withTimeoutOrNull(12_000L) {
+                    coroutineScope {
+                        bases.map { candidate -> async {
+                            candidate to fetchText(
+                                "$candidate/lookup.php?q=${enc(title)}", candidate, timeoutSec = 8,
+                                headers = mapOf("Accept" to "application/json"),
+                            )
+                        } }.awaitAll()
+                            .firstOrNull { (candidate, json) ->
+                                json?.let { m4uSearchHits(it, candidate).isNotEmpty() } == true
                             }
+                    }
+                }
+                if (probe == null) throw CleanMissException("no search hits")
+                base = probe.first
+                hits = m4uSearchHits(probe.second.orEmpty(), base)
+                if (hits.isEmpty()) throw CleanMissException("no search hits")
+                rememberSearchBase("movies4u", base)
+                rememberSearchHits(searchKey, hits)
+            }
+            val posts = rankedPosts(hits, title, year)
+            if (posts.isEmpty()) throw CleanMissException("no match")
+            val expectedYear = year?.toIntOrNull()
+            val result = firstSuccessParallel(posts, limit = 2) { postUrl ->
+                m4uTryPost(spec, base, postUrl, hits, expectedYear, type, season, episode)
+            }
+            result ?: throw CleanMissException("no file links")
+        } ?: throw CleanMissException("timeout")
+    }
+
+    private suspend fun m4uTryPost(
+        spec: ServerSpec,
+        base: String,
+        postUrl: String,
+        hits: List<Pair<String, String>>,
+        expectedYear: Int?,
+        type: String,
+        season: Int,
+        episode: Int,
+    ): List<RawStream>? {
+        val post = fetchText(postUrl, base, timeoutSec = 10) ?: return null
+        val postTitle = (HTML_TITLE.find(post)?.groupValues?.get(1)?.trim().orEmpty())
+            .ifBlank { hits.firstOrNull { it.first == postUrl }?.second.orEmpty() }
+        val postYear = TitleMatch.parseYear(postTitle)
+        if (!postYearMatches(expectedYear, postYear, type)) return null
+        val groups = m4uGroups(post, postUrl).filter { releaseHeightOf(it.heading) >= 720 }
+        if (groups.isEmpty()) return null
+        val postAudio = LinkNaming.languageLabel(postTitle)
+        val out = mutableListOf<RawStream>()
+        val linksPageCache = mutableMapOf<String, List<FileGroup>>()
+        if (type == "movie") {
+            for (group in groups.sortedByDescending { releaseHeightOf(it.heading) }.take(2)) {
+                val audio = groupAudioLabel(group.heading, postAudio)
+                val size = normalizeSizeToken(group.heading)
+                val direct = group.links.filter { HUB_GATEWAY_HOST_ALT.containsMatchIn(it) }
+                val targets = if (direct.isNotEmpty()) {
+                    listOf(direct)
+                } else {
+                    val linksPageUrl = group.links.firstOrNull() ?: continue
+                    // Every quality on a movie post points at the same links page; fetch once.
+                    val fileGroups = linksPageCache[linksPageUrl] ?: m4uGroups(
+                        fetchText(linksPageUrl, postUrl, timeoutSec = 10) ?: continue,
+                        linksPageUrl,
+                    ).also { linksPageCache[linksPageUrl] = it }
+                    val height = releaseHeightOf(group.heading)
+                    val exact = fileGroups.firstOrNull {
+                        size.isNotBlank() && normalizeSizeToken(it.heading) == size
+                    }
+                    val target = exact
+                        ?: fileGroups.filter { releaseHeightOf(it.heading) == height }.firstOrNull()
+                        ?: fileGroups.sortedByDescending { releaseHeightOf(it.heading) }.firstOrNull()
+                        ?: continue
+                    listOf(target.links)
+                }
+                for (links in targets) {
+                    out += fileLinksFor(spec, links, postUrl, audio, group.heading, size)
+                }
+                if (out.size >= 6) break
+            }
+        } else {
+            val chosen = groups.filter { seasonPackMatches(it.heading, season) }
+                .sortedByDescending { releaseHeightOf(it.heading) }
+                .firstOrNull()
+            if (chosen != null) {
+                val audio = groupAudioLabel(chosen.heading, postAudio)
+                val size = normalizeSizeToken(chosen.heading)
+                val direct = chosen.links.filter { HUB_GATEWAY_HOST_ALT.containsMatchIn(it) }
+                if (direct.isNotEmpty()) {
+                    out += fileLinksFor(spec, direct, postUrl, audio, chosen.heading, size)
+                } else {
+                    val episodeUrl = chosen.links.firstOrNull()
+                    val episodePage = episodeUrl?.let { fetchText(it, postUrl, timeoutSec = 10) }
+                    if (episodeUrl != null && episodePage != null) {
+                        val epGroups = m4uGroups(episodePage, episodeUrl)
+                        val targets = epGroups.filter { m4uEpisodeOf(it.heading) == episode }
+                            .ifEmpty { epGroups.filter { m4uEpisodeOf(it.heading) == null } }
+                        for (target in targets) {
+                            out += fileLinksFor(spec, target.links, postUrl, audio, chosen.heading, size)
+                            if (out.size >= 6) break
                         }
                     }
                 }
             }
-            if (out.isNotEmpty()) return out.distinctBy { it.url }
         }
-        throw CleanMissException("no file links")
+        return out.takeIf { it.isNotEmpty() }
     }
 
     private const val VIDBOLT_ORIGIN = "https://vidbolt.xyz"
@@ -3415,6 +3464,39 @@ object StreamEngine {
     }
     private const val FSL_LANDING_PROBE = "/?re=vg&t=2"
     private val fslBaseCache = java.util.concurrent.ConcurrentHashMap<String, Pair<String, Long>>()
+
+    private const val SEARCH_CACHE_TTL_MS = 15 * 60 * 1000L
+    private val searchBaseCache = java.util.concurrent.ConcurrentHashMap<String, Pair<String, Long>>()
+    private val searchHitsCache = java.util.concurrent.ConcurrentHashMap<String, Pair<List<Pair<String, String>>, Long>>()
+
+    private fun cachedSearchBase(family: String): String? =
+        searchBaseCache[family]?.takeIf { System.currentTimeMillis() - it.second < SEARCH_CACHE_TTL_MS }?.first
+
+    private fun rememberSearchBase(family: String, base: String) {
+        searchBaseCache[family] = base to System.currentTimeMillis()
+    }
+
+    private fun cachedSearchHits(key: String): List<Pair<String, String>>? =
+        searchHitsCache[key]?.takeIf { System.currentTimeMillis() - it.second < SEARCH_CACHE_TTL_MS }?.first
+
+    private fun rememberSearchHits(key: String, hits: List<Pair<String, String>>) {
+        if (hits.isNotEmpty()) searchHitsCache[key] = hits to System.currentTimeMillis()
+    }
+
+    /** Runs [body] over [items] in small chunks, returning the first non-null result. */
+    private suspend fun firstSuccessParallel(
+        items: List<String>,
+        limit: Int = 2,
+        body: suspend (String) -> List<RawStream>?,
+    ): List<RawStream>? =
+        if (items.isEmpty()) null
+        else coroutineScope {
+            items.chunked(limit).firstNotNullOfOrNull { chunk ->
+                chunk.map { item -> async { runCatching { body(item) }.getOrNull() } }
+                    .awaitAll()
+                    .firstNotNullOfOrNull { it }
+            }
+        }
 
     internal fun fslIsLanding(html: String): Boolean =
         html.contains("qikly.pro/host") || html.contains("id=\"stx\"")
@@ -4263,9 +4345,7 @@ object StreamEngine {
         val page = if (type == "movie") "$base/embed/movie/$tmdbId"
         else "$base/embed/tv/$tmdbId/$season/$episode"
 
-        // The service sits behind Cloudflare. Its API serves real browser (or header-less)
-        // requests, but a labelled user agent is refused: NiceHttp's default UA gets a 403.
-        // Explicitly clearing the UA lets the request through.
+        // Requests are refused when a user agent is sent; clear it.
         val pageHeaders = mapOf("Accept" to "*/*", "User-Agent" to "")
         val html = withTimeoutOrNull(12_000L) {
             catching { app.get(page, timeout = 12, headers = pageHeaders).text }.getOrNull()
@@ -4295,8 +4375,7 @@ object StreamEngine {
             )
         }
 
-        // Source API first: it can return streams on an external CDN (hscow.com) that is
-        // not Cloudflare-gated. Providers are probed one at a time, API order.
+        // Source API first: its streams may sit on an open CDN.
         if (token.isNotBlank()) {
             val sourcePath = if (type == "movie") "movie/$tmdbId" else "tv/$tmdbId/$season/$episode"
             val apiHeaders = mapOf("Accept" to "application/json", "User-Agent" to "")
@@ -4323,8 +4402,7 @@ object StreamEngine {
             }
         }
 
-        // Prefer external-CDN sources: Vidrift-hosted paths (embed/mb) are Forbidden to
-        // direct clients, so drop them when anything playable was found.
+        // Prefer external-CDN sources over refused host paths.
         if (out.isNotEmpty()) {
             val external = out.filter { !it.url.contains(".vidrift.net", true) }
             if (external.isNotEmpty()) {
@@ -4333,14 +4411,14 @@ object StreamEngine {
             }
         }
 
-        // Warm orion streams baked into the page (fallback).
+        // Fallback: streams baked into the page.
         if (out.isEmpty()) {
             for ((rel, label, height) in vidriftStreams(html)) {
                 add(rel, label, height)
             }
         }
 
-        // evion fallback
+        // Last-resort single-stream fallback.
         if (out.isEmpty()) {
             val evion = meta?.optString("evionUrl").orEmpty()
             if (evion.isNotBlank() && evion.contains(".m3u8", true)) {

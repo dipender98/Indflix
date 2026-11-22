@@ -204,9 +204,7 @@ class M3uPlaylistsTest {
 
     @Test
     fun decode_survives_the_mainurl_prefix_that_fixurl_prepends() {
-        // CloudStream's APIRepository.load() calls api.fixUrl() on the card url.
-        // Because the scheme does not start with "http", the provider receives
-        // "https://www.themoviedb.org/indstream-m3u://item?..." on the device.
+        // The scheme does not start with "http", so host URLs get prefixed.
         val entry = M3uPlaylists.Entry(
             name = "3AW (1080p)",
             url = "https://3awlive.akamaized.net/hls/live/2032295/3AW/index.m3u8",
