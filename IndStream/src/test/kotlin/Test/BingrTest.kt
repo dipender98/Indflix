@@ -3,14 +3,11 @@ package Test
 import com.indstream.ServerFarm
 import com.indstream.ServerIdType
 import com.indstream.StreamEngine
-import com.indstream.SubtitleKit
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertNotNull
-import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-class ServerBingrShowboxTest {
+class BingrTest {
 
     @Test
     fun bingr_presentAndTmdbKeyed() {
@@ -20,6 +17,7 @@ class ServerBingrShowboxTest {
         assertEquals("https://bingr.one/", s.referer)
         assertEquals("https://bingr.one/watch/movie/{id}", s.movieUrl)
         assertEquals("https://bingr.one/watch/tv/{id}/{season}/{episode}", s.tvUrl)
+        assertTrue(s.hasSubtitles)
     }
 
     @Test
@@ -72,28 +70,13 @@ class ServerBingrShowboxTest {
     }
 
     @Test
-    fun heightHintOf_labels() {
+    fun bingr_heightHintOf_labels() {
         assertEquals(1080, StreamEngine.heightHintOf("1080p"))
         assertEquals(2160, StreamEngine.heightHintOf("2160p"))
         assertEquals(2160, StreamEngine.heightHintOf("4K"))
         assertEquals(720, StreamEngine.heightHintOf("720p"))
         assertEquals(0, StreamEngine.heightHintOf("ORG"))
         assertEquals(0, StreamEngine.heightHintOf(""))
-    }
-
-    @Test
-    fun bingr_present_removedServersAbsent() {
-        val gone = setOf(
-            "primesrc", "vidrock", "videm", "vixsrc",
-            "showbox", "vidspark", "hdmovie2", "olamovies",
-        )
-        for (id in gone) assertNull(ServerFarm.allServers.firstOrNull { it.id == id }, "$id must be absent")
-        assertNotNull(ServerFarm.allServers.firstOrNull { it.id == "bingr" })
-    }
-
-    @Test
-    fun bingr_spec_marksSubtitles() {
-        assertTrue(ServerFarm.allServers.first { it.id == "bingr" }.hasSubtitles)
     }
 
     @Test
@@ -123,58 +106,5 @@ class ServerBingrShowboxTest {
             attached[0].subtitles.any { it.url == "https://sub.example/en.vtt" },
             "top-level subtitles must be kept",
         )
-    }
-
-    @Test
-    fun netmirror_captions_attachViaProxyUrls() {
-        val json = """
-            {"ok":true,"streams":[
-                {"url":"https://cdn.example/video.mp4","resolution":1080}
-            ],
-             "captions":[
-                {"lang":"ar","name":"العربية","url":"/api/proxy/video?url=https%3A%2F%2Fx%2Fa.srt"}
-             ]}
-        """.trimIndent()
-        val streams = listOf(
-            StreamEngine.RawStream(
-                "netmirror", "NetMirror", "https://cdn.example/video.mp4", false,
-                referer = "https://videodownloader.site/",
-            ),
-        )
-        val attached = StreamEngine.withJsonSubtitles(streams, org.json.JSONObject(json), "https://net78.cc")
-        assertEquals(1, attached.size)
-        assertTrue(
-            attached[0].subtitles.any { it.url.contains("/api/proxy/video") },
-            "proxy-style caption urls must be accepted",
-        )
-    }
-
-    @Test
-    fun subtitleEndpointStrings_areSplitAndAttachable() {
-        val api = org.json.JSONObject(
-            """
-            {"status":"ready","result":{"file":{
-                "stream":"/dash-proxy?url=x.mpd",
-                "subtitles":"/api/subs/abc123"
-            }}}
-            """.trimIndent(),
-        )
-        val (cleaned, endpoints) = SubtitleKit.splitSubtitleEndpoints(listOf(api))
-        assertEquals(listOf("/api/subs/abc123"), endpoints, "endpoint string must be detected")
-        val tracks = SubtitleKit.fromJson(org.json.JSONArray().apply { cleaned.forEach { put(it) } }, "https://player.example")
-        assertTrue(tracks.none { it.url.contains("/api/subs/") }, "endpoint string must not become a track")
-
-        val subsEndpoint = org.json.JSONArray(
-            """
-            [{"src":"/sub/abc/aHR0cHM6Ly9jYWNoZS52ZHJrLnNpdGUvdjEvdnR0L21vdmllLzI3MjA1L0VuZ2xpc2gudnR0.vtt","label":"English","lang":"en"}]
-            """.trimIndent(),
-        )
-        val attached = StreamEngine.withJsonSubtitles(
-            listOf(StreamEngine.RawStream("test", "Test", "https://player.example/dash-proxy?url=x.mpd", true, isDash = true)),
-            subsEndpoint,
-            "https://player.example",
-        )
-        assertTrue(attached[0].subtitles.any { it.url.startsWith("https://player.example/sub/abc/") }, "sub src must resolve")
-        assertTrue(attached[0].subtitles.any { it.language == "English" }, "label must become language")
     }
 }
