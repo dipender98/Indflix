@@ -4262,8 +4262,13 @@ object StreamEngine {
         val base = "https://embed.vidrift.net"
         val page = if (type == "movie") "$base/embed/movie/$tmdbId"
         else "$base/embed/tv/$tmdbId/$season/$episode"
+
+        // The service sits behind Cloudflare. Its API serves real browser (or header-less)
+        // requests, but a labelled user agent is refused: NiceHttp's default UA gets a 403.
+        // Explicitly clearing the UA lets the request through.
+        val pageHeaders = mapOf("Accept" to "*/*", "User-Agent" to "")
         val html = withTimeoutOrNull(12_000L) {
-            catching { app.get(page, timeout = 12, headers = okHeaders("$base/")).text }.getOrNull()
+            catching { app.get(page, timeout = 12, headers = pageHeaders).text }.getOrNull()
         } ?: run { Log.w("Vidrift", "embed no response"); return emptyList() }
 
         val mi = html.indexOf("var embedMeta")
@@ -4271,75 +4276,76 @@ object StreamEngine {
         val json = if (brace >= 0) extractBalancedJson(html, brace) else null
         val meta = json?.let { catching { org.json.JSONObject(it) }.getOrNull() }
 
+        val token = meta?.optString("playbackToken").orEmpty()
+        val parent = meta?.optString("parent").orEmpty()
         val out = ArrayList<RawStream>()
 
-        // Warm orion streams baked into the page (preferred, with dubs).
-        val found = vidriftStreams(html)
-        for ((rel, label, height) in found) {
-            if (height > 0 && height < 720) continue
-            val abs = if (rel.startsWith("http", true)) rel else base + rel
+        fun add(uRaw: String, name: String, maxH: Int) {
+            if (maxH > 0 && maxH < 720) return
+            val u = uRaw.trim()
+            if (u.isBlank()) return
+            if (!u.contains(".m3u8", true) && !u.contains(".mp4", true)) return
+            val abs = if (u.startsWith("http", true)) u else base + u
+            val label = vidriftLabel(name).ifBlank { LinkNaming.languageLabel(name) }
             out += RawStream(
                 serverId = spec.id, serverName = spec.name,
                 url = abs, isM3u8 = abs.contains(".m3u8", true),
-                referer = "$base/", qualityHint = height, audioLabel = label,
-                extraHeaders = mapOf("User-Agent" to HttpKit.userAgent, "Referer" to "$base/"),
+                referer = "$base/", qualityHint = maxH, audioLabel = label,
+                extraHeaders = mapOf("Referer" to "$base/"),
             )
         }
 
-        // Fall back to the source API when the warm list is empty/filtered out.
-        if (out.isEmpty()) {
-            val token = meta?.optString("playbackToken").orEmpty()
-            if (token.isNotBlank()) {
-                val sourcePath = if (type == "movie") "movie/$tmdbId" else "tv/$tmdbId/$season/$episode"
-                val parent = meta?.optString("parent").orEmpty()
-                for (provider in listOf("orion", "titan", "atlas", "lyra")) {
-                    val url = "$base/api/source/$sourcePath?token=${java.net.URLEncoder.encode(token, "UTF-8")}" +
-                        "&provider=$provider&parent=${java.net.URLEncoder.encode(parent, "UTF-8")}"
-                    val resp = withTimeoutOrNull(12_000L) {
-                        catching { app.get(url, timeout = 12, headers = okHeaders("$base/")).text }.getOrNull()
+        // Source API first: it can return streams on an external CDN (hscow.com) that is
+        // not Cloudflare-gated. Providers are probed one at a time, API order.
+        if (token.isNotBlank()) {
+            val sourcePath = if (type == "movie") "movie/$tmdbId" else "tv/$tmdbId/$season/$episode"
+            val apiHeaders = mapOf("Accept" to "application/json", "User-Agent" to "")
+            for (provider in listOf("titan", "atlas", "lyra", "orion")) {
+                if (out.isNotEmpty()) break
+                val url = "$base/api/source/$sourcePath?token=${java.net.URLEncoder.encode(token, "UTF-8")}" +
+                    "&provider=$provider&parent=${java.net.URLEncoder.encode(parent, "UTF-8")}"
+                val resp = withTimeoutOrNull(12_000L) {
+                    catching { app.get(url, timeout = 12, headers = apiHeaders).text }.getOrNull()
+                }
+                val jo = resp?.let { catching { org.json.JSONObject(it) }.getOrNull() }
+                val streamsArr = jo?.optJSONArray("streams") ?: continue
+                for (i in 0 until streamsArr.length()) {
+                    val o = streamsArr.optJSONObject(i) ?: continue
+                    val u = o.optString("url").ifBlank { o.optString("proxyUrl") }
+                    val rungs = o.optJSONArray("rungs")
+                    var maxH = 0
+                    if (rungs != null) for (j in 0 until rungs.length()) {
+                        val r = rungs.optJSONObject(j) ?: continue
+                        maxH = maxOf(maxH, r.optInt("height"))
                     }
-                    val jo = resp?.let { catching { org.json.JSONObject(it) }.getOrNull() }
-                    val streamsArr = jo?.optJSONArray("streams") ?: continue
-                    if (streamsArr.length() == 0) continue
-                    var added = 0
-                    for (i in 0 until streamsArr.length()) {
-                        val o = streamsArr.optJSONObject(i) ?: continue
-                        val u = o.optString("url").ifBlank { o.optString("proxyUrl") }
-                        if (u.isBlank()) continue
-                        if (!u.contains(".m3u8", true) && !u.contains(".mp4", true)) continue
-                        val rungs = o.optJSONArray("rungs")
-                        var maxH = 0
-                        if (rungs != null) for (j in 0 until rungs.length()) {
-                            val r = rungs.optJSONObject(j) ?: continue
-                            maxH = maxOf(maxH, r.optInt("height"))
-                        }
-                        if (maxH > 0 && maxH < 720) continue
-                        val abs = if (u.startsWith("http", true)) u else base + u
-                        val name = o.optString("name")
-                        val label = vidriftLabel(name).ifBlank { LinkNaming.languageLabel(name) }
-                        out += RawStream(
-                            serverId = spec.id, serverName = spec.name,
-                            url = abs, isM3u8 = abs.contains(".m3u8", true),
-                            referer = "$base/", qualityHint = maxH,
-                            audioLabel = label,
-                            extraHeaders = mapOf("User-Agent" to HttpKit.userAgent, "Referer" to "$base/"),
-                        )
-                        added++
-                    }
-                    if (added > 0) break
+                    add(u, o.optString("name"), maxH)
                 }
             }
         }
 
+        // Prefer external-CDN sources: Vidrift-hosted paths (embed/mb) are Forbidden to
+        // direct clients, so drop them when anything playable was found.
+        if (out.isNotEmpty()) {
+            val external = out.filter { !it.url.contains(".vidrift.net", true) }
+            if (external.isNotEmpty()) {
+                out.clear()
+                out.addAll(external)
+            }
+        }
+
+        // Warm orion streams baked into the page (fallback).
+        if (out.isEmpty()) {
+            for ((rel, label, height) in vidriftStreams(html)) {
+                add(rel, label, height)
+            }
+        }
+
         // evion fallback
-        val evion = meta?.optString("evionUrl").orEmpty()
-        if (out.isEmpty() && evion.isNotBlank() && evion.contains(".m3u8", true)) {
-            val abs = if (evion.startsWith("http", true)) evion else base + evion
-            out += RawStream(
-                serverId = spec.id, serverName = spec.name,
-                url = abs, isM3u8 = true, referer = "$base/",
-                extraHeaders = mapOf("User-Agent" to HttpKit.userAgent, "Referer" to "$base/"),
-            )
+        if (out.isEmpty()) {
+            val evion = meta?.optString("evionUrl").orEmpty()
+            if (evion.isNotBlank() && evion.contains(".m3u8", true)) {
+                add(evion, "", 0)
+            }
         }
 
         Log.d("Vidrift", "parsed ${out.size} streams for $type/$tmdbId")
