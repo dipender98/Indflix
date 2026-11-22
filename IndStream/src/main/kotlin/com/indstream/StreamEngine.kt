@@ -4414,6 +4414,10 @@ object StreamEngine {
             }
         }
 
+        if (out.any { it.qualityHint <= 0 }) {
+            out.clear()
+        }
+
         // Fallback: streams baked into the page.
         if (out.isEmpty()) {
             for ((rel, label, height) in vidriftStreams(html)) {
