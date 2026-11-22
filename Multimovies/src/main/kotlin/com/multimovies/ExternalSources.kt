@@ -927,8 +927,7 @@ internal fun parseVidoutBody(body: String): List<String> {
 
 object BingrExtractor {
 
-    private const val API = "https://api.bingr.one/api/stream"
-    internal val SRVS = listOf("s40", "s70", "s62", "s63")
+    private const val ORIGIN = "https://bingr.one"
 
     suspend fun extract(
         tmdbId: String,
@@ -940,33 +939,32 @@ object BingrExtractor {
         onSubtitle: (NxshaSubtitle) -> Unit,
     ): List<VidemSource> {
         if (!tmdbId.matches(Regex("""\d{2,10}"""))) return emptyList()
+        val page = if (type == "tv") "$ORIGIN/watch/tv/$tmdbId/${season ?: 1}/${episode ?: 1}"
+        else "$ORIGIN/watch/movie/$tmdbId"
+        val html = HttpKit.get(page, mapOf("Referer" to "$ORIGIN/"), 12_000L) ?: return emptyList()
+        val urls = bingrStreams(html)
         val out = ArrayList<VidemSource>()
-        for (srv in SRVS) {
-            val resp = HttpKit.postJson(
-                API,
-                bingrBody(srv, type, tmdbId, title, year, season, episode),
-                mapOf("Content-Type" to "application/json", "Origin" to "https://bingr.one"),
-                4_000L,
-            ) ?: continue
-            val root = runCatching { JSONObject(resp) }.getOrNull() ?: continue
-            root.optJSONArray("sources")?.let { arr ->
-                for (i in 0 until arr.length()) {
-                    val url = arr.optJSONObject(i)?.optString("url")?.takeIf { it.startsWith("http") } ?: continue
-                    out.add(VidemSource("Bingr", url, "", url.contains(".m3u8", true)))
-                }
-            }
-            root.optJSONArray("subtitles")?.let { arr ->
-                for (i in 0 until arr.length()) {
-                    val o = arr.optJSONObject(i) ?: continue
-                    val url = o.optString("url").ifBlank { o.optString("file") }
-                    if (url.startsWith("http")) {
-                        onSubtitle(NxshaSubtitle(o.optString("lang").ifBlank { o.optString("label").ifBlank { "sub" } }, url))
-                    }
-                }
-            }
-            if (out.size >= 4) break
+        for (url in urls.take(4)) {
+            out.add(VidemSource("Bingr", url, "", url.contains(".m3u8", true)))
         }
         return out.distinctBy { it.url }
+    }
+
+    private val BINGR_WATCH_M3U8 = Regex("""https?://[^"'\\s<>\\\\]+master\\.m3u8[^"'\\s<>\\\\]*""", RegexOption.IGNORE_CASE)
+
+    internal fun bingrStreams(html: String): List<String> {
+        if (html.isBlank()) return emptyList()
+        val text = html.replace("\\/", "/")
+            .replace("\\u0026", "&")
+            .replace("\\u003d", "=")
+            .replace("\\u003f", "?")
+            .replace("&amp;", "&")
+            .replace("\\", "")
+        return BINGR_WATCH_M3U8.findAll(text)
+            .map { it.value.trim().trimEnd('\\') }
+            .filter { it.startsWith("http") }
+            .distinct()
+            .toList()
     }
 }
 

@@ -18,8 +18,8 @@ class ServerBingrShowboxTest {
         assertEquals("Bingr", s.name)
         assertEquals(ServerIdType.TMDB, s.idType)
         assertEquals("https://bingr.one/", s.referer)
-        assertEquals("https://api.bingr.one/api/stream", s.movieUrl)
-        assertEquals("https://api.bingr.one/api/stream", s.tvUrl)
+        assertEquals("https://bingr.one/watch/movie/{id}", s.movieUrl)
+        assertEquals("https://bingr.one/watch/tv/{id}/{season}/{episode}", s.tvUrl)
     }
 
     @Test

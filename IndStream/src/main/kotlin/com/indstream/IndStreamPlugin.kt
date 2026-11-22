@@ -744,6 +744,8 @@ class IndStreamProvider : MainAPI() {
                 originalLangNow(),
                 onSubtitle = subtitleSink::emit,
                 onResolved = { labels -> StreamEngine.FastStartCache.patchLabels(cacheKey, labels) },
+                onManifest = { manifests -> StreamEngine.FastStartCache.patchManifests(cacheKey, manifests) },
+                onHeight = { heights -> StreamEngine.FastStartCache.patchHeights(cacheKey, heights) },
             )
         }
 

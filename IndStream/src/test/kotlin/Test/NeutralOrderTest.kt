@@ -322,4 +322,34 @@ class NeutralOrderTest {
             out.map { it.url },
         )
     }
+
+    @Test
+    fun cacheReplay_multiAudioManifest_splitsLanguages() = runBlocking {
+        val master = """
+            #EXTM3U
+            #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac",NAME="English",DEFAULT=YES,URI="track_en.m3u8"
+            #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac",NAME="Hindi",DEFAULT=NO,URI="track_hi.m3u8"
+            #EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1920x1080,AUDIO="aac"
+            1080p.m3u8
+        """.trimIndent()
+        val cached = stream(
+            "cacheHost",
+            url = "https://cdn.example.com/media/abc/master.m3u8",
+            qualityHint = 1080,
+        ).copy(audioLabel = "Multi")
+        val key = "replay-multi-" + System.nanoTime()
+        StreamEngine.FastStartCache.put(key, listOf(cached))
+        StreamEngine.FastStartCache.patchManifests(key, mapOf(cached.url to master))
+
+        val out = mutableListOf<com.lagradost.cloudstream3.utils.ExtractorLink>()
+        StreamEngine.emit(
+            StreamEngine.FastStartCache.get(key).orEmpty(),
+            onLink = { out.add(it) },
+            probeManifests = false,
+        )
+        assertEquals(2, out.size)
+        assertTrue(out.any { it.name.contains("English") })
+        assertTrue(out.any { it.name.contains("Hindi") })
+        assertEquals(2, out.map { it.url }.distinct().size)
+    }
 }

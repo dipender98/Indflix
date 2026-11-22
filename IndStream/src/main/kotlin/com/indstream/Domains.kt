@@ -11,6 +11,7 @@ object Domains {
     private const val SECONDARY = "https://raw.githubusercontent.com/SaurabhKaperwan/Utils/refs/heads/main/urls.json"
     private const val TTL_MS = 60 * 60 * 1000L
     private const val RETRY_MS = 60_000L
+    private val INVALID_HOST = Regex("""^(?:www\.)?(?:google|bing|yahoo|duckduckgo|yandex)\.""", RegexOption.IGNORE_CASE)
 
     private val map = ConcurrentHashMap<String, String>()
     private val refreshLock = Mutex()
@@ -48,7 +49,8 @@ object Domains {
                 while (keys.hasNext()) {
                     val name = keys.next()
                     val value = root.optString(name).trim()
-                    if (value.startsWith("http")) {
+                    val host = value.substringAfter("://").substringBefore('/')
+                    if (value.startsWith("http") && !INVALID_HOST.containsMatchIn(host)) {
                         merged[name.lowercase()] = value.trimEnd('/')
                     }
                 }
