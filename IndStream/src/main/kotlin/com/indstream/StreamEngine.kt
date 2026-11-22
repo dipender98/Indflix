@@ -146,6 +146,7 @@ object StreamEngine {
         val enabled = ServerFarm.allServers.filter { Settings.serverEnabled(it.id) }
         val healthy = enabled.filter { HealthMonitor.isHealthy(it.id) }
         Log.d("IndStream", "healthy: ${healthy.size}/$enabled enabled")
+        val addon = listOfNotNull(StremioNuvioAddons.serverSpec())
         val candidates = if (healthy.isEmpty()) {
             val now = System.currentTimeMillis()
             val last = lastFarmProbeAt.get()
@@ -153,14 +154,14 @@ object StreamEngine {
             if (!claimed) {
                 Log.w("IndStream", "all enabled servers tripped; re-probe cooldown active " +
                     "(${(FARM_REPROBE_COOLDOWN_MS - (now - last)) / 1000}s left)")
-                emptyList()
+                addon
             } else {
                 Log.w("IndStream", "all ${enabled.size} enabled servers tripped -- clearing trips, re-probing enabled")
                 HealthMonitor.resetTrips()
-                enabled
+                enabled + addon
             }
-        } else healthy
-        val servers = candidates + listOfNotNull(StremioNuvioAddons.serverSpec())
+        } else healthy + addon
+        val servers = candidates
         Log.d("IndStream", "selectServers tmdb=$tmdbId type=$type s=$season e=$episode -> ${servers.size} servers (neutral order)")
         return servers
     }
@@ -301,6 +302,8 @@ object StreamEngine {
         probeManifests: Boolean = true,
         onSubtitle: (suspend (SubtitleFile) -> Unit)? = null,
         onResolved: ((Map<String, String>) -> Unit)? = null,
+        onManifest: ((Map<String, String>) -> Unit)? = null,
+        onHeight: ((Map<String, Int>) -> Unit)? = null,
     ): Set<String> {
         val emitted = java.util.Collections.synchronizedSet(HashSet<String>())
         if (streams.isEmpty()) return emitted
@@ -394,11 +397,30 @@ object StreamEngine {
                 }
             }.awaitAll()
         }
-        if (onResolved != null && probeManifests) {
-            val probed = preResolved
-                .filter { it.tagLabel.isNotBlank() && it.tagLabel != it.raw.audioLabel }
-                .associate { it.raw.url to it.tagLabel }
-            if (probed.isNotEmpty()) onResolved(probed)
+        if (probeManifests) {
+            if (onResolved != null) {
+                val probed = preResolved
+                    .filter { it.tagLabel.isNotBlank() && it.tagLabel != it.raw.audioLabel }
+                    .associate { it.raw.url to it.tagLabel }
+                if (probed.isNotEmpty()) onResolved(probed)
+            }
+            if (onManifest != null) {
+                val manifests = HashMap<String, String>()
+                for (r in preResolved) {
+                    val text = r.masterText ?: continue
+                    if (!r.raw.isM3u8 || r.raw.isDash) continue
+                    if (ManifestLanguageProxy.declaredLanguages(text).size <= 1) continue
+                    manifests[r.raw.url] = text
+                }
+                if (manifests.isNotEmpty()) onManifest(manifests)
+            }
+            if (onHeight != null) {
+                val heights = HashMap<String, Int>()
+                for (r in preResolved) {
+                    if (r.fullHeight > 0) heights[r.raw.url] = r.fullHeight
+                }
+                if (heights.isNotEmpty()) onHeight(heights)
+            }
         }
         val ordered = preResolved.sortedBy { speedRankMs(it.fetchMs, it.tagLabel) }
 
@@ -438,7 +460,9 @@ object StreamEngine {
             } else {
                 listOf("" to (master?.let { ManifestLanguageProxy.urlFor(it, raw.url) } ?: raw.url))
             }
+            val playUrls = HashSet<String>()
             variants.forEach { (lang, playUrl) ->
+                if (!playUrls.add(playUrl)) return@forEach
                 emitted.add(playUrl)
                 val audioTag = lang.ifBlank { r.tagLabel }
                 val label = LinkNaming.displayName(
@@ -481,20 +505,31 @@ object StreamEngine {
     }
 
     /**
-     * Resolves manifest audio declarations and patches cached labels, so later cache
-     * replays keep the accurate list instead of the coarser label stamped at harvest.
+     * Resolves manifest audio declarations and patches cached labels, manifests and heights,
+     * so later cache replays keep the accurate data instead of the coarser harvest metadata.
      */
     suspend fun warmAudioLabels(streams: List<RawStream>, cacheKey: String) {
         val targets = streams.filter { it.url.isNotBlank() && (it.isM3u8 || it.isDash) }
         if (targets.isEmpty()) return
         val labels = java.util.concurrent.ConcurrentHashMap<String, String>()
+        val manifests = java.util.concurrent.ConcurrentHashMap<String, String>()
+        val heights = java.util.concurrent.ConcurrentHashMap<String, Int>()
         coroutineScope {
             targets.map { raw ->
                 async {
                     warmLabelGate.acquire()
                     try {
-                        manifestAudioLabel(fetchMasterText(raw))
-                            .takeIf { it.isNotBlank() }?.let { labels[raw.url] = it }
+                        val text = fetchMasterText(raw)
+                        if (!text.isNullOrBlank()) {
+                            manifestAudioLabel(text).takeIf { it.isNotBlank() }?.let { labels[raw.url] = it }
+                            if (raw.isM3u8 && !raw.isDash &&
+                                ManifestLanguageProxy.declaredLanguages(text).size > 1
+                            ) {
+                                manifests[raw.url] = text
+                            }
+                            ManifestKit.bestHeightOf(text, raw.url).takeIf { it > 0 }
+                                ?.let { heights[raw.url] = it }
+                        }
                     } finally {
                         warmLabelGate.release()
                     }
@@ -502,6 +537,8 @@ object StreamEngine {
             }.awaitAll()
         }
         FastStartCache.patchLabels(cacheKey, labels)
+        FastStartCache.patchManifests(cacheKey, manifests)
+        FastStartCache.patchHeights(cacheKey, heights)
     }
 
     private val warmLabelGate = Semaphore(6)
@@ -747,7 +784,7 @@ object StreamEngine {
             }
             val result = resolveVidlink(spec, id, type, season, episode)
             if (result.isNotEmpty()) { okServer(spec, start, "vidlink api", result.size); return result }
-            failServer(spec, "vidlink returned no streams")
+            failServer(spec, "vidlink returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
             return emptyList()
         }
         if (spec.id == "moviebox") {
@@ -1289,7 +1326,7 @@ object StreamEngine {
             }
             if (jsonText.isNullOrBlank()) {
                 Log.w("VidLink", "no API response (timeout/HTTP error) for $mediaPage")
-                return emptyList()
+                continue
             }
             if (jsonText.trim() == "null") {
                 throw CleanMissException("vidlink: api returned null body (no multiLang source) for $mediaPage")
@@ -1297,7 +1334,7 @@ object StreamEngine {
             Log.d("VidLink", "attempt ${attempt + 1} offset +${offset}s: ${jsonText.length}B preview=${safeSnippet(jsonText)}")
             val parsed = catching { org.json.JSONObject(jsonText) }.getOrElse {
                 Log.w("VidLink", "non-JSON response for $mediaPage (${jsonText.length}B, starts: ${safeSnippet(jsonText)})")
-                return emptyList()
+                continue
             }
             if (!parsed.has("error") && !parsed.has("code")) {
                 root = parsed
@@ -1340,6 +1377,11 @@ object StreamEngine {
             if (entries.isNotEmpty()) {
                 Log.d("VidLink", "qualities shape: ${entries.map { it.first }}p for $mediaPage")
                 return withJsonSubtitles(entries.map { (height, url, q) ->
+                    val audio = listOf("languages", "language", "lang", "audio", "label", "title")
+                        .mapNotNull { key -> q.optString(key).takeIf { it.isNotBlank() } }
+                        .ifEmpty { listOfNotNull(stream.optString("languages").takeIf { it.isNotBlank() }) }
+                        .joinToString(", ")
+                        .let { LinkNaming.languageLabel(it) }
                     RawStream(
                         serverId = spec.id,
                         serverName = spec.name,
@@ -1347,6 +1389,7 @@ object StreamEngine {
                         isM3u8 = false,
                         referer = null,
                         qualityHint = height,
+                        audioLabel = audio,
                         extraHeaders = vidlinkPlaybackHeaders(q),
                     )
                 }, resolved, mediaPage)
@@ -1571,7 +1614,10 @@ object StreamEngine {
             MOVIEBOX_DUB_LANGUAGES[dub.optString("lanCode", "").lowercase()]?.let { return it }
             val named = dub.optString("lanName", "")
                 .replace(Regex("""\s*dub\b""", RegexOption.IGNORE_CASE), "").trim()
-            return LinkNaming.canonicalSubtitleName(named)
+            // Declared name/code evidence, not the 9-language whitelist only.
+            val code = dub.optString("lanCode", "").takeIf { it.isNotBlank() }
+            val canonical = LinkNaming.languageNameOrNull(named) ?: code?.let { LinkNaming.languageNameOrNull(it) }
+            return canonical ?: LinkNaming.canonicalSubtitleName(named)
                 .takeIf { it in MOVIEBOX_DUB_LANGUAGES.values } ?: ""
         }
         return ""
@@ -1969,7 +2015,8 @@ object StreamEngine {
                             if (!seenUrls.add(finalUrl)) continue
                             val resolution = s.optString("resolutions", "").toIntOrNull()
                                 ?: s.optInt("resolution", 0)
-                            val isHindi = language?.contains("hindi", ignoreCase = true) == true
+                            val audio = LinkNaming.languageLabel(language)
+                            val isHindi = audio.contains("Hindi")
                             val headers = LinkedHashMap<String, String>()
                             headers["Referer"] = refererBase
                             headers["User-Agent"] = HttpKit.userAgent
@@ -1984,7 +2031,7 @@ object StreamEngine {
                                 referer = refererBase,
                                 qualityHint = resolution,
                                 audioPriority = if (isHindi) 4 else 2,
-                                audioLabel = language ?: "",
+                                audioLabel = audio,
                                 extraHeaders = headers,
                                 isDash = isMpd,
                             )
@@ -2172,9 +2219,11 @@ object StreamEngine {
             .find(raw)?.groupValues?.get(1)?.trim().orEmpty()
         val base = if (m.isNotBlank()) m else raw
         if (base.equals("english", true) || base.equals("eng", true) || base.equals("en", true)) return "English"
-        return ManifestKit.INDIAN_DUB_LANGUAGES.firstOrNull { d ->
+        ManifestKit.INDIAN_DUB_LANGUAGES.firstOrNull { d ->
             d.canonical.equals(base, ignoreCase = true) || d.names.any { it.equals(base, ignoreCase = true) }
-        }?.canonical
+        }?.canonical?.let { return it }
+        // Any other declared language (Japanese, Korean, French, ...) is evidence too.
+        return LinkNaming.languageNameOrNull(base)
     }
 
     private suspend fun resolveVixsrc(
@@ -2876,9 +2925,11 @@ object StreamEngine {
                     for ((url, q, fileLang) in files) {
                         val qText = q.ifBlank { HUB_QUALITY.find(item.title)?.value.orEmpty() }
                         val fileAudio = LinkNaming.languageLabel(fileLang)
+                        val titleAudio = LinkNaming.languageLabel(item.title)
                         val audio = when {
                             fileAudio.isNotBlank() -> fileAudio
                             audioLang.isNotBlank() -> audioLang
+                            titleAudio.isNotBlank() -> titleAudio
                             else -> lang
                         }
                         val audioPriority = when {
@@ -4153,55 +4204,54 @@ object StreamEngine {
     private suspend fun resolveBingr(
         spec: ServerSpec, tmdbId: Int, type: String, season: Int, episode: Int,
     ): List<RawStream> {
-        val id = tmdbId.toString()
-        val meta = try {
-            TmdbService.fetchMeta(tmdbId, type)
-        } catch (c: kotlinx.coroutines.CancellationException) {
-            throw c
-        } catch (t: Throwable) {
-            null
+        val origin = "https://bingr.one"
+        val page = if (type == "tv") "$origin/watch/tv/$tmdbId/$season/$episode"
+        else "$origin/watch/movie/$tmdbId"
+        val html = withTimeoutOrNull(12_000L) {
+            catching { app.get(page, timeout = 12, headers = okHeaders("$origin/")).text }.getOrNull()
+        } ?: run { Log.w("Bingr", "watch page no response"); return emptyList() }
+        val urls = bingrStreams(html)
+        if (urls.isEmpty()) {
+            Log.w("Bingr", "no stream in watch page for $type/$tmdbId")
+            return emptyList()
         }
-        val title = meta?.name.orEmpty()
-        val year = meta?.year.orEmpty()
-        val api = "https://api.bingr.one/api/stream"
-        val postHeaders = mapOf(
-            "Content-Type" to "application/json",
-            "Origin" to "https://bingr.one",
-            "Referer" to "https://bingr.one/",
-            "User-Agent" to HttpKit.userAgent,
-        )
-        val out = LinkedHashMap<String, RawStream>()
-        val subtitlePayloads = mutableListOf<Any>()
-        val deadline = System.currentTimeMillis() + 22_000L
-        for (srv in BINGR_SRVS) {
-            if (out.size >= 6 || System.currentTimeMillis() > deadline) break
-            val text = withTimeoutOrNull(6_000L) {
-                catching {
-                    if (srv == "s40" && type == "tv") {
-                        app.get("$api/aphelion-tv/$id/$season/$episode", timeout = 6,
-                            headers = okHeaders("https://bingr.one/")).text
-                    } else {
-                        app.post(api, timeout = 6, headers = postHeaders,
-                            json = bingrBody(srv, type, id, title, year, season, episode)).text
-                    }
-                }.getOrNull()
-            } ?: continue
-            catching { org.json.JSONObject(text) }.getOrNull()?.let { subtitlePayloads += it }
-            for (s in bingrSources(text)) {
-                if (out.containsKey(s.url)) continue
-                val isDash = s.url.contains(".mpd", true)
-                val adaptive = s.url.contains(".m3u8", true) || isDash
-                out[s.url] = RawStream(
-                    serverId = spec.id, serverName = spec.name,
-                    url = s.url, isM3u8 = adaptive, isDash = isDash,
-                    referer = "https://bingr.one/",
-                    qualityHint = heightHintOf(if (s.quality.isNotBlank()) s.quality else s.label),
-                    audioLabel = s.language,
-                )
-            }
+        val out = ArrayList<RawStream>(urls.size)
+        for (url in urls.take(3)) {
+            val masterText = fetchText(url, "$origin/", timeoutSec = 6)
+            val master = ManifestKit.parseMaster(masterText, url)
+            val height = master?.let { ManifestKit.bestHeight(it.variants) } ?: 0
+            if (height in 1..719) continue
+            out += RawStream(
+                serverId = spec.id, serverName = spec.name,
+                url = url,
+                isM3u8 = true,
+                referer = "$origin/",
+                qualityHint = height,
+                audioLabel = master?.let { ManifestKit.audioLanguageLabel(it) }.orEmpty(),
+                inlineManifest = masterText?.takeIf { master != null },
+                extraHeaders = mapOf("User-Agent" to HttpKit.userAgent, "Referer" to "$origin/"),
+                subtitles = master?.let { SubtitleKit.fromMaster(it, url) }.orEmpty(),
+            )
         }
-        Log.d("Bingr", "cascade got ${out.size} sources for $type/$id")
-        return resolveSubtitleEndpoints(out.values.toList(), subtitlePayloads, api, postHeaders)
+        Log.d("Bingr", "parsed ${out.size} streams for $type/$tmdbId")
+        return out
+    }
+
+    private val BINGR_WATCH_M3U8 = Regex("""https?://[^"'\\s<>\\\\]+master\\.m3u8[^"'\\s<>\\\\]*""", RegexOption.IGNORE_CASE)
+
+    internal fun bingrStreams(html: String): List<String> {
+        if (html.isBlank()) return emptyList()
+        val text = html.replace("\\/", "/")
+            .replace("\\u0026", "&")
+            .replace("\\u003d", "=")
+            .replace("\\u003f", "?")
+            .replace("&amp;", "&")
+            .replace("\\", "")
+        return BINGR_WATCH_M3U8.findAll(text)
+            .map { it.value.trim().trimEnd('\\') }
+            .filter { it.startsWith("http") }
+            .distinct()
+            .toList()
     }
 
 
@@ -4215,16 +4265,83 @@ object StreamEngine {
         val html = withTimeoutOrNull(12_000L) {
             catching { app.get(page, timeout = 12, headers = okHeaders("$base/")).text }.getOrNull()
         } ?: run { Log.w("Vidrift", "embed no response"); return emptyList() }
+
+        val mi = html.indexOf("var embedMeta")
+        val brace = if (mi >= 0) html.indexOf('{', mi) else -1
+        val json = if (brace >= 0) extractBalancedJson(html, brace) else null
+        val meta = json?.let { catching { org.json.JSONObject(it) }.getOrNull() }
+
+        val out = ArrayList<RawStream>()
+
+        // Warm orion streams baked into the page (preferred, with dubs).
         val found = vidriftStreams(html)
-        val out = found.map { (rel, label, height) ->
+        for ((rel, label, height) in found) {
+            if (height > 0 && height < 720) continue
             val abs = if (rel.startsWith("http", true)) rel else base + rel
-            RawStream(
+            out += RawStream(
                 serverId = spec.id, serverName = spec.name,
                 url = abs, isM3u8 = abs.contains(".m3u8", true),
                 referer = "$base/", qualityHint = height, audioLabel = label,
                 extraHeaders = mapOf("User-Agent" to HttpKit.userAgent, "Referer" to "$base/"),
             )
         }
+
+        // Fall back to the source API when the warm list is empty/filtered out.
+        if (out.isEmpty()) {
+            val token = meta?.optString("playbackToken").orEmpty()
+            if (token.isNotBlank()) {
+                val sourcePath = if (type == "movie") "movie/$tmdbId" else "tv/$tmdbId/$season/$episode"
+                val parent = meta?.optString("parent").orEmpty()
+                for (provider in listOf("orion", "titan", "atlas", "lyra")) {
+                    val url = "$base/api/source/$sourcePath?token=${java.net.URLEncoder.encode(token, "UTF-8")}" +
+                        "&provider=$provider&parent=${java.net.URLEncoder.encode(parent, "UTF-8")}"
+                    val resp = withTimeoutOrNull(12_000L) {
+                        catching { app.get(url, timeout = 12, headers = okHeaders("$base/")).text }.getOrNull()
+                    }
+                    val jo = resp?.let { catching { org.json.JSONObject(it) }.getOrNull() }
+                    val streamsArr = jo?.optJSONArray("streams") ?: continue
+                    if (streamsArr.length() == 0) continue
+                    var added = 0
+                    for (i in 0 until streamsArr.length()) {
+                        val o = streamsArr.optJSONObject(i) ?: continue
+                        val u = o.optString("url").ifBlank { o.optString("proxyUrl") }
+                        if (u.isBlank()) continue
+                        if (!u.contains(".m3u8", true) && !u.contains(".mp4", true)) continue
+                        val rungs = o.optJSONArray("rungs")
+                        var maxH = 0
+                        if (rungs != null) for (j in 0 until rungs.length()) {
+                            val r = rungs.optJSONObject(j) ?: continue
+                            maxH = maxOf(maxH, r.optInt("height"))
+                        }
+                        if (maxH > 0 && maxH < 720) continue
+                        val abs = if (u.startsWith("http", true)) u else base + u
+                        val name = o.optString("name")
+                        val label = vidriftLabel(name).ifBlank { LinkNaming.languageLabel(name) }
+                        out += RawStream(
+                            serverId = spec.id, serverName = spec.name,
+                            url = abs, isM3u8 = abs.contains(".m3u8", true),
+                            referer = "$base/", qualityHint = maxH,
+                            audioLabel = label,
+                            extraHeaders = mapOf("User-Agent" to HttpKit.userAgent, "Referer" to "$base/"),
+                        )
+                        added++
+                    }
+                    if (added > 0) break
+                }
+            }
+        }
+
+        // evion fallback
+        val evion = meta?.optString("evionUrl").orEmpty()
+        if (out.isEmpty() && evion.isNotBlank() && evion.contains(".m3u8", true)) {
+            val abs = if (evion.startsWith("http", true)) evion else base + evion
+            out += RawStream(
+                serverId = spec.id, serverName = spec.name,
+                url = abs, isM3u8 = true, referer = "$base/",
+                extraHeaders = mapOf("User-Agent" to HttpKit.userAgent, "Referer" to "$base/"),
+            )
+        }
+
         Log.d("Vidrift", "parsed ${out.size} streams for $type/$tmdbId")
         return out
     }
@@ -4267,19 +4384,13 @@ object StreamEngine {
     private val MOVY_GOLDEN = 0x9e3779b9.toInt()
     private val MOVY_MAGIC = byteArrayOf(109, 118, 109, 49)
     private val MOVY_LANES = listOf(
-        "denver", "atlanta", "phoenix", "portland", "seattle", "miami", "boise", "paris",
-        "cancun", "austin", "dallas", "delhi", "munich", "orlando", "tampa", "berlin",
+        "miami", "boise", "seattle", "atlanta", "phoenix", "cancun",
+        "denver", "portland", "paris", "austin", "dallas", "delhi", "munich", "orlando", "tampa", "berlin",
     )
     private val VIDY_LANES = listOf(
-        "miami", "boise", "vegas", "reno", "oakland", "seattle", "phoenix", "atlanta",
-        "portland", "austin", "dallas", "tampa", "orlando", "munich", "berlin", "paris",
-        "delhi", "cancun",
+        "miami", "boise", "seattle", "atlanta", "phoenix", "cancun",
+        "vegas", "reno", "oakland", "portland", "austin", "dallas", "tampa", "orlando", "munich", "berlin", "paris", "delhi",
     )
-    private val MOVY_LANGS = setOf(
-        "hindi", "tamil", "telugu", "english", "spanish", "french", "german",
-        "italian", "portuguese", "korean", "japanese", "malayalam", "kannada",
-    )
-
     private fun u32(v: Int): Long = v.toLong() and 0xFFFFFFFFL
 
     private fun movyFmix(h0: Int): Int {
@@ -4299,7 +4410,7 @@ object StreamEngine {
 
     private fun movyKeyedFnV(value: String): Int {
         var hash = 0x811c9dc5.toInt()
-        for (c in value) hash = (hash xor c.code) * 0x1000193
+        for (c in value) hash = (hash xor c.code) * 16777619
         return movyFmix(hash)
     }
 
@@ -4377,9 +4488,17 @@ object StreamEngine {
         return out
     }
 
+    private val MOVY_QUALITY_P = Regex("""(\d{3,4})p""", RegexOption.IGNORE_CASE)
+
+    private fun movyHeight(quality: String): Int =
+        MOVY_QUALITY_P.find(quality)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+
     private fun movyAudio(quality: String): String {
-        val q = quality.trim().lowercase()
-        return if (q in MOVY_LANGS) q.replaceFirstChar { it.uppercase() } else ""
+        val q = quality.trim()
+        if (q.isEmpty()) return ""
+        val label = LinkNaming.languageLabel(q)
+        if (label.isNotBlank()) return label
+        return if (LinkNaming.hasMultiMarker(q)) "Multi" else ""
     }
 
     private fun movyEncode(s: String): String {
@@ -4576,15 +4695,18 @@ object StreamEngine {
             val plain = movyDecrypt(cipher, seed, tmdbId) ?: continue
             for (s in movySources(plain)) {
                 if (out.containsKey(s.url)) continue
-                val isDash = s.url.contains(".mpd", ignoreCase = true)
-                out[s.url] = RawStream(
-                    serverId = spec.id, serverName = spec.name,
-                    url = s.url, isM3u8 = s.url.contains(".m3u8", true) || isDash,
-                    referer = referer, qualityHint = heightHintOf(s.quality),
-                    audioLabel = movyAudio(s.quality),
-                    extraHeaders = headers,
-                    isDash = isDash,
-                )
+                val height = movyHeight(s.quality)
+                if (height >= 720) {
+                    val isDash = s.url.contains(".mpd", ignoreCase = true)
+                    out[s.url] = RawStream(
+                        serverId = spec.id, serverName = spec.name,
+                        url = s.url, isM3u8 = s.url.contains(".m3u8", true) || isDash,
+                        referer = referer, qualityHint = height,
+                        audioLabel = movyAudio(s.quality),
+                        extraHeaders = headers,
+                        isDash = isDash,
+                    )
+                }
             }
         }
         Log.d(logTag, "cascade got ${out.size} sources for $type/$tmdbId")
@@ -4639,14 +4761,17 @@ object StreamEngine {
             val streamPath = playJson.optString("url").takeIf { it.isNotBlank() } ?: continue
             val streamUrl = if (streamPath.startsWith("http")) streamPath
             else "https://videm.xyz$streamPath"
-            val isHindi = lang.contains("hindi", ignoreCase = true)
+            val audio = LinkNaming.languageLabel(lang).ifBlank {
+                LinkNaming.languageLabel(svName.substringAfter("Server "))
+            }
+            val isHindi = audio.contains("Hindi")
             out += RawStream(
                 serverId = spec.id, serverName = "${spec.name} ${svName.substringAfter("Server ")}".trim(),
                 url = streamUrl,
                 isM3u8 = playJson.optString("type") == "hls" || streamUrl.contains(".m3u8", true),
                 referer = null, qualityHint = 0,
                 audioPriority = if (isHindi) 4 else 1,
-                audioLabel = lang,
+                audioLabel = audio,
             )
         }
         Log.d("VidEm", "got ${out.size} streams from ${servers.length()} server refs")
@@ -4756,12 +4881,13 @@ object StreamEngine {
                         org.json.JSONObject(linkJson.text).optJSONObject("data")?.optString("link")
                     }.getOrNull()?.takeIf { it.startsWith("http") } ?: return@async
                     synchronized(out) {
+                        val audio = LinkNaming.languageLabel(lang)
                         out += RawStream(
                             serverId = spec.id, serverName = spec.name,
                             url = link, isM3u8 = link.contains(".m3u8", ignoreCase = true),
                             referer = "$base/", qualityHint = 0,
-                            audioPriority = if (lang.contains("hindi", ignoreCase = true)) 4 else 1,
-                            audioLabel = lang,
+                            audioPriority = if (audio.contains("Hindi")) 4 else 1,
+                            audioLabel = audio,
                         )
                     }
                 }
@@ -4825,11 +4951,16 @@ object StreamEngine {
                 val qUrl = q.optString("url").takeIf { it.isNotBlank() } ?: return@mapNotNull null
                 val qLabel = q.optString("quality").takeIf { it.isNotBlank() }
                 val height = qLabel?.let { HEIGHT_NUM.find(it)?.groupValues?.get(1)?.toIntOrNull() } ?: 0
+                val audio = listOf("language", "lang", "audio", "label", "title")
+                    .mapNotNull { key -> q.optString(key).takeIf { it.isNotBlank() } }
+                    .joinToString(", ")
+                    .let { LinkNaming.languageLabel(it) }
                 RawStream(
                     serverId = spec.id, serverName = spec.name,
                     url = qUrl, isM3u8 = false, referer = referer,
                     qualityHint = height,
-                    audioPriority = 0, audioLabel = "",
+                    audioPriority = if (audio == "Hindi") 4 else 0,
+                    audioLabel = audio,
                 )
             }.let { out.addAll(it) }
         }
@@ -4961,6 +5092,36 @@ object StreamEngine {
                 else Entry(
                     e.streams.map { s ->
                         labels[s.url]?.takeIf { it.isNotBlank() }?.let { s.copy(audioLabel = it) } ?: s
+                    },
+                    e.expiresAt,
+                )
+            }
+        }
+
+        fun patchManifests(key: String, manifests: Map<String, String>) {
+            if (manifests.isEmpty()) return
+            val now = System.currentTimeMillis()
+            map.computeIfPresent(key) { _, e ->
+                if (now > e.expiresAt) e
+                else Entry(
+                    e.streams.map { s ->
+                        val text = manifests[s.url]?.takeIf { it.isNotBlank() }
+                        if (text != null && s.inlineManifest.isNullOrBlank()) s.copy(inlineManifest = text) else s
+                    },
+                    e.expiresAt,
+                )
+            }
+        }
+
+        fun patchHeights(key: String, heights: Map<String, Int>) {
+            if (heights.isEmpty()) return
+            val now = System.currentTimeMillis()
+            map.computeIfPresent(key) { _, e ->
+                if (now > e.expiresAt) e
+                else Entry(
+                    e.streams.map { s ->
+                        val h = heights[s.url] ?: return@map s
+                        if (h > s.qualityHint) s.copy(qualityHint = h) else s
                     },
                     e.expiresAt,
                 )

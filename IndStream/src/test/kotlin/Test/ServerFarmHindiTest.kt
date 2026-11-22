@@ -121,11 +121,14 @@ class ServerFarmHindiTest {
         assertEquals("Telugu", StreamEngine.netmirrorDubLabel("Telugu dub", isOriginal = false))
         assertEquals("Bengali", StreamEngine.netmirrorDubLabel("Bengali dub", isOriginal = false))
         assertEquals("Gujarati", StreamEngine.netmirrorDubLabel("Gujarati dub", isOriginal = false))
+        // Any declared language is evidence, not just English + the 9 Indian dubs.
+        assertEquals("Russian", StreamEngine.netmirrorDubLabel("Russian dub", isOriginal = false))
+        assertEquals("French", StreamEngine.netmirrorDubLabel("French dub", isOriginal = false))
+        assertEquals("Japanese", StreamEngine.netmirrorDubLabel("Japanese", isOriginal = false))
+        assertEquals("Arabic", StreamEngine.netmirrorDubLabel("Arabic sub", isOriginal = false))
+        // Undeclared junk / unparseable labels stay null.
         assertNull(StreamEngine.netmirrorDubLabel("ptbr dub", isOriginal = false))
         assertNull(StreamEngine.netmirrorDubLabel("esla dub", isOriginal = false))
-        assertNull(StreamEngine.netmirrorDubLabel("Russian dub", isOriginal = false))
-        assertNull(StreamEngine.netmirrorDubLabel("French dub", isOriginal = false))
-        assertNull(StreamEngine.netmirrorDubLabel("Arabic sub", isOriginal = false))
         assertNull(StreamEngine.netmirrorDubLabel("Default", isOriginal = false))
         assertNull(StreamEngine.netmirrorDubLabel(null, isOriginal = false))
     }

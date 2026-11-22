@@ -78,6 +78,21 @@ class ManifestKitTest {
     }
 
     @Test
+    fun parseMaster_lowercaseTypeStillCountsAudio() {
+        val master = """
+#EXTM3U
+#EXT-X-MEDIA:TYPE=audio,GROUP-ID="aac",NAME="Hindi",LANGUAGE="hi",URI="hi.m3u8"
+#EXT-X-MEDIA:TYPE=audio,GROUP-ID="aac",NAME="English",LANGUAGE="en",URI="en.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080,AUDIO="aac"
+1080p.m3u8
+        """.trimIndent()
+        val result = ManifestKit.parseMaster(master, "https://cdn.example.com/")
+        assertNotNull(result)
+        assertEquals(2, result.audio.size)
+        assertEquals("Hindi, English", ManifestKit.audioLanguageLabel(result))
+    }
+
+    @Test
     fun hasHindiEnglishAudio_falseWhenMissingOne() {
         val master = """
 #EXTM3U

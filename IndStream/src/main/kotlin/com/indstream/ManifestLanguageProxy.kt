@@ -11,6 +11,7 @@ import java.util.concurrent.ConcurrentHashMap
 object ManifestLanguageProxy {
 
     private val manifests = ConcurrentHashMap<String, String>()
+    private const val MAX_MANIFESTS = 2048
     private val serverLock = Any()
 
     @Volatile
@@ -28,6 +29,13 @@ object ManifestLanguageProxy {
         val boundPort = ensureServer() ?: return null
         val key = encodeKey(baseUrl + '\u0000' + target.orEmpty())
         manifests[key] = rewritten
+        if (manifests.size > MAX_MANIFESTS) {
+            val it = manifests.keys.iterator()
+            while (manifests.size > MAX_MANIFESTS && it.hasNext()) {
+                val candidate = it.next()
+                if (candidate != key) it.remove()
+            }
+        }
         return "http://${host}:$boundPort/$key.m3u8"
     }
 
@@ -36,7 +44,7 @@ object ManifestLanguageProxy {
         for (line in master.lineSequence()) {
             val trimmed = line.trim()
             if (!trimmed.startsWith("#EXT-X-MEDIA:", true) ||
-                !trimmed.contains("TYPE=AUDIO", true)
+                (!trimmed.contains("TYPE=AUDIO", true) && !trimmed.contains("""TYPE="AUDIO"""", true))
             ) continue
             languageOf(attributesOf(trimmed))?.let { out += it }
         }
@@ -54,13 +62,15 @@ object ManifestLanguageProxy {
         for (rawLine in master.lineSequence()) {
             val line = rawLine.trimEnd('\r')
             val trimmed = line.trim()
-            if (trimmed.startsWith("#EXT-X-MEDIA:", true) && trimmed.contains("TYPE=AUDIO", true)) {
+            if (trimmed.startsWith("#EXT-X-MEDIA:", true) &&
+                (trimmed.contains("TYPE=AUDIO", true) || trimmed.contains("""TYPE="AUDIO"""", true))
+            ) {
                 val attrs = attributesOf(trimmed)
                 val resolved = languageOf(attrs)
                 if (onlyLanguage != null) {
                     if (resolved != onlyLanguage) continue
                     var next = absolutizeUris(line, baseUrl)
-                    next = setAttribute(next, "LANGUAGE", resolved!!)
+                    next = setAttribute(next, "LANGUAGE", resolved)
                     next = setAttribute(next, "DEFAULT", "YES", quoted = false)
                     next = setAttribute(next, "AUTOSELECT", "YES", quoted = false)
                     rebuilt += next
@@ -85,7 +95,9 @@ object ManifestLanguageProxy {
     }
 
     private fun attributesOf(line: String): Map<String, String> =
-        ATTR.findAll(line).associate { it.groupValues[1].uppercase() to it.groupValues[2] }
+        ATTR.findAll(line).associate { m ->
+            m.groupValues[1].uppercase() to m.groupValues[2].ifEmpty { m.groupValues[3] }
+        }
 
     private fun languageOf(attrs: Map<String, String>): String? {
         val declared = attrs["LANGUAGE"]
@@ -230,6 +242,6 @@ object ManifestLanguageProxy {
     }
 
     private const val HEX = "0123456789abcdef"
-    private val ATTR = Regex("""(?:^|,)\s*([A-Z0-9-]+)\s*=\s*"([^"]*)"""", RegexOption.IGNORE_CASE)
+    private val ATTR = Regex("""(?:^|,)\s*([A-Z0-9-]+)\s*=\s*(?:"([^"]*)"|([^,\s]+))""", RegexOption.IGNORE_CASE)
     private val URI_ATTR = Regex("""(\bURI\s*=\s*")([^"]*)(")""", RegexOption.IGNORE_CASE)
 }

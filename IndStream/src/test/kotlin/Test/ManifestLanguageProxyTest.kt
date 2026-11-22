@@ -147,6 +147,23 @@ seg-1.m4s
     }
 
     @Test
+    fun handlesQuotedEnumAndUnquotedValues() {
+        val master = """
+#EXTM3U
+#EXT-X-MEDIA:TYPE="AUDIO",GROUP-ID="aac",NAME=English,DEFAULT=YES,URI="track_en.m3u8"
+#EXT-X-MEDIA:TYPE="AUDIO",GROUP-ID="aac",NAME=Hindi,URI="track_hi.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1920x1080,AUDIO="aac"
+1080p.m3u8
+        """.trimIndent()
+
+        assertEquals(listOf("en", "hi"), ManifestLanguageProxy.declaredLanguages(master))
+        val out = ManifestLanguageProxy.rewrittenManifest(master, base)
+        assertTrue(out != null)
+        assertTrue(out.contains("LANGUAGE=\"en\""))
+        assertTrue(out.contains("LANGUAGE=\"hi\""))
+    }
+
+    @Test
     fun languageCodeUsesDeclaredNames() {
         assertEquals("en", LinkNaming.languageCode("1. English"))
         assertEquals("hi", LinkNaming.languageCode("Hindi"))

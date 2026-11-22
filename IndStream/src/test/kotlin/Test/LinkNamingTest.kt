@@ -39,6 +39,41 @@ class LinkNamingTest {
     }
 
     @Test
+    fun languageTag_expandedVocabulary() {
+        assertEquals("Rajasthani", LinkNaming.languageTag("Rajasthani"))
+        assertEquals("Chhattisgarhi", LinkNaming.languageTag("छत्तीसगढ़ी"))
+        assertEquals("Haryanvi", LinkNaming.languageTag("Haryanvi"))
+        assertEquals("Awadhi", LinkNaming.languageTag("Awadhi"))
+        assertEquals("Magahi", LinkNaming.languageTag("Magahi"))
+        assertEquals("Santali", LinkNaming.languageTag("Santali"))
+        assertEquals("Tibetan", LinkNaming.languageTag("བོད་སྐད་"))
+        assertEquals("Kyrgyz", LinkNaming.languageTag("Kyrgyz"))
+        assertEquals("Tajik", LinkNaming.languageTag("Tajik"))
+        assertEquals("Turkmen", LinkNaming.languageTag("Turkmen"))
+        assertEquals("Uyghur", LinkNaming.languageTag("Uyghur"))
+        assertEquals("Dari", LinkNaming.languageTag("Dari"))
+        assertEquals("Tigrinya", LinkNaming.languageTag("Tigrinya"))
+        assertEquals("Maltese", LinkNaming.languageTag("Maltese"))
+        assertEquals("Montenegrin", LinkNaming.languageTag("Montenegrin"))
+        assertEquals("Punjabi", LinkNaming.languageTag("Gurmukhi"))
+        assertEquals("Nepali", LinkNaming.languageTag("Gorkhali"))
+        assertEquals("Manipuri", LinkNaming.languageTag("Meiteilon"))
+        assertEquals("Kurdish", LinkNaming.languageTag("Sorani"))
+        assertEquals("Konkani", LinkNaming.languageTag("Konkani"))
+        assertEquals("kok", LinkNaming.languageCode("Konkani"))
+    }
+
+    @Test
+    fun bcp47RegionSubtagsAreNotSecondLanguages() {
+        assertEquals(listOf("Chinese"), LinkNaming.languageNames("zh-Hans"))
+        assertEquals(listOf("Portuguese"), LinkNaming.languageNames("pt-BR"))
+        assertEquals(listOf("English"), LinkNaming.languageNames("en-US"))
+        assertEquals(listOf("Hindi"), LinkNaming.languageNames("hi-en"))
+        assertEquals(listOf("French"), LinkNaming.languageNames("fr-CA"))
+        assertEquals(listOf("Slovenian"), LinkNaming.languageNames("sl-SI"))
+    }
+
+    @Test
     fun languageTag_blankIsUnknown() {
         assertEquals("Unknown", LinkNaming.languageTag(""))
         assertEquals("Unknown", LinkNaming.languageTag(null))
@@ -559,6 +594,15 @@ class LinkNamingTest {
             "Hindi, Tamil, Telugu, English",
             StreamEngine.FastStartCache.get(key)?.single()?.audioLabel,
         )
+    }
+
+    @Test
+    fun cacheReplay_patchesMeasuredHeight() {
+        val key = "height-patch-" + System.nanoTime()
+        val stream = raw("Server H", "Hindi", 480)
+        StreamEngine.FastStartCache.put(key, listOf(stream))
+        StreamEngine.FastStartCache.patchHeights(key, mapOf(stream.url to 1080))
+        assertEquals(1080, StreamEngine.FastStartCache.get(key)?.single()?.qualityHint)
     }
 
     private fun raw(

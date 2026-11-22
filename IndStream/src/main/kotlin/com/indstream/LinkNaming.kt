@@ -51,10 +51,10 @@ object LinkNaming {
         language("Malayalam", "IN", "ml mal", "malayalam|malyalam|മലയാളം", native = "മലയാളം"),
         language("Kannada", "IN", "kn kan", "kannada|kannad|ಕನ್ನಡ", native = "ಕನ್ನಡ"),
         language("Marathi", "IN", "mr mar", "marathi|मराठी", native = "मराठी"),
-        language("Punjabi", "IN", "pa pan", "punjabi|panjabi|ਪੰਜਾਬੀ", native = "ਪੰਜਾਬੀ"),
+        language("Punjabi", "IN", "pa pan", "punjabi|panjabi|gurmukhi|ਪੰਜਾਬੀ", native = "ਪੰਜਾਬੀ"),
         language("Gujarati", "IN", "gu guj", "gujarati|ગુજરાતી", native = "ગુજરાતી"),
         language("Urdu", "PK", "ur urd", "urdu|اردو|اُردُو", native = "اردو"),
-        language("Nepali", "NP", "ne nep", "nepali|नेपाली", native = "नेपाली"),
+        language("Nepali", "NP", "ne nep", "nepali|gorkhali|नेपाली", native = "नेपाली"),
         language("Sinhala", "LK", "si sin", "sinhala|singhalese|sinhalese|සිංහල", native = "සිංහල"),
         language("Assamese", "IN", "as asm", "assamese|asamiya|অসমীয়া"),
         language("Odia", "IN", "or ori", "odia|oriya|ଓଡ଼ିଆ"),
@@ -62,8 +62,14 @@ object LinkNaming {
         language("Sanskrit", "IN", "sa san", "sanskrit|संस्कृतम्|संस्कृत"),
         language("Kashmiri", "IN", "ks kas", "kashmiri|कॉशुर|کٲشُر"),
         language("Sindhi", "PK", "sd snd", "sindhi|सिंधी|سنڌي"),
-        language("Konkani", "IN", "kok", "konkani|कोंकणी"),
-        language("Manipuri", "IN", "mni", "manipuri|meitei|মৈতৈলোন্"),
+        language("Konkani", "IN", "kok kon", "konkani|कोंकणी"),
+        language("Manipuri", "IN", "mni", "manipuri|meitei|meiteilon|মৈতৈলোন্"),
+        language("Rajasthani", "IN", "raj", "rajasthani|राजस्थानी"),
+        language("Chhattisgarhi", "IN", "hne", "chhattisgarhi|छत्तीसगढ़ी"),
+        language("Haryanvi", "IN", "bgc", "haryanvi|हरियाणवी"),
+        language("Awadhi", "IN", "awa", "awadhi|अवधी"),
+        language("Magahi", "IN", "mag", "magahi|मगही"),
+        language("Santali", "IN", "sat", "santali|ᱥᱟᱱᱛᱟᱲᱤ"),
         language("Dogri", "IN", "doi", "dogri|डोगरी"),
         language("Maithili", "IN", "mai", "maithili|मैथिली"),
         language("Tulu", "IN", "tcy", "tulu|ತುಳು"),
@@ -131,8 +137,17 @@ object LinkNaming {
         language("Yoruba", "NG", "yo yor", "yoruba"),
         language("Igbo", "NG", "ig ibo", "igbo"),
         language("Pashto", "AF", "ps pus", "pashto|پښتو"),
-        language("Kurdish", "IQ", "ku kur", "kurdish|kurdî|kurdi"),
+        language("Kurdish", "IQ", "ku kur", "kurdish|kurdî|kurdi|sorani|kurmanji"),
         language("Latin", "VA", "la lat", "latin|latina"),
+        language("Tibetan", "CN", "bo bod", "tibetan|བོད་སྐད་|བོད"),
+        language("Kyrgyz", "KG", "ky kir", "kyrgyz|кыргызча"),
+        language("Tajik", "TJ", "tg tgk", "tajik|тоҷикӣ"),
+        language("Turkmen", "TM", "tk tuk", "turkmen|türkmen"),
+        language("Uyghur", "CN", "ug uig", "uyghur|ئۇيغۇرچە"),
+        language("Dari", "AF", "prs", "dari|دری"),
+        language("Tigrinya", "ER", "ti tir", "tigrinya|ትግርኛ"),
+        language("Maltese", "MT", "mt mlt", "maltese|malti"),
+        language("Montenegrin", "ME", "cnr", "montenegrin|crnogorski"),
         language("Catalan", "AD", "ca cat", "catalan|català|catala|valencian"),
         language("Basque", "ES", "eu baq eus", "basque|euskara"),
         language("Galician", "ES", "gl glg", "galician|galego"),
@@ -182,9 +197,15 @@ object LinkNaming {
     private val LANGUAGE_TOKEN_SPLIT = Regex("""[^\p{L}\p{M}\p{N}'’]+""")
     private val WRITTEN_NUMBER_SPLIT = Regex("""(?<=\p{L})(?=\p{N})|(?<=\p{N})(?=\p{L})""")
     private val BCP47_TAG = Regex(
-        """(?<![\p{L}\p{M}\p{N}])([a-z]{2,3})(?:[-_](?:[a-z]{2}|[a-z]{4}|[0-9]{3})(?:[-_][a-z0-9]{1,8})*)(?![\p{L}\p{M}\p{N}])""",
+        """(?<![\p{L}\p{M}\p{N}])(?:([a-z]{2,3})(?:[-_](?:[a-z]{2}|[a-z]{4}|[0-9]{3})(?:[-_][a-z0-9]{1,8})*))(?![\p{L}\p{M}\p{N}])""",
         RegexOption.IGNORE_CASE,
     )
+
+    /**
+     * A tag names one language; its region/script subtag is not a second language.
+     */
+    private fun normalizeBcp47(text: String): String =
+        BCP47_TAG.replace(text, "$1")
 
     private val LANGUAGE_MODIFIERS = setOf(
         "audio", "dub", "dubbed", "version", "track", "sub", "subs", "subtitle", "subtitles",
@@ -216,7 +237,7 @@ object LinkNaming {
             text = pattern.replace(text, " ${canonical.lowercase()} ")
         }
         // A regional tag names one language; its region subtag is not a second language.
-        text = BCP47_TAG.replace(text, "$1")
+        text = normalizeBcp47(text)
         text = WRITTEN_NUMBER_SPLIT.replace(text, " ")
         val out = LinkedHashSet<String>()
         for (token in LANGUAGE_TOKEN_SPLIT.split(text)) {

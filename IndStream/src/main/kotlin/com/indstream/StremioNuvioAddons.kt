@@ -252,11 +252,11 @@ object StremioNuvioAddons {
             }
             .filter { it.isNotBlank() }
             .joinToString("\n")
-        val declared = listOf(source.languages, detail)
+        // The stream name/title is a release or button label, so it is declared evidence:
+        // e.g. "Movie.2024.HINDI.1080p" or "Hindi Dubbed". A plain title without a language
+        // word contributes nothing, so it still yields blank ("Unknown") honestly.
+        val declared = listOf(source.languages, source.name, source.title, detail)
             .filter { it.isNotBlank() }.joinToString("\n")
-        // The stream name is a title/poster text, not audio-language evidence. Falling back to it
-        // mislabels streams (e.g. "Hindi Movie" -> Hindi) even when the addon reports several
-        // audio languages elsewhere. Return blank so displayName renders "(Unknown)" honestly.
         return LinkNaming.languageLabel(declared).orEmpty()
     }
 

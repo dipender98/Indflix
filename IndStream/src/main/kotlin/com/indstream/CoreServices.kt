@@ -65,9 +65,9 @@ object HttpKit {
             }
             val code = app.get(url, timeout = timeoutSec, headers = headers).code
             when {
-                code == 429 -> null
+                code == 404 || code == 410 -> false
                 code in 200..399 || code == 416 -> true
-                else -> false
+                else -> null
             }
         }
     }
@@ -1264,8 +1264,8 @@ object ManifestKit {
         return if (variants.isEmpty() && media.isEmpty()) null
         else MasterPlaylist(
             variants = variants,
-            audio = media.filter { it.type == "AUDIO" },
-            subtitles = media.filter { it.type == "SUBTITLES" },
+            audio = media.filter { it.type.equals("AUDIO", ignoreCase = true) },
+            subtitles = media.filter { it.type.equals("SUBTITLES", ignoreCase = true) },
         )
     }
 

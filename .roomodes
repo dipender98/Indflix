@@ -31,7 +31,7 @@ customModes:
       - Take references from the internet.
       - Never emit a stream below 720p; filter out any stream whose height is known to be less than 720. Streams below 720p are not allowed in the server list.
       - Stream/link display names show at most 3 audio language names (title's original language first, then Hindi, then English, then any); when more than 3 audio languages are detected, render `Multi` instead of listing them. Keep this rule for all future providers and name-formatting changes.
-      - When a stream's audio language cannot be determined with certainty, keep `Unknown` rather than guessing; resolve it from declared evidence only (manifest audio tracks, file/button labels, release title), never from the title's original language alone.
+      - When a stream's audio language cannot be determined with certainty, keep `Unknown` rather than guessing; resolve it from declared evidence only — manifest audio tracks (HLS/DASH), provider JSON fields, BCP-47 tags, file/button labels and release titles. Any reliable parsing method is allowed; never infer audio language from the title's original language alone.
       - When researching or adding providers/servers, read the related files (ServerRegistry.kt, RejectedServers.kt).
 
       ## 4. Verification

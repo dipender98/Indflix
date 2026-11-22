@@ -175,7 +175,7 @@ class StremioNuvioAddonsTest {
     }
 
     @Test
-    fun streamAudioLabel_declaredThenDetail_noNameGuessing() {
+    fun streamAudioLabel_declaredThenDetail_nameTitleAreReleaseEvidence() {
         fun src(name: String, title: String = "", description: String = "", languages: String = "") =
             StremioNuvioAddons.StreamSource(
                 "https://cdn.example/s.m3u8", name, title, description, languages, emptyMap(),
@@ -183,7 +183,7 @@ class StremioNuvioAddonsTest {
         // Nothing declared anywhere -> blank.
         assertEquals("", StremioNuvioAddons.streamAudioLabel(src("1080p WEB-DL")))
         // The declared field is always included; detail text can add more languages.
-        assertEquals("Hindi", StremioNuvioAddons.streamAudioLabel(src("English", languages = "Hindi")))
+        assertEquals("Hindi, English", StremioNuvioAddons.streamAudioLabel(src("English", languages = "Hindi")))
         assertEquals(
             "Hindi, Tamil, Telugu, English",
             StremioNuvioAddons.streamAudioLabel(
@@ -192,8 +192,8 @@ class StremioNuvioAddonsTest {
         )
         assertEquals("Hindi, English", StremioNuvioAddons.streamAudioLabel(src("1080p", languages = "hin,eng")))
         assertEquals("French, Korean, Turkish", StremioNuvioAddons.streamAudioLabel(src("1080p", languages = "fr,ko,tr")))
-        // Detail text beats a misleading name badge.
-        assertEquals("Hindi", StremioNuvioAddons.streamAudioLabel(src("PenguPlay English", description = "Audio: Hindi")))
+        // Detail text beats a name badge when both carry languages.
+        assertEquals("English, Hindi", StremioNuvioAddons.streamAudioLabel(src("PenguPlay English", description = "Audio: Hindi")))
         // Multi-language list from the detail text is kept whole.
         assertEquals(
             "Hindi, Tamil, Telugu, English",
@@ -211,9 +211,13 @@ class StremioNuvioAddonsTest {
                 src("HDHub 1080p Hindi", description = "Audio: Hindi, English, Tamil, Telugu, Malayalam | Subtitles: English"),
             ),
         )
-        // Without declared data, the name badge is NOT guessed as audio evidence.
-        assertEquals("", StremioNuvioAddons.streamAudioLabel(src("1080p English")))
-        assertEquals("", StremioNuvioAddons.streamAudioLabel(src("HDHub 1080p Hindi")))
+        // A plain name without a language word stays blank ("Unknown").
+        assertEquals("", StremioNuvioAddons.streamAudioLabel(src("1080p")))
+        // Release/button labels declaring a language are parsed, not guessed.
+        assertEquals("English", StremioNuvioAddons.streamAudioLabel(src("1080p English")))
+        assertEquals("Hindi", StremioNuvioAddons.streamAudioLabel(src("HDHub 1080p Hindi")))
+        assertEquals("Hindi", StremioNuvioAddons.streamAudioLabel(src("HDHub", title = "Movie.2024.HINDI.1080p")))
+        assertEquals("Hindi", StremioNuvioAddons.streamAudioLabel(src("HDHub", title = "हिंदी 1080p")))
     }
 
     @Test
