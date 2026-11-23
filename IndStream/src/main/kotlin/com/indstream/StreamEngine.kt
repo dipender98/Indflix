@@ -3483,8 +3483,8 @@ object StreamEngine {
     }
 
     private val FSL_SEEDS = listOf(
-        Triple("vegamovies", "https://new1.vegamovies.lease", "https://new2.vegamovies.futbol"),
-        Triple("rogmovies", "https://rogmovies.one", null),
+        Triple("vegamovies", "https://vegamovies.latino", "https://new1.vegamovies.lease"),
+        Triple("rogmovies", "https://rogmovies.beauty", "https://rogmovies.one"),
     )
 
     private suspend fun fslSeeds(): List<Triple<String, String, String?>> {

@@ -14,6 +14,9 @@ class FslTest {
         val s = com.indstream.ServerFarm.allServers.first { it.id == "fsl" }
         assertEquals("FSL", s.name)
         assertEquals(com.indstream.ServerIdType.TMDB, s.idType)
+        assertEquals("https://vegamovies.latino/", s.movieUrl)
+        assertEquals("https://vegamovies.latino/", s.tvUrl)
+        assertEquals("https://vegamovies.latino/", s.referer)
         assertEquals(60, s.timeoutSec)
         assertTrue(s.downloadFriendly)
         assertTrue(s.supports4k)

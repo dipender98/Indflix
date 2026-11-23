@@ -129,7 +129,7 @@ class FuzzySearchTest {
           ]}
         """.trimIndent()
 
-        val hits = p.parseSearchHits(json, "https://new2.rogmovies.click")
+        val hits = p.parseSearchHits(json, "https://rogmovies.beauty")
         assertEquals(7, hits.size)
 
         val ranked = p.rankSearchResults("bahubali", hits, tmdbBahubali)
@@ -156,7 +156,7 @@ class FuzzySearchTest {
               "post_title":"Download Sri Bharatha Baahubali (2020) HDRip Hindi Dubbed Full Movie 720p [1.4GB] | 1080p [2.8GB]"}}
           ]}
         """.trimIndent()
-        val hits = p.parseSearchHits(json, "https://new2.vegamovies.futbol")
+        val hits = p.parseSearchHits(json, "https://vegamovies.latino")
         assertEquals(3, hits.size)
         val deduped = hits.dedupeByName()
         assertEquals(2, deduped.size)

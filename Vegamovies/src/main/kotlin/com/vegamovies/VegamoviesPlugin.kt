@@ -81,11 +81,11 @@ class VegamoviesProvider : MainAPI() {
 
         const val TAG = "Vegamovies"
 
-        const val SEED_VEGA = "https://new1.vegamovies.lease"
-        const val SEED_ROG = "https://rogmovies.one"
+        const val SEED_VEGA = "https://vegamovies.latino"
+        const val SEED_ROG = "https://rogmovies.beauty"
 
-        const val BOOTSTRAP_VEGA = "https://new2.vegamovies.futbol"
-        const val BOOTSTRAP_ROG = "https://new2.rogmovies.click"
+        const val BOOTSTRAP_VEGA = "https://new1.vegamovies.lease"
+        const val BOOTSTRAP_ROG = "https://rogmovies.one"
 
         const val LANDING_PROBE = "/?re=vg&t=2"
 

@@ -141,9 +141,9 @@ object ServerFarm {
         ServerSpec(
             id = "fsl", name = "FSL",
             idType = ServerIdType.TMDB,
-            movieUrl = "https://new1.vegamovies.lease/",
-            tvUrl = "https://new1.vegamovies.lease/",
-            referer = "https://new1.vegamovies.lease/",
+            movieUrl = "https://vegamovies.latino/",
+            tvUrl = "https://vegamovies.latino/",
+            referer = "https://vegamovies.latino/",
             hasSubtitles = false, timeoutSec = 60,
             declaredLanguages = setOf("Hindi", "Tamil", "Telugu"),
             speed = ServerSpeed.SLOW, downloadFriendly = true,

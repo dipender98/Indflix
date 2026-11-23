@@ -21,23 +21,25 @@ class VegamoviesPluginTest {
 
     @Test
     fun domainPick_keepsFullOrigin() {
+        assertEquals("https://vegamovies.latino", VegamoviesProvider.SEED_VEGA)
+        assertEquals("https://rogmovies.beauty", VegamoviesProvider.SEED_ROG)
         val html = """
         <html><body>
           <a href="https://dead.vegamovies.gallery/">x</a>
-          <a href="https://new1.vegamovies.lease/">a</a>
-          <a href="https://new1.vegamovies.lease/page/2/">b</a>
-          <a href="https://rogmovies.one/">rog</a>
+          <a href="https://vegamovies.latino/">a</a>
+          <a href="https://vegamovies.latino/page/2/">b</a>
+          <a href="https://rogmovies.beauty/">rog</a>
         </body></html>"""
         val doc = Jsoup.parse(html)
         assertEquals(
-            "https://new1.vegamovies.lease",
+            "https://vegamovies.latino",
             VegamoviesProvider.DomainResolver.pick(doc, "vegamovies"),
         )
         assertEquals(
-            "https://rogmovies.one",
+            "https://rogmovies.beauty",
             VegamoviesProvider.DomainResolver.pick(doc, "rogmovies"),
         )
-        assertEquals("https://new1.vegamovies.lease", VegamoviesProvider.DomainResolver.originOf("https://new1.vegamovies.lease/x/y"))
+        assertEquals("https://vegamovies.latino", VegamoviesProvider.DomainResolver.originOf("https://vegamovies.latino/x/y"))
     }
 
     @Test
@@ -50,13 +52,13 @@ class VegamoviesPluginTest {
     fun candidates_rankByLinkCount() {
         val html = """
         <html><body>
-          <a href="https://img.new1.vegamovies.lease/x.jpg">img</a>
-          <a href="https://new1.vegamovies.lease/">a</a>
-          <a href="https://new1.vegamovies.lease/page/2/">b</a>
+          <a href="https://img.vegamovies.latino/x.jpg">img</a>
+          <a href="https://vegamovies.latino/">a</a>
+          <a href="https://vegamovies.latino/page/2/">b</a>
         </body></html>"""
         val c = VegamoviesProvider.DomainResolver.candidates(Jsoup.parse(html), "vegamovies")
-        assertEquals("https://new1.vegamovies.lease", c.first())
-        assertTrue(c.contains("https://img.new1.vegamovies.lease"))
+        assertEquals("https://vegamovies.latino", c.first())
+        assertTrue(c.contains("https://img.vegamovies.latino"))
     }
 
     @Test

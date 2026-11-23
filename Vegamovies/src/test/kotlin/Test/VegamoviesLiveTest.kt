@@ -128,7 +128,7 @@ class VegamoviesLiveTest {
     fun live_search_works_from_a_parked_host() = runBlocking {
         try {
             p.mainUrl = "https://1vegamovies.pics"
-            p.bollywoodUrl = "https://new2.rogmovies.click"
+            p.bollywoodUrl = "https://rogmovies.beauty"
             val res = p.search("avengers endgame")
             println("PARKED-HOST SEARCH -> ${res?.size ?: -1} hits")
             if (res.isNullOrEmpty()) return@runBlocking
