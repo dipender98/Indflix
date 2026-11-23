@@ -19,5 +19,6 @@ local.properties
 /.kotlin/
 /gradle_out.txt
 __pycache__/
+/opencode.jsonc
 
 
