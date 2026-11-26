@@ -22,6 +22,7 @@ object StreamEngine {
 
     private const val MAX_CONCURRENT = 32
     private const val MAX_UNWRAP = 4
+    private const val MAX_FILE_LINKS = 15
     private const val ANIMATION_GENRE_ID = 16
     private const val SUBTITLE_PROBE_CONCURRENCY = 6
     private const val SUBTITLE_PROBE_TIMEOUT_MS = 2_500L
@@ -861,6 +862,12 @@ object StreamEngine {
             val result = resolveMovies4u(spec, tmdbId, type, season, episode)
             if (result.isNotEmpty()) { okServer(spec, start, "movies4u lookup files", result.size); return result }
             failServer(spec, "movies4u returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
+            return emptyList()
+        }
+        if (spec.id == "uhdmovies") {
+            val result = resolveUhdMovies(spec, tmdbId, type, season, episode)
+            if (result.isNotEmpty()) { okServer(spec, start, "uhd search files", result.size); return result }
+            failServer(spec, "uhd returned no streams (soft miss, no breaker trip)", isCleanMiss = true)
             return emptyList()
         }
         if (spec.id == "bingr") {
@@ -2681,7 +2688,7 @@ object StreamEngine {
         val page = withTimeoutOrNull(10_000L) {
             catching { app.get(tokenUrl, timeout = 10, headers = okHeaders(url)).text }.getOrNull()
         } ?: return emptyList()
-        return hubFileButtons(page).take(4).mapNotNull { (u, q, lang) ->
+        return hubFileButtons(page).take(MAX_FILE_LINKS).mapNotNull { (u, q, lang) ->
             if (u.contains("pixel.", true) || u.contains("workers.dev", true) ||
                 u.contains("dl.php?link=", true)
             ) {
@@ -2891,7 +2898,7 @@ object StreamEngine {
             if (!hubPostYearOk(post, year)) continue
             val items = episodeOrSeason(
                 hub4kItems(post), { it.title }, type, season, episode,
-            ).sortedByDescending { releaseHeightOf(it.title) }.take(4)
+            ).sortedByDescending { releaseHeightOf(it.title) }.take(8)
             val out = mutableListOf<RawStream>()
             for (item in items) {
                 // Keep every language name from the source data for the audio label; hubLangOf
@@ -2949,9 +2956,9 @@ object StreamEngine {
                             mediaLabel = item.title,
                         )
                     }
-                    if (out.size >= 6) break
+                    if (out.size >= MAX_FILE_LINKS) break
                 }
-                if (out.size >= 6) break
+                if (out.size >= MAX_FILE_LINKS) break
             }
             if (out.isNotEmpty()) return out
         }
@@ -3268,7 +3275,7 @@ object StreamEngine {
         audio: String,
         qualityLabel: String,
         size: String,
-        limit: Int = 6,
+        limit: Int = MAX_FILE_LINKS,
     ): List<RawStream> {
         val out = mutableListOf<RawStream>()
         val gateways = links.filter { HUB_GATEWAY_HOST_ALT.containsMatchIn(it) }
@@ -3393,7 +3400,7 @@ object StreamEngine {
         val out = mutableListOf<RawStream>()
         val linksPageCache = mutableMapOf<String, List<FileGroup>>()
         if (type == "movie") {
-            for (group in groups.sortedByDescending { releaseHeightOf(it.heading) }.take(2)) {
+            for (group in groups.sortedByDescending { releaseHeightOf(it.heading) }.take(3)) {
                 val audio = groupAudioLabel(group.heading, postAudio)
                 val size = normalizeSizeToken(group.heading)
                 val direct = group.links.filter { HUB_GATEWAY_HOST_ALT.containsMatchIn(it) }
@@ -3419,13 +3426,13 @@ object StreamEngine {
                 for (links in targets) {
                     out += fileLinksFor(spec, links, postUrl, audio, group.heading, size)
                 }
-                if (out.size >= 6) break
+                if (out.size >= MAX_FILE_LINKS) break
             }
         } else {
-            val chosen = groups.filter { seasonPackMatches(it.heading, season) }
+            val chosenList = groups.filter { seasonPackMatches(it.heading, season) }
                 .sortedByDescending { releaseHeightOf(it.heading) }
-                .firstOrNull()
-            if (chosen != null) {
+                .take(3)
+            for (chosen in chosenList) {
                 val audio = groupAudioLabel(chosen.heading, postAudio)
                 val size = normalizeSizeToken(chosen.heading)
                 val direct = chosen.links.filter { HUB_GATEWAY_HOST_ALT.containsMatchIn(it) }
@@ -3440,13 +3447,185 @@ object StreamEngine {
                             .ifEmpty { epGroups.filter { m4uEpisodeOf(it.heading) == null } }
                         for (target in targets) {
                             out += fileLinksFor(spec, target.links, postUrl, audio, chosen.heading, size)
-                            if (out.size >= 6) break
+                            if (out.size >= MAX_FILE_LINKS) break
                         }
                     }
                 }
+                if (out.size >= MAX_FILE_LINKS) break
             }
         }
         return pruneDeadStreams(out).takeIf { it.isNotEmpty() }
+    }
+
+    private val UHD_BASES = listOf("https://uhdmovies.org")
+    private val UHD_YEAR = Regex("""\b\d{4}\b""")
+
+    private fun uhdYearOf(text: String?): Int? =
+        UHD_YEAR.findAll(text.orEmpty()).lastOrNull()?.value?.toIntOrNull()
+
+    private fun uhdYearOk(expectedYear: Int?, candidateYear: Int?): Boolean =
+        expectedYear == null || candidateYear == null || expectedYear == candidateYear
+
+    /** Anchors whose text declares quality or size; shortener pages only (dead image links are skipped). */
+    internal fun uhdDownloadAnchors(html: String, base: String): List<Pair<String, String>> {
+        val doc = Jsoup.parse(html, base)
+        val out = LinkedHashMap<String, String>()
+        for (a in doc.select("a[href]")) {
+            val href = a.attr("abs:href").trim()
+            if (!href.startsWith("http")) continue
+            if (isArchiveUrl(href)) continue
+            if (ORIGIN.find(href)?.value == ORIGIN.find(base)?.value) continue
+            val text = a.text().trim()
+            if (!QUALITY_TEXT_RE.containsMatchIn(text) && !SIZE_TOKEN.containsMatchIn(text)) continue
+            out.putIfAbsent(href, text)
+        }
+        return out.map { it.key to it.value }
+    }
+
+    /** Host links we can turn into playable streams from a shortener page. */
+    internal fun uhdHostLinks(html: String, base: String): List<String> {
+        val doc = Jsoup.parse(html, base)
+        val out = LinkedHashSet<String>()
+        for (a in doc.select("a[href]")) {
+            val href = a.attr("abs:href").trim()
+            if (!href.startsWith("http")) continue
+            if (isArchiveUrl(href)) continue
+            if (HUB_GATEWAY_HOST_ALT.containsMatchIn(href) ||
+                href.contains("pixeldrain.", ignoreCase = true) ||
+                VIDEO_EXT.containsMatchIn(href)
+            ) out.add(href)
+        }
+        return out.toList()
+    }
+
+    private suspend fun resolveUhdMovies(
+        spec: ServerSpec,
+        tmdbId: Int,
+        type: String,
+        season: Int,
+        episode: Int,
+    ): List<RawStream> {
+        val (title, year) = titleYear(tmdbId, type)
+        fun enc(s: String) = java.net.URLEncoder.encode(s, "UTF-8")
+        var base = ""
+        var hits: List<Pair<String, String>> = emptyList()
+        repeat(3) { attempt ->
+            if (hits.isNotEmpty()) return@repeat
+            val probed = withTimeoutOrNull(14_000L) {
+                coroutineScope {
+                    UHD_BASES.map { candidate -> async {
+                        candidate to fetchText("$candidate/?s=${enc(title)}", candidate, timeoutSec = 10)
+                    } }.awaitAll()
+                }
+            }
+            for ((candidate, html) in probed.orEmpty()) {
+                if (html == null) continue
+                val found = titleHits(html, candidate)
+                if (found.isNotEmpty()) { base = candidate; hits = found; break }
+                if (base.isBlank()) base = candidate
+            }
+            if (hits.isEmpty() && attempt < 2) delay(800)
+        }
+        if (hits.isEmpty()) throw CleanMissException("no search hits")
+        val expectedYear = year?.toIntOrNull()
+        val posts = hits
+            .map { it to TitleMatch.titleDistance(title, it.second) }
+            .filter { it.second >= 0.6 && uhdYearOk(expectedYear, uhdYearOf(it.first.second)) }
+            .sortedByDescending { it.second }
+            .map { it.first.first }
+            .take(4)
+        if (posts.isEmpty()) throw CleanMissException("no match")
+        val result = withTimeoutOrNull(30_000L) {
+            firstSuccessParallel(posts, limit = 3) { postUrl ->
+                uhdTryPost(spec, base, postUrl, expectedYear, type, season, episode)
+            }
+        }
+        if (result != null) return result.distinctBy { it.url }
+        throw CleanMissException("no file links")
+    }
+
+    private suspend fun uhdTryPost(
+        spec: ServerSpec,
+        base: String,
+        postUrl: String,
+        expectedYear: Int?,
+        type: String,
+        season: Int,
+        episode: Int,
+    ): List<RawStream>? {
+        val post = fetchText(postUrl, base, timeoutSec = 12) ?: return null
+        val anchors = uhdDownloadAnchors(post, postUrl)
+        if (anchors.isEmpty()) return null
+        val postTitle = HTML_TITLE.find(post)?.groupValues?.get(1)?.trim().orEmpty()
+        if (!uhdYearOk(expectedYear, uhdYearOf(postTitle))) return null
+        val postAudio = LinkNaming.languageLabel(postTitle)
+        val labeled = anchors.map { (url, label) -> url to "$postTitle $label".trim() }
+        val chosen = episodeOrSeason(labeled, { it.second }, type, season, episode)
+            .ifEmpty { labeled }
+        val out = mutableListOf<RawStream>()
+        val seen = HashSet<String>()
+        for ((url, full) in chosen.sortedByDescending { releaseHeightOf(it.second) }.take(6)) {
+            val height = releaseHeightOf(full)
+            if (height > 0 && height < 720) continue
+            val size = normalizeSizeToken(full)
+            val groupAudio = LinkNaming.richerLanguageLabel(
+                LinkNaming.languageLabel(full), postAudio,
+            )
+            val page = fetchText(url, postUrl, timeoutSec = 12) ?: continue
+            val hosts = uhdHostLinks(page, url)
+            if (hosts.isEmpty()) continue
+            var perGroup = 0
+            for (host in hosts) {
+                if (seen.contains(host)) continue
+                val referer = ORIGIN.find(url)?.value ?: postUrl
+                val files = hubDriveFiles(host, referer)
+                if (files.isEmpty()) {
+                    seen.add(host)
+                    out += uhdRawStream(spec, host, height, size, groupAudio, full)
+                    perGroup++
+                } else {
+                    for ((fileUrl, q, fileLang) in files) {
+                        if (!seen.add(fileUrl)) continue
+                        val audio = LinkNaming.richerLanguageLabel(fileLang, groupAudio)
+                        out += uhdRawStream(
+                            spec, fileUrl, releaseHeightOf(q.ifBlank { full }), size, audio, full,
+                        )
+                        perGroup++
+                    }
+                }
+                if (out.size >= MAX_FILE_LINKS) break
+                if (perGroup >= 3) break
+            }
+            if (out.size >= MAX_FILE_LINKS) break
+        }
+        return out.takeIf { it.isNotEmpty() }
+    }
+
+    private fun uhdRawStream(
+        spec: ServerSpec,
+        url: String,
+        height: Int,
+        size: String,
+        audio: String,
+        media: String,
+    ): RawStream {
+        val qText = if (height > 0) "${height}p" else qualityText(media)
+        return RawStream(
+            spec.id,
+            listOf(spec.name, qText).filter { it.isNotBlank() }.joinToString(" "),
+            url,
+            url.contains(".m3u8", ignoreCase = true),
+            ORIGIN.find(url)?.value ?: spec.referer,
+            height,
+            audioPriority = when {
+                audio.contains(',') || audio == "Multi" -> 2
+                audio.startsWith("Hindi") -> 4
+                else -> 1
+            },
+            audioLabel = audio,
+            sizeLabel = size,
+            mediaLabel = media,
+        )
     }
 
     private const val VIDBOLT_ORIGIN = "https://vidbolt.xyz"
@@ -3782,13 +3961,13 @@ object StreamEngine {
                                     mediaLabel = group.heading,
                                 )
                                 perGroup++
-                                if (perGroup >= 2) break
+                                if (perGroup >= 3) break
                             }
-                            if (perGroup >= 2) break
+                            if (perGroup >= 3) break
                         }
-                        if (perGroup >= 2) break
+                        if (perGroup >= 3) break
                     }
-                    if (out.size >= 6) break
+                    if (out.size >= MAX_FILE_LINKS) break
                 }
                 if (out.isNotEmpty()) break
             }

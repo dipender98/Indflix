@@ -189,6 +189,16 @@ object ServerFarm {
             supports4k = true,
         ),
         ServerSpec(
+            id = "uhdmovies", name = "UHDMovies",
+            idType = ServerIdType.TMDB,
+            movieUrl = "https://uhdmovies.org/?s={id}",
+            tvUrl = "https://uhdmovies.org/?s={id}",
+            referer = "https://uhdmovies.org/",
+            hasSubtitles = false, timeoutSec = 60,
+            speed = ServerSpeed.SLOW, downloadFriendly = true,
+            supports4k = true,
+        ),
+        ServerSpec(
             id = "animeworld", name = "AnimeWorld",
             idType = ServerIdType.TMDB,
             movieUrl = "https://watchanimeworld.one/?s={id}",
