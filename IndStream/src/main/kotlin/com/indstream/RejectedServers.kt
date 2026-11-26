@@ -132,6 +132,9 @@ object RejectedServers {
             "Chain works end-to-end but 1080p max only (no real 4K); needs 7.2 KB wasm decryptor; CST captcha gate after ~15-20 rapid resolves; title-mismatch risk (cross-check data.title).",
             "1080p ceiling", "2026-sweep"),
         RejectedServer("filmycab", "FilmyCab", "removed-dead", "Removed (dead source)."),
+        RejectedServer("uhdmovies", "UHDMovies", "not-suitable",
+            "4K/dual-audio DDL, but end-to-end resolves too slowly to be usable: search ~3.5s plus a serial linkszilla -> hubcloud/gdflix/megaup/multiup chain; live probe ~28s with repeated connection resets. Removed in v126.",
+            "28s for 8 streams, 3+ connection resets", "v126"),
     )
 
     val ids: Set<String> = all.map { it.id }.toSet()

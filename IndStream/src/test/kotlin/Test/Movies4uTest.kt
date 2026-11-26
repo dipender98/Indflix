@@ -17,7 +17,7 @@ class Movies4uTest {
         val spec = ServerFarm.allServers.first { it.id == "movies4u" }
         assertEquals("Movies4u", spec.name)
         assertEquals(ServerIdType.TMDB, spec.idType)
-        assertEquals("https://new8.movies4u.garden/", spec.referer)
+        assertEquals("https://new9.movies4u.garden/", spec.referer)
         assertEquals(60, spec.timeoutSec)
         assertEquals(ServerSpeed.SLOW, spec.speed)
         assertTrue(spec.downloadFriendly)

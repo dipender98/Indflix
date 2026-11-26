@@ -317,6 +317,34 @@ object LinkNaming {
     private fun flag(cc: String): String =
         cc.uppercase().map { Character.toChars(0x1F1E6 + (it - 'A')).concatToString() }.joinToString("")
 
+    private val SOURCE_CANONS = listOf("BluRay", "BRRip", "WEB-DL", "WEBRip", "HDTV", "DVDRip", "HDRip", "CAMRip")
+    private val VIDEO_CANONS = listOf("HEVC", "H.264", "AV1", "VP9")
+    private val VISION_CANONS = listOf("Dolby Vision", "HDR10+", "HDR10", "HDR", "10bit", "8bit")
+    private val AUDIO_CANONS = listOf("Dolby Atmos", "TrueHD", "Dolby Digital", "DTS-HD", "DTS", "AAC", "FLAC")
+    private val CHANNEL_CANONS = listOf("2.0", "2.1", "5.1", "6.1", "7.1")
+
+    private fun orderedSpecTokens(found: List<String>): List<String> {
+        val present = found.toSet()
+        return (SOURCE_CANONS + VIDEO_CANONS + VISION_CANONS + AUDIO_CANONS + CHANNEL_CANONS)
+            .filter { it in present }
+    }
+
+    private val HOST_RE = Regex("""^https?://([^/]+)""")
+    private val KNOWN_HOSTS = listOf(
+        "pixeldrain", "hubcloud", "hubdrive", "gdflix", "gdshine", "megaup",
+        "multiup", "gofile", "hexload", "uploadflix", "clicknupload", "fichier", "workers",
+    )
+
+    /** Short friendly name for the sub-server/file host behind a stream URL. */
+    fun hostLabel(url: String?): String {
+        val host = HOST_RE.find(url.orEmpty())?.groupValues?.get(1) ?: return ""
+        val h = host.removePrefix("www.").lowercase()
+        if ("googleusercontent" in h) return "gdrive"
+        for (known in KNOWN_HOSTS) if (known in h) return known
+        val parts = h.split('.')
+        return if (parts.size >= 2) parts[parts.size - 2] else parts.firstOrNull().orEmpty()
+    }
+
     fun displayName(
         serverName: String,
         audioLabel: String? = "",
@@ -324,6 +352,7 @@ object LinkNaming {
         sizeLabel: String? = null,
         mediaLabel: String? = null,
         originalLang: String? = null,
+        hostLabel: String? = null,
     ): String {
         val rawName = serverName.trim().ifBlank { "Server" }
         val named = baseName(rawName, subIndicator)
@@ -331,12 +360,19 @@ object LinkNaming {
         val names = displayLanguageNames(audioLabel, mediaLabel)
         val tagPart = languageTagPart(names, audioLabel, mediaLabel, originalLang)
 
-        val tokens = renditionTokens(listOfNotNull(mediaLabel, rawName).joinToString(" "))
-            .filterNot { containsToken(named, it) }
-            .joinToString(" ")
-        val sizePart = sizeLabel?.trim().orEmpty()
-        return listOf(named, tokens, tagPart, sizePart)
-            .filter { it.isNotBlank() }.joinToString(" ")
+        val specSource = listOfNotNull(mediaLabel, rawName).joinToString(" ")
+        val iconItems = orderedSpecTokens(
+            renditionTokens(specSource).filterNot { containsToken(named, it) },
+        ).map { token ->
+            val icon = specIcon(token)
+            if (icon.isEmpty()) token else "$icon$token"
+        }.toMutableList()
+        bitrateFromText(specSource).takeIf { it.isNotBlank() }?.let { iconItems += "⚡$it" }
+        sizeLabel?.trim().orEmpty().takeIf { it.isNotBlank() }?.let { iconItems += "💾$it" }
+        val iconPart = iconItems.joinToString("|")
+        val qualityPart = qualityFromText(specSource)
+        return listOf(named, hostLabel?.trim().orEmpty(), iconPart, tagPart, qualityPart)
+            .filter { it.isNotBlank() }.joinToString("|")
     }
 
     fun priorityName(
@@ -367,6 +403,7 @@ object LinkNaming {
     private fun stripRendition(text: String): String {
         var out = text
         for ((pattern, _) in ALL_TOKENS) out = pattern.replace(out, " ")
+        out = CHANNELS_RE.replace(out, " ")
         out = REMUX_TOKEN.replace(out, " ")
         out = SIZE_WORD.replace(out, " ")
         out = EMPTY_BRACKETS.replace(out, " ")
@@ -526,6 +563,12 @@ object LinkNaming {
     private val ALL_TOKENS =
         SOURCE_TOKENS + VIDEO_TOKENS + VISION_TOKENS + DEPTH_TOKENS + AUDIO_TOKENS
 
+    private val CHANNELS_RE = Regex("""(?<![\p{L}\p{N}])([2567]\.(?:0|1))(?![\p{L}\p{N}])""")
+
+    private val BITRATE_RE = Regex(
+        """(?i)(?<![\p{L}\p{N}])(\d+(?:\.\d+)?)\s?(Mbps|Mbit/s|Mb/s|Kbps|Kbit/s|Kb/s)""",
+    )
+
     private val TOKEN_PATTERNS = ConcurrentHashMap<String, Regex>()
 
     private fun containsToken(text: String, token: String): Boolean =
@@ -548,7 +591,39 @@ object LinkNaming {
         if (found.containsKey("dts-hd")) found.remove("dts")
         if (found.containsKey("hdr10+")) found.remove("hdr10")
         if (found.containsKey("hdr10+") || found.containsKey("hdr10")) found.remove("hdr")
+        // Standalone channel counts, unless an audio profile token already carries them.
+        for (m in CHANNELS_RE.findAll(s)) {
+            val channel = m.groupValues[1]
+            if (found.values.none { it.contains(channel) }) found[channel] = channel
+        }
         return found.values.toList()
+    }
+
+    /** First bitrate-like value declared in the text, normalized to Mbps (e.g. "6.5Mbps", "0.5Mbps"). */
+    fun bitrateFromText(text: String?): String {
+        // Channel tokens (e.g. "5.1") are dropped first so a number like "5.1.9000"
+        // cannot be misread as the bitrate "1.9000 Kbps".
+        val m = BITRATE_RE.find(CHANNELS_RE.replace(text.orEmpty(), " ")) ?: return ""
+        val v = m.groupValues[1].toDoubleOrNull() ?: return ""
+        val mbps = if (m.groupValues[2].lowercase().startsWith("mb")) v else v / 1000.0
+        val rounded = Math.round(mbps * 10.0) / 10.0
+        val num = if (rounded % 1.0 == 0.0) rounded.toLong().toString()
+        else String.format("%.1f", rounded)
+        return num + "~Mbps"
+    }
+
+    internal fun specIcon(token: String): String = when (token) {
+        "BluRay", "REMUX" -> "💿"
+        "DVDRip" -> "📀"
+        "WEB-DL", "WEBRip" -> "☁️"
+        "HDTV" -> "📡"
+        "HDRip" -> "🎥"
+        "CAMRip" -> "📹"
+        "HEVC", "H.264", "AV1", "VP9" -> "🎞️"
+        "HDR10+", "HDR10", "HDR", "Dolby Vision", "10bit", "8bit" -> "🔆"
+        "Dolby Atmos", "TrueHD", "Dolby Digital", "DTS-HD", "DTS", "AAC", "FLAC" -> "🎧"
+        "2.0", "2.1", "5.1", "6.1", "7.1" -> "🔊"
+        else -> ""
     }
 
     fun taggedSubtitleName(canonical: String, source: String?): String {
