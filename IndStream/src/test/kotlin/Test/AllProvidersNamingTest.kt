@@ -32,7 +32,7 @@ class AllProvidersNamingTest {
             val names = mutableListOf<String>()
             StreamEngine.emit(raw, { link: ExtractorLink -> names += link.name }, probeManifests = false)
 
-            val expected = "${spec.name}|cdn|💿BluRay|🎞️HEVC|🔊5.1|⚡9~Mbps|💾2.3GB|(🇮🇳 Hindi)|1080p"
+            val expected = "${spec.name} · cdn · 💿BluRay · 🎞️HEVC · 🔊5.1 · ⚡9~Mbps · 💾2.3GB · (🇮🇳 Hindi)"
             if (names.size != 1 || names[0] != expected) {
                 mismatches += "${spec.id}: ${names.joinToString(" ; ")}"
             }

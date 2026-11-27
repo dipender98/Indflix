@@ -4,6 +4,8 @@ import java.util.concurrent.ConcurrentHashMap
 
 object LinkNaming {
 
+    private const val SEPARATOR = " · "
+
     private val WHITESPACE = Regex("""\s+""")
 
     private val RESOLUTION_TOKEN =
@@ -369,10 +371,9 @@ object LinkNaming {
         }.toMutableList()
         bitrateFromText(specSource).takeIf { it.isNotBlank() }?.let { iconItems += "⚡$it" }
         sizeLabel?.trim().orEmpty().takeIf { it.isNotBlank() }?.let { iconItems += "💾$it" }
-        val iconPart = iconItems.joinToString("|")
-        val qualityPart = qualityFromText(specSource)
-        return listOf(named, hostLabel?.trim().orEmpty(), iconPart, tagPart, qualityPart)
-            .filter { it.isNotBlank() }.joinToString("|")
+        val iconPart = iconItems.joinToString(SEPARATOR)
+        return listOf(named, hostLabel?.trim().orEmpty(), iconPart, tagPart)
+            .filter { it.isNotBlank() }.joinToString(SEPARATOR)
     }
 
     fun priorityName(

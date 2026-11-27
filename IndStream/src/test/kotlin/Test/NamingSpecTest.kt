@@ -42,7 +42,18 @@ class NamingSpecTest {
             mediaLabel = "Film.2024.1080p.BluRay.HEVC.Hindi.5.1.mkv",
             hostLabel = "pixeldrain",
         )
-        assertEquals("FSL|pixeldrain|💿BluRay|🎞️HEVC|🔊5.1|💾2.3GB|(🇮🇳 Hindi)|1080p", name)
+        assertEquals("FSL · pixeldrain · 💿BluRay · 🎞️HEVC · 🔊5.1 · 💾2.3GB · (🇮🇳 Hindi)", name)
+    }
+
+    @Test
+    fun displayName_leavesResolutionToThePlayer() {
+        val name = LinkNaming.displayName(
+            serverName = "FSL 1080p",
+            audioLabel = "Hindi",
+            mediaLabel = "Film.2024.1080p.BluRay.HEVC.mkv",
+            hostLabel = "pixeldrain",
+        )
+        assertTrue("1080p" !in name, "the player appends the quality itself")
     }
 
     @Test
@@ -61,7 +72,7 @@ class NamingSpecTest {
     }
 
     @Test
-    fun displayName_providerFirstThenIconBlockLanguageQuality() {
+    fun displayName_providerFirstThenIconBlockLanguage() {
         val name = LinkNaming.displayName(
             serverName = "FSL",
             audioLabel = "Hindi",
@@ -69,7 +80,7 @@ class NamingSpecTest {
             mediaLabel = "Film.2024.1080p.BluRay.HEVC.Hindi.5.1.9000 Kbps.mkv",
         )
         assertEquals(
-            "FSL|💿BluRay|🎞️HEVC|🔊5.1|⚡9~Mbps|💾2.3GB|(🇮🇳 Hindi)|1080p",
+            "FSL · 💿BluRay · 🎞️HEVC · 🔊5.1 · ⚡9~Mbps · 💾2.3GB · (🇮🇳 Hindi)",
             name,
         )
     }
@@ -81,6 +92,6 @@ class NamingSpecTest {
             audioLabel = "Hindi",
             mediaLabel = "Film.2024.1080p.WEB-DL.HEVC.9000 Kbps.mkv",
         )
-        assertEquals("FSL|☁️WEB-DL|🎞️HEVC|⚡9~Mbps|(🇮🇳 Hindi)|1080p", name)
+        assertEquals("FSL · ☁️WEB-DL · 🎞️HEVC · ⚡9~Mbps · (🇮🇳 Hindi)", name)
     }
 }
